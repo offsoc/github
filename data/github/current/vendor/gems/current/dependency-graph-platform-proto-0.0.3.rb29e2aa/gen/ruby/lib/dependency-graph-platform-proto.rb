@@ -1,0 +1,10 @@
+# Auto-generated file. Do not edit!
+require 'v1/experimental/dependencies_twirp'
+require 'types/v1/dependency_twirp'
+require 'types/v1/manifest_twirp'
+require 'health/v1/health_api_twirp'
+require 'gh-internal/repositories/v1/repositories_api_twirp'
+require 'gh-internal/integrations/v1/integrations_api_twirp'
+require 'gh-internal/actions/v1/actions_api_twirp'
+require 'repo-insights/v1/repo_insights_api_twirp'
+require 'reachability/v1/dependencies_api_twirp'

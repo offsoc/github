@@ -1,0 +1,191 @@
+<%# erblint:counter DeprecatedComponentsCounter 11 %>
+<div class="Box" data-test-id="codespaces-group">
+  <div class="Box-header">
+    <h3 class="Box-title float-left">
+      Codespaces
+    </h3>
+
+    <div class="table-list-header-toggle no-wrap d-flex flex-auto flex-justify-between flex-sm-justify-end flex-lg-justify-end right-md-0">
+      <div>
+        <details class="details-reset details-overlay position-relative flex-auto" id="filter-options">
+          <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link) do %>
+            <span data-menu-button>
+              <%= LIST_STATES.include?(params.dig(:filters, :state)) ? params.dig(:filters, :state).titleize : "Active" %>
+            </span>
+            <span class="dropdown-caret"></span>
+          <% end %>
+
+          <details-menu class="SelectMenu right-md-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="SelectMenu-modal" style="width: 200px;">
+              <header class="SelectMenu-header">
+                <span class="SelectMenu-title">Select codespaces view</span>
+              </header>
+              <div class="SelectMenu-list">
+                <% LIST_STATES.each do |state| %>
+                  <a href="<%= stafftools_user_codespaces_path(user, filters: { state: state }) %>"
+                    class="SelectMenu-item"
+                    role="menuitemradio"
+                    aria-checked="<%= (params.dig(:filters, :state) || "active") == state %>"
+                    tabindex="0">
+                    <%= render Primer::Beta::Octicon.new(icon: "check", classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                    <span class="text-normal" data-menu-button-text><%= state.titleize %></span>
+                  </a>
+                <% end %>
+              </div>
+            </div>
+          </details-menu>
+        </details>
+      </div>
+    </div>
+  </div>
+  <div class="Box-body">
+    <ul>
+     <% if showing_active_codespaces? %>
+      <% if active_codespaces.any? %>
+        <% paginated_codespaces.each do |codespace| %>
+          <li class="Box-row">
+            <%= render Primer::Box.new(display: :flex, direction: :row, justify_content: :space_between, align_items: :center) do %>
+              <div data-test-id="<%= codespace.name %>" class="col-5">
+                <% if codespace.repository.present? %>
+                  <%= link_to gh_stafftools_repository_path(codespace.repository), class: "text-small no-underline d-block mb-1" do %>
+                    <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 300)) { "#{codespace.repository.nwo}" } %>
+                  <% end %>
+                <% end %>
+                <% if codespace.copilot_workspace? %>
+                  <%= render Primer::Beta::Octicon.new(icon: :copilot, color: :muted) %>
+                <% elsif codespace.task_cloud_environment? %>
+                  <%= render Primer::Beta::Octicon.new(icon: "file-code", color: :muted) %>
+                <% else %>
+                  <%= render Primer::Beta::Octicon.new(icon: "device-desktop", color: :muted) %>
+                <% end %>
+                <%= link_to stafftools_user_codespace_path(user, codespace), class: "no-underline" do %>
+                  <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 200)) { "#{codespace.name}" } %>
+                  &middot;
+                  <%= codespace.safe_display_name %>
+                <% end %>
+                <span class="text-small color-fg-muted d-flex flex-items-center mt-1">
+                  <span class="d-flex flex-items-center">
+                    <%= render Primer::Beta::Octicon.new(icon: "cpu", color: :muted) %>
+                    <span class="ml-2"><%= get_sku(codespace)&.display_cpus %></span>
+                  </span>
+                  <% if should_show_storage_utilization?(codespace) %>
+                    <span class="ml-2">
+                      &middot;
+                    </span>
+                    <span class="d-flex flex-items-center" <%= test_selector "codespaces-storage-utilization" %>>
+                      <%= render(Primer::Beta::IconButton.new(icon: :database, scheme: :invisible, "aria-label":  "#{get_storage_utilization_in_gb(codespace)} GB utilized", tooltip_direction: :ne)) %>
+                      <span><%= get_storage_utilization_in_gb(codespace) %> GB</span>
+                    </span>
+                  <% end %>
+                </span>
+                <span class="text-small color-fg-muted d-block mt-1">
+                  Last used <%= time_ago_in_words_js(codespace.last_used_at, "float-none") %>
+                  &middot;
+                  Created <%= time_ago_in_words_js(codespace.created_at, "float-none") %>
+                </span>
+              </div>
+              <div class="d-flex flex-items-center col-2">
+                <%= render Primer::Beta::Octicon.new(icon: "credit-card", color: :muted) %>
+                <span class="color-fg-muted ml-1">
+                  <%= link_to stafftools_user_path(codespace.billable_owner), class: "no-underline" do %>
+                    <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 125)) { "#{codespace.billable_owner}" } %>
+                  <% end %>
+                </span>
+              </div>
+              <div class="d-flex">
+                <% if codespace.owner.employee? %>
+                  <%= form_tag suspend_environment_stafftools_user_codespace_path(codespace.owner, codespace) do %>
+                    <%= render Primer::ButtonComponent.new(variant: :small, type: :submit) do %>Suspend<% end %>
+                  <% end %>
+                <% else %>
+                  <include-fragment src="<%= suspend_environment_component_stafftools_user_codespace_path(codespace.owner, codespace) %>"></include-fragment>
+                <% end %>
+                <% if helpers.stafftools_action_authorized?(controller: Stafftools::CodespacesController, action: :deprovision_environment) %>
+                  <%= form_tag deprovision_environment_stafftools_user_codespace_path(codespace.owner, codespace) do %>
+                    <%= render Primer::ButtonComponent.new(variant: :small, type: :submit, ml: 2, data: {test_selector: "deprovision-single-codespace"}) do %>Deprovision<% end %>
+                  <% end %>
+                <% else %>
+                  <%= render Primer::ButtonComponent.new(variant: :small, type: :button, ml: 2, disabled: true, title: "You're not authorized to perform this action in stafftools. To request access, please follow the steps on The Hub." ) do %>Deprovision<% end %>
+                <% end %>
+              </div>
+            <% end %>
+          </li>
+        <% end %>
+      <% else %>
+        <li class="Box-row">
+          <p class="text-center">
+            No active codespaces to show.
+          </p>
+        </li>
+      <% end %>
+    <% else %>
+      <% if deleted_codespaces.any? %>
+        <% paginated_codespaces.each do |codespace| %>
+          <li class="Box-row">
+            <%= render Primer::Box.new(display: :flex, direction: :row, justify_content: :space_between, align_items: :center) do %>
+              <div>
+                <% if codespace.repository.present? %>
+                  <%= link_to gh_stafftools_repository_path(codespace.repository), class: "text-small no-underline d-block mb-1" do %>
+                    <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 300)) { "#{codespace.repository.nwo}" } %>
+                  <% end %>
+                <% end %>
+                <% if codespace.copilot_workspace? %>
+                  <%= render Primer::Beta::Octicon.new(icon: :copilot, color: :muted) %>
+                <% else %>
+                  <%= render Primer::Beta::Octicon.new(icon: "device-desktop", color: :muted) %>
+                <% end %>
+                <%= link_to stafftools_user_codespace_path(user, codespace), class: "no-underline" do %>
+                  <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 200)) { "#{codespace.name}" } %>
+                  &middot;
+                  <%= codespace.safe_display_name %>
+                <% end %>
+                <span class="text-small color-fg-muted d-block mt-1">
+                  Deleted <%= time_ago_in_words_js(codespace.deleted_at, "float-none") %>
+                  <% if codespace.restore_count > 0 %>
+                    &middot;
+                    Restored <%= codespace.restore_count %> <%= "time".pluralize(codespace.restore_count) %>
+                    &middot;
+                    Last restored  <%= time_ago_in_words_js(codespace.restored_at, "float-none") %>
+                  <% end %>
+                </span>
+              </div>
+              <div class="d-flex flex-items-center col-2">
+                <%= render Primer::Beta::Octicon.new(icon: "credit-card", color: :muted) %>
+                <span class="color-fg-muted ml-1">
+                  <%= link_to stafftools_user_path(codespace.billable_owner), class: "no-underline" do %>
+                    <%= render(Primer::Truncate.new(tag: :span, inline: true, expandable: true, max_width: 125)) { "#{codespace.billable_owner}" } %>
+                  <% end %>
+                </span>
+              </div>
+              <%= form_tag restore_environment_stafftools_user_codespace_path(codespace.owner, codespace) do %>
+                <%= render Primer::ButtonComponent.new(
+                  variant: :small,
+                  type: :submit,
+                  aria: {disabled: !codespace.restorable?},
+                  data: {confirm: "Are you sure you want to restore codespace '#{codespace.name}' (#{codespace.safe_display_name})?"}) do %>
+                  Restore
+                <% end %>
+              <% end %>
+            <% end %>
+          </li>
+        <% end %>
+      <% else %>
+        <li class="Box-row">
+          <p class="text-center">
+            No deleted codespaces to show.
+          </p>
+        </li>
+      <% end %>
+    <% end %>
+    </ul>
+  </div>
+</div>
+
+<% if paginated_codespaces && will_paginate(paginated_codespaces) %>
+  <div class="paginate-container">
+    <div class="pagination">
+      <%= will_paginate(paginated_codespaces) %>
+    </div>
+  </div>
+<% end %>
+<hr class="my-5">

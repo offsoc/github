@@ -1,0 +1,64 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-es [-hjnv]
+#/
+#/ Check the status of the Elasticsearch service in the cluster.
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+. ghe-repl-lib
+ensure_replica
+is_cache_replica && exit 0
+
+cluster=$(curl -s 'http://localhost:9200/_cluster/health?pretty') || true
+
+status=$(echo "$cluster" | grep status | sed -E 's/.*: (.*?[^\\])/\1/' | tr -d '," ')
+nodes=$(echo "$cluster" | grep number_of_nodes | sed -E 's/.*: (.*?),/\1/')
+initializing=$(echo "$cluster" | grep initializing_shards | sed -E 's/.*: (.*?),/\1/')
+unassigned=$(echo "$cluster" | grep '"unassigned_shards"' | sed -E 's/.*: (.*?),/\1/')
+
+if [ "$status" = "yellow" ] && [ "$unassigned" -eq 0 ]; then
+  yellow_ok='true'
+else
+  yellow_ok='false'
+fi
+
+if [ "$output" = "nagios" ]; then
+  if [[ "$nodes" -gt 1 ]]; then
+    if [ "$status" = "green" ] || [ "$yellow_ok" = "true" ]; then
+      echo "OK: elasticsearch cluster is in sync ($initializing shards initializing, $unassigned shards unassigned)"
+    elif [ "$yellow_ok" = "false" ]; then
+      echo "WARNING: elasticsearch cluster is yellow ($initializing shards initializing, $unassigned shards unassigned)"
+      exit 1
+    elif [ "$status" = "red" ]; then
+      echo "CRITICAL: elasticsearch cluster is red ($initializing shards initializing, $unassigned shards unassigned)"
+      exit 2
+    fi
+   elif [ "$status" = "503" ]; then
+    echo "CRITICAL: elasticsearch link is down"
+    exit 2
+  else
+    echo "UNKNOWN: elasticsearch replication is not setup"
+    exit 3 # UNKNOWN
+  fi
+else
+  echo "$cluster"
+  if [ -n "$verbose" ]; then
+    curl -s 'http://localhost:9200/_nodes?pretty' || true
+    curl -s 'http://localhost:9200/_cluster/allocation/explain?pretty' || true
+    curl -s 'http://localhost:9200/_nodes/stats?pretty' || true
+    curl -s 'http://localhost:9200/_tasks?pretty' || true
+    curl -s 'http://localhost:9200/_cat/recovery?v'
+  fi
+  exit 0
+fi
+

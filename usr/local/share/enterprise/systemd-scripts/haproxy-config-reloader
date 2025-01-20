@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+proxy=$1
+if [ -z "$proxy" ]; then
+  echo "no proxy supplied - failing"
+  exit 1
+elif ! [[ "$proxy" =~ ^cluster|data$ ]]; then
+  echo "Proxy ${proxy} is not supported - failing"
+  exit 1
+fi
+
+checksum=$(sha256sum "/etc/haproxy/haproxy-${proxy}-proxy.cfg" || true)
+historical_file="/etc/haproxy/haproxy-${proxy}-proxy.cfg.sum"
+
+# Compare current checksum to the last run
+historical=$(cat "$historical_file" || true)
+if ! [ -e "$historical_file" ] || [ -z "$historical" ]; then
+  echo "No historical config detected - proceeding"
+elif [ "$checksum" == "$historical" ]; then
+  echo "No change detected - exiting"
+  exit
+fi
+
+# If a change is detected since the last run trigger a reload
+/usr/local/share/enterprise/ghe-nomad-signal -l "haproxy-${proxy}-proxy" SIGUSR2
+
+# If reloading was successful overwrite historical sum file with the current sum
+echo "$checksum" | tee "$historical_file"

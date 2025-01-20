@@ -1,0 +1,218 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 4 %>
+<%# view = Settings::OrgsView %>
+<% page_info :title => "Organizations" %>
+<% ref_loc = "organization_settings_list" %>
+
+<%= render layout: "settings/settings" do %>
+  <%= render Primer::Beta::Subhead.new(hide_border: true, mb: 1) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Organizations<% end %>
+    <% component.with_actions do %>
+      <% if user_can_create_organizations? && !current_user.is_enterprise_managed? %>
+        <a
+          href="<%= new_organization_path %>"
+          data-ga-click="<%= ga_label_with_analytics_tracking_id("Orgs,click,text:New organization;") %>"
+          class="btn btn-sm"
+        >
+          New organization
+        </a>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.eligible_organization_count > 0 %>
+    <%= render(Primer::Box.new(
+      bg: :accent,
+      border_color: :accent,
+      border: true,
+      border_radius: 2,
+      display: :flex,
+      p: 3,
+      mb: 3,
+      align_self: :center,
+      test_selector: "org-settings-upgrade-banner"
+    )) do %>
+      <%= render(Primer::Beta::Octicon.new(:info, mr: 2, color: :accent, align_self: :center))%>
+      <%= render(Primer::Beta::Text.new) do %>
+        You have (<%= view.eligible_organization_count %>) <%= "organization".pluralize(view.eligible_organization_count) %> eligible for a <%= render(Primer::Beta::Text.new(font_weight: :bold)) { "free upgrade" } %>.
+      <% end %>
+      <%= render(Primer::Box.new(flex: 1)) %>
+      <%= render(Primer::Beta::Link.new(
+        href: "#{GitHub.help_url}/admin/overview/about-enterprise-accounts",
+        data: analytics_click_attributes(
+          category: "entacct_migration",
+          action: "click_to_learn_more_about_enterprise_accounts",
+          label: "ref_loc:#{ref_loc};ref_cta:learn_more",
+        ))) { "Learn more" } %>
+    <% end %>
+  <% end %>
+
+  <% if view.memberships.any? || show_pending_invitations_indicator? %>
+    <div class="Box">
+      <%= render Settings::PendingInvitationsComponent.new(user: current_user) %>
+      <% view.memberships.each do |membership| %>
+        <div class="Box-row d-flex flex-justify-between flex-wrap">
+          <div class="py-1">
+            <%= render(Primer::Beta::Avatar.new(src: membership.organization.primary_avatar_url, size: 20, alt: membership.organization.name, shape: :square)) %>
+            <strong class="ml-1"><%= link_to membership.name, user_path(membership.organization) %></strong>
+            <% if membership.organization.archived? %>
+              <%= render(Primer::Beta::Label.new(scheme: :attention)) { "Archived" } %>
+            <% end %>
+            <%= render(Primer::Beta::Label.new(scheme: :secondary)) { membership.description } %>
+          </div>
+          <div class="d-flex flex-justify-between flex-items-baseline py-1">
+            <% if view.two_factor_requirement_enabled?(membership.organization) %>
+              <%= render(Primer::Beta::Label.new(scheme: :primary, align_self: :center)) { "2FA required" } %>
+            <% end %>
+
+            <% if membership.show_upgrade_button? %>
+              <%= render(Primer::Beta::Button.new(
+                tag: :a,
+                scheme: :secondary,
+                size: :small,
+                ml: 2,
+                href: new_org_enterprise_upgrade_path(membership.organization),
+                align_self: :center,
+                data: analytics_click_attributes(
+                  category: "entacct_migration",
+                  action: "click_to_upgrade_for_free",
+                  label: "ref_loc:#{ref_loc};ref_cta:upgrade;organization:#{membership.organization.id}",
+                ),
+                test_selector: "entacct-upgrade-button",
+              )) { "Upgrade" } %>
+
+              <%= render(Primer::Alpha::ActionMenu.new(ml: 2, test_selector: "organization-action-menu")) do |menu| %>
+                <% menu.with_show_button(icon: :"kebab-horizontal", scheme: :invisible, aria: { label: "Organization options" }) %>
+
+                <% menu.with_item(
+                  label: "Compare plans",
+                  role: "menuitem",
+                  href: settings_org_plans_path(membership.organization),
+                  content_arguments: {
+                    data: {
+                      category: "compare_plans",
+                      action: "click_to_go_to_compare_plans",
+                      label: "ref_page:/settings/organizations;ref_cta:compare_plans;ref_loc:organization_settings;ref_org:#{membership.organization.display_login}"
+                    },
+                  },
+                ) if membership.show_compare_plans? %>
+
+                <% menu.with_item(
+                  label: "Settings",
+                  role: "menuitem",
+                  href: membership.org_settings_path,
+                  content_arguments: {
+                    data: { ga_click: ga_label_with_analytics_tracking_id("Orgs, go to organization settings, text:Settings;")},
+                  }
+                ) if membership.show_settings_button? %>
+
+                <% menu.with_item(
+                  label: "Leave",
+                  role: "menuitem",
+                  href: leave_org_path(membership.organization),
+                  tag: :button,
+                  form_arguments: { method: :post },
+                  scheme: :danger,
+                  content_arguments: {
+                    test_selector: "leave-organization-allowed",
+                    data: { confirm: membership.delete_confirmation_message },
+                  },
+                ) unless view.prevent_removal_of_scim_managed_user?(membership.organization) %>
+              <% end %>
+            <% else %>
+              <% if membership.show_compare_plans? %>
+                <%=
+                  link_to "Compare plans",
+                  settings_org_plans_path(membership.organization),
+                  data: {
+                    category: "compare_plans",
+                    action: "click_to_go_to_compare_plans",
+                    label: "ref_page:/settings/organizations;ref_cta:compare_plans;ref_loc:organization_settings;ref_org:#{membership.organization.display_login}"
+                  },
+                  class: "btn btn-sm ml-2"
+                %>
+              <% end %>
+
+              <% if membership.show_settings_button? %>
+                <%=
+                  link_to "Settings",
+                  membership.org_settings_path,
+                  data: { ga_click: ga_label_with_analytics_tracking_id("Orgs, go to organization settings, text:Settings;")},
+                  class: "btn btn-sm ml-2"
+                %>
+              <% end %>
+
+              <% unless view.prevent_removal_of_scim_managed_user?(membership.organization) %>
+                <div <%= test_selector("leave-organization-allowed") %>>
+                  <%= button_to "Leave", leave_org_path(membership.organization), :form_class => "inline-form",
+                    :class => "btn btn-sm ml-2 mb-1 btn-danger",
+                    "data-confirm" => membership.delete_confirmation_message %>
+                </div>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <%= render Primer::Beta::Blankslate.new do |c| %>
+      <% c.with_heading(tag: :h2) do %>
+        You are not a member of any organizations.
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if user_can_create_organizations? && !current_user.is_enterprise_managed?%>
+    <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+      <% component.with_heading(tag: :h2) do %>Transform account<% end %>
+    <% end %>
+
+    <% if current_user.has_a_plan_specific_coupon? %>
+      <p>You cannot transform this account into an organization, because you have an active coupon that is locked to a plan. Please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a>.</p>
+      <p><%= render Primer::ButtonComponent.new(disabled: true) do %>Turn <%= current_user.display_login %> into an organization<% end %></p>
+    <% elsif current_user.actively_sponsoring? %>
+      <p>You cannot transform this account into an organization until all sponsorships are cancelled.</p>
+      <p><%= render Primer::ButtonComponent.new(disabled: true) do %>Turn <%= current_user.display_login %> into an organization<% end %></p>
+    <% elsif current_user.active_sponsors_account? %>
+      <p>You cannot transform this account into an organization because you have an active GitHub Sponsors account.</p>
+      <p><%= render Primer::ButtonComponent.new(disabled: true) do %>Turn <%= current_user.display_login %> into an organization<% end %></p>
+    <% elsif current_user.organizations.empty? %>
+      <%= render layout: "shared/details_dialog", locals: {button_text: "Turn #{current_user} into an organization", title: "Account Transformation Warning"} do %>
+        <%= render Primer::Beta::Flash.new(full: true, scheme: :warning) do %>
+          What you are about to do is an irreversible and destructive process. Please be aware:
+        <% end %>
+        <div class="Box-body overflow-auto">
+          <ul class="ml-4">
+            <% unless current_user.plan_supports?(:repos, visibility: :private, org: true) %>
+              <li>Any private repositories owned by <%= current_user.display_login %> will be disabled</li>
+            <% end %>
+
+            <li>You will no longer be able to sign in to <%= current_user.display_login %> (all administrative privileges will be bestowed upon the owners you choose)</li>
+            <li>Any user-specific information (OAuth tokens, SSH keys, Job Profile, etc) will be erased</li>
+            <li>You will no longer be able to create or modify gists owned by the converted personal account</li>
+            <li>Any commits and comments credited to <%= current_user.display_login %> will no longer be linked to this GitHub account</li>
+            <li>Any GitHub Apps installed on <%= current_user.display_login %> will be uninstalled</li>
+            <li>The total amount of collaborators across private repositories will be the total amount of seats for the organization</li>
+            <% fork_count = current_user.private_repositories.forks.size %>
+            <% unless fork_count.zero? %>
+              <li><%= pluralize(fork_count, "private fork") %> will be deleted</li>
+            <% end %>
+
+          </ul>
+          <p class="mt-3 mb-0">
+            If you are using <%= current_user.display_login %> as a personal account, you should
+            <a class="Link--inTextBlock" href="/join">create a new personal account</a>
+            before transforming <%= current_user.display_login %> into an organization.
+          </p>
+        </div>
+        <div class="Box-footer">
+          <a href="<%= new_organization_path(transform_user: 1) %>" class="btn btn-block">Turn <%= current_user.display_login %> into an organization</a>
+        </div>
+      <% end %>
+    <% else %>
+      <p>You cannot transform this account into an organization until you leave all organizations that you’re a member of.</p>
+      <p><%= render Primer::ButtonComponent.new(disabled: true) do %>Turn <%= current_user.display_login %> into an organization<% end %></p>
+    <% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,210 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+verb = this_issue.locked? ? "unlock" : "lock"
+next_state = (verb == "unlock" ? "lock" : "unlock")
+%>
+
+<% page_info \
+     :title => "Issue ##{this_issue.number}",
+     :selected_link => :issues %>
+
+<div class="site-admin-unboxed">
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      <%= link_to \
+            "Issues",
+            gh_stafftools_repository_issues_path(current_repository) %>
+      /
+      Issue #<%= this_issue.number %>
+    </h2>
+  </div>
+
+  <div class="site-admin-table">
+    <table>
+      <tr>
+        <th>State</th>
+        <td>
+          <%= this_issue.state %>
+          <% if this_issue.locked? %>
+            &ndash; discussion locked
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Creator</th>
+        <td>
+          <% if this_issue.user %>
+            <%= link_to this_issue.user, stafftools_user_path(this_issue.user) %>
+            <% if this_issue.user.spammy? %>
+              &ndash;
+              <%= primer_octicon(:alert, classes: "error") %>
+              flagged as spam
+            <% end %>
+          <% else %>
+            account has been deleted
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Comments</th>
+        <td>
+          <%= link_to \
+                gh_stafftools_repository_issue_comments_path(this_issue) do %>
+            <%= pluralize (this_issue.issue_comments_count + 1), "comment" %>
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Subscriptions</th>
+        <td>
+          <%= link_to \
+                "View subscriptions and ignores",
+                gh_stafftools_repository_issue_subscriptions_path(this_issue) %>
+        </td>
+      </tr>
+      <tr>
+        <th>Discussion</th>
+        <td><%= link_to "View issue", issue_url_to_main_site(this_issue) %></td>
+      </tr>
+    </table>
+
+    <%= link_to \
+          "View database record",
+          gh_database_stafftools_repository_issue_path(this_issue),
+          class: "more" %>
+  </div>
+
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      Audit log
+    </h2>
+  </div>
+
+  <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+    <%= render \
+        partial: "stafftools/audit_log",
+        locals: {
+          query: @query,
+          logs: @logs,
+          more_results: @more_results,
+        } %>
+  <% else %>
+    <p><%= stafftools_not_authorized_html %></p>
+  <% end %>
+
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading"><%= verb.capitalize %> issue</h2>
+  </div>
+
+  <p>
+    <%= verb.capitalize %> this issue and its comments.
+  </p>
+
+  <% if GitHub.guard_audit_log_staff_actor? %>
+  <p>
+    This <strong>should not</strong> be used as a tool for content moderation, spam, or abuse
+  </p>
+  <% end %>
+
+  <%= render(Primer::Experimental::Dialog.new(
+    dialog_id: "#{verb}-dialog",
+    header_variant: :large,
+    width: :large,
+    title: "#{verb.capitalize} conversation on this issue",
+    form_url: "#{issue_path(this_issue)}/#{verb}",
+    form_method: :put
+  )) do |c| %>
+    <% c.with_show_button(
+      color: :danger
+    ) do |s| %>
+      <%= verb.capitalize %> issue
+    <% end %>
+    <% c.with_body do %>
+      <ul class="ml-3 mb-3">
+        <% if verb == "lock" %>
+          <li>Users <strong>won’t be able to add new comments</strong> to this issue.</li>
+          <% if current_repository.in_organization? %>
+            <li>
+              Members of teams with
+              <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a>
+              to this repository <strong>can still leave comments</strong> that others can see.
+            </li>
+          <% else %>
+            <li>
+              Collaborators
+              <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">with access</a>
+              to this repository <strong>can still leave comments</strong> that others can see.
+            </li>
+          <% end %>
+        <% else %>
+          <li><strong>Everyone</strong> will be able to comment on this issue once more.</li>
+        <% end %>
+        <% if verb == "lock" %>
+          <li>You can always <%= next_state %> this issue again in the future.</li>
+        <% end %>
+      </ul>
+
+      <% if verb == "unlock" %>
+        <p>You can always <%= next_state %> this issue again in the future.</p>
+      <% end %>
+
+      <% if verb == "lock" %>
+        <h2 class="f4 mb-1">Reason for <%= verb %>ing</h2>
+
+        <p class="mb-2">Optionally, choose a reason for <%= verb %>ing that others can see.
+        Learn more about when it’s appropriate to <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/locking-conversations">lock conversations</a>.</p>
+      <% end %>
+
+      <% if verb == "lock" %>
+        <%= select_tag(:reason, options_for_select(Issue::LOCK_REASONS.map(&:capitalize)), prompt: "Choose a reason", class: "mb-3") %>
+      <% end %>
+    <% end %>
+    <% c.with_button(
+      data: { "close-dialog-id": "#{verb}-dialog" }
+    ) { "Cancel" } %>
+    <% c.with_button(
+      type: :submit,
+      scheme: :danger,
+      data: { "disable-with": "" }
+    ) { "#{verb.capitalize} conversation on this issue" } %>
+  <% end %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">Delete issue</h2>
+  </div>
+
+  <p>
+    Delete this issue and its comments.
+    This action <strong>cannot be undone.</strong>
+  </p>
+
+  <%= render(Primer::Experimental::Dialog.new(
+    dialog_id: "delete-dialog",
+    header_variant: :large,
+    width: :large,
+    title: "Delete issue?",
+    form_url: gh_stafftools_repository_issue_path(this_issue),
+    form_method: :delete
+  )) do |c| %>
+    <% c.with_show_button(
+      color: :danger
+    ) do |s| %>
+      Delete issue
+    <% end %>
+    <% c.with_body do %>
+      <p>
+        All comments made on this issue will also be deleted.<br>
+        This action <strong>cannot be undone.</strong>
+      </p>
+    <% end %>
+    <% c.with_button(
+      data: { "close-dialog-id": "delete-dialog" }
+    ) { "Cancel" } %>
+    <% c.with_button(
+      type: :submit,
+      scheme: :danger,
+      data: { "disable-with": "" }
+    ) { "Delete issue" } %>
+  <% end %>
+</div>

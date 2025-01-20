@@ -1,0 +1,23 @@
+#!/bin/sh
+
+RAILS_ROOT=$(dirname $(dirname $(readlink -f "$0")))
+PATH="${RAILS_ROOT}/bin:${RAILS_ROOT}/vendor/ruby/$(config/ruby-version)/bin:$PATH"
+
+if [ "$GITHUB_USE_DOCKER" = "1" ]; then
+  cd $(dirname $0)/..
+
+  trap 'docker-compose stop registry-server' EXIT HUP INT QUIT PIPE TERM
+  docker-compose up registry-server
+else
+  script/build-subproject registry || exit 1
+
+  REGISTRY_BIN="vendor/registry/registry"
+  until [ -x $REGISTRY_BIN ]; do
+    # keeps this process alive, which keeps overmind alive.
+    # we can remove this if we're sure _all_ GitHub devs can build registry
+    # successfully.
+    sleep 60
+  done
+
+  exec env LISTEN_ADDR=127.0.0.1:3005 AWS_ACCESS_KEY=$AWS_DEV_ACCESS_KEY_ID AWS_SECRET_KEY=$AWS_DEV_SECRET_ACCESS_KEY AWS_S3_BUCKET=github-dev HYDRO_KAFKA_BROKERS=localhost:9092 HYDRO_KAFKA_VERSION=1.1.1 GITHUB_API_URL=http://api.github.localhost $REGISTRY_BIN
+fi

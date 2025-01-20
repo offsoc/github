@@ -1,0 +1,346 @@
+#!/bin/bash
+#/ Usage: ghe-nomad-jobs queue /path/to/service.hcl       # Queues a nomad job to be run
+#/        ghe-nomad-jobs apply <queue>                    # Runs all nomad jobs in requested queue
+#/        ghe-nomad-jobs wait-queue <queue> [seconds]     # Waits up to requested seconds for requested nomad jobs queue to be empty
+#/        ghe-nomad-jobs apply-wait-all-queues            # Locks and applies all jobs in the system queue before doing the same for the service queue
+#/        ghe-nomad-jobs lock-queue <queue>               # Copies the queue to a locked queue to prevent new jobs from being added while in process
+#/        ghe-nomad-jobs wait-health-checks [service ...] # Waits for the health checks of nomad services to be passing
+#/        ghe-nomad-jobs wait-nomad-nodes                 # Waits for nomad nodes to be ready
+#/        ghe-nomad-jobs debug                            # Prints out the jobs in the queue
+#/ Available queue options
+#/        service # For Nomad service jobs - Default
+#/        system  # For Nomad system jobs
+#/        locked  # For entries in the locked queue
+#/
+set -euo pipefail
+. /usr/local/share/enterprise/lib/instrumentation/otel-trace
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+form_jq_service_select_query() {
+  # If no jobs are supplied, then do not write anything to stdout.
+  if [ "$#" -eq 0 ]; then
+    return
+  fi
+  nomad_jobs_comma_separated="$(echo "$@" | tr ' ' ',')"
+
+  # Collect a space-separated string of quote-surrounded nomad services' names.
+  services="$(curl --silent --fail "http://127.0.0.1:4646/v1/job/{$nomad_jobs_comma_separated}" |
+                    jq 'select(.TaskGroups != null).TaskGroups[] |
+                        select(.Tasks != null).Tasks[] |
+                        select(.Services != null).Services[].Name' | paste --serial --delimiters ' ')"
+  services_as_array="[$(echo "$services" | tr ' ' ',')]"
+  echo "| select(.ServiceName as \$sn | $services_as_array | index(\$sn))"
+}
+
+print_jobs_queue(){
+  if [ "$is_ghes_nomad_delegate" = "true" ]; then
+    echo "The following jobs are in the queue:" 1>&2
+    cat "$1" 1>&2
+  fi
+}
+
+plan_job() {
+  job="$1"
+  nomad plan "$job"
+}
+
+get_pending_system_jobs() {
+  ghe-nomad-api jobs | jq '.[] | select(.Type == "system") | select(.JobSummary.Children.Pending > 0) | .ID'
+}
+
+if [ $# -eq 0 ]; then
+  usage
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+is_ghes_nomad_delegate=$(jq -r .is_ghes_nomad_delegate /etc/github/configapply.json)
+nomad_datacenter=$(jq -r .nomad_datacenter /etc/github/configapply.json)
+
+system_queue=/etc/nomad-jobs/system-queue
+service_queue=/etc/nomad-jobs/service-queue
+locked_queue=/etc/nomad-jobs/locked-queue
+
+if [ "$1" = "queue" ]; then
+  job="$2"
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    if [ -f /etc/github/cluster ]; then
+      ghe-cluster-each -- "$0" queue-local "$job"
+    fi
+    exit 0
+  fi
+  exec "$0" queue-local "$job"
+
+elif [ "$1" = "queue-local" ]; then
+  job="$2"
+  if hcl2json "$job" | jq -e '.job[] | map(.) | .[] | map(.) | .[].type == "system"'; then
+    queue="$system_queue"
+  else
+    queue="$service_queue"
+  fi
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+  if [ -f "$job" ]; then
+    echo "$job" >> $queue
+    echo "Queued nomad job '$job'"
+  fi
+
+elif [ "$1" = "lock-queue" ]; then
+  if [ "$2" == "service" ]; then
+    queue="$service_queue"
+  else
+    queue="$system_queue"
+  fi
+  if ! [ -f "$queue" ]; then
+    echo "No jobs in queue - refusing to lock"
+    exit 0
+  fi
+  num_queued_items=$(wc -l "$queue" | cut -d' ' -f1 || echo 0)
+  if [ -f "$queue" ] && [ "$num_queued_items" -gt 0 ]; then
+    num_locked_queue_items=$(wc -l "$locked_queue" | cut -d' ' -f1 || echo 0)
+    if [ -f "$locked_queue" ] && [ "$num_locked_queue_items" -gt 0 ]; then
+      echo "Jobs are in locked queue. Exiting." 1>&2
+      print_jobs_queue "$locked_queue"
+      exit 1
+    fi
+    mv "$queue" "$locked_queue"
+  else
+    echo "Queue file empty or does not exist. Exiting." 1>&2
+    exit 1
+  fi
+
+elif [ "$1" = "apply-wait-all-queues" ]; then
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+  "$0" lock-queue system && ("$0" apply locked && "$0" wait-queue locked) || true
+  # Wait for all pending system jobs to be healthy to avoid a locking bug https://github.com/hashicorp/nomad/issues/18509
+  for job in get_pending_system_jobs; do
+    "$0" wait-health-checks "$job"
+  done
+  "$0" lock-queue service && ("$0" apply locked && "$0" wait-queue locked) || true
+
+elif [ "$1" = "apply" ]; then
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+
+  # Parallel deployments of the same job may result in failures.
+  # This may happen when ghe-config-apply and nomad-jobs.timer trigger "ghe-nomad-jobs apply" at the same time.
+  [[ -v NOMAD_JOBS_LOCKED ]] || {
+    export NOMAD_JOBS_LOCKED=1
+    exec lockrun --lockfile="/var/run/ghe-nomad-jobs.pid" --wait -- "$0" "$@"
+  }
+
+  if [ $# -ge 2 ] && [[ "$2" =~ ^(service|system|locked)$ ]]; then
+    if [ "$2" == "service" ]; then
+      queue="$service_queue"
+    elif [ "$2" == "locked" ]; then
+      queue="$locked_queue"
+    else
+      queue="$system_queue"
+    fi
+  else
+    echo "queue name not provided - assuming service queue"
+    queue="$service_queue"
+  fi
+
+  if [ -f "$queue" ] && [ "$(< $queue wc -l)" -gt 0 ]; then
+    nomad_status_exit_code=0
+    nomad_status_output=$(nomad status) || nomad_status_exit_code="$?"
+    if [ "$nomad_status_exit_code" -ne 0 ]; then
+      echo "Unable to communicate with nomad" 1>&2
+      echo "$nomad_status_output" 1>&2
+    else
+      # deliberately reading this file only once
+      mapfile -t pending_jobs < <(sort -u "$queue")
+
+      echo "There are ${#pending_jobs[@]} jobs in the queue"
+
+      for job in "${pending_jobs[@]}"; do
+        echo "Planning nomad job '$job'"
+        job_name=$(echo "${job##*/}" | cut -d. -f1)
+
+        set +e
+        nomad_plan_output=$(plan_job "$job")
+        nomad_plan_exit_code="$?"
+        set -e
+
+        run_job=true
+        case "$nomad_plan_exit_code" in
+          0)
+            # Nomad plan may return 0 when it hits a constraint bug. In this case we allow the job to run.
+            # Context:
+            # https://github.com/hashicorp/nomad/issues/12016#issuecomment-1527389689
+            # https://github.com/github/enterprise2/pull/29977#issuecomment-1221255096
+            if echo "$nomad_plan_output" | grep -q "Constraint .* nodes excluded by filter"; then
+              echo "Nomad plan for '$job' detected no changes but had a constraint warning. Allowing the job to run."
+            elif nomad job inspect "$job_name" | jq -e '.Job.Type == "system"'; then
+              # See https://github.com/hashicorp/nomad/issues/20502 for context
+              echo "Nomad job is running and of type system which may have stopped allocations missed by plan. Allowing the job to run."
+            else
+              echo "No Nomad allocations will be created or destroyed for job '$job'"
+              sed -i "\:$job:d" "$queue"
+              run_job=false
+            fi
+            ;;
+          1)
+            echo "Allocation changes required for job '$job'"
+            ;;
+          255)
+            echo "Failed to plan nomad job '$job'" 1>&2
+            echo "$nomad_plan_output" 1>&2
+            sed -i "\:$job:d" "$queue"
+            run_job=false
+            ;;
+          *)
+            echo "Unexpected exit code '$nomad_plan_exit_code' from nomad plan for job '$job'" 1>&2
+            echo "$nomad_plan_output" 1>&2
+            sed -i "\:$job:d" "$queue"
+            run_job=false
+            ;;
+        esac
+
+        if $run_job; then
+          if hcl2json "$job" | jq -r '.job[0] | .[] | .[].datacenters' | grep -q "$nomad_datacenter"; then
+            echo "Running nomad job '$job'"
+
+            nomad_run_output=$(nomad job run -detach "$job")
+            # The output of this command usually looks like:
+            # Job registration successful
+            # Evaluation ID: c64d3f1b-a660-be4e-e9a7-2701f1a9608b
+            # If it's a batch job, it will look like:
+            # Job registration successful
+            # Approximate next launch time: 2023-09-26T08:00:00Z (15m47s from now)
+            echo "$nomad_run_output"
+            # Remove the job from the queue so we don't try to run it again
+            sed -i "\:$job:d" "$queue"
+          else # removing job because it's not supposed to run on this dc
+            sed -i "\:$job:d" "$queue"
+          fi
+        fi
+      done
+    fi
+  fi
+
+elif [ "$1" = "wait-queue" ]; then
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+
+  if [ $# -ge 2 ] && [[ "$2" =~ ^(service|system|locked)$ ]]; then
+    if [ "$2" == "service" ]; then
+      queue="$service_queue"
+    elif [ "$2" == "locked" ]; then
+      queue="$locked_queue"
+    else
+      queue="$system_queue"
+    fi
+  else
+    echo "queue name not provided - assuming service queue"
+    queue="$service_queue"
+  fi
+  echo "Waiting for the nomad jobs queue ${queue} to be empty"
+  for try in $(seq "${3:-600}"); do
+    if [ ! -f "$queue" ] || [ "$(< $queue wc -l)" -eq 0 ]; then
+      echo "Nomad jobs queue ${queue} is empty"
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for the nomad jobs queue to be empty" 1>&2
+  print_jobs_queue "$queue"
+  exit 1
+
+elif [ "$1" = "wait-nomad-nodes" ]; then
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+  timeout=${2:-600}
+  node_count=1
+  if [ -f /etc/github/cluster ] ; then
+    node_count=$(jq -r '.cluster_nodes_in_datacenter_count' /etc/github/configapply.json)
+  fi
+  echo "Waiting for nomad nodes to start"
+  for try in $(seq "$timeout"); do
+    sleep 1
+    nomad_count=$(ghe-nomad-api nodes | jq length) || {
+      echo "Unable to determine the status of nomad nodes" 1>&2
+      # retry this if it fails
+      continue
+    }
+    if (( nomad_count < node_count )) ; then
+      echo "Nodes not online: want $node_count, have $nomad_count"
+      continue
+    fi
+    break
+  done
+
+  timeout=$((timeout - try))
+
+  echo "Waiting for nomad nodes to be ready"
+  for try in $(seq "$timeout"); do
+    sleep 1
+    unhealthy_nodes=$(ghe-nomad-api nodes | jq --raw-output '.[] | select(.Datacenter=="'"$nomad_datacenter"'") | select((.SchedulingEligibility=="eligible") and (.Status!="ready")) | "\(.Name) \(.Status)"') || {
+      echo "Unable to determine the status of nomad nodes" 1>&2
+      # retry this if it fails
+      continue
+    }
+    if [ -z "$unhealthy_nodes" ]; then
+      echo "Nomad nodes are ready"
+      exit 0
+    fi
+    echo "$unhealthy_nodes"
+  done
+  echo "WARNING: Timed out waiting for nomad nodes to be ready. Placement cannot occur on down nodes." 1>&2
+  exit 0
+
+elif [ "$1" = "wait-health-checks" ]; then
+  if [ "$is_ghes_nomad_delegate" = "false" ]; then
+    exit 0
+  fi
+  shift
+  # `service_select_query` will either be a partial jq query (including a leading pipe) to select only the services that belong
+  # to either the specified jobs passed to `wait-health-checks`, or if no jobs are specified, it will be an empty string, which
+  # when substituted into the `jq` query below, will check the health of all services.
+  service_select_query="$(form_jq_service_select_query "$@")"
+  echo "Waiting for the health checks of nomad services to be passing"
+  for try in $(seq "1200"); do
+    sleep 1
+    unhealthy_nomad_services=$(curl --silent --fail "http://127.0.0.1:8500/v1/health/state/any" |
+                              jq  --raw-output ".[] | select(.ServiceID | test(\"nomad-task\")) $service_select_query | select(.Status | test(\"[^passing]\")) | \"\(.Node) \(.ServiceName) \(.Status)\"") || {
+      echo "Unable to determine the health of nomad services" 1>&2
+      # retry this if it fails
+      continue
+    }
+    if [ -z "$unhealthy_nomad_services" ]; then
+      if [ "$#" -eq 0 ]; then
+        echo "All nomad services have passing health checks"
+      else
+        echo "Specified nomad services have passing health checks"
+      fi
+      exit 0
+    fi
+    echo "$unhealthy_nomad_services"
+  done
+  echo "Timed out waiting for the health checks of nomad services to be passing" 1>&2
+  exit 1
+elif [ "$1" = "debug" ]; then
+  echo "system queue:"
+  print_jobs_queue $system_queue
+  echo "service queue:"
+  print_jobs_queue $service_queue
+  exit 0
+
+else
+  usage
+fi

@@ -1,0 +1,72 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/boot", __FILE__)
+require "github/storage"
+require "github/config/mysql"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} <target> <source>"
+  exit 1
+end
+
+require "action_view"
+# don't print deprecation warning
+I18n.enforce_available_locales = false
+
+def main
+  target = ARGV[0]
+  source = ARGV[1]
+
+  if target.nil? || source.nil?
+    usage
+  end
+
+  target_info = GitHub::Storage::Allocator.host_info target
+  if target_info.nil?
+    puts "Unknown host `#{target}`"
+    exit 1
+  end
+
+  source_info = GitHub::Storage::Allocator.host_info source
+  if source_info.nil?
+    puts "Unknown host `#{source}`"
+    exit 1
+  end
+
+  unless target_info[2].nil?
+    unless source_info[2] == target_info[2]
+      puts "Objects can not be repaired across cache locations"
+      exit 1
+    end
+  end
+
+  target_oids = GitHub::Storage::Allocator.oids_on_host target
+  source_oids = GitHub::Storage::Allocator.oids_on_host source
+
+  move_oids = source_oids - target_oids
+
+  puts "Copying #{move_oids.length} to #{target}"
+  move_oids.in_groups_of(100).each do |part|
+    part.compact!
+    oids = part.map { |p| p[1] }
+    blob_ids = part.map { |p| p[0] }
+
+    puts "\t#{oids.length} of #{move_oids.length}"
+    ok, body = GitHub::Storage::Client.replicate_from(target, oids)
+    if !ok
+      puts "Error replicating objects: #{body["message"]}"
+      exit 1
+    end
+
+    GitHub::Storage::Creator.create_replicas_from_repair(target, blob_ids)
+  end
+
+  puts "Done."
+end
+
+main

@@ -1,0 +1,235 @@
+# This file was generated with Kustomize. Please do not edit manually.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    annotations:
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        heaven.githubapp.com/cluster-preferences: ""
+        heaven.githubapp.com/image-placeholder: github
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: unicorn
+        moda.github.net/inject-otel-env-vars-into-containers: unicorn
+        moda.github.net/latest-image-placeholders-for: geoip
+    name: unicorn-gitauth-api
+spec:
+    replicas: 1
+    revisionHistoryLimit: 2
+    selector:
+        matchLabels:
+            role: production
+            service: unicorn-gitauth-api
+    strategy:
+        rollingUpdate:
+            maxSurge: 25%
+            maxUnavailable: 1
+    template:
+        metadata:
+            annotations:
+                fluentbit.io/exclude-nginx: "true"
+                fluentbit.io/parser-unicorn: logfmt_sloppy
+                observability.github.com/splunk_index-unicorn: rails-gitauth
+                ad.datadoghq.com/nginx.checks: |
+                    {
+                      "nginx": {
+                        "instances":[
+                          {
+                            "nginx_status_url": "http://%%host%%:8081/stats"
+                          }
+                        ]
+                      }
+                    }
+                ad.datadoghq.com/unicorn.checks: |
+                    {
+                      "kube_unicorn": {
+                        "instances": [
+                          {
+                            "host_pid": "%%pid%%",
+                            "uid": "%%kube_pod_uid%%",
+                            "worker_regex": "^unicorn .*? worker",
+                            "sockets": ["/build/tmp/sockets/unicorn-gitauth.sock"]
+                          }
+                        ]
+                      }
+                    }
+                ad.datadoghq.com/tolerate-unready: "true"
+            labels:
+                role: production
+                service: unicorn-gitauth-api
+        spec:
+            containers:
+                - env:
+                    - name: KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/docker-nginx
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command:
+                                - sleep
+                                - "5"
+                  name: nginx
+                  ports:
+                    - containerPort: 8080
+                      name: http
+                      protocol: TCP
+                    - containerPort: 8081
+                      name: stats
+                      protocol: TCP
+                  readinessProbe:
+                    failureThreshold: 1
+                    httpGet:
+                        path: /status
+                        port: stats
+                    periodSeconds: 1
+                  volumeMounts:
+                    - mountPath: /etc/nginx/
+                      name: nginx-conf
+                    - mountPath: /assets
+                      name: assets
+                    - mountPath: /sockets
+                      name: sockets
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                - args:
+                    - bin/unicorn_rails
+                    - -c
+                    - config/unicorn.rb
+                    - -E
+                    - production
+                    - --port
+                    - "8083"
+                    - gitauth.ru
+                  env:
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: "0"
+                    - name: GH_WRITE_PIDFILE
+                      value: "0"
+                    - name: GH_UNICORN_WORKER_COUNT
+                      value: "8"
+                    - name: GITAUTH
+                      value: "1"
+                    - name: GRAPHITE_DISABLED
+                      value: "1"
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: GITHUB_CONFIG_ROLE
+                      value: gitauth-api
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: kube_deployment:unicorn-gitauth-api
+                    - name: SMTP_HOST
+                      value: smtp.service.github.net
+                    - name: OTEL_SERVICE_NAME
+                      value: github-unicorn-gitauth-api
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+                  image: github
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command:
+                                - inotifywait
+                                - -e
+                                - delete_self
+                                - /nginx-pidfile/nginx.pid
+                  name: unicorn
+                  ports:
+                    - containerPort: 8083
+                      name: http
+                      protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                        path: /_ping
+                        port: http
+                    initialDelaySeconds: 31
+                  resources:
+                    limits:
+                        cpu: 4
+                        memory: 8Gi
+                    requests:
+                        cpu: 4
+                        memory: 8Gi
+                  volumeMounts:
+                    - mountPath: /usr/share/GeoIP
+                      name: geoip2
+                    - mountPath: /build/tmp/sockets
+                      name: sockets
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - mountPath: /etc/ssl/certs
+                      name: ca-certificates
+                      readOnly: true
+                    - mountPath: /dev/log
+                      name: syslog
+                      readOnly: true
+            dnsPolicy: Default
+            initContainers:
+                - command:
+                    - sh
+                    - -c
+                    - cp /data/geoip2/* /shared-geoip2
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/geoip2:master
+                  imagePullPolicy: IfNotPresent
+                  name: geoip
+                  resources:
+                    requests:
+                        cpu: 50m
+                  volumeMounts:
+                    - mountPath: /shared-geoip2
+                      name: geoip2
+            restartPolicy: Always
+            securityContext:
+                sysctls:
+                    - name: net.core.somaxconn
+                      value: "10240"
+            terminationGracePeriodSeconds: 60
+            volumes:
+                - configMap:
+                    name: unicorn-gitauth-api-nginx-conf
+                  name: nginx-conf
+                - emptyDir: {}
+                  name: nginx-pidfile
+                - emptyDir: {}
+                  name: assets
+                - emptyDir: {}
+                  name: geoip2
+                - emptyDir: {}
+                  name: sockets
+                - hostPath:
+                    path: /etc/github/metadata.json
+                  name: github-metadata
+                - hostPath:
+                    path: /etc/ssl/certs
+                  name: ca-certificates
+                - hostPath:
+                    path: /dev/log
+                  name: syslog

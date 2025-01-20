@@ -1,0 +1,33 @@
+let pageloadIds =
+      ClientEvents
+          | where ServerTimestamp > ago(7d)
+          | where EventName == "codespaces/web/load/action_stop"
+          | where Properties has "$CODESPACE_GUID$"
+          | extend Result = tostring(Properties["codespaces.web.event.result"])
+          | extend LoadId = tostring(Properties["codespaces.web.common.pageLoadId"])
+          | where Result == "Failure"
+          | project LoadId
+          | summarize PID = make_list(LoadId);
+    ClientEvents
+        | where ServerTimestamp > ago(7d)
+        | extend LoadId = tostring(Properties["codespaces.web.common.pageLoadId"])
+        | where LoadId in (pageloadIds)
+        | extend Action = tostring(Properties["Action"])
+        | extend Result = tostring(Properties["Result"])
+        | extend Result = iif(isnotempty(Result), Result, tostring(Properties["codespaces.web.event.result"]))
+        | extend OperationType = tostring(Properties["codespaces.web.event.operationType"])
+        | extend ErrorMessage = tostring(Properties["codespaces.web.event.errorMessage"])
+        | extend Action = iif(isempty(Action) and EventName == "codespaces/web/load/action_stop", "Load", Action)
+        | extend Progress = tostring(Properties["codespaces.web.event.progress"])
+        | extend Progress = iif(isempty(Progress) and EventName == "codespaces/web/load/action_stop", "Stop", Progress)
+        | extend Action = iif(isempty(Action) and EventName == "codespaces/web/load/action_start", "Load", Action)
+        | extend Progress = iif(isempty(Progress) and EventName == "codespaces/web/load/action_start", "Start", Progress)
+        | extend Action = iif(isempty(Action) and isnotempty(OperationType) , OperationType, Action)
+        | extend Progress = iif(isempty(Progress) and isnotempty(ErrorMessage) , ErrorMessage, Progress)
+        | extend Progress = iif(isempty(Progress) and EventName == "action_start" , "Start", Progress)
+        | extend Progress = iif(isempty(Progress) and EventName == "action_stop" , "Stop", Progress)
+        | extend LoadId = tostring(Properties["codespaces.web.common.pageLoadId"])
+        | extend Stack = tostring(Properties["codespaces.web.event.stack"])
+        | where isnotempty(Progress)
+        | project LoadId, ServerTimestamp, Action, Progress, Result
+        | order by ServerTimestamp asc

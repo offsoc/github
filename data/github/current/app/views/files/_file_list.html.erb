@@ -1,0 +1,126 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# rubocop:disable GitHub/DeprecatedViewHelpers %>
+
+<%
+  directory = view.directory
+  template_directory = defined?(template_directory) ? template_directory : false
+-%>
+
+<% file_list = capture do %>
+  <% if current_commit %>
+    <%= link_to 'Permalink', tree_path(path_string, current_commit.oid), :class => 'd-none js-permalink-shortcut', 'data-hotkey' => 'y' %>
+  <% end %>
+  <% if directory && omitted_count = directory.truncated_entries %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true, icon: "alert")) do %>
+      Sorry, we had to truncate this directory to 1,000 files.
+      <%= pluralize number_with_delimiter(omitted_count), "entry was", "entries were" %> omitted from the list.
+    <% end %>
+  <% end %>
+  <%= render(Primer::Beta::Flash.new(scheme: :danger, full: true, icon: "alert", py: 2, classes: "include-fragment-error")) do %>
+    Failed to load latest commit information.
+  <% end %>
+  <div class="js-details-container Details" data-hpc>
+    <div role="grid" aria-labelledby="files" class="Details-content--hidden-not-important js-navigation-container js-active-navigation-container<% if !view.subdirectory? %> d-md-block<% else %> d-block<% end %>">
+      <div class="sr-only" role="row">
+        <div role="columnheader">Type</div>
+        <div role="columnheader">Name</div>
+        <div role="columnheader" class="d-none d-md-block">Latest commit message</div>
+        <div role="columnheader">Commit time</div>
+      </div>
+      <% if view.subdirectory? %>
+        <div role="row" class="Box-row Box-row--focus-gray p-0 d-flex js-navigation-item" <%= test_selector("up-tree") %>>
+          <div role="rowheader" class="flex-auto min-width-0 col-md-2">
+            <%= link_to(up_tree_path, :rel => 'nofollow', :title => "Go to parent directory", :class => "js-navigation-open d-block py-2 px-3") do  %>
+              <span class="text-bold text-center d-inline-block" style="min-width: 16px;">. .</span>
+            <% end %>
+          </div>
+          <div role="gridcell" class="d-none d-md-block"></div>
+          <div role="gridcell"></div>
+        </div>
+      <% end %>
+      <% if directory %>
+        <% Promise.all(directory.map { |row| row[:commit].try(:async_short_message_html) }.compact).sync %>
+        <% content_icons = {} %>
+        <% directory.each do |row| %>
+          <div role="row" class="Box-row Box-row--focus-gray py-2 d-flex position-relative js-navigation-item ">
+            <div role="gridcell" class="mr-3 flex-shrink-0" style="width: 16px;">
+              <% if content_icons[content_type(row[:content])] %>
+                <%= content_icons[content_type(row[:content])] %>
+              <% else %>
+                <%= content_icons[content_type(row[:content])] = render GitHub::Files::IconComponent.new(type: content_type(row[:content])) %>
+              <% end %>
+            </div>
+
+            <div role="rowheader" class="flex-auto min-width-0 col-md-2 mr-3">
+              <span class="css-truncate css-truncate-target d-block width-fit"><%= content_link row[:content], classname: "Link--primary", data: { "turbo-frame": "repo-content-turbo-frame" } %></span>
+            </div>
+
+            <div role="gridcell" class="flex-auto min-width-0 d-none d-md-block col-5 mr-3" <%= test_selector("commit-message") %>>
+              <% if view.render_directory_entries? %>
+                <span class="css-truncate css-truncate-target d-block width-fit markdown-title">
+                  <% unless row[:commit].is_a? Directory::NilCommit %>
+                    <% if row[:commit].empty_message? %>
+                      <%= link_to "No commit message", commit_path(row[:commit]) %>
+                    <% else %>
+                      <%= commit_short_message_link(row[:commit]) %>
+                    <% end %>
+                  <% end %>
+                </span>
+              <% else %>
+                <div class="Skeleton Skeleton--text col-7">&nbsp;</div>
+              <% end %>
+            </div>
+
+            <div role="gridcell" class="color-fg-muted text-right" style="width:100px;">
+              <% if view.render_directory_entries? %>
+                <%= render Primer::Beta::RelativeTime.new(datetime: row[:age], tense: :past) if row[:age] %>
+              <% else %>
+                <div class="Skeleton Skeleton--text">&nbsp;</div>
+              <% end %>
+            </div>
+
+            <% if mobile? %>
+              <%# Make whole row clickable at small sizes %>
+              <%= link_to content_url(row[:content]), style: "opacity:0;", class: "position-absolute top-0 right-0 bottom-0 left-0 d-block d-sm-none" do %>
+                <%= content_path(row[:content]) %>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+    <% if !view.subdirectory? %>
+    <div class="Details-content--shown Box-footer d-md-none p-0">
+      <%= render Primer::ButtonComponent.new(scheme: :link, display: :block, w: :full, px: 3, py: 2, classes: "js-details-target", "aria-expanded": "false") do %>
+        View code
+      <% end %>
+    </div>
+    <% end %>
+  </div>
+<% end %>
+
+<% if view.render_directory_entries? %>
+  <%= file_list %>
+<% else %>
+  <%= include_cached_fragment(src: file_list_path(path_string, tree_name)) do %>
+    <%= file_list %>
+  <% end %>
+<% end %>
+
+<% if logged_in? && current_user_can_push? && view.upload_enabled? %>
+  <div class="repo-file-upload-tree-target js-document-dropzone js-upload-manifest-tree-view"
+       data-drop-url="<%= repo_uploads_path(current_repository.owner, current_repository, branch_or_tag_name.try { |s| s.dup.force_encoding(::Encoding::UTF_8).scrub! }, path_string) %>">
+    <div class="repo-file-upload-outline">
+      <div class="repo-file-upload-slate">
+          <%= render(Primer::Beta::Octicon.new(icon: "file", height: 32, color: :muted)) %>
+          <h2>Drop to upload your files</h2>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<% if template_directory && !current_repository.preferred_issue_templates.issue_template_config.configured? %>
+  <div class="Box color-bg-subtle p-3 mt-6">
+    Customize the issue creation experience with a <code>config.yml</code> file. <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/configuring-issue-templates-for-your-repository#configuring-the-template-chooser">Learn more about <code>config.yml</code> files</a>.
+  </div>
+<% end %>

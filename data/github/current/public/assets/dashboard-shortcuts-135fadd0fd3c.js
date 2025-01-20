@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunk=globalThis.webpackChunk||[]).push([["dashboard-shortcuts"],{52749:(e,s,o)=>{(0,o(21403).lB)(".js-favorites-details-component",{constructor:HTMLDetailsElement,initialize(e){e.addEventListener("toggle",()=>{var s;s=document.querySelector(".dashboard-sidebar"),e.open?s.classList.remove("overflow-auto"):s.classList.add("overflow-auto")})}})}},e=>{var s=s=>e(e.s=s);e.O(0,["vendors-node_modules_github_selector-observer_dist_index_esm_js"],()=>s(52749)),e.O()}]);
+//# sourceMappingURL=dashboard-shortcuts-0332ded6b2ca.js.map

@@ -1,0 +1,140 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+
+<%
+  agreement_body_html = Platform::Helpers::MarketplaceListingContent.html_for(agreement, :body, { current_user: current_user }) if agreement
+  signature = listing.integrator_agreement_signature_for(current_user)
+  signature_owner = signature&.signatory
+  owner = listing.owner unless listing.owner&.hide_from_user?(current_user)
+%>
+<% if listing.publish_pending? %>
+  <%= render Primer::Beta::Flash.new(display: :flex, mb: 2, classes: "flex-items-center") do %>
+    <div class="float-left"> <%= render Primer::Beta::Octicon.new(icon: "info") %></div>
+    <div class="flex-auto">Your listing is under review by GitHub for publishing. We'll notify you via email with updates.</div>
+    <div>
+    <%= form_tag redraft_marketplace_listing_path(listing.slug), class: "d-inline-block" do %>
+      <%= render(Primer::Beta::Button.new(id: "withdraw-request-#{listing.id}", type: :submit, ml: 1)) do |button| %>
+        <% button.with_tooltip(text: "Withdraw approval request so you can make additional changes") %>
+        Withdraw request
+      <% end %>
+    <% end %>
+    </div>
+  <% end %>
+<% end %>
+<p class="mb-4">To publish your app to GitHub Marketplace, complete the following items. Once completed, you can submit your listing to us for review. More information can be found in <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/developers/github-marketplace/submitting-your-listing-for-publication" target="_blank" rel="noopener noreferrer">our developer documentation</a>.</p>
+
+<%= render Marketplace::Listings::VerifiedCreatorComponent.new(listing: listing) %>
+
+<div class="Box mb-4">
+  <div class="Box-row p-3 d-flex flex-items-center" href="<%= edit_description_marketplace_listing_path(listing.slug) %>">
+    <% if listing.publicly_listed? %>
+      <div class="CircleIcon color-bg-success-emphasis mr-3">
+        <%= primer_octicon(:eye, color: :on_emphasis) %>
+      </div>
+      <div class="flex-auto">
+        <h3 class="Box-title d-inline-block">This listing has been published to Marketplace.</h3>
+        <div class="text-small color-fg-muted">
+          <%= listing.name %> is publicly visible on the Marketplace.
+          <%= link_to "View listing", marketplace_listing_path(listing.slug), class: "Link--inTextBlock" %>
+        </div>
+      </div>
+    <% else %>
+      <div class="CircleIcon mr-3" style="background: #959da5">
+        <%= primer_octicon(:"eye-closed", color: :on_emphasis) %>
+      </div>
+      <div class="flex-auto">
+        <h3 class="Box-title d-inline-block">This listing has not been published to Marketplace.</h3>
+        <div class="text-small color-fg-muted">This listing is a draft and has not yet been published on GitHub Marketplace.</div>
+      </div>
+    <% end %>
+  </div>
+
+  <%= render Marketplace::Listings::CompletionStatusComponent.new(
+    description: "Add your contact info",
+    completion_path: edit_contact_info_marketplace_listing_path(listing.slug),
+    onboarding_status_logic: listing.contact_info_completed?,
+  ) %>
+
+  <%= render Marketplace::Listings::CompletionStatusComponent.new(
+    description: "Fill out your listing description",
+    completion_path: edit_description_marketplace_listing_path(listing.slug),
+    onboarding_status_logic: listing.listing_description_completed?,
+  ) %>
+
+  <%= render Marketplace::Listings::CompletionStatusComponent.new(
+    description: "Create plans",
+    completion_path: marketplace_listing_plans_path(listing.slug),
+    onboarding_status_logic: listing.plans_and_pricing_completed?,
+  ) %>
+
+  <%= render Marketplace::Listings::CompletionStatusComponent.new(
+    description: "Set up webhook",
+    completion_path: marketplace_listing_hook_path(listing.slug),
+    onboarding_status_logic: listing.webhook_completed?,
+  ) %>
+
+  <% if (listing.draft? && listing.show_paid_plan_checks_on_draft_listing?) ||
+        (listing.copilot_app? && user_or_global_feature_enabled?(:marketplace_updated_verified_creator)) %>
+    <%= render(Marketplace::Listings::RequestVerificationComponent.new(
+      listing: listing,
+      display_login: owner.display_login,
+    )) %>
+  <% end %>
+
+  <% if listing.draft? && listing.show_paid_plan_checks_on_draft_listing? %>
+    <%= render(Marketplace::Listings::InstallationRequirementComponent.new(
+      listing: listing,
+      installation_count: listing.cached_installation_count,
+    )) %>
+
+    <%= render(Marketplace::Listings::FinancialOnboardingComponent.new(listing: listing)) %>
+  <% end %>
+
+  <div class="Box-row color-bg-subtle clearfix">
+    <span class="Box-btn-octicon btn-octicon float-left">
+      <%= marketplace_onboarding_status_icon(signature.present?) %>
+    </span>
+    <div class="overflow-hidden pl-3 color-fg-muted">
+      Sign
+      <%= render partial: "marketplace_listings/agreement_modal_button", locals: {
+        button_class: "btn-link",
+        button_text: "GitHub #{agreement&.name}",
+        agreement_title: "GitHub #{agreement&.name} #{agreement&.version}",
+        agreement_body_html: agreement_body_html } %>
+
+      <% if signature.present? %>
+        <p class="text-small color-fg-muted mb-0" >
+          <%= link_to signature_owner.safe_profile_name, user_path(signature_owner.display_login), class: "Link--inTextBlock" %>
+          signed the GitHub <%= signature.agreement.name %> version <%= signature.agreement.version %>
+          <% if org = signature.organization %>
+            on behalf of <%= link_to org.safe_profile_name, user_path(org.display_login), class: "Link--inTextBlock" %>
+          <% end %>
+          <%= time_ago_in_words_js signature.created_at %>.
+        </p>
+      <% end %>
+    </div>
+  </div>
+
+  <%= render Marketplace::Listings::CompletionStatusComponent.new(
+    description: "Enable two-factor authentication",
+    completion_path: settings_user_2fa_intro_path,
+    onboarding_status_logic: current_user.two_factor_authentication_enabled?,
+  ) %>
+</div>
+
+<% if listing.can_sign_integrator_agreement?(current_user, agreement: agreement) %>
+  <%= render partial: "marketplace_listings/integrator_agreement", locals: { listing: listing, agreement: agreement } %>
+<% end %>
+
+<% if current_user.spammy? %>
+  <div class="d-flex flex-items-center pt-3">
+    <div class="color-fg-muted text-small">
+      <%= primer_octicon(:lock) %>
+      You cannot submit your app for review because your account has been flagged.
+      If you believe this is a mistake, <%= link_to "contact support", contact_path, class: "Link--inTextBlock" %> to have your account status reviewed.
+    </div>
+  </div>
+<% end %>
+
+<% if listing.draft? %>
+  <%= render partial: "marketplace_listings/request_buttons", locals: { listing: listing, owner: owner } %>
+<% end %>

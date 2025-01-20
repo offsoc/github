@@ -1,0 +1,54 @@
+#!/bin/bash
+
+set -e
+
+export MYSQL_USERNAME="${MYSQL_USERNAME:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)}"
+export MYSQL_PASSWORD="${MYSQL_PASSWORD:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)}"
+TURBOSCAN_IMAGE_TAG="turboscan:$(cat /data/docker-image-tags/turboscan_image_tag)"
+export TURBOSCAN_LOG_LEVEL="${TURBOSCAN_LOG_LEVEL:-error}"
+export ES_ADDR="http://localhost:9201"
+export GITHUB_TWIRP_ADDR=http://localhost:1337/api/v3/internal
+export API_INTERNAL_TWIRP_HMAC_KEYS_FOR_TURBOSCAN=$(ghe-config-ctmpl --get "secrets.code-scanning.turboscan-hmac-key")
+
+docker_run_mode="-i"
+migration_list_file=
+migration_events_file=
+
+case "$1" in
+migratorctl)
+    binary=("/app/bin/turboscan" "util" "migratorctl")
+    migration_list_file=/data/user/tmp/turboscan-migration-list.json
+    migration_events_file=/data/user/tmp/turboscan-migration-events.json
+    ;;
+esindex)
+    binary=("/app/bin/turboscan" "cronjobs" "exec" "repo-indexer")
+    # not needed for the script, but otherwise the docker command has to be split
+    migration_list_file=/data/user/tmp/turboscan-es-migration-list.json
+    migration_events_file=/data/user/tmp/turboscan-es-migration-events.json
+    ;;
+*)
+    echo "Usage: ghe-turboscan (migratorctl | esindex)" >&2
+    exit 1
+    ;;
+esac
+shift
+
+# ensure file exists
+touch "$migration_list_file" "$migration_events_file"
+# ensure docker image user can edit it
+chown 641 "$migration_list_file" "$migration_events_file"
+
+docker run "$docker_run_mode" --rm --network host \
+    -v "$migration_list_file:/home/turboscan/turboscan-migration-list.json" \
+    -v "$migration_events_file:/home/turboscan/turboscan-migration-events.json" \
+    -e APP_ENV=enterprise \
+    -e GHES_MIGRATION_LIST_FILE=/home/turboscan/turboscan-migration-list.json \
+    -e GHES_MIGRATION_EVENTS_FILE=/home/turboscan/turboscan-migration-events.json \
+    -e MYSQL_USERNAME \
+    -e MYSQL_PASSWORD \
+    -e TURBOSCAN_LOG_LEVEL \
+    -e GITHUB_TWIRP_ADDR \
+    -e API_INTERNAL_TWIRP_HMAC_KEYS_FOR_TURBOSCAN \
+    -e ES_ADDR \
+    -i "$TURBOSCAN_IMAGE_TAG" \
+    "${binary[@]}" "$@"

@@ -1,0 +1,87 @@
+#!/bin/bash
+#/ Usage: ghe-metrics-diag
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -l | --logs        Show metrics job timerd logs.
+#/
+set -e
+
+EXCEPTIONS_LOG=/var/log/github/exceptions.log
+
+usage() {
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+}
+
+fail() {
+  (>&2 echo "${1}")
+  exit 1
+}
+
+timerd_logs() {
+  local timerd_alloc
+  . /usr/local/share/enterprise/ghe-nomad-lib
+
+  timerd_alloc=$(find_allocation github-timerd)
+  nomad alloc logs "$timerd_alloc" | grep "Enqueued UploadConnectMetricsJob" | tail -n5
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    -l|--logs)
+			SHOW_LOGS=1
+      shift
+    	;;
+    *)
+  	  >&2 echo "Unrecognized argument: $1"
+  	  usage
+  		;;
+  esac
+done
+
+if [ -f "$EXCEPTIONS_LOG" ]; then
+  excount=$(grep -c UploadConnectMetricsJob "$EXCEPTIONS_LOG" || true)
+  echo "Exceptions: $excount"
+fi
+  
+backlog=$(/usr/local/share/enterprise/github-mysql "select value as '' from key_values where \`key\`='connect-failed-metrics'" | xargs || true)
+
+attempted=""
+if [ -n "$backlog" ]; then
+  attempted="yes"
+fi
+
+if [ -n "$attempted" ]; then
+  echo "Delivery attempted: true"
+
+  success="false"
+  if [ "$backlog" = '[]' ]; then
+    success="true"
+  fi
+  echo "Last delivery successful: $success" 
+  
+  if [ -n "$backlog" ] && [ "$backlog" != '[]' ]; then
+    echo "Failed metrics:"
+    echo "$backlog"
+  fi
+fi
+
+if [ -n "$attempted" ] && [ "$success" = "false" ] && [ "$excount" != "0" ]; then
+  echo
+  echo "We tried to send usage metrics data but failed. Please check $EXCEPTIONS_LOG for 'UploadConnectMetricsJob' exceptions and report."
+fi
+
+if [ -z "$attempted" ] && [ "$excount" != "0" ]; then
+  echo
+  echo "No data was sent but exceptions have been found. Please check $EXCEPTIONS_LOG for 'UploadConnectMetricsJob' and report."
+fi
+
+if [ -n "$SHOW_LOGS" ]; then
+  echo
+  echo "Recently enqueued jobs:"
+  timerd_logs
+fi

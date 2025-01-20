@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# GHE server side script to add Pages routes.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one <page_path> <server1> <server2> <server3>
+# per line, something like:
+#
+# 5/d3/d9/44/10 pages-server-1 pages-server-2 pages-server-3
+# 0/02/e7/4f/27 pages-server-1 pages-server-3 pages-server-4
+# 4/c1/6a/53/31 pages-server-2 pages-server-3 pages-server-4
+# 3/34/17/3c/30 pages-server-4 pages-server-2 pages-server-1
+# 6/6e/a9/ab/29 pages-server-3 pages-server-2 pages-server-1
+# ...
+#
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+require "github/pages/builder"
+require "github/pages/allocator"
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} page_id [replicas...]"
+  exit 1
+end
+
+def process(page_id, replicas)
+  unless replicas & GitHub::Pages::Allocator.get_hosts == replicas
+    $stderr.puts "Invalid list of replicas: #{replicas}"
+    usage
+  end
+
+  revision = GitHub::Pages::Builder.current_revision(page_id)
+
+  GitHub::Pages::Builder.update_replicas(page_id, replicas, revision)
+  $stdout.puts "Processed page #{page_id}"
+end
+
+min_replicas = GitHub.pages_replica_count
+
+while line = $stdin.gets
+  args = line.split(" ")
+  usage unless args.length > min_replicas
+
+  page_id = args.shift.split("/").last.to_i
+  process(page_id, args)
+end

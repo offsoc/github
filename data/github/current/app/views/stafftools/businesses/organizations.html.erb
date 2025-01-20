@@ -1,0 +1,164 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<% page_info title: business.name, selected_link: :business_organizations %>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>Organizations<% end %>
+<% end %>
+
+<%= render Stafftools::SimpleSearchFormComponent.new(
+  query_label: "Search organizations",
+  form_url: stafftools_enterprise_organizations_path(this_business)
+) %>
+
+<% unless GitHub.single_business_environment? || business.enterprise_managed_user_enabled? %>
+  <div class="d-flex flex-wrap gap-2">
+    <details class="select-menu details-reset details-overlay mb-3">
+      <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+        Add an organization
+      <% end %>
+      <details-menu class="position-absolute" style="z-index: 99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+        <div class="select-menu-modal">
+          <div class="select-menu-header">
+            <span class="select-menu-title">Choose an organization</span>
+          </div>
+          <div class="select-menu-filters">
+            <div class="select-menu-text-filter">
+              <remote-input
+                src="<%= stafftools_enterprise_organization_suggestions_path(business) %>"
+                aria-owns="staff-org-complete-results">
+                <input
+                  type="text"
+                  id="search-organizations"
+                  class="form-control"
+                  aria-label="Search for an organization"
+                  autofocus>
+              </remote-input>
+            </div>
+          </div>
+          <div class="select-menu-list" id="staff-org-complete-results">
+          </div>
+        </div>
+      </details-menu>
+    </details>
+    <% if organizations.any? %>
+      <% unless GitHub.single_business_environment? || business.enterprise_managed_user_enabled? %>
+        <%= form_tag stafftools_enterprise_member_organizations_path(business), method: :delete do %>
+          <%= render(Primer::Alpha::Dialog.new(
+            title: "Remove all organizations from #{business.name}?",
+            id: "remove-all-orgs-dialog",
+            size: :medium_portrait
+          )) do |dialog| %>
+            <% dialog.with_header(show_divider: true, text_align: :left) { "" } %>
+            <% dialog.with_show_button(test_selector: "remove-all-orgs-dialog-btn", scheme: :danger) do |button| %>
+              Remove all member organizations
+            <% end %>
+            <% dialog.with_body do %>
+              <%= render Primer::Alpha::Banner.new(full: true, scheme: :warning, mt: 1, ml: -3, mr: -3) do %>
+                Any internal repositories in any of the organizations will be made private.
+              <% end %>
+            <% end %>
+            <% dialog.with_footer(show_divider: true) do %>
+              <%= render Primer::Beta::Button.new(data: { "close-dialog-id": "remove-all-orgs-dialog" }).with_content("Cancel") %>
+              <%= render Primer::Beta::Button.new(type: :submit, "data-disable-with": "Removing organizations…", scheme: :danger) do %>
+                Remove all organizations
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>
+
+<% if organizations.any? %>
+  <% unless GitHub.single_business_environment? %>
+      <% if business.enterprise_managed_user_enabled? %>
+          <%= render Primer::Beta::Flash.new(
+            classes: "flash-notice",
+            test_selector: "emu-org-transfer-flash-notice") do %>
+            <p><%= render(Primer::Beta::Octicon.new(icon: "info")) %>This enterprise is managed by an external identity provider. Existing organizations can not join or leave the enterprise. Please advise the enterprise owner to create new organizations. The enterprise owners can also choose to delete existing organizations in this enterprise.</p>
+          <% end %>
+      <% else %>
+          <%= render Primer::Beta::Flash.new(
+            classes: "flash-notice",
+            test_selector: "org-transfer-flash-notice") do %>
+            <p><%= render(Primer::Beta::Octicon.new(icon: "info")) %>Transfer an organization into this enterprise account by selecting an organization from the organization list above.
+            <b>This should only be done for testing purposes.
+              <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/admin/user-management/managing-organizations-in-your-enterprise/adding-organizations-to-your-enterprise#inviting-an-organization-to-join-your-enterprise-account", text: :bold)) { "Enterprise account owners can invite existing organizations to join an enterprise account via self-service" } %>
+              , or Sales can work with Sales Operations to assist a customer if they have concerns about the self-service options.</b> </p>
+          <% end %>
+      <% end %>
+  <% end %>
+  <div class="Box Box--condensed">
+    <ul>
+      <% organizations.each do |org| %>
+        <li class="Box-row d-flex flex-items-center" <%= test_selector "li-org-#{org.id}" %>>
+          <span class="flex-auto">
+            <%= avatar_for org, 20, class: :avatar %>
+            <%= link_to org.login, stafftools_user_path(org.login) %>
+          </span>
+          <% unless GitHub.single_business_environment? || business.enterprise_managed_user_enabled? %>
+            <span>
+              <%= render layout: "shared/details_dialog", locals: {
+                button_text: "Remove organization",
+                button_class: "btn btn-danger btn-sm mr-1",
+                details_class: "float-right",
+                title: "Remove organization?",
+              } do %>
+                <div class="Box-body overflow-auto">
+                  <% if org.admins.empty? %>
+                    <p class="m-0">
+                      The <%= org.login %> organization cannot be removed from the <%= business.name %> enterprise at
+                      moment because the organization has no owners. Please add an owner and try again.
+                    </p>
+                  <% else %>
+                    <p class="m-0">
+                      Are you sure that you want to remove organization <%= org.login %>
+                      from <%= business.name %>?
+                    </p>
+                    <ul class="ml-4">
+                      <li>Any internal repositories in this organization will be made private</li>
+                    </ul>
+                  <% end %>
+                  <p>
+                    <%= form_tag stafftools_enterprise_organization_path(business, org), method: :delete do %>
+                      <%= render Primer::ButtonComponent.new(
+                        type: :submit,
+                        block: true,
+                        scheme: :danger,
+                        disabled: org.admins.empty?
+                      ) do %>Remove organization <%= org.login %><% end %>
+                    <% end %>
+                  </p>
+                </div>
+              <% end %>
+            </span>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <div class="paginate-container">
+    <%= will_paginate organizations %>
+  </div>
+<% else %>
+  <%= render Primer::Beta::Blankslate.new(mb: 3) do |c| %>
+    <% c.with_heading(tag: :h2) do %>
+      No organizations
+      <% if params[:query].present? %>
+        matching <em><%= params[:query] %></em>
+      <% end %>
+      in this enterprise.
+    <% end %>
+  <% end %>
+
+  <% if business.enterprise_managed_user_enabled? %>
+    <%= render Primer::Beta::Flash.new(classes: "flash-notice") do %>
+      <p>
+        <%= render(Primer::Beta::Octicon.new(icon: "info")) %>
+        This enterprise is managed by an external identity provider. Existing organizations can not join the enterprise. Please advise the enterprise owner to create new organizations.
+      </p>
+    <% end %>
+  <% end %>
+<% end %>

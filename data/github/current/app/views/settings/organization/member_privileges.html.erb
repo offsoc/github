@@ -1,0 +1,565 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# view is an instance of Orgs::Settings::MemberPrivilegesView %>
+<% page_info responsive: false, title: "Member privileges", selected_link: :member_privileges %>
+<% view = Orgs::Settings::MemberPrivilegesView.new(organization: current_organization, current_user: current_user) %>
+
+<%= render layout: "orgs/settings/layout" do %>
+  <section aria-labelledby="member-repo-perms">
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2, id: "member-repo-perms") do %>Member privileges<% end %>
+    <% end %>
+
+    <section aria-labelledby="base-permissions">
+      <h3 id="base-permissions" class="text-normal pb-2">Base permissions</h3>
+      <%= render partial: "settings/organization/member_privileges/tip" %>
+      <p>
+        Base permissions to the organization’s repositories apply to all members and excludes <%= outside_collaborators_verbiage(view.organization) %>. Since organization members can have permissions from multiple sources, members and collaborators who have been granted a higher level of access than the base permissions will retain their higher permission privileges.
+      </p>
+
+      <div class="d-flex flex-items-center flex-justify-between position-relative">
+        <div class="text-right">
+          <% if view.organization.updating_default_repository_permission? %>
+            <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :middle)) %>
+            <strong>Update in progress</strong>. Refresh to see if it’s done.
+          <% elsif view.organization.default_repository_permission_policy? %>
+            <div class="d-flex flex-items-baseline pt-2">
+              <%= render Primer::Beta::Button.new(classes: "select-menu-button disabled", disabled: true) do %>
+                <%= view.default_repository_permissions_button_text %>
+              <% end %>
+              <div class="color-fg-muted mt-n4 pl-3 note">
+                <%= primer_octicon(:"shield-lock") %>
+                This setting has been <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">set by enterprise administrators</a>.
+              </div>
+            </div>
+          <% else %>
+            <%= render(Primer::Alpha::ActionMenu.new(
+              align_content: :center,
+              anchor_align: :start,
+              anchor_side: :outside_bottom,
+              size: :medium_portrait,
+            )) do |menu|
+              menu.with_show_button do |button|
+                button.with_trailing_action_icon(icon: :"triangle-down")
+                view.default_repository_permissions_button_text
+              end
+              menu.with_group(show_dividers: true) do |group|
+                group.with_heading(title: "Organization member permissions")
+                view.default_repository_permissions_select_list.each do |item|
+                  group.with_item(
+                    disabled: item[:selected],
+                    content_arguments: { "data-show-dialog-id": "change-repo-permission-#{item[:value]}-dialog",
+                  }) do |menu_item|
+                    menu_item.with_description.with_content(item[:description])
+                    content_tag(:span, item[:heading])
+                  end
+                end
+              end
+            end %>
+            <% view.default_repository_permissions_select_list.each do |item| %>
+              <% title = "Change base permission to \"#{item[:heading]}\"" %>
+              <%= render(Primer::Alpha::Dialog.new(
+                id: "change-repo-permission-#{item[:value]}-dialog",
+                title: title,
+              )) do |d| %>
+                <% d.with_header(show_divider: true, text_align: :left) { "" } %>
+                <% d.with_body(text_align: :left) do %>
+                  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+                    <%= render Primer::Alpha::Banner.new(scheme: :warning, full: true, mt: 3, mb: 3) do %>
+                      You are about to change the base repository permission for this organization.
+                    <% end %>
+                  <% else %>
+                    <%= render Primer::Beta::Flash.new(scheme: :warning, full: true, mt: 3, mb: 3) do %>
+                      You are about to change the base repository permission for this organization.
+                    <% end %>
+                  <% end %>
+                  This may change the permission that the organization’s
+                  <%= number_with_delimiter(view.default_repository_permissions_member_count) %> <%= "member".pluralize(view.default_repository_permissions_member_count) %> <%= "has".pluralize(view.default_repository_permissions_member_count) %>
+                  on its
+                  <%= number_with_delimiter(view.default_repository_permissions_repository_count) %> <%= "repository".pluralize(view.default_repository_permissions_repository_count) %>.
+
+                  <% if view.organization.custom_roles_supported? %>
+                    <p class="pt-2">
+                      This will affect
+                      <span class="text-bold">
+                        <%= view.affected_custom_roles(item[:value]) %>
+                      </span>
+                      by updating the organization's
+                      <span class="text-bold">
+                        <%= view.affected_members(item[:value]) %>
+                      </span>
+                      to
+                      <span class="text-bold">
+                        <%= item[:heading] %>
+                      </span>
+                      permission on
+                      <span class="text-bold">
+                        <%= view.affected_repositories(item[:value]) %>
+                      </span>.
+                    </p>
+                  <% end %>
+
+                  <%= form_tag organization_default_repository_permission_path(view.organization), method: :put do |f| %>
+                    <input name="default_repository_permission" type="hidden" value="<%= item[:value] %>">
+                    <%= hidden_field_tag :enable_tip, params[:enable_tip]  %>
+                    <input name="settings_context" type="hidden" value="base-permissions">
+                    <%= render Primer::Beta::Button.new(type: :submit, block: true, scheme: :danger, mt: 3) do %><%= title %><% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </section>
+
+
+    <section aria-labelledby="repo_creation">
+      <h3 id="repo_creation" class="text-normal pt-5 pb-2">Repository creation</h3>
+      <p>
+        Members will be able to create only selected repository types.
+        <% unless view.organization.enterprise_managed_user_enabled? %>
+          <%= outside_collaborators_verbiage(view.organization).capitalize %> can never create repositories.
+        <% end %>
+      </p>
+
+      <%= form_for view.organization, url: organization_path(view.organization), method: :put do |form| %>
+        <input type="hidden" name="organization[granular_repo_creation_permissions_changing]" value="1">
+        <% if GitHub.public_repositories_available? && !view.organization.enterprise_managed_user_enabled? %>
+          <div class="form-checkbox mt-0">
+            <%= form.check_box :members_can_create_public_repositories?,
+              disabled: view.members_can_create_public_repos_disabled?,
+              class: "js-public-repo-creation-allowed" %>
+            <label class="<%= "color-fg-muted" if view.members_can_create_repositories_policy_set? %>" for="organization_members_can_create_public_repositories">Public</label>
+            <p class="note">
+              Members will be able to create public repositories, visible to
+              <% if GitHub.private_mode_enabled? %>
+                any logged in user.
+              <% else %>
+                anyone.
+              <% end %>
+              <%= view.repo_creation_privileges_doc_link %>
+            </p>
+          </div>
+        <% end %>
+        <div class="form-checkbox mt-0">
+          <%= form.check_box :members_can_create_private_repositories?,
+            disabled: view.members_can_create_private_repos_disabled?,
+            class: "js-private-repo-creation-allowed",
+            "data-private-only-policy-allowed": view.private_only_policy_allowed? %>
+          <label class="<%= "color-fg-muted" if view.members_can_create_repositories_policy_set? %>" for="organization_members_can_create_private_repositories">Private</label>
+          <p class="note">Members will be able to create private repositories, visible to organization members with permission.</p>
+        </div>
+        <% if view.show_internal_repo_creation_option? %>
+          <div class="form-checkbox mt-0">
+            <%= form.check_box :members_can_create_internal_repositories?,
+              disabled: view.members_can_create_internal_repos_disabled? %>
+            <label class="<%= "color-fg-muted" if view.members_can_create_repositories_policy_set? %>" for="organization_members_can_create_internal_repositories">Internal</label>
+            <p class="note">
+              Members will be able to create internal repositories,
+              visible to all <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/roles-for-an-enterprise-account#enterprise-members">enterprise members</a>.
+            </p>
+          </div>
+        <% end %>
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: view.members_can_create_repositories_policy_set?) do %>Save<% end %>
+          <% if view.members_can_create_repositories_policy_set? %>
+            <div class="color-fg-muted note pl-3">
+              <%= primer_octicon(:"shield-lock") %>
+              This setting has been <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">set by enterprise administrators</a>.
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </section>
+
+    <section aria-labelledby="repo_forking">
+      <h3 id="repo_forking" class="text-normal pt-5 pb-2">Repository forking</h3>
+      <%= form_tag organization_settings_path(view.organization), method: :put do %>
+          <div class="form-checkbox mt-0">
+            <input name="allow_private_repository_forking" type="hidden" value="0" <%= "disabled" if view.allow_private_repository_forking_disabled? %>>
+            <%= check_box_tag "allow_private_repository_forking", '1', view.organization.allow_private_repository_forking?, disabled: view.allow_private_repository_forking_disabled?, class: "js-private-repo-forking-allowed" %>
+            <label class="<%= "color-fg-muted" if view.allow_private_repository_forking_disabled?%>" for="allow_private_repository_forking">
+              Allow forking of <%= view.allow_forking_repo_label %> repositories
+            </label>
+            <p class="note <%= "color-fg-muted" if view.allow_private_repository_forking_disabled?%>">
+              If enabled, forking is allowed on <%= view.allow_forking_repo_description %> repositories. <% if GitHub.public_repositories_available? %>If disabled, forking is only allowed on public repositories.<% end %> This setting is also configurable per-repository.
+            </p>
+          </div>
+          <% if view.should_show_expanded_forking_policy_options? %>
+            <div class="border rounded px-3 my-3 js-org-private-repo-forking-policies" <%= "hidden" unless view.organization.allow_private_repository_forking? %>>
+              <% view.allow_private_repository_forking_policy_options.each do |policy| %>
+                <div class="form-checkbox">
+                  <label class="<%="color-fg-muted" if policy[:disabled] %>">
+                    <%= radio_button_tag "allow_private_repository_forking_policy", policy[:value], policy[:selected], 'aria-describedby': policy[:value] + "-description", disabled: policy[:disabled]  %>
+                    <%= policy[:title] %>
+                  </label>
+                  <span id="<%=policy[:value] %>-description" class="note">
+                    <%= policy[:description] %>
+                  </span>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+         <% if view.any_forking_policies_disabled_by_enterprise_setting? %>
+         <div class="color-fg-muted note pl-3 mb-3">
+              <%= primer_octicon(:"shield-lock") %>
+              Some options are unavailable due to <a class="Link--inTextBlock" href="<%=settings_member_privileges_enterprise_path(view.organization.business) %>">enterprise policy</a>.
+          </div>
+        <% end %>
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: view.allow_private_repository_forking_disabled?) do %>Save<% end %>
+        </div>
+      <% end %>
+    </section>
+
+    <% if view.show_outside_collaborators? %>
+      <section aria-labelledby="repo_invites">
+
+        <%
+          invite_setting_enabled = !view.repo_admins_can_invite_outside_collaborators_policy_set?
+          outside_collaborators_heading = outside_collaborators_verbiage(view.organization)
+        %>
+
+        <h3 id="repo_invites" class="text-normal pt-5 pb-2"><%= outside_collaborators_heading.capitalize %></h3>
+
+        <%= render Organizations::Settings::InviteOutsideCollaboratorsFieldComponent.new(organization: view.organization) %>
+      </section>
+    <% end %>
+
+    <% if view.organization.plan_supports_display_commenter_full_name?(visibility: :private) %>
+      <section aria-labelledby="repo_comments">
+        <h3 id="repo_comments" class="text-normal d-inline-block pt-5 pb-2 pr-2">Repository comments</h3>
+
+        <%= form_tag view.display_commenter_full_name_path, method: :put do %>
+          <div class="form-checkbox mt-0" <%= test_selector("display-commenter-full-name-setting") %>>
+            <input name="display_commenter_full_name" type="hidden" value="0">
+            <%= check_box_tag "display_commenter_full_name", '1', view.organization.display_commenter_full_name_setting_enabled?, disabled: view.display_commenter_full_name_action_when_enforced? %>
+            <label for="display_commenter_full_name">
+              Allow members to see comment author's profile name in private repositories
+            </label>
+            <p class="note">
+              If enabled, members will be able to see comment author's profile name in issues and pull requests for private repositories.
+            </p>
+          </div>
+
+          <div class="d-flex flex-items-baseline">
+            <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>Save<% end %>
+          </div>
+        <% end %>
+      </section>
+    <% end %>
+
+    <% if view.show_discussion_creation_setting? %>
+      <section aria-labelledby="repo_discussions">
+        <h3 id="repo_discussions" class="text-normal d-inline-block pt-5 pb-2 pr-2">
+          Repository discussions
+        </h3>
+
+        <%= form_tag view.readers_can_create_discussions_path, method: :put do %>
+          <div class="form-checkbox mt-0" <%= test_selector("readers-can-create-discussions-setting") %>>
+            <input name="readers_can_create_discussions" type="hidden" value="0">
+            <%= check_box_tag "readers_can_create_discussions", "1", view.organization.readers_can_create_discussions? %>
+            <label for="readers_can_create_discussions">
+              Allow users with read access to create discussions
+            </label>
+            <p class="note">
+              If enabled, all users with read access can create and comment on discussions in
+              <%= view.organization %>&rsquo;s repositories.
+            </p>
+            <p class="note mt-1">
+              If disabled, discussion creation is limited to users with at least triage permission.
+              Users with read access can still comment on discussions.
+            </p>
+          </div>
+
+          <div class="d-flex flex-items-baseline">
+            <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>Save<% end %>
+          </div>
+        <% end %>
+      </section>
+    <% end %>
+
+    <%= render Organizations::Settings::OrgProjectsRoleSettingComponent.new(organization: view.organization) %>
+
+    <% if GitHub.enterprise? || !GitHub.flipper[:private_pages_org_toggle].enabled?(view.organization) %>
+      <%# render global pages toggle instead of access control toggles %>
+      <section aria-labelledby="pages_creation">
+        <h3 id="pages_creation" class="text-normal d-inline-block pt-5 pb-2 pr-2">Pages creation</h3>
+        <%= form_tag organization_update_pages_creation_permission_path(view.organization), method: :put do %>
+          <div class="form-checkbox mt-0">
+            <input name="create_pages_enabled" type="hidden" value="0">
+            <%= check_box_tag "create_pages_enabled", '1', view.organization.members_can_create_pages? %>
+            <label for="create_pages_enabled">
+              Allow members to publish sites
+            </label>
+            <p class="note">
+              If enabled, GitHub Pages sites are allowed to be created from the repository. Existing published sites will not be impacted by this setting. <a class="Link--inTextBlock" href="<%="#{GitHub.help_url}/github/setting-up-and-managing-organizations-and-teams/disabling-publication-of-github-pages-sites-for-your-organization" %>">Learn more about managing the publication of GitHub Pages sites</a>.
+            </p>
+          </div>
+          <div class="d-flex flex-items-baseline">
+            <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>Save<% end %>
+          </div>
+        <% end %>
+      </section>
+    <% else %>
+      <%# `private_pages_org_toggle` enabled so render visibility toggles %>
+      <section aria-labelledby="pages_access_controls">
+        <h3 id="pages_access_controls" class="text-normal d-inline-block pt-5 pb-2 pr-2">Pages creation</h3>
+        <p>
+          Members will be able to publish sites with only the selected access controls.
+        </p>
+        <%= form_tag organization_update_pages_creation_permission_path(view.organization), method: :put do %>
+          <% unless view.organization.enterprise_managed_user_enabled? %>
+            <div class="form-checkbox mt-0">
+              <input name="create_public_pages_enabled" type="hidden" value="0">
+              <%=
+                check_box_tag "create_public_pages_enabled",
+                  '1', view.organization.members_can_create_public_pages?
+              %>
+              <label for="create_public_pages_enabled">
+                Public
+              </label>
+              <p class="note">
+                Members will be able to create public sites, visible to anyone.
+              </p>
+            </div>
+          <% end %>
+          <div class="form-checkbox mt-0 <%= view.pages_access_controls_disabled_text_style %>">
+            <%=
+              check_box_tag "create_private_pages_enabled",
+                '1', view.plan_supports_pages_access_controls? && view.organization.members_can_create_private_pages?,
+                disabled: !view.plan_supports_pages_access_controls?
+            %>
+            <label for="create_private_pages_enabled">
+              Private
+            </label>
+            <p class="note">
+              Members will be able to create private sites, visible to anyone with permission.
+              <%= view.pages_access_controls_disabled_doc_link %>
+            </p>
+          </div>
+          <div class="d-flex flex-items-baseline">
+            <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>Save<% end %>
+          </div>
+        <% end %>
+      </section>
+    <% end %>
+
+  <section aria-labelledby="integration_access_requests">
+    <h3 id="integration_installation_requests" class="text-normal pt-5 pb-2">Integration access requests</h3>
+    <%= form_tag organization_outside_collaborators_can_request_third_party_access_path(view.organization), method: :put do %>
+      <div class="form-checkbox mt-0">
+        <input name="allow_access_requests" type="hidden" value="0">
+        <%= check_box_tag "allow_access_requests", '1', view.organization.allows_third_party_access_requests_from_outside_collaborators? %>
+        <label for="allow_access_requests">
+          Allow integration requests from outside collaborators
+        </label>
+        <p class="note">
+          Outside collaborators will be able to request access for GitHub or OAuth apps to access this organization and its resources.
+        </p>
+      </div>
+      <div class="d-flex flex-items-baseline">
+        <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>
+          Save
+        <% end %>
+      </div>
+    <% end %>
+  </section>
+
+  <section aria-labelledby="admin_repo_perms">
+    <%= render Primer::Beta::Subhead.new(spacious: true, pt: 4) do |component| %>
+      <% component.with_heading(tag: :h2, id: "admin_repo_perms") do %>Admin repository permissions<% end %>
+    <% end %>
+
+    <section aria-labelledby="repo_visibility_change">
+      <h3 id="repo_visibility_change" class="text-normal pb-2">Repository visibility change</h3>
+
+      <%= form_tag organization_members_can_change_repo_visibility_path(view.organization), method: :put do %>
+        <div class="form-checkbox mt-0">
+          <input name="members_can_change_repo_visibility" type="hidden" value="0" <%= "disabled" if view.members_can_change_repo_visibility_disabled? %>>
+          <%= check_box_tag "members_can_change_repo_visibility", '1', view.organization.members_can_change_repo_visibility?, disabled: view.members_can_change_repo_visibility_disabled? %>
+          <label class="<%= "color-fg-muted" if view.members_can_change_repo_visibility_disabled? %>" for="members_can_change_repo_visibility">
+            Allow members to change repository visibilities for this organization
+          </label>
+          <p class="note <%= "color-fg-muted" if view.members_can_change_repo_visibility_disabled?%>">
+            If enabled, members with admin permissions for the repository will be able to change its visibility. If disabled, only organization owners can change repository visibilities.
+          </p>
+        </div>
+
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: view.members_can_change_repo_visibility_disabled?) do %>Save<% end %>
+          <% if view.members_can_change_repo_visibility_disabled? %>
+            <div class="color-fg-muted note pl-3">
+              <%= primer_octicon(:"shield-lock") %>
+              This setting has been
+              <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">
+                <%= view.members_can_change_repo_visibility_policy_action %> by enterprise administrators</a>.
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </section>
+
+    <section aria-labelledby="repo_deletion_and_transfer">
+      <% setting_enabled = !view.members_can_delete_repositories_policy_set? %>
+      <h3 id="repo_deletion_and_transfer" class="text-normal pt-5 pb-2">Repository deletion and transfer</h3>
+
+      <%= form_tag view.can_delete_repos_form_path, method: :put do %>
+        <div class="form-checkbox mt-0">
+          <input name="members_can_delete_repositories" type="hidden" value="0" <%= "disabled" unless setting_enabled %>>
+          <%= check_box_tag "members_can_delete_repositories", '1', view.organization.members_can_delete_repositories?, disabled: !setting_enabled %>
+          <label class="<%= "color-fg-muted" unless setting_enabled %>" for="members_can_delete_repositories">
+            Allow members to delete or transfer repositories for this organization
+          </label>
+          <p class="note <%= "color-fg-muted" unless setting_enabled %>">
+            If enabled, members with admin permissions for the repository will be able to delete or transfer <% if GitHub.public_repositories_available? %><strong>public</strong> and <% end %><strong>private</strong> repositories. If disabled, only organization owners can delete or transfer repositories.
+          </p>
+        </div>
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: !setting_enabled) do %>Save<% end %>
+          <% unless setting_enabled %>
+            <div class="color-fg-muted note pl-3">
+              <%= primer_octicon(:"shield-lock") %>
+              This setting has been
+              <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">
+                <%= view.members_can_delete_repositories_action %> by enterprise administrators</a>.
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </section>
+
+    <% if GitHub.update_protected_branches_setting_enabled? || GitHub.flipper[:update_protected_branches_setting].enabled?(view.organization) %>
+      <section aria-labelledby="repo_branch_protection_rules">
+        <% setting_enabled = !view.members_can_update_protected_branches_policy_set? %>
+
+        <h3 id="repo_branch_protection_rules" class="text-normal d-inline-block pt-5 pb-2 pr-2">Repository branch protection rules</h3>
+
+        <%= form_tag view.can_update_protected_branches_form_path, method: :put do %>
+          <div class="form-checkbox mt-0">
+            <input name="members_can_update_protected_branches" type="hidden" value="0" <%= "disabled" unless setting_enabled %>>
+            <%= check_box_tag "members_can_update_protected_branches", '1', view.organization.members_can_update_protected_branches?, disabled: !setting_enabled %>
+            <label class="<%= "color-fg-muted" unless setting_enabled %>" for="members_can_update_protected_branches">
+              Allow members to update branch protection rules for repositories within this organization
+            </label>
+            <p class="note <%= "color-fg-muted" unless setting_enabled %>">
+              If enabled, members with admin permission to the repository will be able to update branch protection rules and settings. If disabled, only organization owners can change branch protection rules and settings.
+            </p>
+          </div>
+
+          <div class="d-flex flex-items-baseline">
+            <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: !setting_enabled) do %>Save<% end %>
+            <% unless setting_enabled %>
+              <div class="color-fg-muted note pl-3">
+                <%= primer_octicon(:"shield-lock") %>
+                This setting has been
+                <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">
+                  <%= view.members_can_update_protected_branches_action %> by enterprise administrators</a>.
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+      </section>
+    <% end %>
+
+    <section aria-labelledby="issue_deletion">
+      <% setting_enabled = !view.members_can_delete_issues_policy_set? %>
+
+      <h3 id="issue_deletion" class="text-normal d-inline-block pt-5 pb-2 pr-2">Issue deletion</h3>
+
+      <%= form_tag view.can_delete_issues_form_path, method: :put do %>
+        <div class="form-checkbox mt-0">
+          <input name="members_can_delete_issues" type="hidden" value="0" <%= "disabled" unless setting_enabled %>>
+          <%= check_box_tag "members_can_delete_issues", '1', view.organization.members_can_delete_issues?, disabled: !setting_enabled %>
+          <label class="<%= "color-fg-muted" unless setting_enabled %>" for="members_can_delete_issues">
+            Allow repository administrators to delete issues for this organization
+          </label>
+          <p class="note <%= "color-fg-muted" unless setting_enabled %>">
+            If enabled, members with admin permissions for the repository will be able to delete issues. If disabled, only organization owners can delete issues.
+            <a class="Link--inTextBlock" href="<%="#{GitHub.help_url}/organizations/managing-organization-settings/allowing-people-to-delete-issues-in-your-organization" %>">Learn more about allowing people to delete issues in your organization</a>.
+          </p>
+        </div>
+
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: !setting_enabled) do %>Save<% end %>
+          <% unless setting_enabled %>
+            <div class="color-fg-muted note pl-3">
+              <%= primer_octicon(:"shield-lock") %>
+              This setting has been
+              <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">
+                <%= view.members_can_delete_issues_action %> by enterprise administrators</a>.
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </section>
+  </section>
+
+  <section aria-labelledby="member_team_perms">
+    <%= render Primer::Beta::Subhead.new(pt: 4) do |component| %>
+      <% component.with_heading(tag: :h2, id: "member_team_perms") do %>Member team permissions<% end %>
+    <% end %>
+
+    <section aria-labelledby="team_creation_rules">
+      <h3 id="team_creation_rules" class="text-normal pb-2">Team creation rules</h3>
+
+      <%= form_tag view.can_create_teams_form_path, method: :put do %>
+        <div class="form-checkbox mt-0">
+          <input name="members_can_create_teams" type="hidden" value="0">
+          <%= check_box_tag "members_can_create_teams", '1', view.organization.members_can_create_teams? %>
+          <label for="members_can_create_teams">
+            Allow members to create teams
+          </label>
+          <p class="note">
+            If enabled, any member of the organization will be able to create new teams. If disabled, only organization owners can create new teams.
+          </p>
+        </div>
+
+        <div class="d-flex flex-items-baseline">
+          <%= render Primer::Beta::Button.new(type: :submit, ml: 3) do %>Save<% end %>
+        </div>
+      <% end %>
+    </section>
+  </section>
+
+    <% if view.can_restrict_dependency_insights? %>
+      <% dependency_insights_setting_enabled = !view.members_can_view_dependency_insights_set? %>
+
+      <section aria-labelledby="member_org_perms">
+        <%= render Primer::Beta::Subhead.new(pt: 4) do |component| %>
+          <% component.with_heading(tag: :h2, id: "member_org_perms") do %>Member organization permissions<% end %>
+        <% end %>
+
+        <section aria-labelledby="dependency_insights">
+          <h3 id="dependency_insights" class="text-normal pb-2">Dependency insights</h3>
+
+          <%= form_tag organization_members_can_view_dependency_insights_path(view.organization), method: :put do %>
+            <div class="form-checkbox mt-0">
+              <input name="members_can_view_dependency_insights" type="hidden" value="0" <%= "disabled" unless dependency_insights_setting_enabled %>>
+              <%= check_box_tag "members_can_view_dependency_insights", '1', view.organization.members_can_view_dependency_insights?, disabled: !dependency_insights_setting_enabled %>
+              <label class="<%= "color-fg-muted" unless dependency_insights_setting_enabled %>" for="members_can_view_dependency_insights">
+                Allow members to view dependency insights
+              </label>
+              <p class="note <%= "color-fg-muted" unless invite_setting_enabled %>">
+                If disabled, only organization owners may view dependency insights, including aggregated information about security advisories and licenses in dependencies.</p>
+            </div>
+
+            <div class="d-flex flex-items-baseline">
+              <%= render Primer::Beta::Button.new(type: :submit, ml: 3, disabled: !dependency_insights_setting_enabled) do %>Save<% end %>
+
+              <% unless dependency_insights_setting_enabled %>
+                <div class="color-fg-muted note pl-3">
+                  <%= primer_octicon(:"shield-lock") %>
+                  This setting has been
+                  <a class="Link--inTextBlock" href="<%= GitHub.business_accounts_help_url %>">
+                    <%= view.members_can_view_dependency_insights_policy_action %> by enterprise administrators</a>.
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        </section>
+      </section>
+    <% end %>
+
+<% end %>

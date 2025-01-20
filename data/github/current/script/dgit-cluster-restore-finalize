@@ -1,0 +1,83 @@
+#!/usr/bin/env ruby
+# GHE server side script to add repository routes.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one <network_id> <network_path> <server1> <server2> <server3>
+# per line, something like:
+#
+# 100000855 /data/repositories/a/nw/a8/3f/02/100000855 dgit-node1 dgit-node2 dgit-node3
+# 100000880 /data/repositories/a/nw/a8/bc/8d/100000880 dgit-node1 dgit-node2 dgit-node4
+# 100000659 /data/repositories/a/nw/a5/06/81/100000659 dgit-node3 dgit-node2 dgit-node4
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/dgit"
+require "github/dgit/logger"
+require "github/dgit/import"
+
+GitHub.load_activerecord
+GitRPC.timeout = 30.minutes.to_i
+GitRPC.connect_timeout = 16
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} network_id shard_path [replicas...]"
+  exit 1
+end
+
+def process(logger, network_id, shard_path, replicas)
+  retry_count = 2
+  while retry_count > 0
+    begin
+      unless replicas & GitHub::DGit.get_hosts == replicas
+        $stderr.puts "Invalid list of replicas: #{replicas}"
+        usage
+      end
+
+      repo_type = GitHub::DGit::RepoType::REPO
+      checksums = GitHub::DGit::Import::git_dgit_state_init(logger, [], replicas,
+                                                            repo_type, network_id, shard_path, include_archived: true,
+                                                            include_deleted: true)
+      if checksums && checksums[repo_type].present?
+        GitHub::DGit::Enterprise::remove_replica_routes(repo_type, network_id)
+        GitHub::DGit::Enterprise::remove_archived_repo_replica_routes(network_id, repo_type)
+        GitHub::DGit::Enterprise::add_replica_routes(logger, repo_type, network_id,
+                                                     replicas, checksums, true)
+        GitHub::DGit::Import::set_moving(logger, network_id, 0)
+        return true
+      end
+    rescue => e
+      # last retry
+      if retry_count == 1
+        $stderr.puts("#{Time.now.utc}: Something is wrong finalizing restore route for #{network_id}, #{shard_path}, #{replicas}")
+        $stderr.puts("Error: #{e.message}")
+        $stderr.puts("Backtrace: #{e.backtrace}")
+      else
+        $stderr.puts("Exception \"#{e.message}\" rescued when finalizing restore route for #{network_id}, retry...")
+      end
+    end
+    retry_count -= 1
+  end
+
+  false
+end
+
+logger = GitHub::DGit::SilentLogger.new(GitHub::AppEnvironment.root.join("log", "dgit_import.log").to_s)
+errors = []
+
+while line = $stdin.gets
+  args = line.chomp.split(" ")
+
+  # require network_id, shard_path and at least one replica host
+  usage unless args.length >= 3
+
+  network_id = args.shift.to_i
+  shard_path = args.shift.strip
+
+  errors << [network_id, shard_path, args.join(",")] unless process(logger, network_id, shard_path, args)
+end
+
+if !errors.empty?
+  $stderr.puts(errors.map { |id, path, replicas| "#{id}: #{path}, replicas:#{replicas}" }.join("\n"))
+end

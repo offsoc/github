@@ -1,0 +1,156 @@
+<%
+  page_info(title: "Notifications · Subscriptions")
+%>
+
+<div class="container-lg px-md-3 px-0 pt-md-3 pt-2">
+  <%= render(Primer::Beta::Breadcrumbs.new(mt: [2, 2, 0, 0], mx: [3, 3, 0, 0], mb: 3)) do |component| %>
+    <% component.with_item(href: global_notifications_path(:all => nil)) do %>Notifications<% end %>
+    <% component.with_item(href: request.path) do %><h1 id="notifications-subscriptions" class='text-normal f5'>Subscriptions</h1><% end %>
+  <% end %>
+
+  <%= render partial: "notifications/navigation", locals: { selected_tab: "subscriptions" } %>
+
+  <% track_render_partial("app/components/conditional_access/unauthorized_accounts_component") do %>
+    <%= render ConditionalAccess::UnauthorizedAccountsComponent.new(
+        classes: "Box mb-1 mx-md-0 mx-3",
+        container_classes: "mb-2",
+        resource_label: "subscriptions",
+        cap_filter: cap_filter,
+        accounts: resources_for_cap_filter,
+        # Enable SAML logging
+        logging: current_user&.feature_enabled?(:log_notifications_unauthorized_accounts),
+        # Group SAML accounts into unified SAML SSO banner
+        group_saml: GitHub.flipper[:notifications_unified_sso_banner].enabled?(current_user),
+        # Sort SAML accounts by name
+        sort_by_name: GitHub.flipper[:notifications_unified_sso_banner_alphabetical_order].enabled?(current_user),
+    )%>
+  <% end %>
+
+  <div data-hpc class="Box js-check-all-container mx-md-0 mx-3">
+    <div class="Box-header flex-wrap d-flex flex-items-center top-0 position-sticky position-md-static" style=" z-index: 1;">
+      <label class="mr-3 flex-shrink-0">
+        <input type="checkbox" data-check-all aria-labelledby="select-all-subscriptions-text">
+      </label>
+
+      <div class="Box-title flex-auto" id="select-all-subscriptions-text">
+        Subscriptions
+        <%= render Primer::Beta::Counter.new(count: subscription_count, limit: 1000) %>
+      </div>
+
+      <%= render partial: "notification_subscriptions/actions" %>
+      <div class="mt-2 width-full hide-lg hide-xl"></div>
+      <div class="d-md-inline-block">
+        <%= render partial: "notification_subscriptions/filters", locals: { reason: reason, reasons: reasons, labels_by_sort_direction: labels_by_sort_direction, sort_direction: sort_direction } %>
+      </div>
+    </div>
+
+    <%= render partial: "notification_subscriptions/selected_filters", locals: { reason: reason, repository: selected_repository } %>
+    <% track_render_partial("notification_subscriptions/list") do %>
+      <% if subscriptions.empty? %>
+        <div class="Box-body p-0">
+          <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+            <% c.with_visual_icon(icon: "bell") %>
+
+            <% c.with_heading(tag: :h2) do %>
+              No results matched your search.
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <%= form_tag destroy_notification_subscriptions_path, method: :delete, id: "threads-unsubscribe-form" do  %>
+          <ul
+            data-issue-and-pr-hovercards-enabled
+            data-repository-hovercards-enabled
+            data-team-hovercards-enabled>
+            <% subscriptions.each do |(subscription, thread, repository)| %>
+              <%
+                repository_hovercard_attributes = hovercard_data_attributes_for_repo_owner_and_name(repository.owner_display_login, repository.name)
+                thread_url = case thread
+                  when ::Discussion then discussion_url(repository.owner_display_login, repository.name, thread)
+                  when ::Issue, ::PullRequest, ::Commit then thread.url
+                end
+
+                comment_count = case thread
+                  when ::Discussion, ::Issue then thread.comments.filter_spam_for(current_user).size
+                  when ::PullRequest then thread.issue.comments.filter_spam_for(current_user).size
+                end
+
+                thread_hovercard_attributes = if thread.is_a?(::Discussion)
+                  hovercard_data_attributes_for_discussion(
+                    repository.owner_display_login,
+                    repository.name,
+                    thread.number,
+                  )
+                else
+                  hovercard_data_attributes_for_issue_or_pr(thread)
+                end
+                creation_descriptor = "opened"
+              %>
+              <li class="Box-row Box-row--hover-gray notification-thread-subscription py-2">
+                <div class="d-flex flex-row py-2 no-underline">
+                  <label class="flex-shrink-0 mr-md-3 mr-2">
+                    <input type="checkbox" data-check-all-item class="js-notification-subscriptions-check" name="subscription_ids[]" value="<%= subscription.id %>" aria-labelledby="<%= "subscription_link_#{subscription.id}" %>">
+                  </label>
+
+                  <span class="mr-2">
+                    <%= notification_octicon_for(thread) %>
+                  </span>
+
+                  <div class="flex-auto mt-n1 pr-md-0 pr-3 min-width-0">
+                    <%=
+                      link_to(
+                        repository.name_with_display_owner,
+                        repository_url(repository),
+                        class: "d-md-inline-block d-block v-align-middle Link--muted h4 pr-1",
+                        data: repository_hovercard_attributes
+                      )
+                    %>
+                    <%=
+                      link_to(
+                        thread.title,
+                        thread_url,
+                        class: "Link--primary v-align-middle no-underline h4",
+                        data: thread_hovercard_attributes,
+                        id: "subscription_link_#{subscription.id}"
+                      )
+                    %>
+                    <p class="text-small mt-1 mb-0 color-fg-muted">
+                      <span>#<%= thread.number %></span>
+                      <%= creation_descriptor %>
+                      <%= time_ago_in_words_js(thread.created_at) %>
+                      <% if thread.user %>
+                        by <%= profile_link(thread.user, class: "Link--muted") %>
+                      <% end %>
+                      <% if subscription.created_at %>
+                        &bull; subscribed
+                        <%= time_ago_in_words_js(subscription.created_at) %>
+                      <% end %>
+                      &bull; updated
+                      <%= time_ago_in_words_js(thread.updated_at) %>
+                    </p>
+                  </div>
+                  <div class="d-flex flex-row color-fg-muted">
+                    <span class="mr-1">
+                      <%= primer_octicon(:comment, flex_shrink: 0, style: "fill: var(--fgColor-muted, var(--color-fg-muted))", "aria-label": "Comment") %>
+                    </span>
+                    <span class="text-small color-fg-muted"><%= comment_count %></span>
+                  </div>
+                </div>
+              </li>
+            <% end %>
+          </ul>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if page_info.has_next_page || page_info.has_previous_page %>
+    <nav class="paginate-container" aria-label="Pagination" data-pjax>
+      <%= cursor_paginate(page_info, previous_label: "Previous", next_label: "Next") %>
+    </nav>
+  <% end %>
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "notifications" %>
+<% end %>

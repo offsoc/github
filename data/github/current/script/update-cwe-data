@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "faraday"
+require "csv"
+require_relative "../config/environment"
+
+output_path = File.join(Rails.root, "config/cwe-data.json")
+version = "1000"
+csv_url = "https://cwe.mitre.org/data/csv/#{version}.csv.zip"
+tmp_dir = Dir.mktmpdir
+output_zip = File.join(tmp_dir, "csv.zip")
+output_csv = File.join(tmp_dir, "#{version}.csv")
+
+begin
+  puts "Downloading #{csv_url} to #{output_zip}"
+  response = Faraday.get(csv_url)
+  File.open(output_zip, "wb") { |file| file.write(response.body) }
+  system("unzip #{output_zip} -d #{tmp_dir}")
+
+  csv_data = File.read(output_csv)
+  sorted_cwes = CSV.parse(csv_data, headers: true).sort_by do |cwe|
+    cwe["CWE-ID"].to_i
+  end
+  cwes = sorted_cwes.each_with_object({}) do |cwe, cwes|
+    cwes[cwe["CWE-ID"]] = { name: cwe["Name"], description: cwe["Description"] }
+  end
+
+  puts "Writing data for #{cwes.size} CWEs to #{output_path}"
+  File.write(output_path, JSON.generate(cwes, indent: "  ", space: " ", space_before: " ", object_nl: "\n", array_nl: "\n"))
+ensure
+  FileUtils.remove_entry(tmp_dir)
+end

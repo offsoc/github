@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+#/ Common functions used by GitHub MYSQL scripts.
+#/
+
+check_mysql () {
+    result=$(sudo mysql -Nse 'SELECT 1' 2>/dev/null)
+
+    if [[ $result == "1" ]]; then
+      echo "mysql is running"
+      return 0
+    else
+      echo "mysql is not running"
+      return 1
+    fi
+}
+
+stop_mysql () {
+  if systemctl is-active nomad; then
+    echo "Stop MySQL via Nomad"
+    /usr/local/share/enterprise/ghe-nomad-local-alloc-stop mysql
+
+    echo "Waiting for 120 seconds for mysql to completely shut down"
+    for i in $(seq 120); do
+      if pgrep -x mysqld 2>&1 >/dev/null ; then
+        sleep 1
+        continue
+      fi
+      break
+    done
+
+    if pgrep -x mysqld 2>&1 >/dev/null ; then
+      echo "Failed to stop MySQL service!" >&2
+      exit 1
+    fi
+
+  else
+    echo "Nomad is not running, skip stop MySQL"
+  fi
+}
+
+start_mysql () {
+  /usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/mysql/mysql.hcl
+  echo "Wait nomad to start MySQL"
+
+  if /usr/local/share/enterprise/ghe-service-wait-mysql --local; then
+    echo "MySQL is up running"
+  else
+    echo "Failed to start MySQL; exiting" >&2
+    exit 1
+  fi
+
+  # setup mysql eachtime when nomad starts mysql
+  echo "Setup mysql after startup"
+  /usr/local/share/enterprise/systemd-scripts/mysql-setup-database
+  echo "Finish setup mysql after startup"
+
+}

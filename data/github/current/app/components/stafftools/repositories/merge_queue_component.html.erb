@@ -1,0 +1,207 @@
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>
+    Merge Queue for <code class="Subhead-heading"><%= merge_queue.branch %></code>
+  <% end %>
+  <% component.with_actions do %>
+    <%= render(Primer::Alpha::Dropdown.new(with_caret: true)) do |c| %>
+      <% c.with_button do %>
+        Change Branch
+      <% end %>
+
+      <% c.with_menu do |menu| %>
+        <% repository.merge_queues.each do |queue| %>
+          <%= menu.with_item(
+              tag: :a,
+              muted: true,
+              href: stafftools_merge_queue_path(repository.owner, repository, queue.branch)
+          ) { queue.branch }
+          %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(mb: 4)) do |component| %>
+  <% component.with_header(tag: :h3) { "Queue configuration" } %>
+  <% component.with_row(p: 0) do %>
+    <table class="site-admin-table" style="border: none; margin-bottom: 0">
+      <tbody>
+        <tr>
+          <th>Branch</th>
+          <td><code><%= merge_queue.branch %></code></td>
+        </tr>
+        <tr>
+          <th>Merge method</th>
+          <td><%= configuration.merge_method.serialize %></td>
+        </tr>
+        <tr>
+          <th>Merge group size</th>
+          <td><b><%= configuration.min_merge_entries_size %>–<%= configuration.max_merge_entries_size %></b> entries
+            (or fewer if it takes more than <b><%= configuration.max_wait_for_min_merge_entries_size.inspect %></b> to reach the minumum size)</td>
+        </tr>
+        <tr>
+          <th>Max entries to build</th>
+          <td><%= configuration.max_concurrency %></td>
+        </tr>
+        <tr>
+          <th>Max wait time for CI</th>
+          <td><%= configuration.check_response_timeout.inspect %></td>
+        </tr>
+        <tr>
+          <th>Merging strategy</th>
+          <td><%= grouping_strategy_description %></td>
+        </tr>
+        <tr>
+          <th>Configuration source</th>
+          <td>
+            <% if merge_queue.protected_branch.present? %>
+              <%= link_to(
+                "Protected branch",
+                stafftools_repository_protected_branches_path(repository.owner, repository)
+              ) %>
+            <% else %>
+              <%= link_to(
+                "Repository rulesets",
+                stafftools_repository_repository_rules_path(repository.owner, repository)
+              ) %>
+            <% end %>
+          </td>
+        </tr>
+        <tr>
+          <th>Created at</th>
+          <td><%= merge_queue.created_at %></td>
+        </tr>
+      </tbody>
+    </table>
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(mb: 4)) do |component| %>
+  <% component.with_header(tag: :h3) { "Queue contents" } %>
+  <% component.with_row do %>
+    <% if merge_queue_entries.empty? %>
+      <p>The queue is empty.</p>
+    <% else %>
+      <ol class="pl-3" style="list-style-type: decimal">
+        <% merge_queue_entries.each do |entry| %>
+          <li <%= test_selector("merge-queue-entry") %>>
+            <details>
+              <summary>
+                <b>#<%= entry.pull_request.number %></b>
+                <%= entry.pull_request.title %>
+                <%= render state_label(entry) %>
+                <%= render Primer::Beta::Octicon.new(:lock) if entry.locked? %>
+              </summary>
+
+              <table class="site-admin-table my-2">
+                <tbody>
+                  <tr>
+                    <th><code>MergeQueueEntry</code> ID</th>
+                    <td><%= entry.id %></td>
+                  </tr>
+                  <tr>
+                    <th>Position</th>
+                    <td><%= entry.position %></td>
+                  </tr>
+                  <tr>
+                    <th>Enqueued by</th>
+                    <td><%= link_to entry.enqueuer, "/stafftools/users/#{entry.enqueuer&.login}" %></td>
+                  </tr>
+                  <tr>
+                    <th>Pull request</th>
+                    <td><%= link_to "##{entry.pull_request.number}", "/stafftools/repositories/#{repository.nwo}/pull_requests/#{entry.pull_request.number}" %></td>
+                  </tr>
+                  <tr>
+                    <th>Base SHA</th>
+                    <td>
+                      <% if entry.base_sha.present? %>
+                        <%= link_to(commit_path(entry.base_sha)) do %>
+                          <code><%= entry.base_sha %></code>
+                        <% end %>
+                      <% end %>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Head SHA</th>
+                    <td>
+                      <% if entry.head_sha.present? %>
+                        <%= link_to(commit_path(entry.head_sha)) do %>
+                          <code><%= entry.head_sha %></code>
+                        <% end %>
+                      <% end %>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Head ref</th>
+                    <td><code><%= entry.head_ref %></code></td>
+                  </tr>
+                  <tr>
+                    <th>Jumped queue?</th>
+                    <td><%= entry.jump_queue? ? "Yes" : "No" %></td>
+                  </tr>
+                  <tr>
+                    <th>Solo deploy?</th>
+                    <td><%= entry.solo? ? "Yes" : "No" %></td>
+                  </tr>
+                  <tr>
+                    <th>Locked to deploy?</th>
+                    <td><%= entry.locked? ? "Yes" : "No" %></td>
+                  </tr>
+                  <tr>
+                    <th>Enqueued at</th>
+                    <td><%= entry.enqueued_at %></td>
+                  </tr>
+                  <tr>
+                    <th>Checks requested at</th>
+                    <td><%= entry.checks_requested_at %></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <%= form_tag stafftools_merge_queue_entry_path(repository.owner_display_login, repository, merge_queue.branch, entry), method: :delete, class: "mb-4" do %>
+                <% if entry.locked? %>
+                  <p class="color-fg-danger">
+                    <%= primer_octicon(:lock) %>
+                    Cannot remove locked entries, unlock first
+                  </p>
+                <% end %>
+                <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger, disabled: entry.locked?, "data-confirm": "Are you sure you want to remove PR ##{entry.pull_request.number} from the queue?")) do %>
+                  Remove from queue
+                <% end %>
+              <% end %>
+            </details>
+          </li>
+        <% end %>
+      </ol>
+      <div class="paginate-container">
+        <%= will_paginate(merge_queue_entries) %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(color: :danger, border_color: :danger_emphasis)) do |component| %>
+  <% component.with_header(tag: :h3, border_color: :danger_emphasis, bg: :danger) { "Danger Zone" } %>
+  <% component.with_row do %>
+    <% if repository.feature_enabled?(:skip_locked_entries_on_clear) %>
+      <%= form_tag stafftools_merge_queue_clear_path(repository.owner_display_login, repository, merge_queue.branch, clear_locked_entries: false), class: "mb-2" do %>
+        <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger, "data-confirm": "Are you sure you want to clear only unlocked items in the queue for #{merge_queue.branch}?")) do %>
+          Clear unlocked queue entries
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <%= form_tag stafftools_merge_queue_clear_path(repository.owner_display_login, repository, merge_queue.branch), class: "mb-2" do %>
+      <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger, "data-confirm": "Are you sure you want to clear all items in the queue for #{merge_queue.branch}?")) do %>
+        Clear all queue entries
+      <% end %>
+    <% end %>
+
+    <%= form_tag stafftools_merge_queue_unlock_group_path(repository.owner_display_login, repository, merge_queue.branch) do %>
+      <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger, "data-confirm": "Are you sure you want to unlock the locked entries in the queue for #{merge_queue.branch}?")) do %>
+        Unlock locked entries
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

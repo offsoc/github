@@ -1,0 +1,153 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/sql"
+require "github/dgit"
+require "github/config/mysql"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+require "github/config/kv"
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0}"
+  exit 1
+end
+
+@summary = !!(ARGV.delete("-s") || ARGV.delete("--summary"))
+@gists_only = !!(ARGV.delete("-g") || ARGV.delete("--gists-only"))
+usage if ARGV.any?
+
+MAX = 20
+def show_array(arr, label)
+  return if arr.empty?
+  puts "#{label}:"
+  puts arr[0..MAX - 1].map { |row| "  " + (block_given? ? (yield row) : row.inspect) }
+  puts "... and #{arr.size - MAX} more" if arr.size > MAX
+  puts "#{label} total: #{arr.size}"
+  puts
+  true
+end
+
+def hostnum(str)
+  str.sub(/^github-dfs(\d+).*/, '\1').to_i
+end
+
+def nwo_for_network(id)
+  sql = Arel.sql <<-SQL, nwid: id
+    SELECT users.login, repositories.name
+    FROM repository_networks
+    JOIN repositories
+      ON repositories.id = repository_networks.root_id
+      AND repositories.active = 1
+    INNER JOIN users
+      ON users.id = repositories.owner_id
+    WHERE repository_networks.id = :nwid
+  SQL
+  results = ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+  if results.empty?
+    "(soft-deleted) network/#{id}"
+  else
+    owner, name = results.first
+    "#{owner}/#{name}"
+  end
+end
+
+def nwo_for_gist(gist_id)
+  sql = Arel.sql <<-SQL, gist_id: gist_id
+    SELECT repo_name FROM gists WHERE gists.id=:gist_id
+  SQL
+  gist_repo_name = ApplicationRecord::Domain::Gists.connection.select_rows(sql).first.first
+  "gist/#{gist_repo_name}"
+end
+
+def nwo_for_repository(repo_id)
+  sql = Arel.sql <<-SQL, repo_id: repo_id
+    SELECT repositories.name, repositories.owner_id
+    FROM repositories
+    WHERE repositories.id = :repo_id
+      AND repositories.active = 1
+  SQL
+  results = ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+  if results.empty?
+    "(soft-deleted) repository/#{repo_id}"
+  else
+    name, owner_id = results.first
+    sql = Arel.sql <<-SQL, owner_id: owner_id
+      SELECT users.login
+      FROM users
+      WHERE users.id = :owner_id
+    SQL
+    owner = ApplicationRecord::Domain::Repositories.connection.select_rows(sql).first.first
+    "#{owner}/#{name}"
+  end
+end
+
+# Find repository ID-Type (repo, wiki) pairs that do not have the
+# expected number of repository_replica rows. If a repository has the
+# correct number of network_replicas records but not the correct
+# number of repository_replicas records, spokes will incorrectly
+# report everything as OK.
+def missing_repository_replicas
+  # Since we use _only_ `dgit_default_copies` here, read-heavy networks are not properly supported!
+  expected_copies = GitHub.dgit_default_copies.to_i + GitHub.dgit_non_voting_copies.to_i
+  sql = Arel.sql <<-SQL, expected_copies: expected_copies
+    SELECT Count(id_type), id_type
+    FROM   (SELECT Concat(repository_id, "-", repository_type) AS id_type
+            FROM repository_replicas) AS X
+    GROUP  BY id_type
+    HAVING Count(id_type) < :expected_copies
+    LIMIT 1000
+    SQL
+
+  ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+end
+
+unless @gists_only
+  flag = show_array(GitHub::DGit::Maintenance.get_network_replicas_for_cleanup, "network replicas that need cleanup") do |row|
+    "#{nwo_for_network(row[0])} (network) on #{row[1]} is stuck in #{GitHub::DGit::STATES[row[2]]}"
+  end || flag
+end
+flag = show_array(GitHub::DGit::Maintenance.get_gist_replicas_for_cleanup, "gist replicas that need cleanup") do |row|
+  "#{nwo_for_gist(row[0])} (gist) on #{row[1]} is stuck in #{GitHub::DGit::STATES[row[2]]}"
+end || flag
+unless @gists_only
+  flag = show_array(GitHub::DGit::Maintenance.get_repo_replicas_with_bad_checksums, "repo replicas with bad checksums") do |row|
+    "#{nwo_for_repository(row[0])}#{".wiki" if row[3] == GitHub::DGit::RepoType::WIKI} on #{row[2]}"
+  end || flag
+end
+flag = show_array(GitHub::DGit::Maintenance.get_gist_replicas_with_bad_checksums, "gist replicas with bad checksums") do |row|
+  "#{nwo_for_gist(row[0])} on #{row[1]}"
+end || flag
+unless @gists_only
+  flag = show_array(GitHub::DGit::Maintenance.get_bad_replica_counts, "under/over-replicated networks") do |row|
+    "#{nwo_for_network(row[0])} (network) - #{row[1]} #{row[3][:voting] ? "voting" : "non-voting"} #{"replica".pluralize(row[1])}"
+  end || flag
+end
+flag = show_array(GitHub::DGit::Maintenance.get_bad_gist_replica_counts, "under/over-replicated gists") do |row|
+  "#{nwo_for_gist(row[0])} (gist) - #{row[1]} #{row[3][:voting] ? "voting" : "non-voting"} #{"replica".pluralize(row[1])}"
+end || flag
+GitHub::DGit::STATES
+  .select { |state, _| state != GitHub::DGit::ACTIVE }
+  .each do |state, name|
+    unless @gists_only
+      flag = show_array(GitHub::DGit::Maintenance.get_network_replicas_with_state(state), "#{name} network replicas") do |row|
+        "#{nwo_for_network(row[0])} (network) on #{row[1]}"
+      end || flag
+    end
+    flag = show_array(GitHub::DGit::Maintenance.get_gist_replicas_with_state(state), "#{name} gist replicas") do |row|
+      "#{nwo_for_gist(row[0])} (gist) on #{row[1]}"
+    end || flag
+  end
+unless @gists_only || !GitHub.enterprise?
+  flag = show_array(missing_repository_replicas, "under-replicated repository IDs") do |row|
+    "#{row[1].split('-').first}"
+  end || flag
+end
+
+unless flag
+  puts "Everything looks OK!"
+  puts
+end

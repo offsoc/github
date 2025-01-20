@@ -1,0 +1,160 @@
+#!/bin/bash
+#/ Usage: build-git
+#/        build-git <branch>
+#/ Build an app local version of git from https://github.com/github/git.
+#/
+#/ In the first form, build and install the version specified in config/git-version.
+#/ This is run automatically by script/bootstrap for all development environments.
+#/
+#/ When <branch> is given, fetch the latest from the repository, build git at
+#/ the specified branch or tag and then update the config/git-version file with
+#/ the appropriate commit sha1. Add and commit the changed config/git-version file to
+#/ update everyone else's environment the next time they sync with your branch.
+set -e
+unset CDPATH
+
+# Remove Homebrew on Linux from the PATH, it seems to pull in the wrong
+# buildchain from the PATH which breaks the build.
+PATH=$(echo "$PATH" | sed -e 's|:/home/linuxbrew/.linuxbrew/bin||g' -e 's|:/home/linuxbrew/.linuxbrew/sbin||g')
+
+# show usage
+if [ "$1" = "--help" ]; then
+  grep ^#/ <"$0" |cut -c4-
+  exit
+fi
+
+# change into root project dir
+cd "$(dirname "$0")/.."
+
+# revision where we should build
+pinned=$(cat config/git-version | grep -v ^#)
+revision="${1:-$pinned}"
+
+# git repository URL to clone from.
+giturl="$(./script/gh-clone-url github/git)"
+
+# build path locations
+builddir="vendor/git-build"
+installdir="vendor/git-core"
+logfile="log/git-build.log"
+
+if [ "$PWD" = "/workspaces/github-devcontainer/github" ]; then
+  export DEVCONTAINER=1
+fi
+
+# fetch the remote repository into the builddir
+fetch () {
+  progress=
+  [ -t 1 ] && progress="--progress"
+  git --git-dir="$builddir/.git" \
+      fetch -q $progress --prune --force "$giturl" "+refs/heads/*:refs/heads/*"
+}
+
+update_version_file () {
+  local commit=$1
+  if [ -z "$commit" ]; then
+    echo "ERROR: no commit passed to 'update_version_file'!"
+    exit 1
+  fi
+  # Passing an empty .deb argument will no-op on the git.deb file.
+  # This also will fail if it is a no-op, so don't trust the exit code.
+  ./script/update-subcomponent git "$commit" "" || true
+}
+
+# invoked by script/update-git-version with a raw commit oid to update git
+# without building or resolving the oid
+if [ -n "$SKIP_GIT_BUILD" ]
+then
+  update_version_file "$revision"
+  exit 0
+fi
+
+build_git() {
+  # clone or fetch the git repo if needed
+  if [ ! -d "$builddir" ]; then
+    echo "Fetching $giturl for the first time. This may take a while." 2>&1
+    git init -q "$builddir"
+    fetch
+  elif [ "$pinned" != "$revision" ]; then
+    echo "Fetching $giturl for update ..." 2>&1
+    fetch
+  elif ! git --git-dir="$builddir/.git" cat-file -e "$revision" 2>/dev/null; then
+    echo "Fetching $giturl for update ..." 2>&1
+    fetch
+  fi
+
+  # resolve requested revision to commit oid.
+  commit=$(git --git-dir="$builddir/.git" rev-parse --verify -q "$revision" || true)
+  if ! git --git-dir="$builddir/.git" cat-file -e "$commit" 2>/dev/null ; then
+    echo "ERROR: Revision not found: $revision" 2>&1
+    exit 1
+  fi
+
+  # prep install dir
+  mkdir -p "$installdir"
+  rm -f "$installdir/version"
+  prefix=$(cd "$installdir" && pwd)
+
+  # change in and build some stuff
+  echo "Git build at $(echo $commit | cut -c1-10) commencing (see $logfile) ..."
+  set +e
+  (
+    set -ex
+    cd "$builddir"
+    time git --git-dir=".git" --work-tree="." reset --hard "$commit"
+    time make clean
+    time make prefix="$prefix" LDFLAGS="$LDFLAGS" NO_PERL= NO_PYTHON= -j4 all
+    time make prefix="$prefix" LDFLAGS="$LDFLAGS" NO_PERL= NO_PYTHON= install
+  ) 1> "$logfile" 2>&1
+  res=$?
+  set -e
+
+  # check for failure
+  if [ $res -ne 0 ]; then
+    echo "!! Git build failed oh no. The last lines of output follow:" 2>&1
+    tail -10 "$logfile" 2>&1
+    echo "** See $logfile for more ..." 2>&1
+    exit $res
+  fi
+
+  # write the current build version file
+  echo "$commit" > "$installdir/version"
+}
+
+short_revision="$(echo $revision | cut -c1-10)"
+
+check_git() {
+  if [ "$revision" = "$(cat "$installdir/version" 2>/dev/null)" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# bail if the already built revision is up-to-date
+if check_git; then
+  echo "Git build $short_revision is up-to-date."
+elif [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+     [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+     ./script/subproject-prebuild -d $installdir -v $revision download git &&
+     check_git; then
+  echo "Git build $short_revision is up-to-date."
+else
+  build_git
+
+  if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    # Never fail the build on a failed upload.
+    ./script/subproject-prebuild -d $installdir -v $revision upload git || true
+  fi
+
+  echo "Built $($installdir/bin/git --version), installed at $installdir."
+fi
+
+mkdir -p "$installdir"/etc
+cp config/gitattributes "$installdir"/etc/gitattributes
+cp config/gitconfig "$installdir"/etc/gitconfig
+
+# if a <branch> was given, and it resolves
+update_version_file "$revision"
+
+true

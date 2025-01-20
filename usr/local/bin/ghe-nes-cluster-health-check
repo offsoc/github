@@ -1,0 +1,41 @@
+#!/bin/bash
+#/ Usage: ghe-nes-cluster-health-check [-h]
+#/
+#/ Check the health of the cluster and warn if any nodes are ineligible.
+#/ Only ran if NES is enabled.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+
+usage () {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+  esac
+done
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ "$(ghe-config "app.nes.enabled")" = true ]; then
+  nes_service_running=$(nomad job status -short nes 2>&1 | grep -i running)
+  
+  if [ -z "$nes_service_running" ]; then
+    echo "ERROR: NES is not currently running in the cluster."
+    exit 1
+  fi
+
+  ineligible_nodes=$(/usr/bin/nes get-cluster-health --filter-ineligible --json | jq '. != []')
+
+  if $ineligible_nodes; then
+    echo "WARN: Ineligible nodes have been detected in the cluster. This command may not run properly."
+    echo "For more information, run \"nes get-cluster-health\""
+  fi
+fi

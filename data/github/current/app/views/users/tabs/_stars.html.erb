@@ -1,0 +1,167 @@
+<%# typed: true %>
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%
+  view = Users::StarsView.new(user: this_user, viewer: current_user,
+                              type: params[:type],
+                              language: params[:language],
+                              phrase: params[:q])
+  page_info title: user_stars_title(login: this_user.display_login, name: this_user.profile_name, is_viewer: viewing_own_profile?), breadcrumb: "Stars"
+  any_starred_topics = starred_topics.present?
+  any_starred_repos = starred_repositories.any?
+%>
+
+<%= render(UserLists::IndexComponent.new(user_lists: user_lists, mine: viewing_own_profile?)) %>
+
+<% if any_starred_topics %>
+  <%= render Stars::RepositoryFilterComponent.new(
+    user: this_user,
+    starred_repository_count: starred_repository_count,
+    phrase: params[:q],
+    selected_language: params[:language],
+    selected_direction: params[:direction],
+    selected_field: params[:sort],
+    selected_type: params[:type],
+    has_starred_topics: true,
+  ) %>
+<% end %>
+
+<turbo-frame id="user-starred-repos" data-turbo-skip-scroll="true">
+  <div class="d-lg-flex gutter-lg mt-5">
+    <div class="<%= class_names(
+      "col-lg-9" => any_starred_topics,
+      "col-lg-12" => !any_starred_topics,
+    ) %>">
+      <div class="position-relative">
+        <h2 class="f3-light mb-n1">
+          <% if any_starred_topics %>
+            Starred repositories
+          <% else %>
+            Stars
+          <% end %>
+        </h2>
+
+        <% unless any_starred_topics %>
+          <%= render Stars::RepositoryFilterComponent.new(
+            user: this_user,
+            starred_repository_count: starred_repository_count,
+            phrase: params[:q],
+            selected_language: params[:language],
+            selected_direction: params[:direction],
+            selected_field: params[:sort],
+            selected_type: params[:type],
+            has_starred_topics: false,
+          ) %>
+        <% end %>
+      </div>
+
+      <% if over_repo_stars_limit %>
+        <div class="mt-2 mb-0 flash-messages">
+          <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :alert)) do %>
+            <% if viewing_own_profile? %>
+              You have many starred repositories - we’re only showing some of them.
+            <% else %>
+              This user has many starred repositories - we’re only showing some of them.
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if view.filtering? %>
+        <div class="TableObject border-bottom color-border-muted py-3">
+          <div class="TableObject-item TableObject-item--primary">
+            <span class="js-starred-repos-search-results">
+              <strong><%= repo_page_info.total_count %></strong>
+              <% if view.filtering_by_type? %>
+                <%= "result".pluralize(repo_page_info.total_count) %>
+                for <strong><%= type_filter_description(view.type) %></strong> starred repositories
+              <% else %>
+                <%= "star".pluralize(repo_page_info.total_count) %>
+              <% end %>
+              <% if view.phrase.present? %>
+                matching
+                <strong><%= view.phrase %></strong>
+              <% end %>
+              <% if view.language.present? %>
+                written in <strong><%= view.selected_language %></strong>
+              <% end %>
+            </span>
+          </div>
+          <%= link_to(
+            url_with(q: nil, language: nil, type: nil),
+            class: "issues-reset-query text-normal TableObject-item text-right"
+          ) do %>
+            <%= primer_octicon(:x, mt: 1, classes: "issues-reset-query-icon") %>
+            Clear filter
+          <% end %>
+        </div>
+      <% else %>
+        <span class="sr-only js-starred-repos-search-results">Showing <%= "results".pluralize(starred_repository_count) %></span>
+      <% end %>
+
+        <% if any_starred_repos %>
+          <% starred_repositories.each do |repo| %>
+            <%= render partial: "users/starred_repository", locals: { repo: repo } %>
+          <% end %>
+
+          <% if repo_page_info.has_next_page? || repo_page_info.has_previous_page? %>
+            <div class="paginate-container">
+              <%= cursor_paginate(repo_page_info, previous_label: "Previous", next_label: "Next") %>
+            </div>
+          <% end %>
+        <% elsif view.filtering? %>
+          <%= render Primer::BlankslateComponent.new(
+            title: "That’s it. You’ve reached the end of " + (viewing_own_profile? ? "your" : this_user.display_login + "’s") + " stars.",
+            mt: 5,
+            test_selector: "end-of-filtered-repos-blankslate",
+          ) %>
+        <% else %>
+          <% if viewing_own_profile? %>
+            <%= render Primer::BlankslateComponent.new(
+              icon: "star",
+              title: "You don’t have any starred repositories yet.",
+              mt: 5,
+            ) do %>
+              <% unless GitHub.multi_tenant_enterprise? %>
+                <p>As you <%= link_to "explore GitHub", explore_path, class: "Link--inTextBlock" %>,
+                  star repositories to save them for later and they&rsquo;ll show up here.</p>
+              <% end %>
+            <% end %>
+          <% else %>
+            <%= render Primer::BlankslateComponent.new(
+              icon: "star",
+              title: "#{this_user.display_login} doesn’t have any starred repositories yet.",
+              mt: 5,
+            ) %>
+          <% end %>
+        <% end %>
+      </div>
+
+    <% if any_starred_topics %>
+      <div class="col-lg-3 mt-6 mt-lg-0">
+        <h2 class="f3-light">
+          <a href="<%= topics_path %>" class="Link--primary" data-ga-click="Explore, go to Topics">
+            Starred topics
+          </a>
+        </h2>
+
+        <% starred_topics.limit(Profiles::StarsController::STARRED_TOPICS_LIMIT).each do |topic| %>
+          <%= render(Explore::ListItemTopicComponent.new(topic: topic)) %>
+        <% end %>
+
+        <% if starred_topics.size > Profiles::StarsController::STARRED_TOPICS_LIMIT %>
+          <div class="my-3">
+            <a
+              href="<%= users_stars_topics_path(this_user) %>"
+              class="btn-link f6"
+              data-ga-click="Stars tab, go to starred topics"
+            >
+              See all starred topics<%= primer_octicon(:"chevron-right", ml: 2, vertical_align: :text_bottom) %>
+            </a>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+</turbo-frame>

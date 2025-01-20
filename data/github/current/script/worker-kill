@@ -1,0 +1,304 @@
+#!vendor/ruby/current/bin/ruby
+# frozen_string_literal: true
+
+require_relative "./worker_common"
+
+require "fileutils"
+require "logger"
+require "optparse"
+
+HELP_USAGE = <<-EOF
+Usage: #{__FILE__} [options]
+
+DESCRIPTION
+
+  This script kills resqued workers by pid or aqueduct job id and outputs a JSON array of killed
+  worker statuses to STDOUT.
+
+  If neither --pid or --job-id are provided, it will accept output generated from the `worker-status` script as
+  filter criteria, reading one worker status from each line provided to STDIN.
+
+  All logs are written to STDERR.
+
+  The resqued listener will automatically replace workers that have died. Any listeners blocked waiting for stalled
+  workers should then exit gracefully.
+EOF
+
+EXAMPLES = <<-EOF
+EXAMPLES
+
+  (Use --execute instead of --dry-run to actually kill worker_statuses)
+
+  *) Kill a worker by pid
+
+    #{__FILE__} --pid $pid
+
+  *) Kill a worker by aqueduct job id
+
+    #{__FILE__} --pid 0ef61e36-bab4-4ef8-b87e-9ff21f6d37af
+
+  *) Dump workers by job class, job runtime before killing.
+
+  * Waits 15 seconds after gracefully killing before doing a force kill.
+  * Limit rbtrace and gdb dump file sizes to 10000 KB per job.
+
+  Redirect logs to kill-worker_statuses.log.
+
+    script/worker-status --job-class AqueductTestJob --longer-than 60s \\
+    | script/worker-dump \\
+      --dump-dir /tmp/killed-dumps \\
+      --rbtrace-dump 10000 \\
+      --gdb-dump 10000 \\
+    | #{__FILE__} \\
+      --grace-period 15 \\
+      --dry-run \\
+      2>kill-worker_statuses.log
+
+  *) More complicated filtering on job status attributes
+
+    script/worker-status | jq -c '
+      . | select((.current_job.job_class == "SomeJob" or
+          .current_job.arguments[0].argumentName == "argumentValue") and
+          .current_job.processing_elapsed_sec > 60)' \\
+    | script/worker-dump \\
+      --dump-dir /tmp/killed-dumps \\
+      --rbtrace-dump 10000 \\
+      --gdb-dump 10000 \\
+    | #{__FILE__} \\
+      --grace-period 15 \\
+      --dry-run \\
+      2>kill-worker_statuses.log
+EOF
+
+options = {
+  dry_run: true,
+  log_level: "INFO",
+  grace_period_sec: 15,
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = HELP_USAGE
+
+  opts.on("-h", "--help", "prints help") do |_|
+    STDERR.puts opts
+    STDERR.puts EXAMPLES
+    exit 0
+  end
+
+  DRY_RUN_HELP = <<-HELP
+Run this script in dry-run mode, meaning workers will not be killed.
+Defaults to true.
+HELP
+  opts.on("-d", "--dry-run", *DRY_RUN_HELP.split("\n")) do |_|
+    options[:dry_run] = true
+  end
+
+  EXECUTE_HELP = <<-HELP
+Run this script in production  mode, meaning workers will be killed.
+Defaults to false.
+
+HELP
+  opts.on("--execute", *EXECUTE_HELP.split("\n")) do |_|
+    options[:dry_run] = false
+  end
+
+  opts.on("--log-level [LEVEL]", Integer, "The log level (DEBUG=0,INFO=1,WARN=2,ERROR=3). Defaults to INFO.") do |v|
+    options[:log_level] = v.to_i
+  end
+
+  PID_HELP = <<-HELP
+Kills the worker with the given pid.
+
+HELP
+  opts.on("--pid PID", Integer, *PID_HELP.split("\n")) do |v|
+    options[:pid] = v
+  end
+
+  JOBID_HELP = <<-HELP
+Kills the worker running a job with the given aqueduct job id.
+
+HELP
+  opts.on("--job-id JOB_ID", String, *JOBID_HELP.split("\n")) do |v|
+    options[:job_id] = v
+  end
+
+  GRACE_PERIOD_SECONDS_HELP = <<-HELP
+The maximum time in seconds that the script will wait after attempting to gracefully terminate a worker
+before it is force killed.
+
+Defaults to 15 seconds.
+HELP
+  opts.on("-g", "--grace-period SECONDS", Integer, *GRACE_PERIOD_SECONDS_HELP.split("\n")) do |v|
+    options[:grace_period_sec] = v
+  end
+
+end
+
+if ARGV.length == 0
+  parser.parse! %w[--help]
+else
+  parser.parse!
+end
+
+class WorkerKiller
+  include Resqued
+
+  attr_reader :options, :worker_statuses_killed, :summary
+
+  def initialize(options)
+    @options = options
+    logger.level = @options[:log_level]
+    @worker_statuses_killed = {}
+  end
+
+  def enforce_job_id_match?
+    !!options[:job_id] || @from_stdin
+  end
+
+  def run
+    @running = true
+    Signal.trap("INT") do
+      STDERR.puts "Shutting down after next worker status has been evaluated..."
+      @running = false
+    end
+
+    describe_run
+
+    @run_start_time = Time.now.strftime(Resqued::STATUS_TIME_FORMAT)
+
+    @from_stdin = false
+    if pid = options[:pid]
+      statuses = worker_status_by_pid(pid)
+    elsif job_id = options[:job_id]
+      statuses = worker_statuses
+        .filter { |worker_info| worker_info.job_id == job_id }
+    else
+      @from_stdin = true
+      lines = []
+      while job_json = $stdin.gets
+        lines << job_json
+      end
+      statuses = lines.map do |status_json|
+        Resqued::WorkerInfo.from_json(status_json)
+      end
+    end
+
+    kill_count = 0
+
+    # Start killed JSON output
+    puts "["
+
+    statuses.each do |worker_info|
+      unless @running
+        break
+      end
+
+      if kill_count >= 1
+        # For separating killed statuses in JSON output
+        puts ","
+      end
+
+      pid = worker_info.pid
+      job_name = worker_info.job_class
+
+      if nice_kill(worker_info)
+        # Output the killed job
+        puts worker_info.to_json
+        kill_count += 1
+      end
+    end
+    # End the killed JSON output
+    puts "]"
+
+    if worker_statuses_killed.size > 0
+      if options[:dry_run]
+        STDERR.puts "Jobs that would have been killed:"
+      else
+        STDERR.puts "Jobs killed:"
+      end
+
+      worker_statuses_killed.each do |job_class, count|
+        STDERR.puts "#{job_class}: #{count}"
+      end
+    end
+
+    logger.info "Run ended"
+
+  end
+
+  def increment_killed(job_name)
+    if worker_statuses_killed[job_name]
+      worker_statuses_killed[job_name] += 1
+    else
+      worker_statuses_killed[job_name] = 1
+    end
+  end
+
+  def nice_kill(worker_info)
+    pid = worker_info.pid
+    unless worker_info.running?(match_job_id: enforce_job_id_match?)
+      return false
+    end
+
+    if run_command "sudo kill -15 #{pid}"
+      info "Sent TERM to worker #{pid}; #{worker_info.to_json}"
+      logger.info "Waiting #{pretty_duration options[:grace_period_sec]} for job to gracefully terminate #{worker_info.to_json}"
+      sleep options[:grace_period_sec]
+
+      if worker_info.running?(match_job_id: enforce_job_id_match?)
+        logger.info "Job is still running. #{worker_info.to_json}"
+      else
+        logger.info "Gracefully killed job. #{worker_info.to_json}"
+        increment_killed worker_info.job_class
+        return true
+      end
+    else
+      logger.error "Failed to send TERM to gracefully kill worker #{pid}; #{worker_info.to_json}"
+    end
+
+    info "Attempting to force kill worker #{pid} processing job_id #{worker_info.job_id} after #{pretty_duration options[:grace_period_sec]}."
+    if run_command "sudo kill -9 #{pid}"
+      increment_killed worker_info.job_class
+      info "Force killed worker #{pid}; #{worker_info.to_json}"
+      return true
+    else
+      logger.error "Failed to force kill worker #{pid}; #{worker_info.to_json}"
+    end
+    false
+  end
+
+  def run_command(command)
+    if options[:dry_run]
+      info "Would have run command: #{command}"
+    else
+      info "Running command: #{command}"
+      stdout, stderr, status = Open3.capture3("bash -c '#{command}'")
+      unless status.success?
+        logger.error "#{command} exited nonzero: #{status.exitstatus} \n with stderr: #{stderr}\n stdout:\n#{stdout}"
+        return [false, stdout]
+      end
+    end
+
+    [true, "true"]
+  end
+
+  def describe_run
+    if options[:dry_run]
+      STDERR.puts "This is a DRY RUN. Workers stuck processing the same job for *WILL NOT* be killed."
+    else
+      STDERR.puts "This is a REAL RUN. Workers stuck processing the same job for *WILL* be killed. The resqued listener will automaticallly restart killed worker processes."
+    end
+    STDERR.puts ""
+  end
+
+  def info(msg)
+    if options[:dry_run]
+      logger.info "DRY RUN: #{msg}"
+    else
+      logger.info msg
+    end
+  end
+end
+
+killer = WorkerKiller.new(options)
+killer.run

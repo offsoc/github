@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: user-metadata-package-processor
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "user-metadata-package-processor"
+        heaven.githubapp.com/image-placeholder: "github"
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        moda.github.net/inject-otel-env-vars-into-containers: "user-metadata-package-processor"
+spec:
+    replicas: 2
+    template:
+        metadata:
+            labels:
+                service: user-metadata-package-processor
+            annotations:
+                fluentbit.io/parser: logfmt_sloppy
+        spec:
+            restartPolicy: Always
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+            containers:
+                - name: user-metadata-package-processor
+                  image: github
+                  imagePullPolicy: IfNotPresent
+                  args: ["bin/user-metadata-package-processor"]
+                  resources:
+                    requests:
+                        cpu: 1.0
+                        memory: "2G"
+                    limits:
+                        cpu: 1.0
+                        memory: "4G"
+                  volumeMounts:
+                    - name: github-metadata
+                      mountPath: /etc/github/metadata.json
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                  env:
+                    - name: RAILS_ENV
+                      value: production
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_NAMESPACE
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_HOSTNAME
+                      value: github.com
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-stream-processor"
+                  envFrom:
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+    selector:
+        matchLabels:
+            service: user-metadata-package-processor

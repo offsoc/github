@@ -1,0 +1,51 @@
+#!/usr/bin/env ruby
+# Script for configuring the Opentelemetry Collector(otelcol-contrib)
+
+require  'erb'
+
+# check to see if instrumentation is enabled and we're running in a non-prod environment
+instrument_config_apply = system("ghe-config --true config-apply.instrumentation.enabled")
+otelcol_enabled = false
+
+if instrument_config_apply
+  otelcol_enabled = true
+  otelcol_exporters = ['debug','file']
+
+  # Ensure our traces dir exists + has correct permissions
+  system("mkdir -p /data/user/config-apply/traces")
+  system("sudo chown otelcol-contrib:otelcol-contrib /data/user/config-apply/traces")
+
+  # Check for existence of datadog api key
+  if system("ghe-config --present secrets.config-apply.instrumentation.datadog-api-key")
+    otelcol_exporters.push('datadog')
+    otelcol_datadog_api_key = `ghe-config --get secrets.config-apply.instrumentation.datadog-api-key`.chomp
+  end
+
+  # Render otelcol config
+  OTELCOL_TEMPLATE_ERB = "/etc/github/templates/etc/otelcol-contrib/config.yaml.erb"
+  OTELCOL_TEMPLATE = "/etc/otelcol-contrib/config.yaml"
+  time = Time.now.to_i
+  tmp_otelcol_config = "/tmp/otelcol-config#{time}.yaml"
+  puts "Writing temp otelcol config to #{tmp_otelcol_config}"
+  render = ERB.new(File.read(OTELCOL_TEMPLATE_ERB))
+  if File.write(tmp_otelcol_config, render.result(binding))
+    `sudo mv #{tmp_otelcol_config} #{OTELCOL_TEMPLATE}`
+  else
+    abort "Failed to write #{tmp_otelcol_config}!"
+  end
+end
+
+# restart/start + enable/disable otelcol
+if otelcol_enabled
+  system("sudo systemctl enable otelcol-contrib")
+  system("sudo systemctl restart otelcol-contrib")
+else
+  if system("sudo systemctl is-enabled otelcol-contrib")
+    system("sudo systemctl disable otelcol-contrib")
+  end
+  if system("sudo systemctl is-active otelcol-contrib")
+    system("sudo systemctl stop otelcol-contrib")
+  end
+end
+
+puts "Successfully configured otelcol-contrib!"

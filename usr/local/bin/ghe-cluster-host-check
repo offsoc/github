@@ -1,0 +1,73 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-host-check [options]
+#/
+#/ Verifies that all hosts are ready to configure
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -v                 Run with verbose output
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+while getopts "hv" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      exit 1
+      ;;
+    v)
+      set -x
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+# Always run as admin user.
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  exit 1
+}
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 0
+fi
+
+local_host=$(cat /etc/github/cluster)
+
+process_hosts() {
+  local hostname=$1
+  echo "$hostname" | grep -q ".hostname" && return
+  local ip=
+  if [ -n "$(ghe-config cluster.$hostname.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv6")
+  elif [ -n "$(ghe-config cluster.$hostname.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv4")
+  fi
+
+  if [ "$hostname" != "$local_host" ]; then
+    set +e
+    configured_hostname=$(ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$ip" "sudo cat /etc/github/cluster")
+    ssh_exit_status=$?
+    set -e
+    if [ "$(ghe-config "cluster.$hostname.offline")" != true ]; then
+      if [ "$ssh_exit_status" != "0" ]; then
+        echo "Cluster node $hostname ($ip) cannot be reached over SSH and is not marked offline"
+        exit 2
+      fi
+    fi
+  fi
+}
+
+hosts=$(ghe-config --get-regexp cluster.*.hostname)
+for hostname in ${hosts}; do
+  process_hosts "$hostname"
+done
+
+echo "Cluster is ready to configure."

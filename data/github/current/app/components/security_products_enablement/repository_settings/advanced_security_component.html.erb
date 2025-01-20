@@ -1,0 +1,102 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<% if blocked_by_changes_in_progress? %>
+  <%= render Primer::Beta::Flash.new(
+    icon: :alert,
+    mt: 3,
+    scheme: :warning,
+    test_selector: "blocking-enablement-warning"
+  ).with_content(BlockedSettings.new(owner).repo_message) %>
+<% elsif will_exceed_seat_allowance? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true, mt: 3, test_selector: "ghas-banner-seats-exceeded")) do %>
+    <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+    GitHub Advanced Security cannot be enabled because <%= data.advanced_security_blocked_by_seat_count_message %>
+  <% end %>
+<% elsif restricted_by_connect_error? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true, mt: 3, test_selector: "ghas-connect-error")) do %>
+    <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+    Advanced Security is in metered mode. Please configure GitHub Connect and License Sync.
+  <% end %>
+<% elsif data.advanced_security_blocked_by_turboghas_error %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true, mt: 3, test_selector: "ghas-turboghas-error")) do %>
+    <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+    Unable to determine license usage. Please try again later.
+  <% end %>
+<% end %>
+
+<div class="d-flex flex-md-row flex-column flex-md-items-center py-3 border-bottom color-border-muted"
+  <%= test_selector("ghas-repo-settings")%>
+>
+  <div class="mr-md-4 mb-md-0 mb-md-0 mb-2 flex-1">
+    <h2 class="text-normal">GitHub Advanced Security</h2>
+    <p class="color-fg-muted" >
+      <%= data.advanced_security_billed_repositories_description %>.
+      <% if data.advanced_security_billing_learn_more_href %><%= link_to "Learn more about advanced security billing", data.advanced_security_billing_learn_more_href, class: "Link--inTextBlock" %>.<% end %>
+    </p>
+
+    <% if has_mixed_restrictions? %>
+      <% if restricted_by_enterprise_policy? %>
+        <%= render(SecurityProductsEnablement::RepositoryCodeSecurityPolicyNotificationComponent.new(business, mt: 1)) %>
+      <% elsif restricted_by_security_configuration? %>
+        <%= render(SecurityProductsEnablement::RepositoryCodeSecurityPolicyNotificationComponent.new(helpers.owner, mt: 1)) %>
+      <% end %>
+    <% end %>
+  </div>
+  <div>
+    <div class="BtnGroup flex-shrink-0">
+      <% if restricted? %>
+        <div <%= test_selector("toggle-disabled-by-restriction") %>>
+          <%= render Primer::Beta::Octicon.new(:"shield-lock", color: :muted, test_selector: "shield-icon") if display_shield_icon? %>
+          <%= is_currently_enabled? ? "Enabled" : "Disabled" %>
+        </div>
+      <% elsif blocked_by_changes_in_progress? %>
+        <%= render Primer::ButtonComponent.new(
+          aria: { disabled: true, label: enablement_action_label },
+          scheme: !data.advanced_security_enabled ? :default : :danger,
+          test_selector: "ghas-button-disabled-by-security-product-toggling-in-progress",
+          title: "Org-level toggling in progress"
+        ).with_content(enablement_action) %>
+      <% elsif data.advanced_security_blocked_by_turboghas_error %>
+        <%= render Primer::ButtonComponent.new(
+          aria: { disabled: true, label: enablement_action_label },
+          scheme: !data.advanced_security_enabled ? :default : :danger,
+          test_selector: "ghas-button-disabled-by-turboghas-error",
+          title: "Unable to determine license usage"
+        ).with_content(enablement_action) %>
+      <% else %>
+        <%= form_tag data.update_repository_ghas_settings_path, method: :put do %>
+          <%= render(Settings::SecuritySettingDialogComponent.new(
+            button_text: enablement_action,
+            dialog_button_text: "#{is_currently_enabled? ? "Dis" : "En"}able GitHub Advanced Security for this repository",
+            title: "#{is_currently_enabled? ? "Dis" : "En"}able GitHub Advanced Security for this repository?",
+            button_aria_label: enablement_action_label,
+            button_scheme: is_currently_enabled? ? :danger : :default,
+            input_name: "advanced_security_enabled",
+            input_value: is_currently_enabled? ? 0 : 1,
+            data_octo_click: "repo_ghas",
+            data_octo_dimensions: is_currently_enabled?)) do |dialog| %>
+            <% dialog.with_dialog_body do %>
+              <% if is_currently_enabled? %>
+                <p class="ws-normal mt-2">
+                  This will also turn off secret scanning, dependency review, and code scanning and disable any Dependabot alert custom rules on this repository.
+                </p>
+              <% else %>
+                <p class="ws-normal mt-2">Enabling GitHub Advanced Security will:</p>
+                <ul class="ml-3">
+                  <li>Allow code scanning</li>
+                  <li>
+                    <%= data.secret_scanning_enabled_for_new_and_ghas_repos ? "Enable" : "Give the ability to enable" %> secret scanning
+                  </li>
+                  <li>Enable dependency review (if dependency graph is enabled)</li>
+                  <li>Allow the creation of Dependabot alert custom rules</li>
+                  <li <%= test_selector("enable-ghas-extra-seat-count") %>>
+                    Use <b><%= data.advanced_security_license_prompt %></b>
+                  </li>
+                </ul>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+</div>

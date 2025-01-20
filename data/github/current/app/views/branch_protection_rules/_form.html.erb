@@ -1,0 +1,717 @@
+<%# erblint:counter DeprecatedComponentsCounter 9 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%
+  branch_name = branch_protection_rule.name || "*"
+  required_approving_review_count = if branch_protection_rule.pull_request_reviews_enabled?
+    branch_protection_rule.required_approving_review_count
+  else
+    1
+  end
+  admin_force_push_rejection = current_repository.force_push_rejection
+  admin_force_push_rejection_scope = case admin_force_push_rejection
+  when "all"
+    "all branches in this repository"
+  when "default"
+    "the default branch"
+  else
+    nil
+  end
+%>
+
+<div class="Box">
+  <div class="Box-header">
+    <h3 class="Box-title">
+      Protect matching branches
+    </h3>
+  </div>
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options protected-branch-reviews active
+      <% if branch_protection_rule.pull_request_reviews_enabled? %>on<% end %>">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "has_required_reviews", "on", branch_protection_rule.pull_request_reviews_enabled?,
+              class: "js-toggler-target",
+              "aria-describedby": "require_pull_request_desc"
+          %> Require a pull request before merging
+        </label>
+        <span class="note" id="require_pull_request_desc">
+          When enabled, all commits must be made to a non-protected branch and submitted via a pull request before they can be merged into a branch that matches this rule.
+        </span>
+
+        <div class="reviews-dismiss-on-push form-checkbox">
+          <label>
+            <%=
+              check_box_tag "has_required_reviews_reviews", "on", required_approving_review_count > 0,
+                class: "js-reviewers-required-toggle",
+                "aria-describedby": "require_approvals_desc"
+            %> Require approvals
+          </label>
+          <span class="note" id="require_approvals_desc">
+            When enabled, pull requests targeting a matching branch require a number of approvals and no changes requested before they can be merged.
+          </span>
+
+          <div class="require-approving-reviews mt-1 js-reviewers-count" <% if required_approving_review_count == 0 %>hidden<% end %>>
+            <details class="select-menu details-reset details-overlay">
+              <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+                <i>Required number of approvals before merging:</i>
+                <span data-menu-button><%= required_approving_review_count %></span>
+              <% end %>
+
+              <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                <div class="select-menu-list">
+                  <% (0..6).each do |i| %>
+                    <% selected = i == required_approving_review_count %>
+                    <label class="select-menu-item text-normal f6 <% if i == 0 %>d-none<% end %>" role="menuitemradio" tabindex="0" aria-checked="<%= selected %>">
+                      <%= radio_button_tag "required_approving_review_count", i, selected %>
+                      <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                      <span data-menu-button-text><%= i %></span>
+                    </label>
+                  <% end %>
+                </div>
+              </details-menu>
+            </details>
+          </div>
+        </div>
+
+        <div class="reviews-dismiss-on-push form-checkbox">
+          <label>
+            <%=
+              check_box_tag "dismiss_stale_reviews_on_push", "on", branch_protection_rule.dismiss_stale_reviews_on_push?,
+                "aria-describedby": "dismiss_stale_approvals_desc"
+            %> Dismiss stale pull request approvals when new commits are pushed
+          </label>
+          <span class="note" id="dismiss_stale_approvals_desc">
+            New reviewable commits pushed to a matching branch will dismiss pull request review approvals.
+          </span>
+        </div>
+
+        <div class="require-code-owner-review form-checkbox <%= "color-fg-muted" unless current_repository.plan_supports?(:codeowners) %>">
+          <label>
+            <% if current_repository.plan_supports?(:codeowners) %>
+              <%=
+                check_box_tag "require_code_owner_review", "on", branch_protection_rule.require_code_owner_review?,
+                  "aria-describedby": "require_code_owner_review_desc" %>
+            <% else %>
+              <%=
+                check_box_tag "require_code_owner_review",
+                  "on",
+                  false,
+                  :disabled => true,
+                  :class => "tooltipped tooltipped-n",
+                  :"aria-label" => "Upgrade to #{current_repository.next_plan} or make this repository public to enable this feature.",
+                  "aria-describedby": "require_code_owner_review_desc" %>
+            <% end %>
+
+            Require review from Code Owners
+          </label>
+          <span class="note" id="require_code_owner_review_desc">
+            Require an approved review in pull requests including files with a designated code owner.
+          </span>
+
+          <% if !current_repository.plan_supports?(:codeowners) && (current_user == current_repository.plan_owner) %>
+            <div class="mt-3">
+              <%= render "plans/plan_support", repository: current_repository, feature_name: "CODEOWNERS" %>
+            </div>
+          <% end %>
+        </div>
+
+        <% if current_repository.organization.present? %>
+          <dl class="reviews-include-dismiss form-checkbox form-group">
+            <dt>
+              <label>
+                <%=
+                  check_box_tag "required_reviews_enforce_dismissal", "on", branch_protection_rule.authorized_dismissal_actors_only?,
+                    class: "js-authorized-review-dismisser-toggle",
+                    "aria-describedby": "restrict_dismiss_review_desc"
+                %> Restrict who can dismiss pull request reviews
+              </label>
+              <span class="note" id="restrict_dismiss_review_desc">
+                Specify people, teams, or apps allowed to dismiss pull request reviews.
+              </span>
+            </dt>
+            <%= render "edit_repositories/admin_screen/authorized_dismissal", {
+              protected_branch: branch_protection_rule,
+              branch_name: branch_name,
+            } %>
+          </dl>
+
+          <dl class="reviews-include-dismiss form-checkbox form-group js-protected-branch-options">
+            <dt>
+              <label>
+                <%=
+                  check_box_tag "allow_actors_bypass_pull_request", "on", branch_protection_rule.branch_actor_allowance_has_any?(:pull_request),
+                    class: "js-bypass-pull-request-toggle",
+                    "aria-describedby": "allow_bypass_required_pull_requests_desc"
+                %>
+                 Allow specified actors to bypass required pull requests
+              </label>
+              <span class="note" id="allow_bypass_required_pull_requests_desc">
+                Specify people, teams, or apps who are allowed to bypass required pull requests.
+              </span>
+            </dt>
+            <%= render "edit_repositories/admin_screen/bypass_pull_request", {
+              protected_branch: branch_protection_rule,
+              branch_name: branch_name,
+            } %>
+          </dl>
+        <% end %>
+        <div class="require-last-push-approval form-checkbox">
+          <label>
+            <%=
+              check_box_tag "require_last_push_approval", "on", branch_protection_rule.require_last_push_approval?,
+                "aria-describedby": "require_review_most_recent_desc"
+            %> Require approval of the most recent reviewable push
+          </label>
+          <span class="note" id="require_review_most_recent_desc">
+              Whether the most recent reviewable push must be approved by someone other than the person who pushed it.
+          </span>
+        </div>
+
+        <% if current_repository.disqualify_pr_pushers_from_approving_feature_enabled? %>
+          <div class="ignore-approvals-from-contributors form-checkbox">
+            <label>
+              <%=
+                check_box_tag "ignore_approvals_from_contributors", "on", branch_protection_rule.ignore_approvals_from_contributors?,
+                  "aria-describedby": "ignore_approvals_from_contributors_desc"
+              %> Ignore approving reviews from pull request contributors
+            </label>
+            <span class="note" id="ignore_approvals_from_contributors_desc">
+              When enabled, pushing to the branch after a pull request is opened will disqualify users from being eligible to approve it.
+            </span>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options protected-branch-options active">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "has_required_statuses", "on", branch_protection_rule.required_status_checks_enabled?,
+              class: "js-required-status-toggle",
+              "aria-describedby": "require_status_checks_pass_desc"
+          %> Require status checks to pass before merging
+        </label>
+        <span class="note" id="require_status_checks_pass_desc">
+          Choose which <a class="Link--inTextBlock" target="_blank" href="<%= GitHub.status_check_url %>" data-ga-click="Branch Protection Rule, go to statuses docs, from:branch protection rule settings required status checks checkbox" rel="noreferrer">status checks</a> must pass before branches can be merged into a branch that matches this rule.
+          When enabled, commits must first be pushed to another branch, then merged or pushed directly to a branch that matches this rule after status checks have passed.
+        </span>
+        <div class="js-required-statuses <% if !branch_protection_rule.required_status_checks_enabled? %>d-none<% end %>">
+          <div class="form-checkbox">
+            <label>
+              <%=
+                check_box_tag "strict_required_status_checks_policy", "on", branch_protection_rule.strict_required_status_checks_policy?,
+                  "aria-describedby": "require_up_to_date_branch_desc"
+              %> Require branches to be up to date before merging
+            </label>
+            <span class="note" id="require_up_to_date_branch_desc">
+              This ensures pull requests targeting a matching branch have been tested with the latest code.
+              This setting will not take effect unless at least one status check is enabled (see below).
+            </span>
+          </div>
+
+          <% if current_repository.required_status_checks_perf_improvements? %>
+              <%= render partial: "branch_protection_rules/required_status_contexts", locals: {
+                protected_branch: branch_protection_rule,
+                branch_name: branch_name,
+              } %>
+          <% else %>
+            <%- possible_options = branch_protection_rule.possible_required_status_contexts_and_integrations.keys -%>
+
+            <% if possible_options.any? %>
+              <%= render partial: "branch_protection_rules/required_status_contexts", locals: {
+                protected_branch: branch_protection_rule,
+                branch_name: branch_name,
+              } %>
+            <% else %>
+              <%= render Primer::BlankslateComponent.new(
+                title: "No status checks found",
+                description: "Sorry, we couldn’t find any status checks in the last week for this repository.",
+              ) do %>
+                <a target="_blank" href="<%= GitHub.status_check_url %>" data-ga-click="Branch Protection Rule, go to statuses docs, from:branch protection rule settings required status checks blankslate" rel="noreferrer">Learn more about status checks</a>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="Box-body py-0 pl-0" <%= test_selector("required-conversation-resolution-protection-rule") %>>
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "requires_conversation_resolution", "on", branch_protection_rule.required_review_thread_resolution_enabled?,
+              "aria-describedby": "require_conversation_resolution_desc"
+          %> Require conversation resolution before merging
+        </label>
+        <span class="note" id="require_conversation_resolution_desc">
+          When enabled, all conversations on code must be resolved before a pull request can be merged into a branch that matches this rule.
+          <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/github/administering-a-repository/defining-the-mergeability-of-pull-requests/about-protected-branches#require-conversation-resolution-before-merging">Learn more about requiring conversation completion before merging</a>.
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "has_signature_requirement", "on", branch_protection_rule.required_signatures_enabled?,
+              "aria-describedby": "require_signed_commits_desc"
+          %> Require signed commits
+        </label>
+        <span class="note" id="require_signed_commits_desc">
+          Commits pushed to matching branches must have verified signatures.
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <% non_merge_strategy_available = current_repository.rebase_merge_allowed? || current_repository.squash_merge_allowed? %>
+  <% merge_queue_using_merge_method = branch_protection_rule.merge_queue&.merge_method&.to_sym&.upcase == :MERGE %>
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+      <div class="form-checkbox <%= "color-fg-muted" unless non_merge_strategy_available %>">
+        <label>
+          <%=
+            check_box_tag "block_merge_commits", "on", branch_protection_rule.required_linear_history_enabled?,
+              disabled: (!non_merge_strategy_available || merge_queue_using_merge_method),
+              class: "js-protected-branch-require-linear-history-checkbox",
+              "aria-describedby": "require_linear_history_desc"
+          %>
+          Require linear history
+        </label>
+        <span class="note" id="require_linear_history_desc">
+          Prevent merge commits from being pushed to matching branches.
+        </span>
+        <% if !non_merge_strategy_available %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, mt: 3) do %>
+            <%= link_to "Edit merge strategies", edit_repository_path(current_repository), class: "btn btn-sm flash-action" %>
+            Enable squashing or rebasing merge strategy on this repository to use this rule.
+          <% end %>
+        <% else %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, mt: 3, classes: "js-protected-branch-linear-history-warning", hidden: !merge_queue_using_merge_method) do %>
+            Select the squash or rebase method for the associated merge queue to use this rule.
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <% if current_repository.merge_queue_enabled? %>
+    <div id="merge-queue" class="Box-body py-0 pl-0" <%= test_selector("merge-queue-protection-rule") %>>
+      <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+        <div class="form-checkbox">
+          <label>
+            <%= check_box_tag "requires_merge_queue", "on", branch_protection_rule.merge_queue_enabled?,
+               class: "js-protected-branch-merge-queue-checkbox",
+               "data-confirm-if-checked": "Turning off merge queue for this branch will remove all pull requests from this merge queue. Are you sure?",
+               "data-auto-uncheck-message": "Merge queue is not available for branch name patterns containing a wildcard character \"*\" and will be disabled.",
+               "aria-describedby": "require_merge_queue_desc"
+            %>
+            Require merge queue
+          </label>
+          <span class="note" id="require_merge_queue_desc">
+            Merges to matching branches must be performed via a merge queue.
+          </span>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, mt: 3, classes: "js-protected-branch-name-merge-queue-warning", hidden: true) do %>
+            Merge queue is not available for branch name patterns containing a wildcard character "*"
+          <% end %>
+
+          <div class="js-protected-branch-merge-queue-settings" <%= "hidden" unless branch_protection_rule.merge_queue_enabled? %>>
+            <%= render Primer::Beta::Flash.new(mt: 3) do |component| %>
+              Make sure to configure your CI to build branches created by the queue.
+
+              <% component.with_action do %>
+                <%= render(Primer::Beta::Button.new(size: :small, scheme: :invisible, tag: :a, href: "https://aka.ms/github-mq-ci-config-docs", aria: { label: "Learn more about configuring your CI to work with merge queue" })) do %>
+                  Learn more
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <%
+              merge_queue_merge_method_options = {
+                MERGE: {text: "Merge commit"},
+                SQUASH: {text: "Squash and merge"},
+                REBASE: {text: "Rebase and merge"},
+              }
+
+              # Selectively disable methods when not allowed on the repository or branch
+              if !current_repository.merge_commit_allowed?
+                merge_queue_merge_method_options[:MERGE].merge!({
+                  disabled: true,
+                  disabled_text: "Not enabled for this repository"
+                })
+              elsif branch_protection_rule.required_linear_history_enabled?
+                merge_queue_merge_method_options[:MERGE].merge!({
+                  disabled: true,
+                  disabled_text: "Not available when linear history is enabled"
+                })
+              end
+              if !current_repository.squash_merge_allowed?
+                merge_queue_merge_method_options[:SQUASH].merge!({
+                  disabled: true,
+                  disabled_text: "Not enabled for this repository"
+                })
+              end
+              if !current_repository.rebase_merge_allowed?
+                merge_queue_merge_method_options[:REBASE].merge!({
+                  disabled: true,
+                  disabled_text: "Not enabled for this repository"
+                })
+              end
+
+            %>
+            <div class="mt-1">
+              <% selected_merge_method = branch_protection_rule.merge_queue&.merge_method&.to_sym&.upcase %>
+              <% selected_merge_method ||= merge_queue_merge_method_options.reject { |k, v| v[:disabled] }.keys.first %>
+              <label> Merge method </label>
+                <span class="note">
+                  Method to use when merging changes from queued pull requests.
+                </span>
+              <details class="select-menu details-reset details-overlay">
+                <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+                  <i>Method: </i>
+                  <span data-menu-button><%= merge_queue_merge_method_options[selected_merge_method][:text] %></span>
+                <% end %>
+
+                <details-menu class="select-menu-modal position-absolute" style="z-index: 99;" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <div class="select-menu-list">
+                    <% merge_queue_merge_method_options.each do |method, settings| %>
+                      <% selected = (method == selected_merge_method) %>
+
+                      <label class="<%= class_names("select-menu-item text-normal f6 width-full js-protected-branch-merge-queue-method-radio", {disabled: settings[:disabled]}) %>"
+                        role="menuitemradio"
+                        type="button"
+                        aria-checked="<%= selected_merge_method == method %>"
+                        <% if settings[:disabled] %>
+                          tabindex="-1"
+                        <% else %>
+                          tabindex="0"
+                        <% end %>
+                        >
+                        <%= radio_button_tag "merge_queue_merge_method", method, selected_merge_method == method, {disabled: settings[:disabled]} %>
+                        <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                        <span class="select-menu-item-text">
+                          <span data-menu-button-text><%= settings[:text] %></span>
+                          <span class="unavailable-merge-method" <%= "hidden" unless settings[:disabled] %>><%= settings[:disabled_text] %></span>
+                        </span>
+                      </label>
+                    <% end %>
+                  </div>
+                </details-menu>
+              </details>
+            </div>
+
+            <div class="mt-1 <%= "hidden" unless branch_protection_rule.merge_queue_enabled? %>">
+              <% current_max_entry_to_merge = branch_protection_rule.merge_queue&.max_entries_to_merge || MergeQueue.column_defaults["max_entries_to_merge"] %>
+              <% current_min_entry_to_merge = branch_protection_rule.merge_queue&.min_entries_to_merge  || MergeQueue.column_defaults["min_entries_to_merge"] %>
+              <% current_min_wait_time = branch_protection_rule.merge_queue&.min_entries_to_merge_wait_minutes || MergeQueue.column_defaults["min_entries_to_merge_wait_minutes"]  %>
+              <% current_max_entry_to_build = branch_protection_rule.merge_queue&.max_entries_to_build || MergeQueue.column_defaults["max_entries_to_build"] %>
+              <% current_check_response_timeout = branch_protection_rule.merge_queue&.check_response_timeout_minutes || MergeQueue.column_defaults["check_response_timeout_minutes"] %>
+              <% current_merging_strategy = branch_protection_rule.merge_queue&.merging_strategy || MergeQueue.column_defaults["merging_strategy"] %>
+
+              <div class="mt-2">
+                <label for="merge_queue_max_entries_to_build"> Build concurrency </label>
+                <span class="note">
+                    Limit the number of queued pull requests building at the same time.
+                  </span>
+                <span class="note color-fg-default">
+                    Maximum pull requests to build:
+                    <%= number_field_tag(:merge_queue_max_entries_to_build, current_max_entry_to_build, class: "form-control text-center ml-2 col-2", style: "width: 4em", placeholder: current_max_entry_to_build, in: 0..360, step: 1) %>
+                  </span>
+              </div>
+
+              <div class="mt-1">
+                <label> Merge limits </label>
+                <span class="note">
+                    Limit the number of pull requests merged into the protected branch in a single merge operation.
+                </span>
+                <label hidden for="merge_queue_min_entries_to_merge"> Mininmum pull request to merge</label>
+                <span class="note color-fg-default">
+                  Minimum pull requests to merge:
+                  <%= number_field_tag(:merge_queue_min_entries_to_merge, current_min_entry_to_merge, class: "form-control text-center ml-2 mr-1 col-2", style: "width: 4em", placeholder: current_min_entry_to_merge, in: 0..100, step: 1) %>
+                  or after
+                  <label hidden for="merge_queue_min_entries_to_merge_wait_time"> Time to wait before merging fewer than the minimum</label>
+                  <%= number_field_tag(:merge_queue_min_entries_to_merge_wait_time, current_min_wait_time, class: "form-control text-center col-2", style: "width: 4em", placeholder: current_min_wait_time, in: 0..360, step: 1) %>
+                  minutes
+                </span>
+                <p class="note mt-1 color-fg-default">
+                  Maximum pull requests to merge:
+                  <label hidden for="merge_queue_max_entries_to_merge"> Maximum pull request to merge</label>
+                  <%= number_field_tag(:merge_queue_max_entries_to_merge, current_max_entry_to_merge, class: "form-control text-center ml-2 col-2", style: "width: 4em", placeholder: current_max_entry_to_merge, in: 0..360, step: 1) %>
+                </p>
+
+                <div class="form-checkbox">
+                  <label class="text-small color-fg-default" style="font-weight: normal">
+                    <%= check_box_tag "merge_queue_merging_strategy", "on", current_merging_strategy == "ALLGREEN" %>
+                    Only merge non-failing pull requests
+                  </label>
+                </div>
+              </div>
+
+              <div class="mt-1">
+                <label> Status check timeout </label>
+                <span class="note">
+                  Time (in minutes) a required status check must report a conclusion within to not be considered failed.
+                </span>
+                <span class="note color-fg-default">
+                  Consider check failed after:
+                  <%= number_field_tag(:merge_queue_check_response_timeout, current_check_response_timeout, class: "form-control text-center ml-2 col-2", style: "width: 4em", placeholder: current_check_response_timeout, in: 1..360, step: 1) %>
+                  minutes
+                </span>
+              </div>
+              <% if current_repository.merge_queue_extra_branch_protection_settings? %>
+                <div class="mt-1">
+                  <% selected_retries_limit = branch_protection_rule.merge_queue&.check_run_retries_limit || MergeQueue.column_defaults["check_run_retries_limit"] %>
+                  <details class="select-menu details-reset details-overlay">
+                    <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+                      <i>
+                        Maximum times to retry a
+                        <a class="Link--inTextBlock" href="https://docs.github.com/rest/reference/checks" target="_blank">check run</a>
+                        failure:
+                      </i>
+                      <span data-menu-button><%= selected_retries_limit %></span>
+                    <% end %>
+
+                    <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                      <div class="select-menu-list">
+                        <% MergeQueue::ALLOWED_CHECK_RUN_RETRIES_LIMITS.each do |i| %>
+                          <% selected = (i == selected_retries_limit) %>
+                          <label class="select-menu-item text-normal f6" role="menuitemradio" tabindex="0" aria-checked="<%= selected %>">
+                            <%= radio_button_tag "merge_queue_check_run_retries", i, selected %>
+                            <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                            <span data-menu-button-text><%= i %></span>
+                          </label>
+                        <% end %>
+                      </div>
+                    </details-menu>
+                  </details>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options protected-branch-options active" <%= test_selector("required-deployment-protection-rule") %>>
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "has_required_deployments", "on", branch_protection_rule.required_deployments_enabled?,
+              class: "js-required-deployments-toggle",
+              "aria-describedby": "require_successful_deployments_desc"
+          %> Require deployments to succeed before merging
+        </label>
+        <span class="note" id="require_successful_deployments_desc">
+          Choose which environments must be successfully deployed to before branches can be merged into a branch that matches this rule.
+        </span>
+        <div class="js-required-deployments" <% if !branch_protection_rule.required_deployments_enabled? %>hidden<% end %>>
+          <% required_deployment_environments = (branch_protection_rule.required_deployments&.map(&:environment) || []).to_set %>
+
+          <% if branch_protection_rule.possible_required_deployment_environments.any? %>
+            <div class="listgroup listgroup-sm automated-check-options">
+              <div class="listgroup-item listgroup-header">
+                Deployment environments found in this repository
+              </div>
+              <div class="listgroup-overflow">
+                <% for deployment_environment in branch_protection_rule.possible_required_deployment_environments.sort %>
+                  <div class="listgroup-item js-protected-branches-item">
+                    <label>
+                      <%=
+                        check_box_tag "deployment_environments[]", deployment_environment, required_deployment_environments.include?(deployment_environment),
+                          class: "js-required-status-checkbox", id: nil
+                      %>
+                      <%= deployment_environment %>
+                      <span class="label Label--primary float-right js-required-status-badge <% if !required_deployment_environments.include?(deployment_environment) %> d-none<% end %>">Required</span>
+                    </label>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% else %>
+            <%= render Primer::BlankslateComponent.new(
+              title: "No deployment environments found",
+              description: "Sorry, we couldn’t find any deployments for this repository.",
+            ) do %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active
+      <% if branch_protection_rule.lock_branch_enabled? %>on<% end %>">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "lock_branch", "on", branch_protection_rule.lock_branch_enabled?,
+              class: "js-lock-branch-toggle",
+              "aria-describedby": "lock_branch_desc"
+          %> Lock branch
+        </label>
+        <span class="note" id="lock_branch_desc">
+          Branch is read-only. Users cannot push to the branch.
+        </span>
+        <% if current_repository.fork? %>
+          <div id="allow-upstream-fetching" class="form-checkbox" <% if !branch_protection_rule.lock_branch_enabled? %>hidden<% end %>>
+            <label>
+              <%=
+                check_box_tag "lock_allows_fetch_and_merge", "on", branch_protection_rule.lock_allows_fetch_and_merge?,
+                  "aria-describedby": "allow_fork_syncing_desc"
+              %> Allow fork syncing
+            </label>
+            <span class="note" id="allow_fork_syncing_desc">
+              Branch can pull changes from its upstream repository
+            </span>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "enforce_all_for_admins", "on", branch_protection_rule.admin_enforced?,
+              class: "js-protected-branch-include-admin-toggle",
+              "aria-describedby": "no_bypassing_desc"
+          %>
+          Do not allow bypassing the above settings
+        </label>
+
+        <span class="note" id="no_bypassing_desc">
+          The above settings will apply to administrators and custom roles with the "bypass branch protections" permission.
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <% if current_repository.organization.present? %>
+  <div class="Box-footer py-0 pl-0">
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options active">
+      <dl class="form-checkbox form-group">
+        <dt>
+          <label>
+            <%=
+              check_box_tag "authorized_actors", "on", branch_protection_rule.has_authorized_actors?,
+                class: "js-authorized-branch-pushers-toggle",
+                "aria-describedby": "restrict_matching_branch_push_desc"
+            %>
+            Restrict who can push to matching branches
+          </label>
+          <span class="note" id="restrict_matching_branch_push_desc">
+            Specify people, teams, or apps allowed to push to matching branches. Required status checks will still prevent these people, teams, and apps from merging if the checks fail.
+          </span>
+        </dt>
+
+        <%= render "edit_repositories/admin_screen/authorized_actors", {
+          protected_branch: branch_protection_rule,
+          branch_name: branch_name
+        } %>
+      </dl>
+    </div>
+  </div>
+  <% end %>
+</div>
+
+<div class="Box mt-3">
+  <div class="Box-header">
+    <h3 class="Box-title">
+      Rules applied to everyone including administrators
+    </h3>
+  </div>
+
+  <div class="Box-body py-0 pl-0">
+    <% is_checked_for_actors = branch_protection_rule.branch_actor_allowance_has_any?(:force_push) %>
+    <% is_checked = is_checked_for_actors || !branch_protection_rule.block_force_pushes_enabled? && admin_force_push_rejection != "all" %>
+    <% is_disabled = admin_force_push_rejection == "all" %>
+
+    <div class="js-protected-branch-options js-toggler-container protected-branch-options protected-branch-force-push active
+      <% unless is_disabled %>active<% end %>
+      <% if is_checked %>on<% end %>">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "allows_force_pushes", "on", is_checked, disabled: is_disabled,
+              class: "js-force-push-toggle",
+              "aria-describedby": "permit_force_pushes_desc"
+          %> Allow force pushes
+        </label>
+        <p class="note" id="permit_force_pushes_desc">Permit force pushes for all users with push access.</p>
+
+        <% if admin_force_push_rejection_scope.present? %>
+          <p class="text-small color-fg-muted mt-3">
+            <%
+              if GitHub.enterprise?
+                admin_name = "your GitHub Enterprise administrator"
+                admin_pronoun = "them"
+              else
+                admin_name = "GitHub Support"
+                admin_pronoun = "us"
+              end
+            %>
+            Force pushes to <%= admin_force_push_rejection_scope %> have been disabled by <%= admin_name %>.
+            Please <a class="Link--inTextBlock" href="<%= contact_path %>">contact <%= admin_pronoun %></a> if you'd like that changed.
+          </p>
+        <% end %>
+
+        <div role="radiogroup" aria-label="Users who can force push" class="allow-force-pushes form-checkbox form-group js-protected-branch-options js-restrict-who-pushes" <% if !is_checked %>hidden<% end %>>
+            <label>
+              <input
+                  type="radio"
+                  name="allow_force_push"
+                  value="everyone"
+                <% if !is_checked_for_actors %>checked<% end %> >
+                  Everyone
+                <p class="note">
+                  Permit force pushes for all users with push access.
+                </p>
+            </label>
+            <label>
+              <input
+                  type="radio"
+                  name="allow_force_push"
+                  value="actors"
+                  <% if is_checked_for_actors %>checked<% end %> >
+                    Specify who can force push
+                  <p class="note">
+                    Only these people, teams, or apps are allowed to force push.
+                  </p>
+            </label>
+          <%= render "edit_repositories/admin_screen/allow_force_push", {
+            protected_branch: branch_protection_rule,
+            branch_name: branch_name,
+          } %>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="Box-body py-0 pl-0">
+    <div class="js-protected-branch-options protected-branch-options active">
+      <div class="form-checkbox">
+        <label>
+          <%=
+            check_box_tag "allows_deletions", "on", !branch_protection_rule.block_deletions_enabled?,
+              "aria-describedby": "allow_deletions_desc"
+          %> Allow deletions
+        </label>
+        <span class="note" id="allow_deletions_desc">
+          Allow users with push access to delete matching branches.
+        </span>
+      </div>
+    </div>
+  </div>
+</div>

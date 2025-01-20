@@ -1,0 +1,101 @@
+#!/bin/bash
+# usage: build-node
+
+# the project root directory
+root=$(cd $(dirname "$0")/.. && pwd)
+cd "$root"
+
+version="$(cat config/node-version)"
+download_location="https://nodejs.org/dist"
+larger_runner_file="/.github-full-larger-runner"
+octofactory_hostname="octofactory.githubapp.com"
+
+if [ "$GITHUB_CI" = "1" ] && [ -f "$larger_runner_file" ]; then
+  octofactory_hostname="octofactory-ang.githubapp.com"
+fi
+
+if [ "$GITHUB_CI" = "1" ]; then
+  download_location="https://${octofactory_hostname}/artifactory/nodejs-remote"
+fi
+
+node_dir="$root/vendor/node"
+mkdir -p "$node_dir"
+cd "$node_dir"
+
+check_node() {
+  [ -x "node" ] && [ -x "npm" ] && [ -x "npx" ] && [ "$(./node -v)" = "v$version" ]
+}
+
+node_name() {
+  echo "node-v$version-linux-x64"
+}
+
+use_existing_node_version() {
+  echo "Unable to build version $version of node"
+
+  # If the node version we want fails to download, we can check if there is an existing version
+  # This can happen if we are running a GitHub golden image with an outdated version installed
+  if [ "$(readlink $node_dir/node)" ]; then
+    # extract version from format v$version. Split the version out
+    version=$($node_dir/node -v | cut -d'v' -f2)
+
+    echo "Falling back to existing version of node: $version"
+    # continue through remaining steps with updated version number
+  else
+    echo "Node failed to install and no fallback version of found. Cannot proceed."
+    exit 1
+  fi
+}
+
+if check_node; then
+  echo "Node $version is up-to-date."
+elif [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+     [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+     "$root/script/subproject-prebuild" -d "$node_dir/$version" -v "$version" download node &&
+     check_node; then
+  echo "Node $version is up-to-date."
+else
+  echo "Building Node $version..."
+  (
+    set -ex
+    header=()
+    if [ "$GITHUB_CI" = "1" ] && [ -f "$larger_runner_file" ]; then
+      refreshed_oidc_token_path="/workspace/.oidc-token"
+      ruby $root/script/ci/refresh-oidc-token.rb -p $refreshed_oidc_token_path
+      header=("-H" "X-Ang-Authentication: $(cat $refreshed_oidc_token_path)")
+    fi
+
+    curl -fsSL "${header[@]}" "$download_location/v$version/$(node_name).tar.gz" | tar -xz "$(node_name)/"{bin,lib}
+    chmod +x "$(node_name)/bin/"{node,npm}
+  ) &> "node-build.log"
+
+  if [ $? != 0 ]; then
+    echo "Failed to build Node:"
+    cat "node-build.log"
+
+    use_existing_node_version
+  fi
+fi
+
+link_binary() {
+  bin_name=$1
+  bin_path="$(node_name)/bin/$bin_name"
+
+  if [ "$(readlink "$bin_name")" != "$bin_path" ]; then
+    ln -sf "$bin_path" "$bin_name"
+  fi
+}
+
+link_binary "node"
+link_binary "npm"
+link_binary "npx"
+
+set -e
+
+PATH="$root/vendor/node:$PATH"
+echo "npm version: $(./npm -v)"
+
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+  # Never fail the build on a failed upload.
+  "$root/script/subproject-prebuild" -d "$node_dir/$version" -v "$version" upload node || true
+fi

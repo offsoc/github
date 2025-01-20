@@ -1,0 +1,57 @@
+#!/usr/bin/env ruby
+# Usage: script/delete-experiment first_run_survey
+
+require "fileutils"
+
+unless (name = ARGV.shift)
+  abort "usage: #$0 <name>"
+end
+
+require "active_support/all"
+
+# Remove experiment files
+removed_files = []
+[
+  "lib/github/user_research/experiments/#{name.underscore}.rb",
+  "lib/github/transitions/*_#{name.underscore}_experiment.rb",
+  "test/lib/github/user_research/experiments/#{name.underscore}_test.rb",
+  "test/lib/github/transitions/*_#{name.underscore}_experiment_test.rb",
+].each do |file_path|
+  Dir.glob(file_path) do |path|
+    FileUtils.remove_file(path)
+    removed_files << path
+  end
+end
+
+if removed_files.any?
+  puts "Removed the following files:"
+  removed_files.map { |path| puts "- #{path}" }
+else
+  puts "No files found for experiment '#{name.underscore}'"
+end
+
+# Remove line from UserExperimentCohort class that looks like:
+#
+# FIRST_RUN_GLOBAL_SURVEY          = :first_run_global_survey
+#
+cohort_path = "app/models/user_experiment_cohort.rb"
+cohort_definition_found = false
+
+File.open(cohort_path, "r") do |original_file|
+  File.open("#{cohort_path}.tmp", "w") do |new_file|
+    original_file.each_line do |line|
+      if line.include?(name.underscore)
+        cohort_definition_found = true
+      else
+        new_file.write(line)
+      end
+    end
+  end
+end
+FileUtils.mv "#{cohort_path}.tmp", cohort_path
+
+if cohort_definition_found
+  puts "\nUpdated UserExperimentCohort class at #{cohort_path}"
+else
+  puts "No cohort definition found for experiment '#{name.underscore}'"
+end

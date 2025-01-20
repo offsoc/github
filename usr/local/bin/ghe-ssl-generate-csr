@@ -1,0 +1,151 @@
+#!/bin/bash
+#/ Usage: ghe-ssl-generate-certificate-request [options]
+#/
+#/ This utility will generate a CSR and matching key for this GitHub Enterprise instance.
+#/
+#/
+#/ It can be used remotely over SSH as follows:
+#/
+#/   ssh -p 122 admin@[hostname] -- 'ghe-ssl-generate-csr'
+#/
+#/ OPTIONS:
+#/   -h/--help      Show this message.
+#/   -v/--verbose   Run in verbose mode.
+#/   -w/--wildcard  Generate a CSR with a wildcard subdomain (default is a certificate listing individual SANs)
+#/   -y/--yes       No prompting. Only info supplied will be the Common Name.
+#/   -r/--summary   Display a summary of the CSR after generation (mostly for testing purposes)
+
+set -e
+
+export PATH=/bin:/sbin:/usr/sbin:/usr/bin:/usr/local/bin:/usr/local/sbin
+
+full=""
+TEMP_KEY=$(mktemp)
+TEMP_CSR=$(mktemp)
+trap "rm $TEMP_KEY $TEMP_CSR" EXIT
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --verbose | -v)
+            set -x
+            shift
+            ;;
+        --wildcard | -w)
+            wildcard=true
+            shift
+            ;;
+        --yes|-y)
+            prompt_less=no
+            shift
+            ;;
+        --summary|-r)
+            summary=1
+            shift
+            ;;
+        *)
+            grep "^#/" <"$0" | cut -c4-
+            exit ${exitcode:-0}
+            ;;
+    esac
+done
+
+HAPROXY_CFG=${HAPROXY_CFG:-/etc/haproxy/haproxy-frontend.cfg}
+subject_alt_name=""
+github_hostname=${GITHUB_HOSTNAME:-$(ghe-config 'core.github-hostname')}
+
+proceed() {
+  if [ -z "$prompt_less" ]; then
+    read -n1 -r -p "Press any key to continue..." -r
+  fi
+}
+
+print_summary() {
+  if [ ! -z "$summary" ]; then
+    subject=$(openssl req -noout -text -in $1 | grep -o 'Subject: [^ ]*')
+    altnames=$(openssl req -noout -text -in $1 | grep -A1 "Subject Alternative Name" |tr -d '\n' | sed -e 's/[ ]*X509v3 //'|  tr -d  '[:blank:]')
+    echo "$subject"
+    echo "$altnames"
+  fi
+}
+
+
+echo_error() {
+  echo "ghe-ssl-generate-csr error: $1" >&2
+  exit 1
+}
+
+check_prerequisites() {
+  [ -z $github_hostname ] && \
+    echo_error "Configured hostname must be present to generate a certificate request"
+  [[ $github_hostname =~ \. ]] || \
+    echo_error 'Configured hostname must include at least one dot (e.g. `example.com`).'
+  [[ $github_hostname =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && \
+    echo_error "Configured hostname can't be an IP address."
+  grep -q $github_hostname $HAPROXY_CFG || \
+    echo_error "configured hostname must be configured in $HAPROXY_CFG. Run 'ghe-config-apply' to apply the configuration changes."
+}
+
+check_prerequisites
+
+if [ -n "$wildcard" ]; then
+  # we default to the hostname and wildcard subdomain
+  subject_alt_name+=",DNS:$github_hostname,DNS:*.$github_hostname"
+else
+  # prefix each domain with `,DNS:` to generate the list of SANs from the configured hostname and subdomains.
+  subject_alt_name+=$(/usr/local/share/enterprise/ghe-http-hostnames | sed -e 's/^/,DNS:/'|tr -d '\n')
+  echo $subject_alt_name
+fi
+
+subject_alt_name="subjectAltName=${subject_alt_name:1}"
+
+reqtmp=$(mktemp)
+
+echo "[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = ${prompt_less:-"yes"}" > $reqtmp
+
+if [ -z "$prompt_less" ]; then
+  echo "[req_distinguished_name]
+  commonName		          = The instance hostname
+  commonName_default      = $github_hostname
+  countryName             = Country Name (2 letter code)
+  stateOrProvinceName     = State or Province Name (full name)
+  localityName            = Locality Name (eg, city)
+  organizationName        = Organization Name (eg, company)" >> $reqtmp
+else
+  echo "[req_distinguished_name]
+  commonName		          = $github_hostname" >> $reqtmp
+fi
+
+echo "[v3_req]
+basicConstraints = CA:FALSE
+extendedKeyUsage = critical, serverAuth
+$subject_alt_name" >> $reqtmp
+
+openssl req -out $TEMP_CSR -newkey rsa:2048 -nodes -keyout $TEMP_KEY -config <(
+cat $reqtmp)
+
+rm $reqtmp
+
+
+ghe-config ssl.csr.key "$(cat $TEMP_KEY)"
+ghe-config ssl.csr.request "$(cat $TEMP_CSR)"
+
+echo "Exporting the certificate signing request (CSR). "
+proceed
+
+ghe-config --get ssl.csr.request
+
+echo "Exporting the private key. Please store it as this will be required to install your new certificate."
+proceed
+
+ghe-config --get ssl.csr.key
+
+echo "You can also copy these with the following commands from your workstation:
+
+ssh -p 122 admin@$github_hostname -- \'ghe-config --get ssl.csr.request\' > $github_hostname.csr
+ssh -p 122 admin@$github_hostname -- \'ghe-config --get ssl.csr.key\' > $github_hostname.key
+"
+
+print_summary "$TEMP_CSR"

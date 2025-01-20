@@ -1,0 +1,29 @@
+#!/bin/bash
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+rm -f /etc/network/interfaces.d/dhcp
+
+if [ -f /etc/network/interfaces.d/static -a -f /etc/network/enterprise-selected-map ] && [ $(cat /etc/network/enterprise-selected-map) = "static" ]; then
+  net4_ip=$(grep address /etc/network/interfaces.d/static | awk '{print $2}')
+  net4_subnet=$(grep netmask /etc/network/interfaces.d/static | awk '{print $2}')
+  net4_gateway=$(grep gateway /etc/network/interfaces.d/static | awk '{print $2}')
+  net4_dns=$(grep dns-nameservers /etc/network/interfaces.d/static | awk '{print $2 " " $3}')
+  cat <<-EOF > /tmp/net_ipv4
+iface eth0 inet static
+  address $net4_ip
+  netmask $net4_subnet
+  gateway $net4_gateway
+EOF
+  [ -n "$net4_dns" ] && echo "  dns-nameservers $net4_dns" >> /tmp/net_ipv4
+  echo "auto eth0" >> /tmp/net_ipv4
+  mv /tmp/net_ipv4 /etc/network/interfaces.d/eth0-ipv4
+  rm /etc/network/interfaces.d/static /etc/network/enterprise-selected-map
+  log_message "upgraded network configuration"
+fi
+
+# pull out any old post-up stanzas
+for iface in /etc/network/interfaces.d/* ; do
+  grep -v '^\s*post-up\s*.*\/regenerate-ssl-self-signed$' $iface > $iface.new
+  mv $iface.new $iface
+done

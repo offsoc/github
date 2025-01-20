@@ -1,0 +1,117 @@
+#!vendor/ruby/current/bin/ruby
+# frozen_string_literal: true
+
+require_relative "./worker_common"
+require "optparse"
+
+HELP_USAGE = <<-HELP
+Usage: #{__FILE__} [options]
+
+DESCRIPTION
+
+  Prints current worker statuses and arguments (if available) to STDOUT.
+  Each line has one worker status as a JSON object.
+  Sorts worker statuses by the processing time of the active job, if available.
+HELP
+
+EXAMPLES = <<-USAGE
+EXAMPLES
+
+  1) Show all worker statuses
+
+    #{__FILE__}
+
+  2) Show all worker statuses with AqueductTestJobs running for more than 1h30s
+
+    #{__FILE__} --job-class AqueductTestJob --longer-than "1h 30s"
+
+USAGE
+
+options = {
+  status: true
+}
+
+# simpler version of chronic_duration
+class Duration
+  attr_reader :time
+
+  TOKENS = {
+    "s" => 1,
+    "m" => (60),
+    "h" => (60 * 60),
+    "d" => (60 * 60 * 24)
+  }
+
+  def initialize(input)
+    @input = input
+    @time = 0
+    parse
+  end
+
+  def parse
+    @input.scan(/(\d+)(\w)/).each do |amount, measure|
+      @time += (amount.to_f * TOKENS[measure]).to_i
+    end
+  end
+end
+
+parser = OptionParser.new do |opts|
+  opts.banner = HELP_USAGE
+
+  opts.on("-h", "--help", "prints help") do |_|
+    STDERR.puts opts
+    STDERR.puts EXAMPLES
+    exit 0
+  end
+
+  opts.on("-s", "--status", "Print out worker job statuses.") do |_|
+    options[:status] = true
+  end
+
+  JOB_CLASS_HELP  = <<~HELP
+Filters workers by active job class, i.e. `AqueductTestJob`.
+
+HELP
+  opts.on("--job-class JOB_CLASS", String, *JOB_CLASS_HELP.split("\n")) do |v|
+    options[:job_class] = v
+  end
+
+  PROCESSING_TIME_HELP  = <<~HELP
+Filter by active jobs processing for longer than the elapsed duration, i.e. '60s', '1m30s', '1h', '1h30m', '1d'.
+
+HELP
+  opts.on("--longer-than DURATION", String, *PROCESSING_TIME_HELP.split("\n")) do |v|
+    begin
+      options[:processing_time_sec] = Duration.new(v).time
+    rescue => e # rubocop:disable Lint/GenericRescue
+      STDERR.puts "Invalid duration '#{v}', please specify a duration like  i.e. '60s', '1m30s', '1h', '1h30m', '1d': " + e.inspect
+      exit 1
+    end
+  end
+end
+
+parser.parse!
+
+class WorkerStatus
+  include Resqued
+
+  attr_reader :options
+
+  def initialize(options)
+    @options = options
+  end
+
+  def run
+    if options[:status] = true
+      statuses = worker_statuses
+      statuses.sort_by { |v| -v.elapsed_sec }
+      .filter { |v| options[:job_class] ? v.is_job_class?(options[:job_class]) : true }
+      .filter { |v| options[:processing_time_sec] ? v.elapsed_sec > options[:processing_time_sec] : true }
+      .each do |worker_info|
+        puts worker_info.to_json
+      end
+    end
+  end
+end
+
+WorkerStatus.new(options).run

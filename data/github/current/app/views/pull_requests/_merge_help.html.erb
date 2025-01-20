@@ -1,0 +1,160 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<% if !pull.closed? && logged_in? && current_user_can_push? %>
+  <%
+    if pull.head_repository
+      view = Repositories::ProtocolSelectorView.new(
+        :context => :merge_help,
+        :repository => pull.head_repository,
+        :user => current_user
+      )
+    end
+  %>
+
+  <git-clone-help class="merge-branch-manually">
+    <% if merge_state.dirty? %>
+      <h4>Checkout via command line</h4>
+      <p class="intro">
+        If the conflicts on this branch are too complex to resolve in the web
+        editor, you can check it out via command line to resolve the conflicts.
+      </p>
+    <% else %>
+      <h4>Merging via command line</h4>
+      <p class="intro">
+        If you do not want to use the merge button or an automatic merge cannot be
+        performed, you can perform a manual merge on the command line. However, the
+        following steps are not applicable if the base branch is protected.
+
+        <% if shell_safe_names_include_placeholders? [
+          [':branch', pull.display_base_ref_name],
+          [':user-:branch', pull.safe_head_user, pull.display_head_ref_name],
+        ] %>
+          <%= link_to "Learn about dealing with special characters on the command line.", ShellHelper::SHELL_ESCAPING_DOCS_URL %>
+        <% end %>
+      </p>
+    <% end %>
+
+    <div class="d-flex mt-2">
+      <div class="BtnGroup">
+        <% if pull.head_repository %>
+          <% view.each_protocol_view do |protocol_view| %>
+            <%= form_tag protocol_view.sticky_url, :class => "BtnGroup-parent", "data-remote" => true do %>
+              <button type="submit" class="BtnGroup-item btn btn-sm js-git-protocol-clone-url<% if protocol_view.is_default %> selected<% end %>" data-url="<%= protocol_view.url %>" data-action="click:git-clone-help#updateURL" data-targets="git-clone-help.cloneURLButtons">
+                <%= protocol_view.protocol %>
+              </button>
+            <% end %>
+          <% end %>
+        <% end %>
+        <button type="button" class="BtnGroup-item btn btn-sm<% unless pull.head_repository %> selected<% end %>" data-url="<%= base_url + gh_pull_request_patch_path(pull) %>" data-action="click:git-clone-help#updateURL" data-targets="git-clone-help.cloneURLButtons">
+          Patch
+        </button>
+      </div>
+
+      <% if pull.head_repository %>
+        <div class="flex-1 ml-2">
+          <div class="input-group">
+              <input id="clone-help-git-url" type="text" readonly spellcheck="false" class="form-control input-sm input-monospace" data-target="git-clone-help.helpField" value="<%= view.default_url %>" aria-label="Clone URL">
+              <span class="input-group-button">
+                <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-git-url", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+              </span>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <% if pull.cross_repo? %>
+      <p class="text-small color-fg-muted step"><strong>Step 1:</strong> From your project repository, check out a new branch and test the changes.</p>
+      <div class="copyable-terminal">
+        <div class="copyable-terminal-button">
+          <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-1", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+      </div>
+        <pre id="clone-help-step-1" class="copyable-terminal-content">
+<span class="user-select-contain">git checkout -b <%= shell_safe_name(':user-:branch', pull.safe_head_user, pull.display_head_ref_name) %> <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span>
+<% if view %>
+<span class="user-select-contain">git pull <span data-target="git-clone-help.helpTexts"><%= view.default_url %></span> <%= shell_safe_name(':branch', pull.display_head_ref_name) %></span>
+<% else %>
+<span class="user-select-contain">curl -L <%= pull.comparison.to_patch_url %> | git am -3</span>
+<% end %></pre>
+      </div>
+
+      <p class="text-small color-fg-muted step"><strong>Step 2:</strong> Merge the changes and update on GitHub.</p>
+      <div class="copyable-terminal">
+        <div class="copyable-terminal-button">
+          <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-2", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+        </div>
+        <pre id="clone-help-step-2" class="copyable-terminal-content">
+<span class="user-select-contain">git checkout <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span>
+<span class="user-select-contain">git merge --no-ff <%= shell_safe_name(':user-:branch', pull.safe_head_user, pull.display_head_ref_name) %></span>
+<span class="user-select-contain">git push origin <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span></pre>
+      </div>
+    <% else # not a fork %>
+      <p class="text-small color-fg-muted step"><strong>Step 1:</strong> Clone the repository or update your local repository with the latest changes.</p>
+      <div class="copyable-terminal">
+        <div class="copyable-terminal-button">
+          <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-1", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+        </div>
+        <pre id="clone-help-step-1" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git pull origin <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span></pre>
+      </div>
+
+      <% if merge_state.dirty? %>
+        <p class="text-small color-fg-muted step"><strong>Step 2:</strong> Switch to the head branch of the pull request.</p>
+      <% else # the head branch has no conflicts with the base branch %>
+        <p class="text-small color-fg-muted step"><strong>Step 2:</strong> Switch to the base branch of the pull request.</p>
+      <% end %>
+      <div class="copyable-terminal">
+        <div class="copyable-terminal-button">
+          <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-2", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+        </div>
+          <% if merge_state.dirty? %>
+            <pre id="clone-help-step-2" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git checkout <%= shell_safe_name(':branch', pull.display_head_ref_name) %></span></pre>
+          <% else # the head branch has no conflicts with the base branch %>
+            <pre id="clone-help-step-2" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git checkout <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span></pre>
+          <% end %>
+      </div>
+
+      <% if merge_state.dirty? %>
+        <p class="text-small color-fg-muted step"><strong>Step 3:</strong> Merge the base branch into the head branch.</p>
+      <% else # the head branch has no conflicts with the base branch %>
+        <p class="text-small color-fg-muted step"><strong>Step 3:</strong> Merge the head branch into the base branch.</p>
+      <% end %>
+      <div class="copyable-terminal">
+        <div class="copyable-terminal-button">
+          <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-3", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+        </div>
+          <% if merge_state.dirty? %>
+            <pre id="clone-help-step-3" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git merge <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span></pre>
+          <% else # the head branch has no conflicts with the base branch %>
+            <pre id="clone-help-step-3" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git merge <%= shell_safe_name(':branch', pull.display_head_ref_name) %></span></pre>
+          <% end %>
+      </div>
+
+      <% if merge_state.dirty? %>
+        <p class="text-small color-fg-muted step"><strong>Step 4:</strong>
+          Fix the conflicts and commit the result.
+        </p>
+<span class="text-small step copyable-terminal">See <%= link_to "Resolving a merge conflict using the command line", "#{GitHub.help_url}/pull-requests/collaborating-with-pull-requests/addressing-merge-conflicts/resolving-a-merge-conflict-using-the-command-line", class: "Link--inTextBlock" %> for step-by-step instructions on resolving merge conflicts.</span>
+        <p class="text-small color-fg-muted step"><strong>Step 5:</strong> Push the changes.</p>
+        <div class="copyable-terminal">
+          <div class="copyable-terminal-button">
+            <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-5", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+          </div>
+          <pre id="clone-help-step-5" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git push -u origin <%= shell_safe_name(':branch', pull.display_head_ref_name) %></span></pre>
+        </div>
+      <% else # the head branch has no conflicts with the base branch %>
+        <p class="text-small color-fg-muted step"><strong>Step 4:</strong> Push the changes.</p>
+        <div class="copyable-terminal">
+          <div class="copyable-terminal-button">
+            <%= render Primer::Beta::ClipboardCopy.new(for: "clone-help-step-4", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+          </div>
+          <pre id="clone-help-step-4" class="copyable-terminal-content user-select-contain">
+<span class="user-select-contain">git push -u origin <%= shell_safe_name(':branch', pull.display_base_ref_name) %></span></pre>
+        </div>
+      <% end %>
+    <% end %>
+  </git-clone-help>
+<% end %>

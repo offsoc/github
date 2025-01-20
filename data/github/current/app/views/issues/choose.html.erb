@@ -1,0 +1,141 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# frozen_string_literal: true %>
+<%
+  highlight ||= :default
+  page_info(
+    selected_link: :repo_issues,
+    container_xl: true,
+    title: "New Issue · #{current_repository.name_with_display_owner}"
+  )
+  has_security_policy = current_repository.security_policy.exists?
+  has_templates = issue_templates.any?
+  issue_template_repo = issue_templates&.repository
+  viewer_can_write = issue_template_repo&.pushable_by?(current_user)
+  repo_template_path = issue_template_repo&.template_tree_path
+  show_blank_issue = config.blank_issues_enabled?
+  show_template_links = config.configured? || has_templates
+  private_vulnerability_reporting_enabled = with_database_error_fallback(fallback: false) { use_pvd_workflow? }
+  advisory_management_authorized = current_repository.advisory_management_authorized_for?(current_user)
+  show_reporting_button = has_security_policy || private_vulnerability_reporting_enabled || advisory_management_authorized
+  vulnerability_reporting_mode =  if !AdvisoryDB::Pvd.authorized_repo?(repo: current_repository)
+                                    has_security_policy ? :direct_to_policy : :none
+                                  elsif private_vulnerability_reporting_enabled
+                                    :pvd
+                                  elsif advisory_management_authorized
+                                    :advisory_management
+                                  elsif has_security_policy
+                                    :direct_to_policy
+                                  else
+                                    :none
+                                  end
+  can_create_either_advisory_type = [:pvd, :advisory_management].include?(vulnerability_reporting_mode) && !GitHub.enterprise?
+%>
+
+<%= render layout: "issues/issues" do %>
+  <%
+    if render_issue_react_create_opt_in
+      url = "/#{current_repository.owner.display_login}/#{current_repository.name}/issues?new_create_experience=true"
+  %>
+    <%= form_with url: url do |f| %>
+      <%= render(Primer::Beta::Label.new(scheme: :success)) { "Beta" } %>
+      <%= render Primer::Beta::Button.new(scheme: :link, type: :submit, mb: 3, mt: 2) do %>
+        <%= emoji_tag(Emoji.find_by_alias("zap"), class: "emoji emoji-icon") %>Try the new experience
+      <% end %>
+    <% end %>
+  <% end %>
+  <div class="mt-md-3" data-hpc>
+    <div class="timeline-comment-wrapper timeline-new-comment composer ml-0 pl-0 ml-md-6 pl-md-3">
+      <div class="d-none d-md-block">
+        <%= timeline_comment_avatar_for(user: current_user) %>
+      </div>
+      <div class="timeline-comment">
+        <% issue_templates.valid_templates.each do |template| %>
+          <div class="Box-row d-flex flex-items-center">
+            <div class="flex-auto min-width-0 mr-3">
+              <strong class="f4"><%= template.name %></strong>
+              <div class="color-fg-muted">
+                <%= template.about %>
+              </div>
+            </div>
+            <%
+              new_issue_params = {
+                labels: template.labels_string,
+                assignees: template.assignees_string,
+                projects: template.projects_string,
+                title: params[:title].presence || template.title,
+                template: template.filename,
+                milestone: params[:milestone],
+              }
+              template.user_inputs.map(&:id).map(&:to_sym).each do |input|
+                next unless params[input].present?
+
+                new_issue_params[input] = params[input]
+              end
+            %>
+            <a href="<%= new_issue_path(**new_issue_params) %>" class="btn btn-primary">
+              Get started<span class="sr-only">: <%= template.name %></span>
+            </a>
+          </div>
+        <% end %>
+
+        <% if show_template_links && vulnerability_reporting_mode != :none %>
+          <div class="Box-row d-flex flex-items-center" <%= test_selector("issue-template-row-report-vulnerability") %>>
+            <div class="flex-auto min-width-0">
+              <strong class="f4">Report a security vulnerability</strong>
+              <div class="color-fg-muted">
+                <% if vulnerability_reporting_mode == :pvd %>
+                  Privately report a security vulnerability.
+                <% elsif vulnerability_reporting_mode == :advisory_management %>
+                  Report a security vulnerability.
+                <% elsif vulnerability_reporting_mode == :direct_to_policy %>
+                  Please review our <a class="Link--inTextBlock" href="<%= repository_security_policy_path %>">security policy</a> for more details.
+                <% end %>
+              </div>
+            </div>
+            <% security_button_path = can_create_either_advisory_type ? new_repository_advisory_path(current_repository.owner, current_repository) : repository_security_policy_path %>
+            <a href="<%= security_button_path %>" class="btn btn-primary flex-shrink-0">
+              <%= can_create_either_advisory_type ? "Report a vulnerability" : "View policy" %>
+            </a>
+          </div>
+        <% end %>
+
+        <% config.contact_links.each do |link| %>
+          <% hydro_tracking = hydro_click_tracking_attributes("contact_link.click", { actor_id: current_user.id, repository_id: current_repository.id, contact_link: link.as_json(dangerously_allow_all_keys: true) }) %>
+          <div class="Box-row d-flex flex-items-center">
+            <div class="flex-auto min-width-0">
+              <strong class="f4"><%= link.name %></strong>
+              <div class="color-fg-muted">
+                <%= link.about %>
+              </div>
+            </div>
+            <% octicon_link = primer_octicon(:"link-external", mr: 1) %>
+            <%= safe_link_to(octicon_link + " Open", link.url, class: "btn flex-shrink-0", target: "_blank", data: hydro_tracking) %>
+          </div>
+        <% end %>
+      </div>
+
+      <div class="d-flex flex-column flex-md-row mt-3">
+        <% hydro_data = blank_issue_hydro_tracking(current_user.id, current_repository.id) %>
+        <div class="flex-auto min-width-0">
+          <% if show_blank_issue %>
+            Don’t see your issue here? <%= link_to(new_issue_path(milestone: params[:milestone]), data: hydro_data, class: "Link--inTextBlock") do %>
+              Open a blank issue.
+            <% end %>
+          <% end %>
+        </div>
+
+        <% if show_template_links %>
+          <div class="flex-justify-end mt-2 mt-md-0">
+            <% if viewer_can_write %>
+              <%= link_to("Edit templates", repo_template_path) %>
+            <% elsif issue_template_repo.owner.is_a?(Organization) %>
+              <%= link_to("View organization templates", repo_template_path) %>
+            <% elsif GitHub.user_abuse_mitigation_enabled? %>
+              <%= link_to("Report abuse", flavored_contact_path(flavor: "report-abuse", report: "#{current_repository.name_with_display_owner} (Contact Links)")) %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>

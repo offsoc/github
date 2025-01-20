@@ -1,0 +1,90 @@
+#!/bin/bash
+
+#/ Usage: ghe-nomad-handle-change
+#/
+#/ Options:
+#/   -h | --help                       Show this message.
+#/   -d | --dry-run                    Exit with success if Nomad node name and datacenter are unchanged without taking action
+
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -d|--dry-run)
+      DRY_RUN=1
+      ;;
+    -*)
+      echo "Error: unexpected flag ${1%%=*}" 1>&2
+      usage 1>&2
+      exit 1
+      ;;
+    *)
+      break;
+      ;;
+  esac
+done
+
+[ "$(whoami)" = "root" ] || {
+    echo "This script must be run as root"
+    exit 1
+}
+
+if [ ! -d /data/user/nomad/raft ]; then
+  echo "No raft database detected, Nomad must be clean. Exiting"
+  exit
+fi
+
+if systemctl is-active nomad; then
+  last_nomad_dc=$(nomad node status -self -json | jq .Datacenter)
+  last_nomad_name=$(nomad node status -self -json | jq .Name)
+else
+  last_nomad_dc=$(sudo nomad operator raft state /data/user/nomad | jq '.Nodes | .[] | select(.HTTPAddr == "127.0.0.1:4646") | .Datacenter')
+  last_nomad_name=$(sudo nomad operator raft state /data/user/nomad | jq '.Nodes | .[] | select(.HTTPAddr == "127.0.0.1:4646") | .Name')
+fi
+
+current_nomad_dc=$(sudo hcl2json /etc/nomad.d/config.hcl | jq .datacenter)
+current_nomad_name=$(sudo hcl2json /etc/nomad.d/config.hcl | jq .name)
+
+if [ "$last_nomad_dc" != "$current_nomad_dc" ]; then
+  echo "Change detected to Nomad datacenter name"
+  CHANGES=1
+fi
+if [ "$last_nomad_name" != "$current_nomad_name" ]; then
+  echo "Change detected to Nomad node name"
+  CHANGES=1
+fi
+
+if [ -n "$CHANGES" ]; then
+  if [ -n "$DRY_RUN" ]; then
+    exit 1
+  fi
+
+  # Mask nomad-jobs.timer to prevent Nomad from being unexpectedly restarted
+  if [ -L /etc/systemd/system/nomad-jobs.timer ] && [ "$(readlink -f /etc/systemd/system/nomad-jobs.timer)" == "/dev/null" ]; then
+    masking_nomad_jobs_timer=1
+    echo "masking nomad-jobs.timer to avoid unexpected restarting of Nomad"
+    systemctl mask nomad-jobs.timer
+  else
+    echo "nomad-jobs.timer already masked, skipping masking"
+  fi
+
+  # Cleanup contents of raft database directory
+  echo "Starting Nomad cleanup"
+  ghe-nomad-cleanup
+  echo "Cleaning raft database from disk"
+  rm -rf /data/user/nomad/raft/*
+
+  # Unmask nomad-jobs.timer
+  if [ -n "$masking_nomad_jobs_timer" ]; then
+    echo "Cleaning up mask on nomad-jobs.timer"
+    systemctl unmask nomad-jobs.timer
+  fi
+fi

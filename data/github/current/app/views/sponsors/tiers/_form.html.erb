@@ -1,0 +1,215 @@
+<%
+  listing = sponsorable.sponsors_listing
+  lock_pricing = tier.persisted? && !tier.can_change_pricing?
+  frequency_param = tier.recurring? ? "recurring" : "one-time"
+  hide_repositories_menu = tier.one_time? || frequency_param == "one-time"
+%>
+
+<div class="js-sponsors-tier-form">
+  <% if tier.new_record? %>
+    <label>
+      <div class="d-flex">
+        <div class="mr-3">
+          <%= radio_button_tag :frequency, "recurring", tier.recurring?, class: "flex-shrink-0 flex-self-start js-tier-frequency-radio-button" %>
+        </div>
+
+        <div>
+          <strong>Monthly tier</strong>
+          <p class="text-normal">
+            Monthly sponsors will have their profile badge displayed on your sponsors page
+            and receive any email updates you send until they cancel their sponsorship.
+          </p>
+        </div>
+      </div>
+    </label>
+
+    <label>
+      <div class="d-flex mt-2">
+        <div class="mr-3">
+          <%= radio_button_tag :frequency, "one-time", !tier.recurring?, class: "js-tier-frequency-radio-button" %>
+        </div>
+
+        <div>
+          <strong>One time tier</strong>
+          <p class="text-normal mb-0">
+            One time sponsors will have their profile badge displayed on your sponsors
+            page and receive any email updates you send for one month.
+          </p>
+        </div>
+      </div>
+    </label>
+
+    <hr class="my-4">
+  <% end %>
+
+
+  <% if lock_pricing %>
+    <div class="d-flex flex-items-center mb-3">
+      <h3 class="h4"><%= tier.name %></h3>
+      <%= render Primer::Beta::Octicon.new(icon: "info", ml: 3, mr: 2, color: :muted, flex_shrink: 0) %>
+      <span class="note text-normal">
+        Want to change the tier price? You can retire this tier and create a new one to replace it.
+      </span>
+    </div>
+  <% else %>
+    <dl class="form-group required">
+      <dt>
+        <label for="amount">Tier price</label>
+      </dt>
+      <dd class="position-relative">
+        <span class="position-absolute ml-2 color-fg-muted" style="top: 6px;left: 3px;">$</span>
+        <auto-check
+          class="js-tier-pricing-check"
+          src="<%= sponsorable_dashboard_tier_verify_path(sponsorable, frequency: frequency_param) %>"
+          required
+          <%= test_selector("tier-pricing-check") %>>
+          <input type="number"
+            id="amount"
+            name="amount"
+            class="form-control pl-4"
+            style="width: 96px;"
+            value="<%= params[:amount] || tier.monthly_price_in_dollars.to_i %>"
+            min="1"
+            step="1"
+            max="<%= SponsorsTier::MAX_SPONSORSHIP_AMOUNT_IN_DOLLARS %>"
+            <%= "readonly" if lock_pricing %>
+            required
+            autofocus>
+          <%= csrf_hidden_input_for sponsorable_dashboard_tier_verify_path(sponsorable, frequency: frequency_param) %>
+        </auto-check>
+        <% if tier.persisted? %>
+          <span class="d-inline-block no-wrap color-fg-muted">
+            <%= tier.recurring?? "/ month" : "one time" %>
+          </span>
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+  <dl class="form-group mb-5 required">
+    <dt>
+      <label for="description">Tier description</label>
+    </dt>
+    <dd>
+      <%= render Primer::Experimental::PreviewableMarkdownEditor.new(
+        label: "Describe this tier. Formatting with Markdown is supported.",
+        preview_path: marketplace_preview_path,
+        emoji_suggestions_path: emoji_suggestions_path,
+        character_limit: SponsorsTier::MAX_DESCRIPTION_LENGTH,
+        allow_attachments: false,
+        autofocus: lock_pricing
+      ) do |editor| %>
+        <% editor.with_textarea(name: "description", id: "description") do %><%= params[:description] || tier&.description %><% end %>
+        <% editor.with_extra do %>
+          <%= csrf_hidden_input_for marketplace_preview_path, class: "js-data-preview-url-csrf" %>
+        <% end %>
+      <% end %>
+    </dd>
+  </dl>
+
+  <hr class="my-4">
+
+  <dl class="form-group" <%= test_selector("welcome-message") %>>
+    <dt class="form-checkbox">
+      <label for="include_welcome_message">
+        <input type="checkbox" name="include_welcome_message" class="js-welcome-message-checkbox" <%= "checked" if tier.welcome_message.present?%> id="include_welcome_message">
+        Display welcome message
+      </label>
+      <p class="note">
+        This will be visible after payment and in the welcome email. Include any information about
+        accessing or receiving rewards.
+      </p>
+    </dt>
+    <dd class="js-welcome-message-form ml-3" <%= "hidden" if tier.welcome_message.nil? %>>
+      <%= render Primer::Experimental::PreviewableMarkdownEditor.new(
+        label: "Add a welcome message for new sponsors on this tier. Formatting with Markdown is supported.",
+        preview_path: marketplace_preview_path,
+        emoji_suggestions_path: emoji_suggestions_path,
+        character_limit: SponsorsTier::MAX_DESCRIPTION_LENGTH,
+        allow_attachments: false,
+        required: false
+      ) do |editor| %>
+        <% editor.with_textarea(name: "welcome_message", id: "welcome_message") do %><%= params[:welcome_message] || tier&.welcome_message %><% end %>
+        <% editor.with_extra do %>
+          <%= csrf_hidden_input_for marketplace_preview_path, class: "js-data-preview-url-csrf" %>
+        <% end %>
+      <% end %>
+      <%= render Primer::Beta::Button.new(
+        type: :submit,
+        name: Sponsors::TiersController::SEND_TEST_EMAIL_INPUT_NAME,
+        value: true,
+        size: :small,
+        mt: 2,
+        'data-test-selector': "send-test-email",
+      ).with_content("Send Test Email") %>
+    </dd>
+  </dl>
+
+  <hr>
+
+  <div class="js-repositories-menu" <%= "hidden" if hide_repositories_menu %>>
+    <%= render Sponsors::Sponsorables::RepositoriesMenuComponent.new(tier: tier) %>
+  </div>
+
+  <input type="hidden" name="listing_slug" value="<%= listing.slug %>">
+  <div class="d-flex flex-column flex-sm-row mt-4">
+  <% if tier.can_retire? %>
+    <%= render Primer::Beta::Button.new(
+      type: :submit,
+      scheme: :primary,
+      m: 1,
+      "data-disable-invalid": "",
+    ).with_content("Update") %>
+    <%= render Primer::Beta::Button.new(
+      tag: :a,
+      href: sponsorable_dashboard_tiers_path(sponsorable, frequency: frequency_param),
+      m: 1,
+      text_align: :center,
+    ).with_content("Cancel") %>
+    <div class="flex-1"></div>
+    <%= render Sponsors::Dashboard::Tiers::RetireTierButtonComponent.new(sponsor_count: sponsor_count) %>
+  <% elsif tier.published? %>
+    <%= render Primer::Beta::Button.new(
+      type: :submit,
+      scheme: :primary,
+      m: 1,
+      "data-disable-invalid": "",
+    ).with_content("Update") %>
+    <%= render Primer::Beta::Button.new(
+      tag: :a,
+      href: sponsorable_dashboard_tiers_path(sponsorable, frequency: frequency_param),
+      m: 1,
+      text_align: :center,
+    ).with_content("Cancel") %>
+    <div class="flex-1"></div>
+    <%= render Sponsors::Dashboard::Tiers::RetireTierButtonComponent.new(sponsor_count: sponsor_count) %>
+  <% else %>
+    <%= render Primer::Beta::Button.new(
+      type: :submit,
+      m: 1,
+      "data-disable-invalid": "",
+      value: "save_draft",
+      name: "submit"
+    ).with_content("Save draft") %>
+    <%= render Primer::Beta::Button.new(
+      tag: :a,
+      href: sponsorable_dashboard_tiers_path(sponsorable, frequency: frequency_param),
+      m: 1,
+    ).with_content("Cancel")%>
+    <% if can_publish? %>
+      <div class="flex-1"></div>
+      <%= render Primer::Beta::Button.new(
+        type: :submit,
+        scheme: :primary,
+        m: 1,
+        value: 'publish_tier',
+        name: "submit",
+        classes: "js-publish-tier-button",
+        "data-disable-invalid": ""
+      ) do |button| %>
+        <% button.with_leading_visual_icon(icon: :eye) %>
+        Publish tier
+      <% end %>
+    <% end %>
+  <% end %>
+  </div>
+</div>

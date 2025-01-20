@@ -1,0 +1,16 @@
+export const VALUES = {
+  timelineAvatarSize: 32,
+  timelineBackPageSize: 15,
+  loadAroundHighlightedPageSize: 15,
+  rowLoadingSkeletonCount: 5,
+  maxLinkedBranches: 5,
+  maxLinkedPullRequests: 25,
+  issueTransferRepositoriesPreloadCount: 10,
+  ghostUserLogin: 'ghost',
+  branchUrl: (branch: string, repositoryWithOwner: string) => `/${repositoryWithOwner}/tree/${branch}`,
+  convertToDiscussionCategoriesFirst: 30,
+  stickyHeaderHeight: 60,
+  scrollWaitMediaTimeout: 5000,
+  commentImage: '.markdown-body img',
+  commentVideo: '.markdown-body video',
+}

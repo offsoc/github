@@ -1,0 +1,105 @@
+#!/bin/bash
+# This script is used to initialize the Packages repositories in a codespace. It clones the repositories and runs their `bootstrap` and `setup` scripts.
+
+set -e
+
+help() {
+   echo "Clones Packages repositories and runs their \`bootstrap\` and \`setup\` scripts."
+   echo
+   echo "Usage: setup-codespaces-packages [-f|d|h]"
+   echo "Options:"
+   echo "-f     Forces deletion (without prompting) of existing data and resources (e.g. minio bucket, elastic search index, etc.) before recreating them. When not specified, the script will prompt for confirmation before deleting and recreating each resource."
+   echo "-d     Deletes existing Packages repositories before recloning them."
+   echo "-h     Prints this help message."
+   echo
+}
+
+# Contains arguments passed to the `bootstrap` and `setup` scripts.
+bootstrap_and_setup_args=""
+
+# Whether to delete existing repositories.
+delete_existing_repos=false
+
+# Parse the options.
+while getopts "fhd" opt; do
+   case $opt in
+   h)
+      help
+      exit
+      ;;
+   f)
+      # If the `-f` flag is passed, pass `-f` to the `bootstrap` and `setup` scripts.
+      bootstrap_and_setup_args="-f"
+      ;;
+   d)
+      delete_existing_repos=true
+      ;;
+   :)
+      echo "Error: Option -$OPTARG requires an argument."
+      exit 1
+      ;;
+   \?)
+      echo "Error: Invalid option -$OPTARG"
+      exit 1
+      ;;
+   esac
+done
+
+echo "Started setup of all Packages repositories..."
+
+packages_workspace_dir="/workspaces/packages"
+
+# Delete existing Packages repositories if requested.
+if [[ $delete_existing_repos == true ]]; then
+   echo -e "Deleting existing packages repositories..."
+   rm -rf $packages_workspace_dir/registry-metadata
+   rm -rf $packages_workspace_dir/container-registry
+   rm -rf $packages_workspace_dir/npm-metadata
+   rm -rf $packages_workspace_dir/registry
+   echo -e "Deleted existing packages repositories."
+fi
+
+# Create the Packages workspace directory if it doesn't exist.
+mkdir -p "$packages_workspace_dir"
+
+initialize_repo() {
+   local repo_name=$1
+
+   # Change to the Packages workspace directory.
+   cd "$packages_workspace_dir"
+
+   # Clone the repo if it doesn't exist.
+   if [ ! -d "$repo_name" ]; then
+      echo "Cloning $repo_name repo..."
+      git clone "https://github.com/github/$repo_name"
+      echo "Cloned $repo_name repo."
+   else
+      echo "Repo $repo_name already exists. Skipping clone..."
+   fi
+
+   # Change to the repo directory.
+   cd "$repo_name"
+
+   (
+      # Run bootstrap script if it exists.
+      if [ -f "script/bootstrap" ]; then
+         echo "Running bootstrap for $repo_name..."
+         . script/bootstrap $bootstrap_and_setup_args
+         echo "Bootstrap complete for $repo_name."
+      fi
+
+      # Run setup script if it exists.
+      if [ -f "script/setup" ]; then
+         echo "Running setup for $repo_name..."
+         . script/setup $bootstrap_and_setup_args
+         echo "Setup complete for $repo_name."
+      fi
+   )
+}
+
+initialize_repo registry-metadata
+initialize_repo container-registry
+initialize_repo npm-registry
+initialize_repo registry
+
+echo "Completed setup of all Packages repositories."

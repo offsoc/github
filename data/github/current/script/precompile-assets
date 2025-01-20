@@ -1,0 +1,56 @@
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+destination="${ASSETS_PATH:-public/assets}"
+RAILS_ENV="${RAILS_ENV:-development}"
+ENTERPRISE="${ENTERPRISE:-false}"
+
+rm -rf "$destination"
+
+echo "Compiling assets for $RAILS_ENV in $destination"
+
+precompile_assets() {
+  [ ! -d tmp ] && mkdir tmp
+  date +%s > tmp/assets-precompiled-at
+  # Prepare for builds
+  NODE_ENV="$RAILS_ENV" DESTINATION="$destination" ./bin/npm run fingerprint-static-assets # Static Assets
+  ./bin/npm run compile-relay # Compile Relay
+
+  # Run webpack builds in parallel
+  NODE_ENV="$RAILS_ENV" DESTINATION="$destination" ENTERPRISE="$ENTERPRISE" SKIP_RELAY=true ./bin/npm run webpack & # Webpack
+  P1=$!
+  NODE_ENV="$RAILS_ENV" DESTINATION="$destination" ./bin/npm run webpack:css & # CSS
+  P2=$!
+  NODE_ENV="$RAILS_ENV" DESTINATION="$destination" SKIP_RELAY=true ./bin/npm run webpack:alloy & # Alloy
+  P3=$!
+  wait $P1 $P2 $P3
+
+  # remove dev-only .css.js files
+  if [ "$RAILS_ENV" != "development" ]; then
+    rm -f "$destination"/*.css.js
+  fi
+
+  ./script/validate-manifest-json "$destination"
+
+  # Compile assets for each active bundler flag when building for production
+  if [ "$RAILS_ENV" == "production" ]; then
+    BUNDLER_FLAGS=($(cat ui/packages/webpack/bundler-flags.json | jq -r 'keys[] as $k | "\(.[$k] | .flag)"'))
+    echo "Compiling assets for each active bundler flags:" "${BUNDLER_FLAGS[@]}"
+
+    for flag in "${BUNDLER_FLAGS[@]}"; do
+      BUNDLER_FLAG=$flag NODE_ENV="$RAILS_ENV" DESTINATION="$destination" ENTERPRISE="$ENTERPRISE" ./bin/npm run webpack
+      rm -f "$destination"/*.css.js
+    done
+  else
+    echo "Skipping assets compilation for additional bundler flags in development"
+  fi
+
+  # symlink files are only needed during development
+  if [ "$RAILS_ENV" != "development" ]; then
+    find "$destination" -type l | xargs rm -f
+  fi
+}
+
+precompile_assets

@@ -1,0 +1,140 @@
+<% sort_order = params[:sort_by] %>
+
+<% owner_actor = this_business.owner?(current_user) %>
+<% view = Businesses::PeopleView.new(query: query, business: this_business, selected_user_ids: [], owner_actor: owner_actor) %>
+
+<% if view.query_or_filters_present? %>
+  <div class="issues-reset-query-wrapper">
+    <%= link_to people_enterprise_path(this_business.slug), class: "issues-reset-query" do %>
+      <%= primer_octicon(:x, classes: "issues-reset-query-icon") %>
+      Clear current search query and filters
+    <% end %>
+  </div>
+<% end %>
+
+<div class="d-flex table-list-header table-list-header-next">
+  <span data-autosearch-results class="d-none d-md-block d-lg-block table-list-heading table-list-header-meta flex-auto">
+    <%= number_with_delimiter members.total_entries %>
+    <%= pluralize_without_number members.total_entries, "person" %>
+    <%= view.organizations&.any? ? " with membership in #{view.organizations.join(' or ')} " : "" %>
+    in <%= this_business.name %>
+
+    <div class="select-all-dropdown js-bulk-actions d-inline">
+      <%= render Businesses::People::BulkActionToolbarComponent.new(business: this_business, selected_user_ids: view.selected_user_ids, show_remove: view.show_remove?) %>
+    </div>
+  </span>
+
+  <div class="table-list-header-toggle pl-0">
+    <%= render(Primer::Alpha::ActionMenu.new(
+      select_variant: :single,
+      mt: 2,
+      mr: 2
+    )) do |menu| %>
+      <% menu.with_show_button(
+        test_selector: "sort-button",
+      ) do |button| %>
+        <% button.with_trailing_action_icon(icon: :"triangle-down") %>
+        Sort
+      <% end %>
+      <% menu.with_item(
+        label: "A-Z members",
+        href: people_enterprise_path(this_business.slug, query: query, sort_by: "asc"),
+        active: sort_order == "asc" || sort_order.blank?,
+      ) %>
+      <% menu.with_item(
+        label: "Z-A members",
+        href: people_enterprise_path(this_business.slug, query: query, sort_by: "desc"),
+        active: sort_order == "desc",
+      ) %>
+    <% end %>
+  </div>
+</div>
+
+<% if view.display_two_factor_filter_warning? %>
+  <div <%= test_selector("two-factor-warning") %>>
+    <%= render layout: "shared/flash_container", locals: { type: "notice", border: true } do %>
+      <%= render(Primer::Beta::Octicon.new(:"info", mr: 0)) %>
+      <%= view.two_factor_warning_banner %>
+      <%= link_to "Learn more about filters.", view.filter_help_url %>
+    <% end %>
+  </div>
+<% end %>
+
+<% if view.display_cost_center_error_warning? %>
+  <div <%= test_selector("cost-center-warning") %>>
+    <%= render layout: "shared/flash_container", locals: { type: "warn", border: true } do %>
+      <%= render(Primer::Beta::Octicon.new(:"alert", mr: 0)) %>
+      <%= "There was an issue retrieving cost center data." %>
+    <% end %>
+  </div>
+<% end %>
+
+<% if members.size > 0 %>
+  <ul>
+    <% members.each do |member| %>
+      <%= render Businesses::UserListCardComponent.new(
+        user: member.is_a?(BusinessUserAccount) ? (member.user.blank? ? nil : member) : member,
+        # If user is provided as nil show a "person" octicon as the server-only
+        # EnterpriseUserAccount avatar.
+        octicon: "person",
+        user_link: view.member_link(member),
+        user_link_data_options: view.organization_member_link_data_options(member),
+        primary_name: member.is_a?(BusinessUserAccount) ? (member.name.present? ? member.name : member.display_login) : member.safe_profile_name,
+        subtitle: view.subtitle_for_member(member),
+        spammy: !GitHub.single_business_environment? && member&.user&.spammy?,
+        display_login: member.display_login,
+        bulk_action_enabled: !GitHub.single_business_environment? && view.owner_actor?,
+        bulk_attribute: "user_ids",
+        bulk_id: member.is_a?(BusinessUserAccount) ? (member.user.blank? ? nil : member.user.id) : member.id,
+        owner_actor: view.owner_actor?
+      ) do %>
+        <div class="color-fg-muted d-flex flex-1 flex-items-center flex-justify-end flex-wrap">
+          <% if view.owner_actor? %>
+            <%= render GitHub::BatchDeferredContentComponent.new(
+              url: enterprise_member_details_path(this_business),
+              inputs: { member_id: member&.id }
+            ) do %>
+              <span class="Skeleton d-inline-block ml-1 Skeleton--text">Loading…</span>
+            <% end %>
+          <% else %>
+            <span class="d-flex flex-items-center">
+              <% if member.is_a?(BusinessUserAccount) %>
+                <% if member.user.present? && this_business.owner?(member.user) %>
+                  Owner
+                <% else %>
+                  Member
+                <% end %>
+              <% elsif this_business.owner?(member) %>
+                Owner
+              <% else %>
+                Member
+              <% end %>
+            </span>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  </ul>
+
+  <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+    <%= will_paginate(members) %>
+  </div>
+
+  <%= render(Businesses::EmuFirstAdminMembersBlankslateComponent.new(
+    page: :admins,
+    count: members.size,
+  )) %>
+
+<% else %>
+  <%= render Primer::Beta::Blankslate.new do |c| %>
+    <% c.with_visual_icon(icon: "people") %>
+
+    <% c.with_heading(tag: :h2) do %>
+      No members
+    <% end %>
+
+    <% c.with_description do %>
+      <%= "There aren’t any members in this enterprise" + (view.original_query.present? ? " matching '#{view.original_query}'" : "") + "." %>
+    <% end %>
+  <% end %>
+<% end %>

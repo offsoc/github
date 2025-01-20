@@ -1,0 +1,93 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "rails"
+require "erb_lint/cli"
+
+CONCURRENCY = ENV.fetch("TEST_QUEUE_WORKERS", Etc.nprocessors).to_i
+FILE_PREFIX = "tmp/erblint.#{Time.now.to_i}".freeze
+
+# Fake ERBLint CLI to get the list of files to lint
+#
+# ERBLint does not have the --list-target-files like Rubocop does
+# so we obtain the list using some private CLI APIs
+class FakeERBLintCLI < ERBLint::CLI
+  def files_to_lint(args)
+    args = args.dup
+    load_options(args)
+    load_config
+    @files = args
+    lint_files
+  end
+end
+
+def read_process_lines(args)
+  lines = IO.popen(args) { |io| io.each_line.map(&:chomp) }
+  unless $?.success?
+    $stderr.puts "Error running #{args.inspect}"
+    exit $?.exitstatus
+  end
+  lines
+end
+
+cli = FakeERBLintCLI.new
+files = cli.files_to_lint(ARGV).map { |file| file.delete_prefix("#{Dir.pwd}/") }
+git_files = read_process_lines(["git", "ls-tree", "--name-only", "-r", "HEAD"])
+
+# Filter out files that aren't committed to the repo and aren't specified on
+# the command line.
+files_to_keep = Set.new(git_files)
+files_to_keep.merge(ARGV)
+files.select! { |file| files_to_keep.include?(file) }
+
+# Shuffle files to ensure no worker gets stuck with a bunch of big files
+files.shuffle!
+
+chunk_size = (files.length.to_f / CONCURRENCY).ceil
+
+pids = []
+while files.any?
+  chunk_files = files.shift(chunk_size)
+  output_file = "#{FILE_PREFIX}.#{pids.length}"
+  pids << spawn("bin/bundle", "exec", "erblint", *chunk_files, out: output_file)
+end
+
+status = 0
+pids.each do |pid|
+  Process::waitpid(pid)
+  unless $?.success?
+    status = $?.exitstatus
+  end
+end
+
+num_files = 0
+num_errors = 0
+num_ignored = 0
+was_empty = false
+erblint_files = /^Linting (\d+) files/
+erblint_errors = /^(\d+) error\(s\) were found in ERB files/
+erblint_ignored = /^(\d+) error\(s\) were ignored in ERB files/
+
+Dir.glob("#{FILE_PREFIX}*").each do |file|
+  IO.foreach(file) do |line|
+    if m = line.match(erblint_files)
+      num_files += m[1].to_i
+    elsif m = line.match(erblint_errors)
+      num_errors += m[1].to_i
+    elsif m = line.match(erblint_ignored)
+      num_ignored += m[1].to_i
+    elsif line.chomp.empty?
+      # collapse consecutive empty lines
+      print line unless was_empty
+      was_empty = true
+    else
+      was_empty = false
+      print line
+    end
+  end
+end
+
+puts "%d files inspected, %d offenses detected, %d offenses ignored" % [num_files, num_errors, num_ignored]
+
+FileUtils.rm_f(Dir.glob("#{FILE_PREFIX}*"))
+exit status

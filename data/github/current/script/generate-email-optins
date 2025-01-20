@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# Usage: gudo generate-email-optins [<username>|<max_row_count>]
+
+if ARGV.length >= 2
+  STDERR.puts "Usage: gudo generate-email-optins [<username>|<max_row_count>]"
+  exit 1
+end
+
+username_or_max_row_count = ARGV.first if ARGV.length == 1
+limit = unless username_or_max_row_count.to_i.zero?
+  username_or_max_row_count.to_i
+end
+username = username_or_max_row_count if limit.nil?
+
+require_relative "../config/boot"
+require_relative "../config/environment"
+
+if ENV["DEBUG"]
+  ActiveRecord::Base.logger = Logger.new STDERR
+end
+
+user_ids = ActiveRecord::Base.connected_to(role: :reading) do
+  if username
+    User.where(login: username).pluck(:id)
+  else
+    user_ids = ActiveRecord::Base.connected_to(role: :reading_slow) do
+      sql = Arel.sql <<-SQL
+        SELECT users.id
+        FROM users
+        WHERE spammy = false
+        AND id NOT IN (
+          SELECT user_id
+          FROM newsletter_preferences
+        )
+      SQL
+
+      if limit
+        # get 10% more users than we need because filtering out by type at this
+        # point is very slow and only 8-9% of users are bots or organizations.
+        users_limit = (limit * 1.1).round
+        sql += Arel.sql(<<-SQL)
+          ORDER BY rand()
+          LIMIT #{users_limit}
+        SQL
+      end
+
+      ApplicationRecord::Domain::Users.connection.select_values(sql)
+    end
+
+    user_ids.sort! if limit
+    user_ids
+  end
+end
+
+BATCH_SIZE = 1000
+URL = "http#{"s" if GitHub.ssl?}://#{GitHub.host_name}/email-optin?token="
+
+puts "# user.id, user.login, user.primary_user_email, email_optin_url"
+puts_count = 0
+ActiveRecord::Base.connected_to(role: :reading) do
+  user_ids.each_slice(BATCH_SIZE) do |ids|
+    break if puts_count >= limit
+    User.where(type: "User", id: ids).includes(:primary_user_email).each do |user|
+      break if puts_count >= limit
+      token = ActiveRecord::Base.connected_to(role: :writing) do
+        user.signed_auth_token scope: EmailOptinController::REQUIRED_SCOPE,
+                               expires: 1.year.from_now
+      end
+      puts "#{user.id},#{user.login},#{user.primary_user_email},#{URL}#{token}"
+      puts_count += 1
+    end
+  end
+end
+
+if puts_count < limit
+  $stderr.puts "Warning: only output #{puts_count} rows (requested #{limit})!"
+end

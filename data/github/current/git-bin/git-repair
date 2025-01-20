@@ -1,0 +1,146 @@
+#!/bin/sh
+#/ Usage: git-repair [<problem...>]
+#/
+#/ Detect and attempt to repair certain object-database
+#/ problems leftover from old Git/GitHub bugs. If no
+#/ problem names are provided, detection is attempted on all
+#/ known types; the first one detected is then fixed.
+#/
+#/ Returns 0 if a problem was repaired, or if no problems were
+#/ detected. Returns 1 otherwise.
+#/
+#/ Known problems:
+#  [see inline comments below]
+
+set -e
+
+if test "$1" = "--help"; then
+  grep '^#/' <"$0" | cut -c 4-
+  exit 1
+fi
+
+say() {
+  echo >&2 "git-repair: $*"
+}
+
+die() {
+  say "fatal: $*"
+  exit 1
+}
+
+#/
+#/   stale_reflog - reflogs which refer to parts of the object graph
+#/                  that have been pruned (and can break git-repack or
+#/                  git-prune runs)
+detect_stale_reflog () {
+  git rev-list --objects --all >/dev/null 2>&1 &&
+    ! git rev-list --objects --reflog >/dev/null 2>&1
+}
+
+repair_stale_reflog() {
+  git reflog expire --stale-fix --expire-unreachable=now --all
+}
+
+#/
+#/   automerge - an automerge whose tree objects have been pruned
+#
+# We detect the situation by finding any trees with broken entries,
+# and then work our way back to the commits. If they look like
+# merge commits, they are candidates for repair (and we repair
+# by re-running the merge).
+detect_automerge () {
+  automerge_commits=$(
+    git fsck --no-dangling |
+    perl -lne '/^broken link from\s+(\S+) (\S+)/ and print "$1 $2"' |
+    while read type sha; do
+      if test "$type" = "commit"; then
+        echo "$sha"
+      elif test "$type" = "tree"; then
+        find_commit_from_tree "$sha"
+      fi
+      # we do not know how to handle broken tags,
+      # and blobs cannot reference anything
+    done |
+    while read commit; do
+      # now we have candidate commits; make sure they actually
+      # look like auto-merges
+      git log --no-walk --merges --format="%s" $commit |
+      egrep -q 'Merge (pull request|[0-9a-f]* into)' &&
+        echo $commit
+    done
+  )
+  test -n "$automerge_commits"
+}
+
+repair_automerge () {
+  for commit in $automerge_commits; do
+    say "re-running merge of $commit"
+    merge_base=$(git merge-base "$commit^1" "$commit^2") ||
+      merge_base=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+    tree=$(git bare-merge-helper "$merge_base" "$commit^1" "$commit^2" 2>/dev/null) ||
+      die "repeating auto-merge failed"
+    test "$(git rev-parse --verify "$commit^{tree}")" = "$tree" ||
+      die "re-run of auto-merge produced different tree"
+  done
+}
+
+trees() {
+  git cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype)' |
+  grep ' tree$' |
+  cut -d' ' -f1
+}
+
+find_commit_from_tree () {
+  # first check commits to see if it is a root-tree
+  commit=$(git log --all --format="%T %H" |
+           grep "^$1" |
+           cut -d' ' -f2 |
+           head -1)
+  if test -n "$commit"; then
+    echo "$commit"
+    return 0
+  fi
+
+  # now look for it as an entry of another tree (i.e., a subtree).
+  tree=$(
+    trees |
+    while read tree; do
+      git ls-tree "$tree" |
+      grep -q "$1" &&
+        echo $tree
+    done |
+    head -1
+  )
+  # if we found one, then recurse; otherwise, give up
+  if test -n "$tree"; then
+    find_commit_from_tree "$tree"
+  fi
+}
+
+
+if test "$#" = 0; then
+  set -- stale_reflog automerge
+fi
+
+detected=false
+for problem in "$@"; do
+  say "detecting problem '$problem'"
+  eval "detect_$problem" || continue
+
+  detected=true
+  say "repairing problem '$problem'"
+  if eval "repair_$problem"; then
+    exit 0
+  else
+    say "repair of '$problem' failed"
+    # try next problem
+  fi
+done
+
+if $detected; then
+  say "some problems could not be repaired"
+  exit 1
+fi
+
+say "no problems detected"
+exit 0

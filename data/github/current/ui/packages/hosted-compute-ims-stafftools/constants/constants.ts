@@ -1,0 +1,23 @@
+export const Constants = {
+  stafftoolPageTitle: 'Hosted Compute Image Management',
+  blankslateTitle: 'Welcome to IMS Stafftools',
+  blankslateDescription: 'Coming soon!',
+  pointerBlankslateTitle: 'Pointer table is empty!',
+  curatedImagesPointerTableBlankslateTitle: 'Curated image table is empty!',
+  imsRepoLink: 'https://github.com/github/hosted-compute-ims',
+  editPointer: 'Edit pointer',
+  deletePointer: 'Delete pointer',
+  pointerTableSubtitle: 'Pointers table will show the latest pointer and where it pointing to.',
+  pointerTableTitle: 'Pointers',
+  createPointer: 'Create pointer',
+  curatedImagesTableTitle: 'Curated Images',
+  newCuratedImages: 'New image',
+  createCuratedImages: 'Create image',
+  curatedImageTableSubtitle:
+    'Curated images table will show the curated image definitions and its corresponding image versions.',
+  viewImageVersions: 'View image versions',
+  editCuratedImages: 'Edit image',
+  deleteCuratedImages: 'Delete image',
+  imageVersionsUrl: (path: string, imageDefinitionId: string) => `${path}/curated/${imageDefinitionId}`,
+  stateDetails: 'View State Details',
+}

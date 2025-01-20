@@ -1,0 +1,61 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/boot", __FILE__)
+require "github/storage"
+require "github/config/mysql"
+require "active_support/core_ext/array/grouping"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} <host>"
+  exit 1
+end
+
+require "action_view"
+# don't print deprecation warning
+I18n.enforce_available_locales = false
+
+def main
+  host = ARGV.first
+
+  unless host
+    usage
+  end
+
+  host_info = GitHub::Storage::Allocator.host_info host
+  if host_info.nil?
+    puts "Unknown host `#{host}`"
+    exit 1
+  end
+
+  if host_info[1] != 0
+    puts "Host `#{host}` must be taken offline before evacuation."
+    exit 1
+  end
+
+  all_oids = GitHub::Storage::Allocator.oids_on_host host
+
+  puts "Evacuating #{all_oids.length} from #{host}"
+  all_oids.in_groups_of(100).each do |part|
+    part.compact!
+    oids = part.map { |p| p[1] }
+    blob_ids = part.map { |p| p[0] }
+
+    puts "\t#{oids.length} of #{all_oids.length}"
+
+    ok, body = GitHub::Storage::Client.delete(host, oids)
+    if !ok
+      puts "Error deleting objects: #{body["message"]}"
+      exit 1
+    end
+
+    GitHub::Storage::Creator.delete_replicas(host, blob_ids)
+  end
+
+end
+
+main

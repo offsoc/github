@@ -1,0 +1,135 @@
+#!/usr/bin/env safe-ruby
+
+# typed: false
+# frozen_string_literal: true
+
+# This script is used stitch process and pull down query violation information from the latest, complete CI run.
+# It stitches together query violation files generated across all our CI builds into one file
+# that is checked into gh/gh. It can also include the location of the violations in the queries but this should
+# never be committed.
+#
+# Run this from the root of your gh/gh Codespace with a specific branch checked out. It will update the relevant YAML
+# files in packages with the violations found in the last CI builds. See the options below for more details.
+
+require "optparse"
+require "yaml"
+require "sorbet-runtime"
+
+require_relative "../lib/github/serviceowners/packageowners"
+
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: domain-isolation-violations [options]"
+
+  opts.on("-b", "--branch [String]", "Optional branch name") do |v|
+    options[:branch] = v
+  end
+  opts.on("-s", "--sha [String]", "Optional SHA") do |v|
+    options[:sha] = v
+  end
+  opts.on("--[no-]locations", "Include violation locations") do |v|
+    options[:include_locations] = v
+  end
+  opts.on("--[no-]audit", "Include violations for queries involving tables with visibility 'audit'") do |v|
+    options[:include_audit] = v
+  end
+  opts.on("--reason [String]", "Only process this reason, possible values: cross_domain, domain_access") do |v|
+    options[:reason] = v
+  end
+  opts.on("-t", "--tables", "Only print tables involved in violations") do |v|
+    options[:tables] = v
+  end
+end.parse!
+
+input_branch = options[:branch] || `git rev-parse --abbrev-ref HEAD`.strip
+input_include_locations = options[:include_locations] || false
+input_include_audit = options[:include_audit] || false
+input_reason = options[:reason]
+input_tables = options[:tables] || false
+
+sha = options[:sha] || `git rev-parse #{input_branch}`.strip
+
+puts "Looking up latest worklow run for #{input_branch} (#{sha})..."
+workflow_run_id = `gh run list --commit #{sha} --status 'completed' --workflow 'GitHub CI - Actions' --json databaseId | jq '.[] | .databaseId' | tail -n1`.strip
+
+if workflow_run_id.empty?
+  puts "=> No completed workflow runs found for #{input_branch} (#{sha})"
+  exit
+end
+
+if input_tables
+  puts "Pulling workflow run data from GitHub..."
+  run_view = `gh run view #{workflow_run_id}`
+
+  annotations = run_view.split("ANNOTATIONS").last
+  tables = annotations.split(/^  Tables:\n/).each_with_object(Set.new) do |section, tables|
+    table_names = section.scan(/\s{2}-\s'([^']+)'/).flatten
+    tables.merge(table_names)
+  end.sort
+
+  puts tables.join("\n")
+  exit
+end
+
+folder = "tmp/cache/artifacts/#{sha}-#{workflow_run_id}"
+
+puts "Downloading artifacts for #{input_branch} (#{sha}) to #{folder}..."
+if !File.exist?(folder)
+  # artifacts can be large, so let's keep one copy around
+  FileUtils.rm_rf("tmp/cache/artifacts")
+  FileUtils.mkdir_p(folder)
+
+  `gh run download #{workflow_run_id} --pattern 'github-all-features*' --dir #{folder}`
+  puts "=> Artifacts downloaded."
+else
+  puts "=> Artifacts already downloaded for #{sha}."
+end
+
+puts "Processing artifacts in #{folder}..."
+violations_count = 0
+packageowners = GitHub::Serviceowners::Packageowners.new
+
+Dir["#{folder}/**/*domain_query_violations.yml"].each do |file_name|
+  package = file_name.match(/github-all-features.*artifacts\/(\S+)\//)&.captures&.first
+  next if package.nil?
+
+  data = YAML.safe_load_file(file_name)
+
+  data.each do |_, value|
+    relevant_violations = value["violations"].dup
+    relevant_violations.select! { |v| v["reason"] == input_reason } if input_reason
+
+    next if relevant_violations.empty?
+
+    if !input_include_audit
+      all_tables_audit = value["tables"].all? do |table|
+        package, level = packageowners.package_and_ownership_level_for(table)
+        level == GitHub::Serviceowners::Packageowners::TableVisibilityLevel::Audit
+      end
+
+      next if all_tables_audit
+    end
+
+    relevant_violations.each do |violation|
+      reason = GitHub::Serviceowners::Packageowners::QueryViolationReason.deserialize(violation["reason"])
+
+      packageowners.record_violation_for_package(
+        package: package,
+        query: value["query"],
+        tables: value["tables"],
+        frame: violation["location"],
+        reason: reason
+      )
+      violations_count += 1
+    end
+  end
+end
+
+puts "=> Processed #{violations_count} violations across all packages."
+
+puts "Writing violations to YAML files in all packages..."
+packageowners.flush_package_violations(
+  merge_with_stored: false,
+  write_to_stored: true,
+  include_locations: input_include_locations
+)

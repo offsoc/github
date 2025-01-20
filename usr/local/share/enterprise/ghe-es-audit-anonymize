@@ -1,0 +1,78 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-es-dump-json 'http://localhost:9200/audit_log*' | ghe-es-audit-anonymize
+
+require "json"
+
+ALLOWED_FIELDS =  { 0 => ["action", "created_at", "@timestamp", "started_at", "finished_at"] }
+
+def allowed_key?(level, k)
+  return ALLOWED_FIELDS.key?(level) && ALLOWED_FIELDS[level].include?(k)
+end
+
+def mutate_string(original)
+  "x" * original.length
+end
+
+def mutate_integer(original)
+  return 1
+end
+
+def mutate_float(original)
+  return 1.0
+end
+
+def mutate_array(original, level)
+  original.map { |v| mutate_value(v, level) }
+end
+
+def mutate_value(v, level)
+  case v
+  when String
+    return mutate_string(v)
+  when Integer
+    return mutate_integer(v)
+  when Float
+    return mutate_float(v)
+  when Array
+    return mutate_array(v, level + 1)
+  when TrueClass
+    return true
+  when FalseClass
+    return false
+  when NilClass
+    return nil
+  when Hash
+    return mutate_hash(v, level + 1)
+  else
+    raise  "Unhandled class #{v.class}"
+  end
+end
+
+def mutate_hash(d, level = 0)
+  d.keys.each do |k, v|
+    next if allowed_key?(level, k)
+    d[k] = mutate_value(d[k], level)
+  end
+
+  return d
+end
+
+def parse(l)
+  d = JSON.parse(l)
+  mutate_hash(d["_source"])
+  puts d.to_json
+end
+
+def main
+  if ARGV.size != 0
+    puts File.read(__FILE__).lines.select { |l| l =~ /^#\// }.map { |l| l[3, l.size] }.join("\n")
+    exit 1
+  end
+
+  STDIN.read.split("\n").each do |l|
+    parse l
+  end
+end
+
+main

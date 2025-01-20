@@ -1,0 +1,54 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+warn "Loading rails environment..."
+require_relative "../config/environment"
+
+require "resqued/aqueduct_worker_adapter"
+
+def print_queue_lengths
+  GitHub::Aqueduct::Job.list_queues.sort.each do |q|
+    depth = ApplicationJob.queue_depth(queue: q)
+    $stdout.puts "  #{q}: #{depth}"
+  end
+end
+
+def main
+  $stdout.puts "Starting work-all-jobs..."
+  $stdout.puts "Queue lengths before starting:"
+  print_queue_lengths
+  queues = GitHub::Aqueduct::Job.list_queues
+  if queues.empty?
+    $stderr.puts "No queues found. Service aqueduct-lite may not be running, or no jobs have been enqueued."
+    return 1
+  end
+
+  completed = 0
+  $stdout.puts "Waiting for jobs..."
+  loop do
+    job = GitHub.aqueduct_worker_backend.pop(queues, 5, worker_id: "work-all-jobs")
+    if job.ok? && job.value
+      worker = Resqued::AqueductWorkerAdapter.new(*queues).worker
+      begin
+        worker.start_heartbeat
+        worker.send(:perform, job.value)
+        completed += 1
+        # Print updated progress every 100 jobs completed
+        if completed % 100 == 0
+          $stdout.puts "Completed #{completed} jobs..."
+        end
+      ensure
+        worker.stop_heartbeat
+      end
+    else
+      $stdout.puts "No more jobs available."
+      $stdout.puts "Queue lengths after finishing:"
+      print_queue_lengths
+      return 0
+    end
+  end
+end
+
+exit(main)
+
+# vim:filetype=ruby

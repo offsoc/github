@@ -1,0 +1,269 @@
+<%# erblint:counter DeprecatedComponentsCounter 7 %>
+<div
+  data-target="get-repo.modal"
+  <%= test_selector("code-menu-contents-for-#{current_branch_or_tag_name.try { |s| s.dup.force_encoding(::Encoding::UTF_8).scrub! }}") %>
+>
+  <% if GitHub.codespaces_enabled? && visibility.present? %>
+    <%# Dropdown menu with tabs (Local and Codespaces) %>
+    <%= render Primer::Alpha::TabPanels.new(
+      label: "Choose where to access your code",
+      with_panel: true,
+      bg: :subtle,
+      m: 0,
+      classes: "hx_tabnav-in-dropdown",
+      body_arguments: { display: :flex },
+    ) do |component| %>
+      <%# Local tab of dropdown menu %>
+      <% component.with_tab(
+        panel_id: is_responsive ? "local-panel-responsive" : "local-panel",
+        id: is_responsive ? "local-tab-responsive" : "local-tab",
+        selected: true,
+        flex: 1,
+        data: {
+          tab: "local",
+          action: "click:get-repo#localTabSelected focusin:get-repo#localTabSelected",
+        },
+        wrapper_arguments: {
+          classes: "hx_tabnav-in-dropdown-wrapper",
+          flex: 1
+        }
+      ) do |t| %>
+        <% t.with_text { "Local" } %>
+        <% t.with_panel do %>
+          <ul class="list-style-none">
+            <%= render(
+              "code_menu/pull_request_local_menu_items",
+              pull_request: pull_request,
+              repository: repository,
+              default_menu_item_classes: DEFAULT_MENU_ITEM_CLASSES,
+              default_menu_item_link_classes: DEFAULT_MENU_ITEM_LINK_CLASSES,
+            ) %>
+          </ul>
+        <% end %>
+      <% end %>
+      <%# Codespaces tab of dropdown menu %>
+      <% component.with_tab(
+        panel_id: is_responsive ? "cloud-panel-responsive" : "cloud-panel",
+        id: is_responsive ? "cloud-tab-responsive" : "cloud-tab",
+        flex: 1,
+        data: {
+          tab: "cloud",
+          action: "click:get-repo#cloudTabSelected focusin:get-repo#cloudTabSelected",
+        },
+        wrapper_arguments: {
+          classes: "hx_tabnav-in-dropdown-wrapper",
+          flex: 1
+        }
+      ) do |t| %>
+        <% t.with_text do %>
+          <span>Codespaces</span>
+        <% end %>
+        <% t.with_panel(classes: "cloud-panel") do %>
+          <% if logged_in? %>
+            <% if has_access_to_codespaces? %>
+              <%= render Codespaces::CodeMenuCodespacesListComponent.new(
+                visibility: visibility,
+                pull_request: pull_request,
+                repository: repository,
+                name_param: name_param,
+                ref: ref
+              ) %>
+            <% else %>
+              <div
+                <%= test_selector("codespaces-access-limited") %>
+              >
+                <% if !repository_policy.allowed? %>
+                  <%= render Primer::BlankslateComponent.new(
+                    title: "Codespace access limited",
+                    title_tag: :h4,
+                  ) do %>
+                    <p class="mt-2 mx-4">
+                      <% if !repository_policy.can_bill? && current_user.is_enterprise_managed? %>
+                        <%= render(Primer::Beta::Link.new(
+                          href: "https://docs.github.com/enterprise-cloud@latest/admin/identity-and-access-management/using-enterprise-managed-users-for-iam/about-enterprise-managed-users",
+                          underline: false,
+                          classes: "Link--inTextBlock",
+                        )) { "Enterprise-managed users" } %>
+                        must have their Codespaces usage paid for by <%= current_user.enterprise_managed_business&.name || "their enterprise" %>.
+                      <% elsif repository_policy.has_ip_allowlists? %>
+                        Your organization or enterprise enforces
+                        <%= render(Primer::Beta::Link.new(
+                          href: "https://docs.github.com/enterprise-cloud@latest/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/managing-allowed-ip-addresses-for-your-organization",
+                          underline: false,
+                          classes: "Link--inTextBlock",
+                        )) { "IP allow lists" } %>
+                        which are unsupported by Codespaces at this time.
+                      <% elsif repository_policy.disabled_by_business? %>
+                        Your enterprise has disabled Codespaces at this time. Please contact your enterprise administrator for more information.
+                      <% elsif repository_policy.disabled_by_organization? %>
+                        Your organization has disabled Codespaces on this repository. Please contact your organization administrator for more information.
+                      <% else %>
+                        An unexpected error occurred. Please <%= render Primer::Beta::Link.new(href: contact_path, classes: "Link--inTextBlock").with_content("contact support") %>
+                        for more information.
+                      <% end %>
+                    </p>
+                  <% end %>
+                <% elsif !repository_policy.changes_would_be_safe? %>
+                  <%= render Primer::BlankslateComponent.new(
+                    title: "Repository access limited",
+                    title_tag: :h4,
+                  ) do %>
+                    <p class="mt-2 mx-4">
+                      You do not have access to push to this repository and its owner has disabled forking.
+                    </p>
+                  <% end %>
+                <% else %>
+                  <%= render Primer::BlankslateComponent.new(
+                    title: "Codespace access limited",
+                    title_tag: :h4,
+                    m: 6
+                  ) do %>
+                    <p class="mt-2 mx-4">
+                      An unexpected error occurred. Please <%= render Primer::Beta::Link.new(href: contact_path, classes: "Link--inTextBlock").with_content("contact support") %>
+                      for more information.
+                    </p>
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          <% else %>
+            <%= render Primer::BlankslateComponent.new(
+              title: "Sign in required",
+              title_tag: :h4,
+            ) do %>
+              <p class="mt-2 mx-4">
+                Please
+                <%= render(Primer::Beta::Link.new(
+                  href: new_codespace_path(repo: repository.id, hide_repo_select: true, ref: ref),
+                  underline: false,
+                  classes: "Link--inTextBlock",
+                )) { "sign in" } %>
+                to use Codespaces.
+              </p>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if user_feature_enabled?(:copilot_workspace) %>
+        <%# Copilot tab of dropdown menu %>
+        <% component.with_tab(
+          panel_id: "copilot-panel",
+          id: "copilot-tab",
+          flex: 1,
+          data: {
+            tab: "copilot",
+            action: "click:get-repo#copilotTabSelected focusin:get-repo#copilotTabSelected",
+          },
+          wrapper_arguments: {
+            classes: "hx_tabnav-in-dropdown-wrapper",
+            flex: 1
+          }
+        ) do |t| %>
+          <% t.with_text do %>
+            <span>Copilot</span>
+          <% end %>
+          <% t.with_panel do %>
+            <% form_with(url: "https://copilot-workspace.githubnext.com/#{repository.name_with_display_owner}/pull/#{pull_request.number}", method: :get, class: "p-3 d-flex flex-column") do %>
+              <%= render Primer::Alpha::TextArea.new(
+                label: "Task",
+                name: "task",
+                placeholder: "Describe a change you'd like to make to this pull request, such as adding tests or documentation...",
+                visually_hide_label: true,
+                required: true,
+                full_width: true,
+                cols: 30,
+                mb: 3,
+                style: "resize:vertical;min-height:160px"
+              ) %>
+              <%= render Primer::Beta::Button.new(
+                scheme: :primary,
+                type: :submit
+              ) do |button| %>
+                Start task
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if pull_request && current_user&.hadron_editor_preview_enabled? %>
+        <%# GitHub editor tab of dropdown menu %>
+        <% component.with_tab(
+          panel_id: "github-editor-panel",
+          id: "github-editor-tab",
+          flex: 1,
+          data: {
+            tab: "github-editor",
+            action: "click:get-repo#githubEditorTabSelected focusin:get-repo#githubEditorTabSelected",
+          },
+          wrapper_arguments: {
+            classes: "hx_tabnav-in-dropdown-wrapper",
+            flex: 1
+          }
+        ) do |t| %>
+          <% t.with_text do %>
+            <span class="no-wrap">GitHub Editor</span>
+          <% end %>
+          <% t.with_panel do %>
+            <div class="p-3 d-flex flex-column">
+              <div class="pb-3">
+                <%= render Primer::Beta::Text.new.with_content("Edit files and run code in this Pull Request directly from the browser.") %>
+              </div>
+              <%= render Primer::Beta::Button.new(
+                scheme: :primary,
+                tag: :a,
+                href: repo_copilot_task_path(user_id: repository.owner_display_login, repository: repository, id: pull_request.number),
+              ) do |button| %>
+                Open editor
+              <% end %>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <%# Dropdown menu with no tabs (Local menu items only) for GHES %>
+    <ul class="list-style-none">
+      <%= render(
+        "code_menu/pull_request_local_menu_items",
+        pull_request: pull_request,
+        repository: repository,
+        default_menu_item_classes: DEFAULT_MENU_ITEM_CLASSES,
+        default_menu_item_link_classes: DEFAULT_MENU_ITEM_LINK_CLASSES,
+      ) %>
+    </ul>
+  <% end %>
+</div>
+
+<%# Platform loading messages %>
+
+<div class="p-3" data-targets="get-repo.platforms" data-platform="mac" hidden>
+  <h4 class="lh-condensed mb-3">Launching GitHub Desktop<span class="AnimatedEllipsis"></span></h4>
+  <p class="color-fg-muted">
+    If nothing happens, <a class="Link--inTextBlock" href="https://desktop.github.com/">download GitHub Desktop</a> and try again.
+  </p>
+  <%= render Primer::ButtonComponent.new(
+    scheme: :link,
+    "data-action": "click:get-repo#onDetailsToggle",
+  ) { "Go back" } %>
+</div>
+<div class="p-3" data-targets="get-repo.platforms" data-platform="windows" hidden>
+  <h4 class="lh-condensed mb-3">Launching GitHub Desktop<span class="AnimatedEllipsis"></span></h4>
+  <p class="color-fg-muted">
+    If nothing happens, <a class="Link--inTextBlock" href="https://desktop.github.com/">download GitHub Desktop</a> and try again.
+  </p>
+  <%= render Primer::ButtonComponent.new(
+    scheme: :link,
+    "data-action": "click:get-repo#onDetailsToggle",
+  ) { "Go back" } %>
+</div>
+<div class="p-3" data-targets="get-repo.platforms" data-platform="xcode" hidden>
+  <h4 class="lh-condensed mb-3">Launching Xcode<span class="AnimatedEllipsis"></span></h4>
+  <p class="color-fg-muted">
+    If nothing happens, <a class="Link--inTextBlock" href="https://developer.apple.com/xcode/">download Xcode</a> and try again.
+  </p>
+  <%= render Primer::ButtonComponent.new(
+    scheme: :link,
+    "data-action": "click:get-repo#onDetailsToggle",
+  ) { "Go back" } %>
+</div>
+<%= render "codespaces/loading_vscode", classes: "" %>

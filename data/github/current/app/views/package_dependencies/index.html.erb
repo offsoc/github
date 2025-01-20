@@ -1,0 +1,205 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%
+  page_info(
+    title: "Dependency Insights#{view.raw_query.present? ? ' · Search for ' + view.raw_query.to_s : ''}",
+    selected_link: :insights,
+    breadcrumb_owner: view.single_organization_scope? ? view.this_organization : nil,
+    breadcrumb: view.single_organization_scope? ? "Insights" : "Dependency insights",
+    container_xl: view.single_organization_scope?
+  )
+
+  dependencies = data.fetch(:dependents, [])
+  dependencies_count = data.fetch(:total_count, 0)
+  page_info = data.fetch(:page_info, nil)
+%>
+<% content_for :header_title do %>
+  <% if view.single_organization_scope? %>
+    <a class="Header-link" href="<%= user_path(view.this_organization) %>"><%= view.this_organization.to_s %></a>
+  <% else %>
+    <strong class="color-text-white">Dependency insights</strong>
+  <% end %>
+<% end %>
+<div>
+  <%= render(Primer::Experimental::PageLayout.new(outer_spacing: :none, inner_spacing: :normal, column_gap: :none)) do |layout| %>
+    <% if view.single_organization_scope? %>
+      <% layout.with_pane_region(
+        width: :wide,
+        divider: :line,
+        p: 0,
+      ) do %>
+        <%= render partial: "orgs/insights/nav_bar", locals: { this_organization: this_organization, selected: :dependency_insights } %>
+      <% end %>
+    <% end %>
+    <% layout.with_content_region(
+      width: :lg,
+      px: 4, # Fixing issue with 'inner_spacing: :normal' mistakenly using the :condensed padding instead
+    ) do %>
+      <% if view.single_organization_scope? %>
+        <%= render partial: "orgs/insights/header", locals: { this_organization: view.this_organization, container_size: "container-xl" } %>
+      <% end %>
+      <% if view.multi_organization_scope? %>
+        <h1 class="d-none d-lg-flex py-3 f1-light flex-items-center">
+          Dependency insights
+        </h1>
+      <% end %>
+      <div class="subnav <%= "mt-2 mt-lg-0" if view.multi_organization_scope? %>">
+        <div class="col-12 col-xl-6 col-lg-8 float-left d-flex flex-column flex-md-row mt-4 mt-md-0">
+          <nav class="subnav-links" aria-label="Search">
+            <% open_security_advisories_selected = view.contains_qualifier?(:is, "vulnerable") %>
+            <a href="<%= view.build_path(query: nil) %>" class="subnav-item <%= "selected" unless open_security_advisories_selected %>">All results</a>
+            <a href="<%=  view.build_path(query: "is:vulnerable sort:vulnerabilities-desc") %>" class="subnav-item <%= "selected" if open_security_advisories_selected %>">Open Security Advisories</a>
+          </nav>
+          <% if view.single_organization_scope? %>
+            <a href="<%= packages_dashboard_path(query: view.raw_query) %>" class="d-none d-md-block ml-md-2 subnav-item rounded-2">My organizations</a>
+          <% end %>
+        </div>
+        <%= form_tag nil, method: :get, class: "subnav-search m-0 col-12 col-xl-6 col-lg-4 float-left mt-3 mt-lg-0" do %>
+          <div class="input-group width-full">
+            <input class="form-control subnav-search-input input-contrast rounded-2" type="text" placeholder="Search dependencies" aria-label="Search dependencies" name="query" value="<%= Search::Queries::PackageDependenciesQuery.stringify(view.parsed_query) %>">
+            <%= primer_octicon(:search, classes: "subnav-search-icon", style: "z-index: 2") %>
+          </div>
+        <% end %>
+      </div>
+      <%= render ConditionalAccess::UnauthorizedAccountsComponent.new(
+          classes: "Box mb-1",
+          cap_filter: view.cap_filter,
+          resource_label: "dependents"
+        ) %>
+      <div class="d-flex flex-column">
+        <div class="flex-order-2 flex-md-order-1 mt-3 mt-md-0">
+          <%= render partial: "package_dependencies/rollup_cards", locals: { view: view } %>
+        </div>
+        <div class="flex-order-1 Box js-navigation-container js-active-navigation-container" data-repository-hovercards-enabled data-hpc>
+          <div class="Box-header d-flex">
+            <div class="Box-title flex-auto" data-test-id="dg-org-pkg-counter">
+              <%= primer_octicon(:package, mr: 1) %>
+              <%= number_with_delimiter(dependencies_count) %>
+              <%= "dependency".pluralize(dependencies_count) %>
+            </div>
+            <%= render partial: "package_dependencies/filters/menu", locals: { view: view } %>
+            <%= render partial: "package_dependencies/filters/license", locals: { view: view } %>
+            <%= render partial: "package_dependencies/filters/ecosystem", locals: { view: view } %>
+            <% if view.multi_organization_scope? %>
+              <%= render partial: "package_dependencies/filters/organization", locals: { view: view } %>
+            <% end %>
+            <%= render partial: "package_dependencies/filters/sort", locals: { view: view } %>
+          </div>
+          <% if dependencies.nil? || dependencies.empty? %>
+            <% if view.dependency_graph_timed_out %>
+              <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+                <% c.with_visual_icon(icon: "hourglass") %>
+                <% c.with_heading(tag: :h2) do %>
+                  The dependency graph is taking too long to respond
+                <% end %>
+                <% c.with_description do %>
+                  We’re working on fixing this issue as soon as possible. Please try again later.
+                <% end %>
+              <% end %>
+            <% elsif view.dependency_graph_unavailable %>
+              <%= render Primer::BlankslateComponent.new(
+                  icon: "alert",
+                  title: "Loading package dependencies failed",
+                  spacious: true,
+                ) do %>
+                <p>We track these errors automatically, but if the problem persists feel free to <a class="Link--inTextBlock" href="<%= contact_path %>">contact us</a>.</p>
+              <% end %>
+            <% else %>
+              <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+                <% c.with_visual_icon(icon: "package") %>
+                <% c.with_heading(tag: :h2) do %>
+                  Could not find packages in any of the selected organizations
+                <% end %>
+                <% c.with_description do %>
+                  Please make sure you have committed lockfiles (e.g. gemfile.lock, package-lock.json, etc.) in your repositories so we're able to understand and display your dependencies.
+                <% end %>
+              <% end %>
+            <% end %>
+          <% else %>
+            <% dependencies.each do |repository_package_release| %>
+              <% package_release = repository_package_release.package_release %>
+              <div class="Box-row Box-row--focus-gray js-navigation-item" data-test-id="dg-org-pkg-dependency">
+                <div class="d-flex pb-2 flex-column flex-md-row">
+                  <h2 class="f3 flex-auto flex-md-self-center mr-3">
+                    <% package_details_path_params = {
+                          ecosystem: package_release.package_manager.downcase,
+                          name: url_encode(package_release.package_name),
+                          version: url_encode(package_release.version),
+                          query: view.organization_query
+                      } %>
+                    <a class="js-navigation-open" href="<%= package_details_path(package_details_path_params) %>">
+                      <%= package_release.package_name %>
+                    </a>
+                  </h2>
+                  <div class="flex-auto flex-wrap flex-sm-nowrap flex-md-justify-end d-flex flex-items-center color-fg-muted pt-1 pt-md-0">
+                    <% if (repo = package_release.repository)&.sponsorable_owner? %>
+                      <%= render Sponsors::SponsorButtonComponent.new(
+                          sponsorable: repo.owner_display_login,
+                          is_sponsoring: repo.owner_sponsored_by_viewer?(current_user),
+                          mr: 3,
+                          location: repo.owner_sponsored_by_viewer?(current_user) ? :PACKAGE_DEPENDENCY_SPONSORING : :PACKAGE_DEPENDENCY_SPONSOR
+                        ) %>
+                    <% end %>
+                    <% if package_release.license %>
+                      <span class="pr-3 flex-grow-0 pt-1 pt-md-0">
+                        <%= primer_octicon(:law, mr: 1) %>
+                        <%= package_release.license %>
+                      </span>
+                    <% end %>
+                    <div class="d-flex flex-items-center flex-shrink-0 pt-1 pt-md-0">
+                      <span class="circle p-1 mr-1" style="background-color: <%= ecosystem_color(package_release.package_manager) %>;"></span>
+                      <%= ecosystem_label(package_release.package_manager) %>
+                    </div>
+                    <%= link_to package_details_path(package_details_path_params.merge(tab: "dependents")), class: "flex-shrink-0 Link--muted pt-1 pt-md-0" do %>
+                      <%= primer_octicon(:"package-dependents", ml: 3, classes: "octicon") %>
+                      <%= repository_package_release.dependents_count %>
+                      <%= "dependent".pluralize(repository_package_release.dependents_count) %>
+                    <% end %>
+                  </div>
+                </div>
+                <div class="d-flex flex-wrap f6 pt-1 pt-md-0">
+                  <% if package_release.repository %>
+                    <% repo_hovercard_attributes = hovercard_data_attributes_for_repository(package_release.repository) %>
+                    <%= link_to repository_path(package_release.repository), class: "Link--muted min-width-0 pr-3 pt-1 pt-md-0", data: repo_hovercard_attributes do %>
+                      <%= primer_octicon(:repo, float: :left, mr: 1) %>
+                      <%= package_release.repository.name_with_display_owner %>
+                    <% end %>
+                  <% end %>
+                  <span class="pr-3 pt-1 pt-md-0 min-width-0">
+                    <%= primer_octicon(:tag, float: :left, color: :muted, mr: 1) %>
+                    <%= package_release.version %>
+                  </span>
+                  <% if package_release.published_on %>
+                    <span class="pr-3 flex-shrink-0 pt-1 pt-md-0">
+                      <%= primer_octicon(:calendar, color: :muted, mr: 1) %>
+                      <relative-time prefix="" class="no-wrap" datetime="<%= package_release.published_on %>"></relative-time>
+                    </span>
+                  <% end %>
+                  <% if repository_package_release.vulnerabilities_count > 0 %>
+                    <span class="pr-3 flex-shrink-0 pt-1 pt-md-0">
+                      <%= link_to package_details_path(package_details_path_params.merge(tab: "security")), class: "Link--muted" do %>
+                        <%= primer_octicon(:alert, color: :muted, mr: 1) %>
+                        <%= number_with_delimiter(repository_package_release.vulnerabilities_count) %> security <%= "advisory".pluralize(repository_package_release.vulnerabilities_count) %>
+                      <% end %>
+                    </span>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
+          <% end %>
+        </div>
+        <% if page_info&.has_next_page || page_info&.has_previous_page %>
+          <nav class="flex-order-1 paginate-container" aria-label="Pagination">
+            <%= cursor_paginate(page_info, previous_label: "Previous", next_label: "Next") %>
+          </nav>
+        <% end %>
+        <% if view.single_organization_scope? %>
+          <a href="<%= packages_dashboard_path(query: view.raw_query) %>" class="flex-order-2 btn-block d-md-none subnav-item rounded-2">My organizations</a>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+</div>
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "graphs" %>
+<% end %>

@@ -1,0 +1,85 @@
+
+<%
+  # Hide short months:
+  shrink_cell_size = current_user&.feature_enabled?(:mobile_year_picker) || activity_overview_enabled
+  months = calendar.months.reject { |month| month.total_weeks < 2 }
+  cell_size = shrink_cell_size ? 13 : 15
+  cell_spacing = shrink_cell_size ? 3 : 4
+  day_label_width = 25
+  week_days = I18n.translate("date.day_names")
+%>
+
+<div style="max-width: 100%; overflow-y: hidden; overflow-x: auto">
+  <%= content_tag :table,
+      data: profile_click_tracking_attrs(:CONTRIBUTION_CALENDAR_SQUARE),
+      role: "grid", "aria-readonly": "true",
+      class: "ContributionCalendar-grid js-calendar-graph-table",
+      style: "border-spacing: #{cell_spacing}px; overflow: hidden; position: relative" do %>
+    <caption class="sr-only">Contribution Graph</caption>
+
+    <thead>
+      <tr style="height: <%= cell_size %>px">
+        <td style="width: <%= day_label_width + cell_spacing %>px">
+          <span class="sr-only">Day of Week</span>
+        </td>
+
+        <% months.each do |month| %>
+          <% prior_week_count = calendar.weeks.count { |week| week.first_day < month.first_day } %>
+
+          <%# Normally we would use `th` here instead of `td`, but the info is duplicated in the cell content (so we
+          can also show it to sighted users via tooltip). Adding semantic headers will cause it to be read twice for
+          every cell. %>
+          <td class="ContributionCalendar-label" colspan="<%= month.total_weeks %>" style="position: relative">
+            <%# We want screen readers to read the full name, but sighted users to only see the abbreviation.
+              This is semantically the same as <th abbr="February">Feb</th>, but the abbr attribute is not
+              supported by most screen readers. %>
+            <span class="sr-only"><%= month.full_name %></span>
+            <span aria-hidden="true" style="position: absolute; top: 0"><%= month.name %></span>
+          </td>
+        <% end %>
+      </tr>
+    </thead>
+
+    <tbody>
+      <% calendar.days_of_week.each_with_index do |days, iy| %>
+        <tr style="height: <%= cell_size - cell_spacing %>px">
+          <td class="ContributionCalendar-label" style="position: relative">
+            <span class="sr-only"><%= week_days[iy] %></span>
+            <span aria-hidden="true" style="clip-path: <%= iy % 2 == 0 ? "Circle(0)" : "None" %>; position: absolute; bottom: <%= -cell_spacing %>px">
+              <%= week_days[iy][0, 3] %>
+            </span>
+          </td>
+
+          <% days.each_with_index do |day, ix| %>
+            <% if day.present? %>
+              <%
+                 count_text = if GitHub.flipper[:contribution_retention_period].enabled?(this_user) && day.count > 100
+                   "100+ contributions"
+                 elsif day.count.zero?
+                   "No contributions"
+                 else
+                   pluralize(day.count, "contribution")
+                 end
+               %>
+              <% date_text = day.date.strftime("%B #{day.date.day.ordinalize}") %>
+              <%= render(Users::Contributions::DayComponent.new(
+                as_table_cell: true,
+                description: "#{count_text} on #{date_text}.",
+                classes: "ContributionCalendar-day",
+                date: day.date,
+                level: day.level,
+                tabindex: 0,
+                id: "contribution-day-component-#{iy}-#{ix}",
+                "data-ix": ix,
+                "aria-selected": false,
+                "aria-describedby": "contribution-graph-legend-level-#{day.level}",
+                style: "width: #{cell_size - cell_spacing}px")) %>
+            <% else %>
+              <td></td>
+            <% end %>
+          <% end %>
+        </tr>
+      <% end %>
+    </tbody>
+  <% end %>
+</div>

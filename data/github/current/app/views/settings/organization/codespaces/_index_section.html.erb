@@ -1,0 +1,174 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%
+  business = current_organization.business
+  should_render_spending_limit_modal = defined?(show_spending_limit_modal) ? show_spending_limit_modal : false
+  org_policy = Codespaces::OrgPolicy.new(org: current_organization, user: current_user)
+%>
+
+<div data-replace-remote-form-target>
+  <% if org_policy.allow_org_setting? %>
+    <%= render(Codespaces::SetSpendingLimitBannerComponent.new(organization: current_organization)) %>
+  <% elsif org_policy.must_upgrade_to_use_codespaces? %>
+    <%= render(Codespaces::UpgradePlanBannerComponent.new(organization: current_organization, org_policy: org_policy)) %>
+  <% elsif current_organization.business && Codespaces::BusinessDelegator.new(current_organization.business).codespaces_disabled_for_org?(current_organization) %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, mb: 2)) do %>
+        Your enterprise has disabled Codespaces for this organization. Access and ownership settings below will not apply until your enterprise administrator enables Codespaces. While disabled, organization members will be able to create user-owned codespaces from public repositories.
+    <% end %>
+  <% else %>
+    <%= render(Codespaces::ContactUsBannerComponent.new(organization: current_organization)) %>
+  <% end %>
+
+  <%= render(Primer::Beta::Subhead.new) do |component| %>
+    <% component.with_heading(tag: :h2) do %>
+      Codespaces
+    <% end %>
+  <% end %>
+
+  <% spending_limit_alert_component = Codespaces::SpendingLimitAlertComponent.new(organization: current_organization) %>
+  <%= render(Codespaces::SpendingLimitAlertComponent.new(organization: current_organization)) %>
+
+  <%= render Primer::Box.new(display: :flex, mt: 2, mb: 4, direction: :column) do %>
+    <%= render Primer::Beta::Heading.new(tag: :h3, style: "flex: 0 1 auto;", mb: 2, font_weight: :normal) do %>
+        Codespaces access
+    <% end %>
+    <%= render Primer::Beta::Text.new do %>
+        Manage access to GitHub Codespaces for your organization's members on private and internal repositories. Codespaces are always available on public repositories.
+    <% end %>
+    <%= render Organizations::Settings::CodespacesUserPermissionsComponent.new(organization: current_organization, users: users, teams: teams) %>
+  <% end %>
+
+  <%= render_react_partial name: "codespaces-organization-ownership-setting", ssr: true, props: {
+    currentValue: current_organization.organization_codespaces_ownership_setting,
+    disabled: !org_policy.allow_org_admin_update_ownership_setting?,
+    submitUrl: settings_org_codespaces_update_ownership_setting_path(current_organization)
+    } %>
+
+  <% if org_policy.allow_org_setting? %>
+    <%= render Primer::Box.new(display: :flex, my: 2, direction: :column) do %>
+      <%= render Primer::Beta::Heading.new(tag: :h3, style: "flex: 0 1 auto;", mb: 2, font_weight: :normal) do %>
+        <%= render Primer::Box.new(display: :flex, align_items: :center) do %>
+          Access and security <%= render(Primer::Beta::Label.new(scheme: :attention, ml: 2)) { "Deprecated" } %>
+        <% end %>
+      <% end %>
+      <%= render Primer::Beta::Text.new do %>
+        Codespaces created for repositories within your organization can be either restricted to only that repository,
+        or granted read access to other repositories your organization owns.
+      <% end %>
+      <%= render partial: "settings/organization/codespaces/trusted_repositories_access", locals: { show_check: false, trusted_repositories: trusted_repositories } %>
+    <% end %>
+  <% end %>
+</div>
+
+<% if should_render_spending_limit_modal %>
+  <codespaces-spending-limit-modal>
+    <div id="codespaces-spending-limit-modal" data-action="click:codespaces-spending-limit-modal#closeModal" class="height-full left-0 top-0 width-full position-absolute" style="background-color: rgba(0, 0, 0, 0.5);"></div>
+    <details-dialog class="Box d-flex mt-12 flex-column anim-fade-in fast" style="width: 510px;"><%# erblint:disable A11yDetailsDialogMigration %>
+      <%= render(Primer::Beta::BorderBox.new) do |component| %>
+        <% component.with_header do %>
+          <h3 class="Box-title">
+            Set a spending limit for your organization
+            <%= render Primer::ButtonComponent.new(
+              classes: "Box-btn-octicon btn-octicon",
+              float: :right,
+              aria: { label: "Close Codespaces Spending Limit Modal Button" },
+              data: {
+                target: "codespaces-spending-limit-modal.closeModalButton",
+                action: "click:codespaces-spending-limit-modal#closeModal"
+              }
+            ) do |c| %>
+              <% c.primer_octicon(:x) %>
+            <% end %>
+          </h3>
+        <% end %>
+        <% component.with_body do %>
+          <% if current_organization.plan.enterprise? || business.present? %>
+            <div>
+              This organization is part of <strong><%= business.name %></strong> and is billed at the enterprise level.
+              <% if business.billing_manager?(current_user) || business.owner?(current_user) %>
+                To make changes to your spending limit, visit your enterprise account's <%= link_to "billing settings", settings_billing_enterprise_path(business), class: "Link--inTextBlock" %>.
+              <% elsif business.owners.any? %>
+                Please contact your enterprise owners to make changes to your spending limit.
+                <div <%= test_selector "enterprise-owners" %>>
+                  See all <%= link_to "enterprise owners", org_enterprise_owners_path(current_organization), class: "Link--inTextBlock" %>.
+                </div>
+              <% else %>
+                <%= link_to "contact sales", ent_contact_url, class: "Link--inTextBlock" %>.
+              <% end %>
+            </div>
+          <% else %>
+            <p>Codespaces is a metered product, and in order to use it you need to either turn on unlimited spending or define a spending limit.</p>
+            <%= render(Primer::Beta::Flash.new(scheme: :danger, hidden: true, data: { target: "codespaces-spending-limit-modal.errorMessageElement" })) do %>
+              <%= render(Primer::Beta::Octicon.new("alert")) %>
+              <span data-target="codespaces-spending-limit-modal.errorMessageElementText"></span>
+            <% end %>
+            <%= form_tag settings_org_codespaces_update_codespaces_spending_limit_path(current_organization), method: :put, data: {"action" => "submit:codespaces-spending-limit-modal#submitForm"} do %>
+              <div class="form-checkbox">
+                <label for="unlimited_spending">
+                  <input
+                    id="unlimited_spending"
+                    data-target="codespaces-spending-limit-modal.unlimitedSpendingRadioInput"
+                    data-action="click:codespaces-spending-limit-modal#handleUnlimitedSpendingRadioInputClick"
+                    type="radio"
+                    name="unlimited_spending"
+                    aria-label="Unlimited Spending Radio Input"
+                  >
+                  Unlimited spending
+                </label>
+                <p class="note" id="help-text-for-unlimited">
+                  Pay as much as needed to keep codespaces running
+                </p>
+              </div>
+              <div class="form-checkbox">
+                <label for="limit_spending">
+                  <input
+                    id="limit_spending"
+                    data-target="codespaces-spending-limit-modal.limitSpendingRadioInput"
+                    data-action="click:codespaces-spending-limit-modal#handleLimitSpendingRadioInputClick"
+                    type="radio"
+                    name="limit_spending"
+                    aria-label="Spending Limit Radio Input"
+                  >
+                  Limit spending
+                </label>
+                <label class="note" for="spending_limit_amount">
+                  Set up a spending limit on a monthly basis
+                </label>
+                <div class="position-relative">
+                  <span
+                    class="position-absolute text-center events-none f4"
+                    style="
+                      transform: translate(0, -50%);
+                      top: 49%;
+                      width: 25px;
+                    "
+                  >
+                    $
+                  </span>
+                  <input
+                    disabled
+                    type="number"
+                    step=".01"
+                    min="0"
+                    class="form-control pl-4"
+                    style="width: 240px;"
+                    id="spending_limit_amount"
+                    data-target="codespaces-spending-limit-modal.spendingLimitAmountInput"
+                    data-action="keyup:codespaces-spending-limit-modal#handleSpendingLimitChange blur:codespaces-spending-limit-modal#handleSpendingLimitChange"
+                    name="spending_limit_amount"
+                    placeholder="0.00"
+                    aria-label="Spending limit amount"
+                  >
+                </div>
+                <div hidden id="codespaces-spending-limit-alert" class="mt-2 color-fg-attention" data-target="codespaces-spending-limit-modal.codespacesAccessAlertElement">
+                  <%= render(Primer::Beta::Octicon.new(:alert, height: 16)) %>
+                  <span class="pl-2">A $0 limit will prevent your organization from using Codespaces</span>
+                </div>
+              </div>
+              <%= render(Primer::ButtonComponent.new(pt: 2, scheme: :primary, block: true, type: :submit, data: { target: "codespaces-spending-limit-modal.updateLimitSubmitButton" })) { "Update limit" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </details-dialog>
+  </codespaces-spending-limit-modal>
+<% end %>

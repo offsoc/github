@@ -1,0 +1,237 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# view is an instance of Integrations::ShowView %>
+
+<% page_info\
+  title: "GitHub App settings - #{view.integration.slug}",
+  stafftools: stafftools_user_app_path(view.integration.owner, view.integration)
+%>
+
+<% content = capture do %>
+
+  <%= render "integrations/settings/integration_header", :view => view %>
+  <div class="container-lg px-3">
+    <div class="gutter clearfix">
+      <div class="col-3 float-left">
+        <%= render "integrations/settings/integration_menu", :view => view %>
+      </div>
+      <div class="col-9 float-left">
+        <div class="mb-4">
+
+          <%= render(IpAllowlistEntries::Ipv6NoticeComponent.new(
+            owner: view.integration,
+            dismissal_path: dismiss_notice_path(IpAllowlistEntries::Ipv6NoticeComponent::NOTICE_NAME),
+            dismissal_method: "post",
+          )) %>
+
+          <%= render partial: "integrations/suspended_integration_alert", locals: { integration: view.integration } %>
+
+          <a name="oauth-credentials"></a>
+          <%= render Primer::Beta::Subhead.new do |component| %>
+            <% component.with_heading(tag: :h2, font_size: 3) do %>About<% end %>
+          <% end %>
+
+          <p><strong>Owned by:</strong> <%= link_to "@#{view.integration.display_owner.display_login}", view.integration.display_owner.user_path, class: "Link--inTextBlock" %></p>
+          <p><strong>App ID:</strong> <%= view.integration.id %></p>
+          <% if view.show_app_id_deprecation_message? %>
+            <p class="text-small">Using your App ID to get installation tokens? You can now <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app">use your Client ID instead</a>.</p>
+          <% end %>
+          <p><strong>Client ID:</strong> <%= view.integration.key %></p>
+
+          <%= render layout: "shared/details_dialog", locals: {
+              button_text: "Revoke all user tokens",
+              button_class: "btn btn-danger mr-2",
+              title: "Revoke all user tokens?",
+              details_class: "d-inline-block text-normal"
+              } do %>
+          <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+            <%= render Primer::Alpha::Banner.new(full: true, scheme: :warning) do %>
+              Are you sure you want to revoke <strong>all</strong> user tokens for this application?
+            <% end %>
+          <% else %>
+            <%= render Primer::Beta::Flash.new(full: true, scheme: :warning) do %>
+              Are you sure you want to revoke <strong>all</strong> user tokens for this application?
+            <% end %>
+          <% end %>
+          <div class="Box-body">
+            <p>
+              All users of this application will be forced back through the
+              <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/apps/building-github-apps/identifying-and-authorizing-users-for-github-apps/">authorization flow</a>
+              before they can use your application again.
+            </p>
+            <p>All SSH keys created by this application will also be deleted.</p>
+            <p class="mb-0">This action is not reversible.</p>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag gh_integration_revoke_all_tokens_path(view.integration) do %>
+              <% render Primer::Beta::Button.new(type: :submit, block: true, scheme: :danger) do %>
+                I understand, revoke all user tokens
+              <% end %>
+            <% end %>
+          </div>
+          <% end %>
+
+          <p class="note mt-1">
+            GitHub Apps can use OAuth credentials to identify users.  Learn more about identifying users by reading our
+            <%= link_to "integration developer documentation", "#{GitHub.developer_help_url}/apps/building-integrations/setting-up-and-registering-github-apps/identifying-users-for-github-apps/", class: "Link--inTextBlock" %>.
+          </p>
+
+          <% unless view.integration.private? %>
+          <dl class="form-group" style="max-width: 440px;">
+            <dt class="input-label">
+              <label for="app-public-link">Public link</label>
+            </dt>
+            <dd>
+              <div class="input-group">
+                <input id="app-public-link" type="text" class="form-control input-contrast input-monospace" data-autoselect value="<%= gh_app_url(view.integration, current_user) %>" readonly>
+                <div class="input-group-button">
+                  <%= render Primer::Beta::ClipboardCopy.new(for: "app-public-link", "aria-label": "Copy to clipboard", classes: "btn") %>
+                </div>
+              </div>
+            </dd>
+          </dl>
+          <% end %>
+        </div>
+
+        <%= render partial: "oauth_applications/client_secrets", locals: {
+              app: view.integration,
+              create_client_secret_path: gh_settings_app_create_client_secret_path(view.integration),
+              delete_client_secret_path: gh_settings_app_remove_client_secret_path(view.integration)
+            } %>
+
+        <%= render Primer::Beta::Subhead.new do |component| %>
+          <% component.with_heading(tag: :h2, font_size: 3) do %>Basic information<% end %>
+        <% end %>
+        <% form_view = Integrations::FormView.new(:integration => view.integration) %>
+        <%= render "integrations/settings/form", :view => form_view, :form_action => gh_settings_app_path(view.integration) %>
+
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2, font_size: 3) do %>Display information<% end %>
+        <% end %>
+        <div class="application-show-group Box p-4 mb-4">
+          <div class="d-block">
+            <%= render partial: "integrations/uploader", :locals => { :integration => view.integration } %>
+
+            <% if view.allow_editing_bgcolor? %>
+              <%= form_for view.integration, url: gh_settings_app_path(view.integration), method: :put, html: { class: "clearfix mt-3 js-app-bgcolor-form", id: "edit_integration_bgcolor_#{view.integration.id}" } do |f| %>
+                <div class="col-5 float-left">
+                  <dl class="form-group mb-0">
+                    <dt><label for="integration_bgcolor">Badge background color</label></dt>
+                    <dd>
+                      <input required type="text" autocomplete="off" name="integration[bgcolor]" id="integration_bgcolor" maxlength="7" class="form-control js-app-bgcolor-input" value="#<%= view.integration.bgcolor %>" placeholder="Hex color code" pattern="#?([a-fA-F0-9]{6}|[a-fA-F0-9]{3})" aria-describedby="help-text-for-bgcolor">
+                      <p class="note mb-0" id="help-text-for-bgcolor">
+                        The hex value of the badge background color. Hex colors should only contain numbers and letters from a-f.
+                      </p>
+                      <span class="d-inline-block js-app-bgcolor-save-notice marketplace-listing-save-notice color-fg-success f6">
+                        <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                        Saved
+                      </span>
+                    </dd>
+                  </dl>
+                </div>
+                <div class="col-5 float-left">
+                  <div style="background-color: #<%= view.integration.bgcolor %>" class="CircleBadge CircleBadge--large ml-4 js-app-logo-with-bgcolor">
+                    <%= integration_avatar(integration: view.integration, size: 70, class: "CircleBadge-icon", force_app_logo: true) %>
+                  </div>
+                </div>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+
+        <% if view.eligible_for_marketplace? %>
+          <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+            <% component.with_heading(tag: :h2, font_size: 3) do %>Marketplace<% end %>
+          <% end %>
+          <% if listing = view.integration.marketplace_listing %>
+            <% if listing.allowed_to_edit?(current_user) %>
+              <p>
+                Edit how your GitHub App is presented in the Marketplace directory,
+                including screenshots and links.
+              </p>
+              <a href="<%= edit_marketplace_listing_path(listing) %>" class="text-bold" <%= test_selector("manage-marketplace-listing") %>>
+                Edit Marketplace listing
+              </a>
+            <% end %>
+          <% else %>
+            <p>
+              List your GitHub App in the
+              <a class="Link--inTextBlock" href="<%= marketplace_path %>">GitHub Marketplace</a> so that other users can discover
+              it.
+            </p>
+            <a href="<%= new_marketplace_listing_with_integratable_path(MarketplaceListingsController::GITHUB_APP_TYPE, view.integration.id) %>" class="text-bold" <%= test_selector("manage-marketplace-listing") %>>
+              List in Marketplace
+            </a>
+          <% end %>
+
+        <% end %>
+
+        <div class="col-12 clearfix">
+          <a name="private-key"></a>
+          <div class="js-integration-keys-container" data-url="<%= gh_list_keys_settings_app_path(view.integration) %>">
+            <%= render "integrations/settings/keys", :view => view %>
+          </div>
+        </div>
+
+        <% if GitHub.ip_allowlists_available? %>
+          <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+            <% component.with_heading(tag: :h2, font_size: 3) do %>
+              IP allow list
+            <% end %>
+          <% end %>
+          <p>
+            Enter the IP addresses of your GitHub App to allow organizations with
+            <%= link_to "IP allow lists",
+              "#{GitHub.help_url}/github/setting-up-and-managing-organizations-and-teams/managing-allowed-ip-addresses-for-your-organization", class: "Link--inTextBlock" %>
+            to selectively inherit the App's IP allow list when installed.
+            <%= link_to "Learn more about App IP allow lists",
+              "#{GitHub.help_url}/developers/apps/building-github-apps/managing-allowed-ip-addresses-for-a-github-app", class: "Link--inTextBlock" %>.
+          </p>
+
+          <% ip_allowlist_entries = IpAllowlistEntry.usable_for(view.integration)
+            .order(allow_list_value: :asc)
+            .paginate(page: current_page) %>
+          <% if !view.integration.new_record? && IpAllowlistEntry.eligible_for_ip_allowlist?(view.integration) %>
+            <div class="Box mb-6" <%= test_selector("integration-ip-allow-list") %>>
+              <% if ip_allowlist_entries.any? %>
+                <ul class="table-list" style="table-layout: auto;">
+                  <li class="table-list-item color-bg-subtle color-fg-default">
+                    <span class="table-list-cell border-top-0 text-bold f5 py-3 pl-3" style="min-width: 140px;">IP address</span>
+                    <span class="table-list-cell border-top-0 text-bold f5 py-3 ">Description</span>
+                    <span class="table-list-cell border-top-0 text-bold f5 py-3 pr-3"></span>
+                  </li>
+                  <%= render(IpAllowlistEntries::EntryComponent.with_collection(
+                    ip_allowlist_entries,
+                    owner: view.integration
+                  )) %>
+                </ul>
+                <div class="paginate-container hidden-when-empty"><%= will_paginate ip_allowlist_entries %></div>
+              <% else %>
+                <div class="Box-body text-center color-fg-muted py-6">
+                  There are no IP addresses on the allow list yet.
+                </div>
+              <% end %>
+
+              <%= form_for IpAllowlistEntry.new, url: settings_user_apps_ip_allowlist_entries_path(view.integration) do |f| %>
+                <div class="Box-footer d-flex">
+                  <%= render partial: "ip_allowlist_entries/edit_entry",
+                    object: IpAllowlistEntry.new, as: :entry, locals: { f: f } %>
+                </div>
+              <% end %>
+            </div>
+
+            <%= render IpAllowlistChecks::FormComponent.new(
+              owner_type: :integration,
+              owner_id: view.integration.id) %>
+          <% end %>
+        <% end %>
+
+      </div>
+    </div>
+  </div>
+
+<% end %>
+
+<%= render layout: "settings/settings_focus" do %>
+  <%= content %>
+<% end %>

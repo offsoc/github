@@ -1,0 +1,1522 @@
+<%# erblint:counter DeprecatedComponentsCounter 49 %>
+<%# erblint:counter ButtonComponentMigrationCounter 3 %>
+<% view = Stafftools::RepositoryViews::AdminView.new(repository: current_repository, porter_status: porter_status) %>
+
+<%
+  page_info :title => view.page_title
+  high_profile_repo, high_profile_reason = HighProfileSignals.high_profile_repo?(current_repository)
+%>
+
+<div class="boxed-group">
+  <h3>Contributions data</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag gh_rebuild_commit_contributions_stafftools_repository_path(current_repository), method: :post do %>
+      <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Rebuild<% end %>
+    <% end %>
+    <h4>Rebuild commit contributions data</h4>
+    <p>
+      Update user contribution calendars with missing commits
+      from this repository.
+    </p>
+  </div>
+</div>
+
+<div class="boxed-group">
+  <h3>Single Repository Lock</h3>
+  <div class="boxed-group-inner">
+    <% if current_repository_locked_for_migration? %>
+      <%= form_tag gh_unlock_stafftools_repository_path(current_repository) do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+          Unlock
+        <% end %>
+      <% end %>
+      <h4>Lock and unlock repository</h4>
+      <p>
+        Unlock repository. Enables repository write access for code and<br>
+        repository metadata like issues and comments. Beware: unlocking a repo<br>
+        after a failed migration can lead to data loss. Please check with the<br>
+        Migration Tools team before unlocking a repo with a failed migration.<br>
+        Repository is currently <strong>locked</strong>.
+      </p>
+    <% elsif current_repository.locked? %>
+      <%= form_tag gh_unlock_stafftools_repository_path(current_repository) do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+          Unlock
+        <% end %>
+      <% end %>
+      <h4>Lock and unlock repository</h4>
+      <p>
+        Unlocks this repository and allows the user to access their code again.<br>
+        Repository is currently <strong>locked</strong>.
+      </p>
+      <% if current_repository.locked_on_migration? %>
+        <p>
+          <strong>Warning:</strong> Repository is currently locked for a migration.
+          Prematurely unlocking an importing repository may result in corruption.
+          Proceed with caution.
+          <% unless GitHub.enterprise? %>
+            Visit <a class="Link--inTextBlock" href="https://thehub.github.com/epd/migrations/#can-a-repository-be-unlocked-before-its-finished-importing">The Hub for details</a>.
+          <% end %>
+        </p>
+      <% end %>
+    <% else %>
+      <% unless GitHub.enterprise? %>
+        <%= form_tag gh_lock_stafftools_repository_path(current_repository) do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+            Lock
+          <% end %>
+        <% end %>
+        <h4>Lock and unlock repository</h4>
+        <p>
+          Lock this repository and disallow the user to access their code.<br>
+          Repository is currently <strong>unlocked</strong>.
+        </p>
+        <hr>
+      <% end %>
+
+      <%= form_tag gh_lock_for_migration_stafftools_repository_path(current_repository) do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+          Lock
+        <% end %>
+      <% end %>
+      <h4>Lock repository for migration</h4>
+      <p>
+        Lock this repository for migration. Disables access to code and<br>
+        all other repository resources (issues, comments, labels, milestones).<br>
+        Repository is currently <strong>unlocked</strong>.
+      </p>
+    <% end %>
+  </div>
+</div>
+<% if GitHub.interaction_limits_enabled? && !current_repository.private? %>
+  <div class="boxed-group" id="interaction-limits">
+    <h3>Temporary interaction limits</h3>
+    <div class="boxed-group-inner clearfix">
+      <p>
+        Temporarily restrict which users can interact with the repository (comment, open issues, or create pull requests). This may be used to force a "cool-down" period during heated discussions.
+      </p>
+
+      <%= render InteractionLimits::SettingsComponent.new(
+        object: current_repository,
+        staff_actor: true,
+      ) %>
+    </div>
+  </div>
+<% end %>
+<% unless GitHub.enterprise? || current_repository.nil? %>
+  <div class="boxed-group">
+    <h3 id="network-privileges">Network Privileges</h3>
+    <div class="boxed-group-inner clearfix">
+        <%= form_tag gh_hide_from_google_stafftools_repository_path(current_repository) do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+            <% if current_repository.noindex? %>
+              Allow indexing by Google
+            <% else %>
+              De-index from Google
+            <% end %>
+          <% end %>
+          <input type="hidden" name="no_index" value="<%= current_repository.noindex? ? "0" : "1" %>">
+        <% end %>
+        <h4>Hide from Google</h4>
+        <p>
+          Adds <code>no-index</code> meta tag to troublesome repositories to <br>
+          de-index them from search engines. Don’t forget to <a class="Link--inTextBlock" href="https://www.google.com/webmasters/tools/submit-url">submit the site to be recrawled by Google</a>.
+        </p>
+        <p>Repository is currently
+          <% if current_repository.noindex? %>
+            <strong>de-indexed from Google.</strong>
+          <% else %>
+            <strong>indexed by Google.</strong>
+          <% end %>
+        </p>
+        <% if current_repository.public? %>
+          <hr>
+          <%= form_tag hide_from_discovery_stafftools_repository_path(current_repository.owner.login, current_repository.name) do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+              <% if current_repository.is_hidden_from_discovery? %>
+                Show this repository
+              <% else %>
+                Hide this repository
+              <% end %>
+            <% end %>
+
+            <input type="hidden" name="hide_from_discovery" value="<%= current_repository.is_hidden_from_discovery? ? "0" : "1" %>">
+          <% end %>
+          <h4>Hide from Explore pages</h4>
+          <p>
+          Helps prevent the amount of public attention a repository can receive by removing it from <%= link_to "Explore", explore_path, class: "Link--inTextBlock" %> pages.
+          </p>
+          <p>
+            Repository is currently
+            <% if current_repository.is_hidden_from_discovery? %>
+              <strong>hidden from Explore pages.</strong>
+            <% else %>
+              <strong>shown on Explore pages.</strong>
+            <% end %>
+          </p>
+          <hr>
+          <%= form_tag gh_require_login_stafftools_repository_path(current_repository) do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+              <% if current_repository.require_login? %>
+                Allow anonymous users to view repository
+              <% else %>
+                Require login to view repository
+              <% end %>
+            <% end %>
+
+            <input type="hidden" name="require_login" value="<%= current_repository.require_login? ? "0" : "1" %>">
+          <% end %>
+          <h4>Require users to sign in</h4>
+          <p>
+            Helps prevent the amount of public attention a repository can receive by requiring users to sign in to view content.
+          </p>
+          <p>Repository currently
+            <% if current_repository.require_login? %>
+              <strong>requires users to be logged in to view content.</strong>
+            <% else %>
+              <strong>does not require users to be logged in.</strong>
+            <% end %>
+          </p>
+
+          <hr>
+          <% if current_repository.content_warning? %>
+            <%= form_tag gh_content_warning_stafftools_repository_path(current_repository), class: "stafftools" do %>
+              <%= render layout: "shared/details_dialog", locals: {
+                id: "content_warning_remove",
+                dialog_class: "Box-overlay--wide",
+                button_class: "btn",
+                button_text: "Remove content warning",
+                details_class: "boxed-action",
+                title: "Remove content warning",
+              } do %>
+                <div class="Box-body overflow-auto">
+                  <input type="hidden" name="category" value="">
+                  <input type="hidden" name="sub_category" value="">
+                  <input type="hidden" name="custom_sub_category" value="">
+                  <p>Remove content warning from this repository.</p>
+                  <% if current_repository.forks_count > 0 %>
+                    <%= label_tag(:apply_to_forks) do %>
+                      Apply to forks?
+                      <div class="form-checkbox mt-2 mb-0 pl-0">
+                        <%= check_box_tag(:apply_to_forks, "yes", true, { style: "margin-left: 2px; margin-right: 6px;" }) %>
+                        <p class="note">
+                          Enabling this will also remove content warnings that were applied to forks in this repository's network.
+                        </p>
+                      </div>
+                    <% end %>
+                  <% end %>
+                </div>
+                <div class="Box-footer">
+                  <%= render Primer::ButtonComponent.new(id: "content_warning_submit", type: :submit, block: true, "data-disable-invalid": "") do %>
+                    Yes. Remove content warning.
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
+          <% end %>
+          <%= form_tag gh_content_warning_stafftools_repository_path(current_repository), class: "stafftools" do %>
+            <%= render layout: "shared/details_dialog", locals: {
+              id: "content_warning_apply",
+              dialog_class: "Box-overlay--wide",
+              button_class: current_repository.content_warning? ? "btn btn-invisible btn-sm" : "btn",
+              button_text: current_repository.content_warning? ? "Change content warning" : "Apply content warning",
+              details_class: "boxed-action",
+              title: current_repository.content_warning? ? "Change content warning" : "Apply content warning",
+            } do %>
+              <div class="Box-body overflow-auto">
+                <p>
+                  Emails will be sent to the owners of this repository (and, if chosen, its
+                  forks) notifying them of the content warning.
+                </p>
+                <dl class="form-group">
+                  <dd>
+                    <div class="form-checkbox mt-2 mb-0 pl-0">
+                      <%= check_box_tag(:apply_to_forks, "yes", true, { style: "margin-left: 2px; margin-right: 6px;" }) %>
+                      <%= label_tag(:apply_to_forks) do %>
+                        Apply to forks?
+                      <% end %>
+                      <p class="note">
+                        Enabling this will apply content warning to forks in this repositories network and send notification emails to fork owners.
+                      </p>
+                    </div>
+                  </dd>
+
+                  <dd class="mt-3">
+                    <label for="category">Reason</label>
+                    <%= select_tag(
+                      :category,
+                      options_for_select(TrustSafety::ContentWarnings.category_options),
+                      class: "input-block"
+                    ) %>
+                  </dd>
+
+                  <dd id="sub_category_container" class="mt-2" hidden>
+                    <label for="sub_category">Type of mis/disinformation</label>
+                    <%= select_tag(
+                      :sub_category,
+                      options_for_select(TrustSafety::ContentWarnings.sub_category_options_for("mis_dis_information")),
+                      class: "input-block"
+                    ) %>
+                  </dd>
+
+                  <dd id="custom_sub_category_container" class="mt-2" hidden>
+                    <label for="custom_sub_category">Custom message</label>
+                    <%= text_area_tag :custom_sub_category,
+                      "",
+                      style: "height: 35px; min-height: 35px",
+                      "aria-label" => "Custom mis/disinformation reason" %>
+                  </dd>
+
+                  <dd>
+                    <%= render(Primer::Beta::Text.new(id: 'category_explanation', tag: :p, font_style: :italic, color: :muted, mt: 1)) { "" } %>
+                  </dd>
+
+                  <dd id="content_warning_instructions" class="mt-3">
+                    <label for="instructions">Instructions for the repository owner (Optional)</label>
+                    <%= text_area_tag :instructions,
+                      "",
+                      style: "height: 86px; min-height: 86px;",
+                      "aria-label" => "Instructions for the owner" %>
+                  </dd>
+
+                  <dd>
+                    <%= render(Primer::Beta::Text.new(
+                      id: 'instructions_explanation',
+                      tag: :p,
+                      font_style: :italic,
+                      color: :muted,
+                      mt: 1
+                    )) { "Instructions for repository owners are appended to the bottom of their email notification." } %>
+                  </dd>
+
+                  <dt class="mt-4">
+                    <label id="preview_label" for="preview">
+                      Preview
+                    </label>
+                  </dt>
+                  <dd id="interstitial_preview" hidden>
+                    <%= render Primer::Beta::Blankslate.new(border: true) do |component| %>
+                      <% component.with_heading(tag: :h2).with_content("") %>
+                      <% component.with_description { "" } %>
+                    <% end %>
+                  </dd>
+
+                  <dd id="banner_preview" hidden>
+                    <%= render(Primer::Alpha::Banner.new(scheme: :warning, description: "")) { "" } %>
+                  </dd>
+                </dl>
+              </div>
+              <div class="Box-footer">
+                <%= render Primer::ButtonComponent.new(id: "content_warning_submit", type: :submit, block: true, "data-disable-invalid": "") do %>
+                  Yes. Apply content warning.
+                <% end %>
+              </div>
+            <% end %>
+          <% end %>
+          <h4>Show content warning to users</h4>
+          <p>
+            Used by Trust & Safety in order to give GitHub users more information about potentially harmful content that is not in violation of GitHub's Terms of Service.
+          </p>
+          <% if view.pending_apply_content_warning_job? %>
+            <%= render(Primer::Box.new(border: true, border_radius: 1, direction: :column, justify_content: :center, align_items: :center, py: 1, px: 2)) do %>
+              <%= render(Primer::Beta::Spinner.new(size: :small, mr: 1, style: "margin-bottom: -2px;")) %>
+              Applying a content warning to this repository. <b>Reload page to update status.</b>
+            <% end %>
+          <% elsif view.pending_remove_content_warning_job? %>
+            <%= render(Primer::Box.new(border: true, border_radius: 1, direction: :column, justify_content: :center, align_items: :center, py: 1, px: 2)) do %>
+              <%= render(Primer::Beta::Spinner.new(size: :small, mr: 1, style: "margin-bottom: -2px;")) %>
+              Removing a content warning from this repository. <b>Reload page to update status.</b>
+            <% end %>
+          <% elsif current_repository.content_warning? %>
+            <p>
+              Repository currently has a
+              <b>
+                <%= current_repository.network_privilege.content_warning_category %>
+                <%= TrustSafety::ContentWarnings.type_for(current_repository.network_privilege.content_warning_category) %>
+                content warning.
+              </b>
+            </p>
+          <% else %>
+            <p>
+              Repository currently <b>does not have a content warning.</b>
+            </p>
+          <% end %>
+
+          <% if view.error_apply_content_warning_job? %>
+            <%= render(Primer::Beta::Flash.new(scheme: :danger, py: 1, px: 2)) do %>
+              <%= primer_octicon(:x, color: :danger, mr: 1) %>
+              <b>Failed to apply content warning to repository.</b> Content warning may have been applied to one or more forks.
+            <% end %>
+          <% elsif view.error_remove_content_warning_job? %>
+            <%= render(Primer::Beta::Flash.new(scheme: :danger, py: 1, px: 2)) do %>
+              <%= primer_octicon(:x, color: :danger, mr: 1) %>
+              <b>Failed to remove content warning from repository.</b> Content warning may have been removed from one or more forks.
+            <% end %>
+          <% end %>
+
+          <hr>
+          <%= form_tag gh_collaborators_only_stafftools_repository_path(current_repository) do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+              <% if current_repository.collaborators_only? %>
+                Allow all users to view repository
+              <% else %>
+                Restrict to collaborators only
+              <% end %>
+              <input type="hidden" name="collaborators_only" value="<%= current_repository.collaborators_only? ? "0" : "1" %>">
+            <% end %>
+          <% end %>
+          <h4>Restrict repository visibility to collaborators only</h4>
+          <p>
+            Helps prevent the amount of public attention a repository can receive by restricting the repository to those with <br>
+            write permissions only.
+          </p>
+          <p>Repository currently
+            <% if current_repository.collaborators_only? %>
+              <strong>restricted to collaborators only.</strong>
+            <% else %>
+              <strong>available to everyone.</strong>
+            <% end %>
+          </p>
+        <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.flipper[:schaefer_send_for_scanning].enabled?(current_user) %>
+  <div class="boxed-group">
+    <h3>Automated content classification</h3>
+    <div class="boxed-group-inner clearfix">
+      <%= form_tag stafftools_repository_asset_batch_scan_path(repository_id: current_repository.id), method: 'post' do %>
+        <% count_to_scan = current_repository.assets.count %>
+        <p>
+          <button type="submit" class="btn boxed-action" <%= "disabled" if count_to_scan == 0 %>>Submit for automated content classification</button>
+        </p>
+        <p>
+          If you suspect that this repository's images contain Child Sexual Exploitation Imagery or Extreme
+          Terrorism content, submit all images for classification and potential flagging.
+
+          <strong>Note: For now, please check with the Slack channel #schaefer before clicking this button.</strong>
+
+          This will trigger <%= count_to_scan %> scans.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Push and Pull</h3>
+  <div class="boxed-group-inner clearfix">
+    <% if current_repository.force_push_rejection_writable? %>
+      <%= form_tag gh_change_allow_force_push_stafftools_repository_path(current_repository) do %>
+        <details class="select-menu details-reset details-overlay float-right select-menu-modal-right">
+          <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+            <%= primer_octicon(:"repo-push") %>
+            <span data-menu-button><%= view.force_detail_text %></span>
+          <% end %>
+
+          <details-menu class="select-menu-modal position-absolute right-0" style="z-index:99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="select-menu-header">
+              <span class="select-menu-title">Force Push</span>
+            </div>
+
+            <div class="select-menu-list">
+              <% view.force_rejection_choices.each do |label, value| %>
+                <% selected = current_repository.force_push_rejection_original_value == value %>
+                <button type="submit" class="select-menu-item width-full" aria-checked="<%= selected %>" role="menuitemradio" name="value" value="<%= value %>">
+                  <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                  <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                </button>
+              <% end %>
+            </div>
+          </details-menu>
+        </details>
+      <% end %>
+
+      <h4>Force pushes</h4>
+      <p>
+        Allow or block force pushes made to this repository.
+        <% if current_repository.force_push_rejection_inherited? %>
+          <br>
+          The current value is the default setting set at <strong><%= view.setting_source_detail_text(current_repository.force_push_rejection_source) %></strong>.
+        <% end %>
+      </p>
+    <% else %>
+      <h4>Force pushes</h4>
+      <p>
+        Force pushes are currently <strong><%= view.force_detail_text.downcase %></strong>.
+        This is a policy set at <strong><%= view.setting_source_detail_text(current_repository.force_push_rejection_source) %></strong> and cannot be changed here.
+      </p>
+    <% end %>
+
+
+    <% if current_repository.public? && GitHub.public_push_enabled? %>
+      <hr>
+
+      <%= form_tag gh_toggle_public_push_stafftools_repository_path(current_repository) do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+          <%= view.public_push_button_text %>
+        <% end %>
+      <% end %>
+      <h4>Toggle public push</h4>
+      <p>
+        Toggle if pushes by any logged in user are allowed to this repository.
+        Currently <strong><%= view.public_push_detail_text %></strong>.
+      </p>
+    <% end %>
+
+    <hr>
+
+    <% if current_repository.max_object_size_writable? %>
+      <%= form_tag gh_change_max_object_size_stafftools_repository_path(current_repository) do %>
+        <details class="select-menu float-right select-menu-modal-right details-reset details-overlay">
+          <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+            <%= primer_octicon(:"repo-push") %>
+            <span data-menu-button><%= view.max_object_size_detail_text %></span>
+          <% end %>
+
+          <details-menu class="select-menu-modal position-absolute right-0" style="z-index:99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="select-menu-header">
+              <span class="select-menu-title">Maximum Object Size</span>
+            </div>
+
+            <div class="select-menu-list">
+              <% view.max_object_size_choices.each do |label, value| %>
+                <% selected = current_repository.max_object_size == value %>
+                <button type="submit" class="select-menu-item width-full" role="menuitemradio" aria-checked="<%= selected %>" name="value" value="<%= value %>">
+                  <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                  <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                </button>
+              <% end %>
+            </div>
+          </details-menu>
+        </details>
+      <% end %>
+      <h4>Maximum Object Size</h4>
+
+      <p>
+        Set the maximum size of Git objects that can be pushed to this repository. <br>
+        Allowing large objects to be pushed into Git can degrade performance, consider other options <br>
+        (e.g. git-lfs) before increasing this value.
+        <% if current_repository.max_object_size_inherited? %>
+          <br>
+          The current value is set at <strong><%= view.setting_source_detail_text(current_repository.max_object_size_source) %></strong>.
+        <% end %>
+      </p>
+    <% else %>
+      <h4>Maximum Object Size</h4>
+      <p>
+        Maximum Object Size is currently set to <strong><%= view.max_object_size_detail_text %></strong>.
+        This is a policy set at <strong><%= view.setting_source_detail_text(current_repository.max_object_size_source) %></strong> and cannot be changed here.
+      </p>
+    <% end %>
+
+    <% unless GitHub.enterprise? %>
+      <% [:warn, :lock].each do |quota_kind| %>
+        <hr>
+        <% if current_repository.disk_quota_writable?(kind: quota_kind) %>
+          <details class="select-menu float-right select-menu-modal-right details-reset details-overlay">
+            <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+              <%= primer_octicon(view.disk_quota_octicon(quota_kind)) %>
+              <span data-menu-button><%= view.disk_quota_detail_text(quota_kind) %></span>
+            <% end %>
+
+            <details-menu class="position-absolute right-0" style="z-index:99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="select-menu-modal">
+                <div class="select-menu-header">
+                  <span class="select-menu-title"><%= quota_kind.to_s.capitalize %></span>
+                </div>
+
+                <div class="select-menu-list">
+                  <% view.disk_quota_choices.each do |label, value| %>
+                    <%= form_tag gh_change_disk_quota_stafftools_repository_path(quota_kind, current_repository), "data-autosubmit": true do %>
+                      <button type="submit" class="select-menu-item width-full" role="menuitemradio" aria-checked="false" name="value" value="<%= value %>">
+                        <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                        <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                      </button>
+                    <% end %>
+                  <% end %>
+                </div>
+              </div>
+            </details-menu>
+          </details>
+          <h4><%= quota_kind.to_s.capitalize %> Disk Quota</h4>
+          <p>
+            Set the reachable repository size at which we will take the action
+          </p>
+        <% else %>
+          <h4><%= quota_kind.to_s.capitalize %> Disk Quota</h4>
+          <p>
+            <%= quota_kind.to_s.capitalize %> Disk Quota is currently set to <strong><%= view.disk_quota_detail_text(quota_kind) %></strong>.
+            This is a policy set at <strong><%= view.setting_source_detail_text(current_repository.disk_quota_source(kind: quota_kind)) %></strong> and cannot be changed here.
+          </p>
+        <% end %>	<%# if writable %>
+      <% end %> <%# each quota kind %>
+    <% end %> <%# unless GitHub enterprise %>
+  </div>
+</div>
+
+<div class="boxed-group">
+  <h3>Insights graphs</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag gh_toggle_allow_git_graph_stafftools_repository_path(current_repository) do %>
+      <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+        <%= view.graph_button_text %>
+      <% end %>
+    <% end %>
+    <h4>Disable Git-backed insights graphs</h4>
+    <p>
+      Prevents gh-graph operations from running disabling related insights graphs (contributors, commit activity, code frequency).<br>
+      Git graph operations are currently
+      <strong><%= view.graph_detail_text %></strong>.
+    </p>
+  </div>
+</div>
+
+<% if GitHub.git_lfs_config_enabled? %>
+  <div class="boxed-group">
+    <h3>Git LFS</h3>
+    <div class="boxed-group-inner">
+      <% if current_repository.git_lfs_enabled? %>
+        <%= form_tag preview_stafftools_repository_large_files_path(current_repository.owner, current_repository), method: :delete do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Disable<% end %>
+        <% end %>
+      <% else %>
+        <% if view.can_enable_lfs? %>
+          <%= form_tag preview_stafftools_repository_large_files_path(current_repository.owner, current_repository) do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+              Enable
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action disabled", disabled: true) do %>
+            Enable
+          <% end %>
+        <% end %>
+      <% end %>
+      <h4>Toggle Git LFS access</h4>
+      <p>
+        <% if view.can_enable_lfs? %>
+          <%= current_repository.git_lfs_enabled? ? :Disable : :Enable %>
+          Git LFS for this repository.
+        <% else %>
+          <%= view.git_lfs_button_banner_text %>
+        <% end %>
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Codeload</h3>
+  <div class="boxed-group-inner">
+    <% if current_repository.archive_resource_blocked? %>
+      <%= form_tag unblock_archive_download_stafftools_repository_path(current_repository.owner, current_repository) do %>
+        <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+          Unblock
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= form_tag block_archive_download_stafftools_repository_path(current_repository.owner, current_repository) do %>
+        <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+          Block
+        <% end %>
+      <% end %>
+    <% end %>
+    <h4>Block archive download</h4>
+    <p>
+        Block/unblock archive download for this repository.
+    </p>
+  </div>
+</div>
+
+<% if GitHub.can_disable_git_ssh_access? %>
+  <div class="boxed-group">
+    <h3>Git SSH access</h3>
+    <div class="boxed-group-inner clearfix">
+      <% if current_repository.ssh_writable? %>
+        <%= form_tag change_ssh_access_stafftools_repository_path do %>
+          <details class="select-menu float-right select-menu-modal-right details-reset details-overlay">
+            <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+              <%= primer_octicon(:key) %>
+              <span data-menu-button><%= current_repository.ssh_enabled? ? "Enabled" : "Disabled"  %></span>
+            <% end %>
+
+            <details-menu class="select-menu-modal right-0 position-absolute" style="z-index:99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="select-menu-header">
+                <span class="select-menu-title">Git SSH Access</span>
+              </div>
+
+              <div class="select-menu-list">
+                <% view.ssh_choices.each do |label, value| %>
+                  <button type="submit" class="select-menu-item width-full" role="menuitemradio" name="value" value="<%= value %>" aria-checked="<%= current_repository.ssh_enabled?.to_s == value %>">
+                    <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                    <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                  </button>
+                <% end %>
+              </div>
+            </details-menu>
+          </details>
+        <% end %>
+        <h4>Git SSH Access</h4>
+        <p>
+          Enable or disable Git SSH access for this repository.
+
+          <% if current_repository.ssh_inherited? %>
+            <br>
+            The current value is inherited from <strong><%= view.setting_source_detail_text(current_repository.ssh_source) %></strong>.
+          <% end %>
+        </p>
+      <% else %>
+        <h4>Git SSH Access</h4>
+        <p>
+          Git SSH access is currently <strong><%= current_repository.ssh_enabled? ? "enabled" : "disabled" %></strong>.
+          This is a policy set at <strong><%= view.setting_source_detail_text(current_repository.ssh_source) %></strong> and cannot be changed here.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.mirrors_enabled? %>
+  <div class="boxed-group">
+    <h3>Mirror</h3>
+    <div class="boxed-group-inner">
+      <% if view.mirror %>
+        <% if view.mirror_timestamp %>
+          <p>
+            This repository’s last mirror sync
+            <strong><%= view.mirror_result %></strong> at
+            <code>
+              <%= view.mirror_timestamp %>
+            </code>
+          </p>
+        <% end %>
+
+        <p>
+          <a class="Link--inTextBlock" href="<%= view.mirror_sentry_link %>">Search Sentry</a>
+          for exceptions from this repository’s mirror jobs.
+        </p>
+
+        <hr>
+
+        <%= form_tag gh_stafftools_repository_mirror_path(current_repository), method: :put, class: "stafftools" do %>
+          <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Update mirror URL",
+            details_class: "boxed-action",
+            title: "Update mirror URL",
+            } do %>
+            <div class="Box-body overflow-auto">
+              <dl class="form-group">
+                <dt><label for="mirror_url">Mirror URL</label></dt>
+                <dd><%= text_field_tag :mirror_url, view.mirror.url, autofocus: true, required: true, "aria-label" => "Mirror URL" %></dd>
+              </dl>
+            </div>
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(type: :submit, block: true, "data-disable-invalid": "") do %>Update mirror<% end %>
+            </div>
+          <% end %>
+        <% end %>
+
+        <h4>Upstream repository URL</h4>
+        <p>
+          This repository is currently mirroring
+          <%= link_to view.mirror.url %> <%# erblint:disable A11yUnderlineLinksInTextBlock %>
+        </p>
+        <hr>
+      <% else %>
+        <%= form_tag gh_stafftools_repository_mirror_path(current_repository), class: "stafftools" do %>
+          <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Create mirror",
+            details_class: "boxed-action",
+            title: "Mirror repository",
+            } do %>
+            <div class="Box-body overflow-auto">
+              <p>
+                If you make this repository a mirror, it will periodically fetch
+                data from a remote Git repository. All data in this repository
+                will be overwritten by the fetched data, including commits that
+                were pushed directly.
+              </p>
+              <p>
+                <strong>
+                  Do not push directly to this repository; you may lose commits!
+                </strong>
+              </p>
+              <dl class="form-group">
+                <dt><label for="mirror_url">Mirror URL</label></dt>
+                <dd><%= text_field_tag :mirror_url, "", autofocus: true, required: true, "aria-label" => "Mirror URL" %></dd>
+              </dl>
+            </div>
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(type: :submit, block: true, "data-disable-invalid": "") do %>Create mirror<% end %>
+            </div>
+          <% end %>
+        <% end %>
+
+        <h4>Mirror an external repository</h4>
+        <p>
+          Set this repository to automatically mirror an external Git
+          repository.
+        </p>
+      <% end %>
+
+      <% if view.mirror %>
+        <%= form_tag gh_sync_stafftools_repository_mirror_path(current_repository), method: :put do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Sync mirror<% end %>
+        <% end %>
+        <h4>Sync with mirror</h4>
+        <p>
+          Queue a job to sync this repository with its mirror.
+        </p>
+        <hr>
+
+        <%= render layout: "shared/details_dialog", locals: {
+          button_class: "btn btn-danger",
+          button_text: "Remove mirroring",
+          details_class: "boxed-action",
+          title: "Remove mirroring",
+          } do %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+            Woah there!
+          <% end %>
+          <div class="Box-body overflow-auto">
+            <p>
+              This repository is currently mirroring <%= link_to view.mirror.url, class: "Link--inTextBlock" %>
+            </p>
+            <p>
+              Are you sure you want to remove the mirroring set up for this repository?
+            </p>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag gh_stafftools_repository_mirror_path(current_repository), method: :delete, class: "stafftools" do %>
+              <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>Remove mirroring<% end %>
+            <% end %>
+          </div>
+        <% end %>
+        <h4>Remove mirroring</h4>
+        <p>
+          Remove the mirroring currently set up for this repository.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Repository license</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag gh_redetect_license_stafftools_repository_path(current_repository), method: :post do %>
+    <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Redetect license<% end %>
+    <% end %>
+    <h4>Redetect repository’s license</h4>
+    <p>
+      <% if current_repository.license.present? %>
+        Current license: <strong><%= current_repository.license.name %></strong>
+      <% else %>
+        Repository contains <strong>no detected license file</strong>.
+      <% end %>
+    </p>
+  </div>
+</div>
+
+<div class="boxed-group">
+  <h3>Preferred files</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag stafftools_repository_preferred_files_redetection_path(
+      current_repository.owner,
+      current_repository,
+    ) do %>
+      <%= render Primer::Beta::Button.new(
+        type: :submit,
+        classes: "boxed-action",
+      ) do %>Redetect preferred files<% end %>
+    <% end %>
+    <h4>Redetect repository’s preferred files</h4>
+    <p>
+      <% RepositoryPreferredFile::VALID_TYPES.each do |type| %>
+        <strong><%= type %>:</strong>
+        <% if current_repository.preferred_files.exists?(type.to_sym) %>
+          <%= primer_octicon(:check) %>
+        <% else %>
+          <%= primer_octicon(:x) %>
+        <% end %>
+        <br>
+      <% end %>
+    </p>
+  </div>
+</div>
+
+<% unless GitHub.enterprise? %>
+  <div class="boxed-group">
+    <h3>Repository invitation rate limit</h3>
+    <div class="boxed-group-inner">
+      <%= form_tag gh_pause_repo_invite_limit_stafftools_repository_path(current_repository), method: :post do %>
+      <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Override<% end %>
+      <% end %>
+      <h4>Override repository’s invitation rate limit</h4>
+      <p>
+        Allow unlimited repository invitations to be sent for a 24-hour period.
+        <% if view.invitation_rate_limit_overridden? %>
+          Current override expires <%= view.invitation_rate_limit_override_expiration %>.
+        <% end %>
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Fix stuck issue transfer</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag fix_issue_transfers_stafftools_repository_path(current_repository.owner, current_repository), method: :post do %>
+      <button type="submit" class="btn boxed-action" <% if issue_transfers.empty? %>disabled<% end %>>Fix</button>
+    <% end %>
+    <h4>Fix stuck issue transfer</h4>
+    <p>
+      <% if issue_transfers.empty? %>
+        No stuck issues found. Great job!
+      <% else %>
+        <%= pluralize(issue_transfers.count, "issue") %> stuck
+      <% end %>
+    </p>
+  </div>
+</div>
+
+<%= render partial: "stafftools/repositories/token_scanning", locals: { view: view } %>
+
+<%= render partial: "stafftools/repositories/release_downloads", locals: { view: view } %>
+
+<div class="boxed-group dangerzone">
+  <h3 id="danger-zone">Danger Zone</h3>
+  <div class="boxed-group-inner">
+
+    <% if GitHub.repository_transfer_requests_enabled? && view.transferring? %>
+      <h4>Pending transfer</h4>
+      <p>
+        <%= link_to "@#{view.transfer_requester.login}",
+              user_path(view.transfer_requester), :class => "user-mention Link--inTextBlock" %>
+
+        started a transfer to
+
+        <%= link_to "@#{view.transfer_target.login}",
+              user_path(view.transfer_target), :class => "user-mention Link--inTextBlock" %>
+
+        <%= time_ago_in_words_js(view.transfer_created_at) %>.
+      </p>
+
+      <hr>
+    <% end %>
+
+    <% if view.show_permission_toggle? %>
+      <%= render layout: "shared/details_dialog", locals: {
+        button_class: "btn btn-danger",
+        button_text: "Make #{view.permission_toggle_type}",
+        details_class: "boxed-action",
+        title: "Toggle visibility",
+        } do %>
+        <div class="Box-body overflow-auto">
+          <p>
+            <% if view.make_private_blocked_on_plan? %>
+              Owner is at their private repository limit. You may want to upgrade their account
+              with a coupon.
+            <% else %>
+              This repository will now be
+              <strong><%= view.permission_toggle_type %></strong>.
+              <% if current_repository.fork? %>
+                The root repository of this network has already been made
+                <%= view.permission_toggle_type %> since this fork was created.
+              <% end %>
+            <% end %>
+          </p>
+        </div>
+        <div class="Box-footer">
+          <% if view.make_private_blocked_on_plan? %>
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true, classes: "disabled") do %>Make repository private<% end %>
+          <% else %>
+            <%= form_tag gh_toggle_permission_stafftools_repository_path(current_repository), class: "stafftools" do %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>Make repository <%= view.permission_toggle_type %><% end %>
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <h4>Toggle visibility</h4>
+      <p>
+        <% if current_repository.fork? %>
+          Make this fork <%= view.permission_toggle_type %>, matching the root
+          repository’s visibility.
+        <% else %>
+          Make this repository <%= view.permission_toggle_type %>.
+        <% end %>
+      </p>
+      <hr>
+    <% end %>
+
+    <% if view.archived? %>
+      <%= render layout: "shared/details_dialog", locals: {
+        button_class: "btn btn-danger",
+        button_text: "Unarchive",
+        details_class: "boxed-action",
+        title: "Unarchive repository",
+        } do %>
+        <div class="Box-body overflow-auto">
+          <p>
+            This will make the <strong><%= current_repository.name_with_owner %></strong> repository, issues,
+            pull requests, labels, milestones, projects, wiki, releases, commits, tags, branches, reactions and
+            comments read-write and allow future comments.
+          </p>
+        </div>
+        <div class="Box-footer">
+          <%= form_tag gh_unarchive_stafftools_repository_path(current_repository), class: "stafftools" do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>Unarchive repository<% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <h4>Unarchive repository</h4>
+      <p>
+        Mark this repository as unarchived and read-write.
+      </p>
+    <% else %>
+      <%= render layout: "shared/details_dialog", locals: {
+        button_class: "btn btn-danger",
+        button_text: "Archive",
+        details_class: "boxed-action",
+        title: "Archive repository",
+        } do %>
+        <div class="Box-body overflow-auto">
+          <p>
+            This will make the <strong><%= current_repository.name_with_owner %></strong> repository, issues,
+            pull requests, labels, milestones, projects, wiki, releases, commits, tags, branches, reactions and
+            comments read-only and disable any future comments. The repository can still be forked.
+          </p>
+        </div>
+        <div class="Box-footer">
+          <%= form_tag gh_archive_stafftools_repository_path(current_repository), class: "stafftools" do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>Archive repository<% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <h4>Archive repository</h4>
+      <p>
+        Mark this repository as archived and read-only.
+      </p>
+    <% end %>
+    <hr>
+
+    <% if view.pending_access_disable_job? %>
+      <%= render Primer::ButtonComponent.new(classes: "boxed-action", disabled: true) do %>Disable access<% end %>
+      <h4 data-disable-job-status="pending">Disable repository</h4>
+      <p>This repository has been queued for disabling.</p>
+      <%= render(Primer::Box.new(border: true, border_radius: 1, direction: :column, justify_content: :center, align_items: :center, py: 1, px: 2)) do %>
+        <%= render(Primer::Beta::Spinner.new(size: :small, mr: 1, style: "margin-bottom: -2px;")) %>
+        Current status: <strong><%= current_repository.disable_access_job_status %></strong>
+      <% end %>
+    <% elsif view.pending_access_enable_job? %>
+      <%= render Primer::ButtonComponent.new(classes: "boxed-action", disabled: true) do %>Restore access to this repository<% end %>
+      <h4>Disable repository</h4>
+      <p>
+      This repository has been queued for re-enabling.
+      <br>
+      Current status: <strong><%= current_repository.enable_access_job_status %></strong>
+      </p>
+    <% elsif view.disabled? %>
+      <%= form_tag gh_disable_stafftools_repository_path(current_repository), method: :delete do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Restore access to this repository<% end %>
+      <% end %>
+      <h4 data-disable-job-status="success">Disable repository</h4>
+      <p>
+      This repository was disabled by <strong><%= view.disabler_login %></strong>
+      <%= time_ago_in_words_js view.disabled_at %>.
+      </p>
+    <% else %>
+      <%= form_tag gh_admin_disable_stafftools_repository_path(current_repository), class: "stafftools" do %>
+        <%= render layout: "shared/details_dialog", locals: {
+            id: "disable_access_modal",
+            button_class: "btn btn-danger",
+            button_text: "Disable access",
+            details_class: "boxed-action",
+            dialog_class: "Box-overlay--wide",
+            title: "Disable repository access",
+          } do %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+            Pay attention!
+            <% if current_user.employee? && high_profile_repo %>
+              <%= link_to "High Profile Repository", "https://github.com/github/trust-safety/blob/main/docs/operations/escalation-procedures/high-profile-escalation.md", class: "Link--inTextBlock" %> - if uncertain check with Trust & Safety prior to flagging
+              <small>
+                <br>
+                <%= high_profile_reason %>
+              </small>
+            <% end %>
+          <% end %>
+          <div class="Box-body overflow-auto">
+            <% if GitHub.enterprise? %>
+              <p>
+                This will prevent both read and write access to this repository
+                <% if !current_repository.fork? %> and all of its forks<% end %>.
+                The owners of this repository will receive an email advising them
+                to contact their site administrator.
+                <strong>Are you sure?</strong>
+              </p>
+
+              <dl class="form-group">
+                <dt>
+                  <label for="instructions">Instructions for the owner (Optional)</label>
+                </dt>
+                <dd>
+                  <%= text_area_tag :instructions,
+                    "",
+                    style: "height: 100px; min-height: 100px;",
+                    "aria-label" => "Instructions for the owner" %>
+                </dd>
+              </dl>
+            <% else %>
+              <p>
+                This will prevent both read and write access to this repository
+                <% if !current_repository.fork? %> and all of its forks<% end %>.
+                The owners of this repository will receive an email explaining why
+                they can’t access its content and how to remedy the situation.
+              </p>
+
+              <dl class="form-group">
+                <dt>
+                  <label class="select-menu-title" for="reason">Reason</label>
+                </dt>
+                <dd>
+                  <%= select_tag(
+                    :disable_reason,
+                    options_for_select(view.disable_repo_reason_choices),
+                    class: "input-block",
+                    "aria-label": "Reason for disabling",
+                    name: "reason"
+                  ) %>
+                </dd>
+              </dl>
+
+              <dl class="form-group">
+                <dt>
+                  <label for="tos_reason">ToS reason for disabling</label>
+                </dt>
+                <dd id="tos_reason_container" class="mt-2">
+                  <%= select_tag(
+                    :tos_reason,
+                    options_for_select(DsaConstants::TOS_MODERATION_REASON_OPTIONS),
+                    class: "input-block",
+                    required: true,
+                    include_blank: true
+                  ) %>
+                </dd>
+              </dl>
+
+              <dl class="form-group">
+                <dt><label for="content_formats">Format of violating content (select at least one)</label></dt>
+                <dd>
+                  <%= render(Primer::Alpha::CheckBoxGroup.new(
+                    name: "content_formats",
+                    id: "content_formats",
+                    required: false)) do |c|
+                      DsaConstants::CONTENT_FORMAT_OPTIONS.each do |label, value|
+                        c.check_box(label:, value:)
+                      end
+                    end
+                  %>
+                </dd>
+              </dl>
+
+              <dl class="form-group">
+              <dt><label for="source">How was this content detected</label></dt>
+              <dd>
+                <%= select_tag(
+                  :source,
+                  options_for_select(DsaConstants::SOURCE_OPTIONS),
+                  class: "input-block",
+                  required: true
+                ) %>
+              </dd>
+            </dl>
+
+              <dl class="form-group">
+                <dt>
+                  <label for="details">Audit log details (required)</label>
+                </dt>
+                <dd class="js-length-limited-input-container">
+                  <%= text_area_tag :details,
+                    "",
+                    autofocus: true,
+                    required: true,
+                    class: "js-length-limited-input",
+                    data: {
+                      "warning-text": "{{remaining}} remaining",
+                      "warning-length": "100",
+                      "input-max-length": "255",
+                    },
+                    style: "height: 75px; min-height: 75px;",
+                    "aria-label" => "Audit log details" %>
+                  <div class="js-length-limited-input-warning text-right m-0 d-none"></div>
+                </dd>
+              </dl>
+
+              <dl class="form-group">
+                <dt>
+                  <label for="do_not_notify_dsa">Are you disabling due to fraudulent (inauthentic) activity?</label>
+                  <p>
+                    If selected, the moderation activity will not be reported to the DSA. Ensure that the activity truly is
+                    inauthentic before selecting this option as this may have legal implications for GitHub.
+                  </p>
+                </dt>
+                <dd>
+                  <input type="checkbox" id="do_not_notify_dsa" name="do_not_notify_dsa" <%= "checked" if current_repository.forks_count >= 100 %>>
+                </dd>
+              </dl>
+
+              <dl class="form-group">
+                <dt>
+                  <label for="instructions">Notification for the owners</label>
+                  <p>
+                    This text will be emailed to the owners of the repository. It can be sent to fork owners too.
+                  </p>
+                </dt>
+                <dd>
+                  <% view
+                      .disable_repo_reason_choices
+                      .map(&:second)
+                      .uniq!
+                      .each do |value|
+                  %>
+                    <%= text_area_tag(:"email_template_#{value}", disable_templates[value.to_sym], {
+                          style: "height: 100px; min-height: 100px;",
+                          'aria-label': "Instructions for the owner"
+                        })
+                    %>
+                  <% end %>
+                  <small>
+                    The words surrounded by curly brackets (e.g. <code>{{repository_name_with_owner}}</code>) are
+                    <a class="Link--inTextBlock" href="https://mustache.github.io/">Mustache</a> variables.
+                    They'll be replaced with actual values
+                    (e.g. <code>https://github.com/mojombo/chronic</code>)
+                    before the email is sent out.
+                  </small>
+                </dd>
+              </dl>
+            <% end %>
+          </div>
+          <div class="Box-footer">
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true, "data-disable-invalid": "") do %>Yes. Disable the repository<% end %>
+          </div>
+        <% end %>
+      <% end %>
+      <% if view.error_access_disable_job? %>
+        <h4 data-disable-job-status="error">Disable repository</h4>
+      <% else %>
+        <h4>Disable repository</h4>
+      <% end %>
+
+      <p>
+        <% if current_repository.fork? %>
+          Disable access to this repository.
+        <% else %>
+          Disable access to the repository and all of its forks.
+        <% end %>
+      </p>
+
+      <% if view.error_access_disable_job? %>
+        <%= render(Primer::Beta::Flash.new(scheme: :danger, py: 1, px: 2)) do %>
+          <%= primer_octicon(:x, color: :danger, mr: 1) %>
+          <b>Failed to disable repository.</b> One or more forks may have been disabled. Check
+          <%= link_to("sentry for details", "https://sentry.io/organizations/github/issues/?project=1885898&query=is%3Aunresolved+%22GitRepositoryAccess%3A%3ARepoNetworkDisableError%22&statsPeriod=14d", target: :_blank, class: "Link--inTextBlock") %>.
+        <% end %>
+      <% end %>
+    <% end %>
+
+
+    <% if !GitHub.enterprise? %>
+      <hr>
+      <% if view.pending_access_disable_job? %>
+        <%= render Primer::ButtonComponent.new(classes: "boxed-action", disabled: true) do %>Process DMCA takedown<% end %>
+        <h4>DMCA takedown</h4>
+        <p>This repository has been queued for disabling.</p>
+        <%= render(Primer::Box.new(border: true, border_radius: 1, direction: :column, justify_content: :center, align_items: :center, py: 1, px: 2)) do %>
+          <%= render(Primer::Beta::Spinner.new(size: :small, mr: 1, style: "margin-bottom: -2px;")) %>
+          Current status: <strong><%= current_repository.disable_access_job_status %></strong>
+        <% end %>
+      <% elsif view.pending_access_enable_job? %>
+        <%= render Primer::ButtonComponent.new(classes: "boxed-action", disabled: true) do %>Remove DMCA<% end %>
+        <h4>DMCA takedown</h4>
+        <p>
+        This repository has been queued for re-enabling.
+        <br>
+        Current status: <strong><%= current_repository.enable_access_job_status %></strong>
+        </p>
+      <% elsif view.dmca? %>
+        <%= form_tag gh_stafftools_repository_dmca_takedown_path(current_repository), method: :delete do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>Remove DMCA<% end %>
+        <% end %>
+        <h4>DMCA takedown</h4>
+        <p>
+          Clear the DMCA takedown from this repository.
+        </p>
+      <% else %>
+        <%= form_tag gh_stafftools_repository_dmca_takedown_path(current_repository), class: "stafftools" do %>
+          <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn btn-danger",
+            button_text: "Take down",
+            details_class: "boxed-action",
+            title: "Process DMCA takedown",
+            } do %>
+            <div class="Box-body overflow-auto">
+              <p>
+                This will prevent public access to this repository, its wiki,
+                issues, pull requests, and pages. All forks and their content will
+                be blocked as well.
+              </p>
+              <p>
+                Emails will be sent to the owners of this repository and its
+                forks notifying them of the takedown.
+              </p>
+              <dl class="form-group">
+                <dt><label for="takedown_url">Takedown URL</label></dt>
+                <dd><%= text_field_tag :takedown_url, nil, autofocus: true, required: true, "aria-label" => "Takedown URL" %></dd>
+              </dl>
+            </div>
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true, "data-disable-invalid": "") do %>Take down repository<% end %>
+            </div>
+          <% end %>
+        <% end %>
+        <h4>DMCA takedown</h4>
+
+        <p>
+          Process a DMCA takedown against this repository and its forks,
+          blocking public access.
+        </p>
+
+        <% if view.error_access_disable_job? %>
+          <%= render(Primer::Beta::Flash.new(scheme: :danger, py: 1, px: 2)) do %>
+            <%= primer_octicon(:x, color: :danger, mr: 1) %>
+            <b>Failed to disable repository.</b> One or more forks may have been disabled. Check
+            <%= link_to("sentry for details", "https://sentry.io/organizations/github/issues/?project=1885898&query=is%3Aunresolved+%22GitRepositoryAccess%3A%3ARepoNetworkDisableError%22&statsPeriod=14d", target: :_blank, class: "Link--inTextBlock") %>.
+          <% end %>
+        <% end %>
+      <% end %>
+      <hr>
+
+      <%= render layout: "shared/details_dialog", locals: {
+          button_class: "btn btn-danger",
+          button_text: "Block country",
+          details_class: "boxed-action",
+          title: "Block country",
+        } do %>
+        <div class="Box-body overflow-auto">
+          <p>
+            This will prevent public access to this repository, its wiki,
+            issues, pull requests, and pages from IP’s seeming to originate from
+            the given countries. All forks and their content will be blocked
+            as well.
+          </p>
+          <% if current_repository.country_blocks.present? %>
+            <h4>Existing blocks</h4>
+            <% current_repository.country_blocks.each do |reason, url| %>
+              <%= form_tag gh_stafftools_repository_country_block_path(current_repository),
+                method: "delete", class: "clearfix stafftools" do %>
+                <%= hidden_field_tag :country_block, reason, id: "country_block_#{reason}" %>
+                <span class="float-right">
+                  <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, scheme: :danger) do %>Remove country block<% end %>
+                </span>
+                <p><%=link_to GitRepositoryBlock::COUNTRY_BLOCK_DESCRIPTIONS[reason], url, class: "Link--inTextBlock" %></p>
+              <% end %>
+            <% end %>
+          <% end %>
+          <hr>
+          <h4>Add new block</h4>
+          <%= form_tag gh_stafftools_repository_country_block_path(current_repository), class: "stafftools", id: "add_country_block_form" do %>
+            <dl class="form-group">
+              <dt><label for="country_block">Block type</label></dt>
+              <dd>
+                <%= select_tag :country_block,
+                  options_for_select(GitRepositoryBlock::COUNTRY_BLOCK_DESCRIPTIONS.invert,
+                    disabled: current_repository.country_blocks.keys),
+                  class: "input-block" %>
+              </dd>
+            </dl>
+            <dl class="form-group">
+              <dt><label for="tos_reason">ToS violating reason</label></dt>
+              <dd class="mt-2">
+                <%= select_tag(
+                  :tos_reason,
+                  options_for_select(DsaConstants::TOS_MODERATION_REASON_OPTIONS),
+                  class: "input-block",
+                  required: true,
+                  include_blank: true
+                ) %>
+              </dd>
+            </dl>
+
+            <dl class="form-group">
+              <dt><label for="content_formats">Format of violating content (select at least one)</label></dt>
+              <dd>
+                <%= render(Primer::Alpha::CheckBoxGroup.new(
+                  name: "content_formats",
+                  id: "content_formats")) do |c|
+                    DsaConstants::CONTENT_FORMAT_OPTIONS.each do |label, value|
+                      c.check_box(label:, value:)
+                    end
+                  end
+                %>
+              </dd>
+            </dl>
+
+            <dl class="form-group">
+              <dt><label for="source">How was this content detected</label></dt>
+              <dd>
+                <%= select_tag(
+                  :source,
+                  options_for_select(DsaConstants::SOURCE_OPTIONS),
+                  class: "input-block",
+                  required: true
+                ) %>
+              </dd>
+            </dl>
+
+            <dl class="form-group">
+              <dt><label for="country_block_reason">Block reason</label></dt>
+              <dd>
+                <%= text_area_tag :country_block_reason,
+                  "",
+                  rows: 4,
+                  placeholder: "Reason for country block",
+                  required: true,
+                  "aria-label": "Country block reason" %>
+              </dd>
+            </dl>
+            <dl class="form-group">
+              <dt><label for="country_block_url">Block URL (Optional)</label></dt>
+              <dd>
+                <%= text_field_tag :country_block_url,
+                  "",
+                  placeholder: "Only include if blocking notice is posted publicly",
+                  "aria-label" => "Country block URL" %>
+              </dd>
+            </dl>
+          <% end %>
+        </div>
+        <div class="Box-footer">
+          <button type="submit" class="btn btn-danger btn-block" form="add_country_block_form">Yes. Set up country block</button>
+        </div>
+      <% end %>
+      <h4>Country specific block</h4>
+      <p>
+        Block the repository in a specific country. It blocks
+        public access for IP’s originating from a specific country.
+      </p>
+
+    <% end %>
+
+    <% if current_repository.anonymous_git_access_available? %>
+      <hr>
+
+      <% if current_repository.fork? %>
+        <%= render Primer::ButtonComponent.new(scheme: :danger, classes: "boxed-action", disabled: true) do %><%= view.toggled_anonymous_access_action %><% end %>
+        <h4><%= view.toggled_anonymous_access_action %> anonymous Git read access</h4>
+        <p>
+          Forks inherit the anonymous Git read access setting of the upstream or parent repository.
+          Currently <b><%= view.anonymous_access_state %></b>.
+        </p>
+      <% else %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn btn-danger",
+            button_text: view.toggled_anonymous_access_action,
+            details_class: "boxed-action",
+            title: "#{view.toggled_anonymous_access_action} anonymous Git access",
+          } do %>
+            <% if view.toggled_anonymous_access %>
+              <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                This will allow Git reads without authentication!
+              <% end %>
+              <div class="Box-body overflow-auto">
+                <ul class="ml-3 mb-3">
+                  <li>You are allowing unauthenticated Git operations to read the code in this repository.</li>
+                  <li>Anyone with network access to GitHub Enterprise will be able to read the code in this repository.</li>
+                </ul>
+                <p>
+                  <strong>Are you sure?</strong>
+                </p>
+              </div>
+            <% else %>
+              <div class="Box-body overflow-auto">
+                <ul class="ml-3 mb-3">
+                  <li>Unauthenticated Git operations will no longer be able to read the code in this repository.</li>
+                  <li>Disabling anonymous Git reads could impact developer tools’ access to this repository.</li>
+                </ul>
+                <p>
+                  <strong>Are you sure?</strong>
+                </p>
+              </div>
+            <% end %>
+            <div class="Box-footer">
+              <%= form_tag change_anonymous_git_access_stafftools_repository_path, class: "stafftools" do %>
+                <input type="hidden" value="<%= view.toggled_anonymous_access %>" name="value">
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>Yes, <%= view.toggled_anonymous_access_action.downcase %> anonymous Git read access<% end %>
+              <% end %>
+            </div>
+          <% end %>
+
+        <h4><%= view.toggled_anonymous_access_action %> anonymous Git read access</h4>
+        <p>
+          <%= view.toggled_anonymous_access_action %> read access to this repository for Git operations without authentication.
+        </p>
+        <%= form_tag change_anonymous_git_access_locked_stafftools_repository_path, :class => "stafftools" do %>
+          <input type="hidden" name="value" value="<%= !view.anonymous_access_locked? %>">
+          <input type="checkbox" id="anonymous_git_access_locked" class="js-submit-checkbox <%= view.anonymous_access_locked_disabled %>" <%= "checked" if view.anonymous_access_locked? %> <%= view.anonymous_access_locked_disabled %>>
+          <label for="anonymous_git_access_locked" class="<%= "color-fg-muted" if view.anonymous_access_locked_policy? %>">
+            <% if view.anonymous_access_locked_policy? %>
+              Repository admins are globally prevented from <%= view.toggled_anonymous_access_action_gerund %> anonymous Git read access.
+            <% else %>
+              Prevent repository admins from <%= view.toggled_anonymous_access_action_gerund %> anonymous Git read access.
+            <% end %>
+          </label>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <hr>
+
+    <%= render layout: "shared/details_dialog", locals: {
+        button_class: "btn btn-danger",
+        button_text: "Delete this repository",
+        details_class: "boxed-action",
+        title: "Delete repository",
+        hidden: current_repository.owner_trade_screening_delete_restricted?,
+      } do %>
+      <div class="Box-body overflow-auto">
+        <p>
+          This will delete the repository, its wiki, issues, pull requests, <% if !GitHub.enterprise? %>packages, <% end %>and pages.
+
+          <% if current_repository.private? %>
+            All forks and their content will be deleted as well.
+          <% end %>
+          <strong>Are you certain?</strong>
+        </p>
+      </div>
+      <div class="Box-footer">
+        <p>Please type <strong><%= current_repository.name_with_display_owner %></strong> to confirm.</p>
+        <%= form_tag gh_stafftools_repository_path(current_repository), method: :delete, class: "stafftools" do %>
+          <p>
+          <input type="text" class="form-control input-block" autofocus required
+                  pattern="<%= case_insensitive_pattern current_repository.name_with_display_owner %>"
+                  aria-label="Type in the name of the repository to confirm that you want to delete this repository."
+                  name="verify"
+                  autocomplete="off">
+          </p>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true, "data-disable-invalid": "") do %>Delete repository<% end %>
+        <% end %>
+      </div>
+    <% end %>
+    <h4>Delete repository</h4>
+    <% if current_repository.owner_trade_screening_delete_restricted? %>
+      <p>This repository cannot be deleted as the repository owner is trade restricted.</p>
+    <% else %>
+      <p>Delete this repository and all its related content.</p>
+    <% end %>
+  </div>
+</div>

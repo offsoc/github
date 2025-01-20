@@ -1,0 +1,319 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info title: "Upgrade", selected_link: :business_billing_settings,
+  stafftools: stafftools_enterprise_path(this_business) %>
+
+<% if this_business.autopay_disabled_by_india_rbi? %>
+  <div <%= test_selector("upgrade-rbi-payment") %>>
+    <%= render template: "billing_settings/payments/separate", locals: {
+      target: this_business,
+      trade_screening_needed: true,
+      manual_payment: Billing::ManualPayment.new(target: this_business)
+    } %>
+  </div>
+<% else %>
+  <div class="container-lg p-responsive mt-4">
+    <%= render partial: "settings/header", locals: {
+      current_context: this_business,
+      hide_profile_link: true
+    } %>
+  </div>
+
+  <div class="my-5" <%= test_selector("multi-checkout") %>>
+    <div class="container-lg p-responsive">
+      <div class="border-bottom pb-3 mb-5">
+        <%= render(Primer::Beta::Heading.new(tag: :h1, test_selector: "billing-upgrade-header")) do %>
+          <%= buy_enterprise_flavor %>
+        <% end %>
+      </div>
+
+      <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+        <%= render(Primer::Alpha::Banner.new(mb: 4, mt: 5)) do |component| %>
+          If you require invoices, or are interested in Enterprise Managed Users, <%= link_to "contact our sales team", ent_contact_url, class: "Link--inTextBlock" %>.
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(mb: 4, mt: 5)) do |component| %>
+          If you require invoices, or are interested in Enterprise Managed Users, <%= link_to "contact our sales team", ent_contact_url, class: "Link--inTextBlock" %>.
+        <% end %>
+      <% end %>
+
+      <% completed_billing_information = this_business.has_saved_trade_screening_record_with_information? %>
+      <% completed_payment_method = this_business.has_credit_card? || this_business.has_paypal_account? %>
+      <% can_complete_purchase = this_business.trial? && completed_billing_information && completed_payment_method %>
+      <% total_consumed_licenses = [this_business.total_consumed_licenses, 1].max %>
+      <% default_seats = total_consumed_licenses %>
+
+      <div class="d-md-flex gutter-md">
+        <div class="col-md-7" <%= test_selector("duration-summary") %>>
+          <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Included Seats", icon: :people)) do |component| %>
+            <% component.with_body do %>
+              <%= render(Growth::SeatsPricingCardComponent.new(seat_price: price_per_seat, mt: 3)) do |card| %>
+                <% card.with_title { "Enterprise" } %>
+                <% card.with_description do %>
+                  Security, compliance, and flexible deployment
+                <% end %>
+                <% card.with_toggle("aria-label": "Billing duration") do |toggle| %>
+                  <% toggle.with_item(
+                    label: "Monthly",
+                    selected: selected_duration == "month",
+                    classes: "js-bus-month-duration",
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_on_monthly_duration",
+                      label: "ref_cta:monthly;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                  <% toggle.with_item(
+                    label: "Yearly",
+                    selected: selected_duration == "year",
+                    classes: "js-bus-year-duration",
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_on_yearly_duration",
+                      label: "ref_cta:yearly;ref_loc:account_upgrade"
+                    )
+                  ) do |button| %>
+                    <% if selected_duration == "month" %>
+                      <% button.with_trailing_visual_label(color: :default) { "-8%" } %>
+                    <% else %>
+                      <% button.with_trailing_visual_label(bg: :accent, color: :accent, border: 0) { "-8%" } %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+                <% if selected_duration == "year" %>
+                  <% card.with_notice { "Discounted Yearly pricing is for new customers for the first year." } %>
+                <% end %>
+                <% card.with_stepper_component(
+                  type: :plan_upgrade,
+                  seats: params[:seats] || default_seats,
+                  param_name: "seats",
+                  name: "seats",
+                  min: total_consumed_licenses,
+                  max: this_business.seat_limit_for_upgrades,
+                  form: "upgrade-business-trial",
+                  current_url: edit_multi_checkout_enterprise_path(this_business),
+                  min_error_message: "You need at least #{pluralize(total_consumed_licenses, 'seat')} to support your #{pluralize(total_consumed_licenses, 'existing member')}",
+                  max_error_message: "Please contact us at https://github.com/enterprise/contact for pricing and purchasing information."
+                ) do |stepper| %>
+                  <% stepper.with_remove_seat_control(
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_to_decrease_enterprise_seats",
+                      label: "ref_cta:remove_seat;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                  <% stepper.with_input(
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_on_enterprise_seats_input",
+                      label: "ref_cta:seats_input;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                  <% stepper.with_add_seat_control(
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_to_add_enterprise_seats",
+                      label: "ref_cta:add_seat;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                <% end %>
+              <% end %>
+              <%= render(Primer::Beta::Heading.new(tag: :h3, mt: 5)) { "Add-ons" } %>
+              <%= render(Growth::SeatsPricingCardComponent.new(seat_price: advanced_security_price_per_seat, per: "per committer", mt: 3)) do |card| %>
+                <% card.with_title { "Advanced Security" } %>
+                <% card.with_description do %>
+                  Secure software from the start.
+                <% end %>
+                <% if suggested_advanced_security_seats > 0 %>
+                  <% card.with_notice(test_selector: "recommended-committers") { "Based on your trial activity, we recommend #{pluralize(suggested_advanced_security_seats, "committer")}." } %>
+                <% end %>
+                <% card.with_stepper_component(
+                  type: :plan_upgrade,
+                  seats: params[:committers] || suggested_advanced_security_seats,
+                  label: "committer",
+                  param_name: "committers",
+                  name: "committers",
+                  min: 0,
+                  max: this_business.seat_limit_for_advanced_security_upgrade,
+                  form: "upgrade-business-trial",
+                  current_url: edit_multi_checkout_enterprise_path(this_business),
+                  min_error_message: "You must have at least #{pluralize(0, "committer")}.",
+                  max_error_message: "Please contact us at https://github.com/enterprise/contact for pricing and purchasing information."
+                ) do |stepper| %>
+                  <% stepper.with_remove_seat_control(
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_to_decrease_advanced_security_seats",
+                      label: "ref_cta:remove_committer;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                  <% stepper.with_input(
+                    test_selector: "advanced-security-input",
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_on_advanced_security_seats_input",
+                      label: "ref_cta:committer_input;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                  <% stepper.with_add_seat_control(
+                    data: analytics_click_attributes(
+                      category: "business_multi_checkout",
+                      action: "click_to_add_advanced_security_seats",
+                      label: "ref_cta:add_committer;ref_loc:account_upgrade"
+                    )
+                  ) %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+          <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Billing information", icon: completed_billing_information ? :"check-circle-fill" : :mail)) do |component| %>
+            <% component.with_button(
+              size: :medium,
+              px: 3,
+              font_size: 6,
+              test_selector: "edit-billing-information-button",
+              classes: "js-billing-settings-billing-information-edit-button",
+              hidden: !completed_billing_information || !this_business.is_allowed_to_edit_trade_screening_information?
+            ) do %>
+              Edit<span class="sr-only">&nbsp;billing information</span>
+            <% end %>
+            <% component.with_body do %>
+              <%= render partial: "businesses/billing_settings/payment_information", locals: {
+                business: this_business,
+                show_form: !completed_billing_information,
+                return_to: edit_multi_checkout_enterprise_path(this_business)
+              } %>
+            <% end %>
+          <% end %>
+          <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Payment method", icon: completed_payment_method ? :"check-circle-fill" : :"credit-card")) do |section| %>
+            <% section.with_body(pt: 3) do %>
+              <% if completed_billing_information %>
+                <%= render(Growth::TradeScreeningCannotProceedComponent.new(target: this_business, check_for_current_user: true)) %>
+                <%= render(Growth::PaymentMethodComponent.new(target: this_business, return_to: edit_multi_checkout_enterprise_path(this_business))) %>
+              <% else %>
+                <p class="mt-2">
+                  You have not added billing information for your account.
+                </p>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+        <div class='col-md-5'>
+          <div class="pb-3">
+            <%= form_tag settings_billing_multi_checkout_enterprise_path(this_business), method: :put, id: 'upgrade-business-trial' do %>
+              <%= hidden_field_tag :plan_duration, selected_duration, {class: "js-bus-duration-input"} %>
+              <div class="pt-1 mt-7">
+                <%= render(Growth::PricingSummaryComponent.new(
+                  test_selector: "yearly-summary",
+                  hidden: yearly_is_hidden,
+                  mb: 3,
+                )) do |summary| %>
+                  <% summary.with_title { "Yearly summary" } %>
+                  <% summary.with_line_item do |item| %>
+                    <% item.with_title { "Enterprise" } %>
+                    <% item.with_description(classes: "multi-checkout-yearly-enterprise-description") {
+                      yearly_summary.dig(:line_items, 0, :description) || ""
+                    } %>
+                    <% item.with_cost(classes: "multi-checkout-yearly-enterprise-cost") {
+                      yearly_summary.dig(:line_items, 0, :cost) || ""
+                    } %>
+                  <% end %>
+                <% end %>
+
+                <%= render(Growth::PricingSummaryComponent.new(
+                  test_selector: "monthly-summary",
+                  classes: "js-stepper-show-with-value",
+                  hidden: monthly_is_hidden,
+                )) do |summary| %>
+                  <% summary.with_title { "Monthly summary" } %>
+                  <% summary.with_line_item(hidden: monthly_enterprise_line_item.nil?) do |item| %>
+                    <% item.with_title { "Enterprise" } %>
+                    <% item.with_description(classes: "multi-checkout-monthly-enterprise-description") {
+                      monthly_enterprise_line_item&.fetch(:description) || ""
+                    } %>
+                    <% item.with_cost(classes: "multi-checkout-monthly-enterprise-cost") {
+                      monthly_enterprise_line_item&.fetch(:cost) || ""
+                    } %>
+                  <% end %>
+                  <% summary.with_line_item(classes: "js-stepper-show-with-value", hidden: monthly_advanced_security_line_item.nil?) do |item| %>
+                    <% item.with_title { "Advanced Security" } %>
+                    <% item.with_description(classes: "multi-checkout-monthly-advanced-security-description") {
+                      monthly_advanced_security_line_item&.fetch(:description) || ""
+                    } %>
+                    <% item.with_cost(classes: "multi-checkout-monthly-advanced-security-cost") {
+                      monthly_advanced_security_line_item&.fetch(:cost) || ""
+                    } %>
+                  <% end %>
+                  <% summary.with_total do |total| %>
+                    <% total.with_title { "Recurring total" } %>
+                    <% total.with_cost(classes: "multi-checkout-monthly-total") {
+                      monthly_summary&.fetch(:recurring_total) || ""
+                    } %>
+                  <% end %>
+                <% end %>
+
+                <%= render(Growth::PricingSummaryComponent.new(bg: :subtle, my: 3)) do |summary| %>
+                  <% summary.with_line_item(pt: 3, pb: 1) do |item| %>
+                    <% item.with_title(tag: :h3) { "Due today" } %>
+                    <% item.with_cost(classes: "multi-checkout-due-today") { due_today } %>
+                  <% end %>
+                  <% summary.with_sales_tax do |total| %>
+                    <% if this_business.display_sales_tax_on_checkout? %>
+                      <% total.with_title(test_selector: "sales-tax-label") { "Sales tax" } %>
+                      <% total.with_cost(test_selector: "sales-tax-value") { "(applied to your invoice)" } %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </div>
+
+              <% unless can_complete_purchase %>
+                <p class="mt-2">
+                  You have not added the
+                  <% if completed_billing_information %>
+                    payment method
+                  <% else %>
+                    billing information and payment method
+                  <% end %>
+                  for your account.
+                </p>
+              <% end %>
+              <%= render Primer::Beta::Button.new(
+                scheme: :primary,
+                block: true,
+                type: :submit,
+                size: :large,
+                disabled: !can_complete_purchase || this_business.has_trade_screening_restriction? || current_user.has_trade_screening_restriction?,
+                test_selector: "complete-purchase-button",
+                data: analytics_click_attributes(
+                  category: "business_multi_checkout",
+                  action: "click_to_complete_enterprise_purchase",
+                  label: "ref_cta:complete_github_enterprise_purchase;ref_loc:account_upgrade;enterprise_id:#{this_business.id}",
+                )
+              ) do %>
+                Complete GitHub Enterprise purchase
+              <% end %>
+              <%= render Primer::Beta::Button.new(
+                href: enterprise_path(this_business), block: true, tag: :a, mt: 2,
+                data: analytics_click_attributes(
+                  category: "business_multi_checkout",
+                  action: "cancel_github_enterprise_purchase",
+                  label: "enterprise_id:#{this_business.id}"
+                ),
+              ) do %>
+                Cancel purchase
+              <% end %>
+            <% end %>
+          </div>
+          <div class="pb-3">
+            <p class="f6 color-fg-muted">
+              By clicking "Complete GitHub Enterprise purchase", you are accepting the
+              <a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer Agreement</a> and confirming that
+              you have the authority to do so on behalf of your organization. For more information about GitHub's
+              privacy practices, see the <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy Statement</a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+<% end %>

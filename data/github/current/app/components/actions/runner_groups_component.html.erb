@@ -1,0 +1,165 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% if @runner_groups.none? %>
+  <% if description.present? %>
+    <div class="mb-5">
+      <%= description %>
+    </div>
+  <% end %>
+  <% if params[:qr] %>
+    <div class="d-flex flex-row mb-2">
+      <div class="flex-auto">
+        <%= form_tag "runner-groups", :method => :get, :class => "subnav-search ml-0 mt-md-0 mr-2", role: "search", "aria-label": "Runner groups" do %>
+          <input type="text" name="qr" value="<%= params[:qr] %>" class="form-control subnav-search-input subnav-search-input-wide input-contrast width-full" placeholder="Search runner groups" aria-label="Runner groups" <%= params[:qr].present? ? "autofocus" : nil %>>
+          <%= primer_octicon(:search, classes: 'subnav-search-icon') %>
+        <% end %>
+      </div>
+      <% if @can_create_groups && !@restricted_plan %>
+        <%= link_to new_path, class: "btn btn-primary" do %>
+          New runner group
+        <% end %>
+      <% end %>
+    </div>
+    <actions-announceable-search-result-summary>
+      <div class="Box">
+        <%= render Primer::BlankslateComponent.new(title: "No runner group found") do %>
+          <span data-target="actions-announceable-search-result-summary.searchResult">No runner groups were found that matched the query.</span>
+        <% end %>
+      </div>
+    </actions-announceable-search-result-summary>
+  <% else %>
+    <div class="Box">
+      <%= render Primer::BlankslateComponent.new(
+        title: "There are no runner groups configured for this #{@owner_settings.settings_owner_type}",
+        ) do %>
+        <p><%= link_to "Learn more about using runners", "#{GitHub.help_url}/github/automating-your-workflow-with-github-actions/hosting-your-own-runners", class: "Link--inTextBlock" %> to run actions on your own servers.</p>
+          <% if @can_create_groups && !@restricted_plan %>
+            <a class="btn btn-primary" href="<%= new_path %>" >New runner group</a>
+          <% end %>
+      <% end %>
+    </div>
+  <% end %>
+<% else %>
+  <% if can_create_groups? %>
+    <div class="d-flex flex-items-center mb-3" <%= test_selector("runner-groups-list") %> >
+      <% if description.present? %>
+        <div class="flex-1">
+          <%= description %>
+        </div>
+      <% end %>
+
+    </div>
+    <div class="d-flex flex-row mb-3">
+      <div class="flex-auto">
+        <%= form_tag "runner-groups", :method => :get, :class => "subnav-search ml-0 mt-md-0 mr-2", role: "search", "aria-label": "Runner groups" do %>
+          <input type="text" name="qr" value="<%= params[:qr] %>" class="form-control subnav-search-input subnav-search-input-wide input-contrast width-full" placeholder="Search runner groups" aria-label="Runner groups" <%= params[:qr].present? ? "autofocus" : nil %>>
+          <%= primer_octicon(:search, classes: 'subnav-search-icon') %>
+        <% end %>
+      </div>
+      <% if @restricted_plan %>
+          <%= render(Primer::Beta::Button.new(disabled: true, test_selector: 'disabled-new-group-button')) { "New runner group" } %>
+      <% else %>
+        <%= link_to new_path, class: "btn btn-primary" do %>
+          New runner group
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if params[:qr] %>
+    <actions-announceable-search-result-summary>
+      <div class="mb-3" data-target="actions-announceable-search-result-summary.searchResult">Found <%= pluralize(@runner_groups.size, 'runner group') %></div>
+    </actions-announceable-search-result-summary>
+  <% end %>
+
+  <%= render(Primer::Beta::BorderBox.new(padding: :condensed, test_selector: "runner-groups-full-list-#{@groups_inheritance}", "data-hpc": "")) do |component| %>
+    <% component.with_header(display: :flex, color: :muted, font_size: :small) do %>
+      <div class="flex-1">
+          Group
+      </div>
+      <div class="col-2">
+          Runners
+      </div>
+      <div class="col-1">
+      </div>
+    <% end %>
+    <% @runner_groups.each_with_index do |runner_group, index| %>
+      <% if index == precreated_runner_groups_count && @restricted_plan %>
+        <% component.with_row(py: 2, px: 3, display: :flex, classes: "Box-row--yellow") do %>
+          <p>
+            The groups below have been disabled because your current GitHub plan does not include runner groups.
+            The runners within each group can be moved to the group above to make them usable.
+            The groups below will be available if you choose to
+            <%= link_to "upgrade your plan", @owner_settings.billing_path, class: "Link--inTextBlock" %>.
+          </p>
+          <% end %>
+      <% end %>
+      <% component.with_row(display: :flex, align_items: :center, color: @restricted_plan && !runner_group.precreated? ? :muted : nil, test_selector: "runner-group-item") do %>
+        <div class="d-flex flex-1 flex-column">
+          <div class="d-flex flex-items-center h4">
+            <%= render(Primer::Beta::Link.new(href: edit_path(runner_group), scheme: :primary, id: "runner-group-#{runner_group.id}", font_weight: :bold, word_break: :break_all)) { runner_group.name } %>
+            <% if runner_group.default? %>
+              <%= render Primer::Beta::Label.new(ml: 2, scheme: :secondary, title: "Default", test_selector: 'default-group-label') do %>Default<% end %>
+            <% elsif !runner_group.precreated? && @restricted_plan %>
+              <%= render Primer::Beta::Label.new(ml: 2, scheme: :warning, title: "Disabled", test_selector: 'disabled-group-label') do %>Disabled<% end %>
+            <% end %>
+            <% if network_configuration_visible?(runner_group) %>
+              <% if is_network_configuration_disabled?(runner_group) %>
+                <%= render Primer::Beta::Label.new(ml: 2, scheme: :danger, title: "Network disabled", test_selector: 'vnet-disabled-group-label') do %>Network disabled<% end %>
+              <% end %>
+            <% end %>
+          </div>
+          <span class="text-small color-fg-muted pt-1">
+            <%= visibility_for(runner_group) %>
+          </span>
+          <% workflows = runner_group.selected_workflow_refs %>
+          <% workflows_count = workflows&.count || 0 %>
+          <% if runner_group.restricted_to_workflows && workflows_count > 0 %>
+            <div class="d-flex mt-1" <%= test_selector("runner-group-workflow-restrictions")%>>
+              <div class="color-fg-muted text-small">
+                Usage restricted to
+              </div>
+              <%= render(GitHub::DialogComponent.new(title: "Workflow access", variant: :wide, details_classes: "ml-1", header_classes: 'p-3', body_classes: 'p-3')) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+                <% dialog.with_summary do %>
+                  <summary role="button" class="Link--muted text-bold text-small" aria-haspopup="dialog">
+                    <%= workflows_count %> workflow <%= "file".pluralize(workflows_count) %>
+                  </summary>
+                <% end %>
+                <% dialog.with_body do %>
+                  <div class="mb-3 text-normal">
+                    Runner group <span class="text-bold"><%= runner_group.name %></span> is allowed to use the following workflow files:
+                  </div>
+                  <pre class="rounded text-small color-bg-subtle color-fg-muted border color-border-default p-3 overflow-x-scroll"><%= workflows.join(",\n") -%></pre>
+                  <div class="text-small lh-condensed-ultra color-fg-muted mt-3 mb-1">
+                    Learn more about
+                    <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/actions/hosting-your-own-runners/managing-access-to-self-hosted-runners-using-groups", classes: "Link--inTextBlock")) { "restricted workflows" } %>
+                    <%# TODO: update this link once we have a more specific docs article %>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+        <div class="col-2" >
+          <span class="mr-4" <%= test_selector "runner-count" %>>
+            <%= runner_group.runners.size + runner_group.runner_scale_sets.size %>
+          </span>
+        </div>
+        <% if can_update_groups? %>
+          <div class="d-flex col-1 flex-justify-end">
+            <% unless runner_group.inherited? || runner_group.precreated? %>
+              <details class="details-overlay details-reset position-relative">
+                <%= render Primer::Beta::Button.new(tag: :summary, scheme: :link, classes: "timeline-comment-action", "aria-haspopup": "menu") do %>
+                  <%= render Primer::Beta::Octicon.new(icon: "kebab-horizontal", aria: { label: "Show options", hidden: false }) %>
+                <% end %>
+                <details-menu class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default anim-scale-in" style="width: 288px" role="dialog"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <%= render(Actions::RunnerGroupRemoveButtonComponent.new(runner_group: runner_group, owner_settings: @owner_settings, delete_from_list: true)) %>
+                </details-menu>
+              </details>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

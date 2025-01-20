@@ -1,0 +1,117 @@
+<div class="border mb-3 rounded color-border-subtle overflow-hidden">
+  <div class="color-bg-subtle f6 py-2 px-2 d-flex flex-column flex-md-row gap-1 flex-justify-start border-bottom">
+    <div class="flex-auto flex-md-self-center">
+      <%= render(Primer::Beta::Truncate.new(font_family: :mono, color: :muted, test_selector: "split-diff-file-path")) do |c| %>
+        <% c.with_item(style: "direction: rtl; text-align: end;") do %>
+          <%# We use direction:rtl; to truncate from the left in narrow viewports. %>
+          <%# This causes leading punctuation (e.g. ...) to be displayed on the right, adding a left-to-right mark keeps it on the left. %>
+          &lrm;
+          <% if path_link.present? %>
+            <a <%= test_selector("split-diff-path-link") %> href="<%= path_link %>" class="Link--primary"><%= file_path %><b><%= file_name %></b><%= line_range_suffix %></a>
+          <% else %>
+            <span <%= test_selector("split-diff-path-plain") %>><%= truncated_file_path %></span>
+          <% end %>
+        <% end %>
+      <% end %>
+      <%= render(Primer::Beta::ClipboardCopy.new(value: copy_path, "data-copy-feedback": "Copied!", "aria-label": "Copy", color: :muted, classes: "Link--secondary", test_selector: "split-diff-copy-path", mx: 1)) %>
+      <%= render(Primer::Beta::Label.new(scheme: :default, display: :inline_flex, ml: 2)) { "Autofix" } %>
+    </div>
+  </div>
+
+  <div>
+    <table class="diff-table tab-size file-diff-split">
+      <thead class="sr-only">
+        <tr>
+          <th scope="col">Original file line number</th>
+          <th scope="col">Original file line</th>
+          <th scope="col">Diff line number</th>
+          <th scope="col">Diff line change</th>
+        </tr>
+      </thead>
+
+      <colgroup>
+        <col width="<%= diff_entry.col_width %>">
+        <col>
+        <col width="<%= diff_entry.col_width %>">
+        <col>
+      </colgroup>
+
+      <tbody>
+        <%# We use loop and Enumerator#next so we can peek at the next line within the loop %>
+        <%
+        line_enumerator = diff_entry.split_lines
+        last_right = nil
+        last_left  = nil
+        hunk_id = nil
+        %>
+        <% if should_display_fallback_annotation? %>
+          <tr <%= test_selector("split-diff-fallback-annotation") %>>
+            <td colspan="4" class="color-bg-subtle">
+              <%= annotation_on_alert_location %>
+            </td>
+          </tr>
+        <% end %>
+        <% loop do %>
+          <% left_line, right_line = line_enumerator.next %>
+
+          <% if left_line.type == :hunk %>
+            <% hunk_id = Digest::SHA256.hexdigest(left_line.text) %>
+            <tr data-position="<%= left_line.position %>">
+              <td class="blob-num blob-num-hunk" data-line-number="..."></td>
+              <td class="blob-code blob-code-inner blob-code-hunk" colspan="3"><%= left_line.text %></td>
+            </tr>
+          <% else %>
+            <tr <% if hunk_id %>data-hunk="<%= hunk_id %>"<% end %>>
+              <% if left_line.type && left_line.position %>
+                <td class="blob-num blob-num-<%= left_line.type %>" data-line-number="<%= left_line.left %>"></td>
+
+                <td data-split-side="left" data-lock-side-selection="" class="blob-code blob-code-<%= left_line.type %>">
+                  <span class="blob-code-inner blob-code-marker"><%= HighlightedDiffLine.for_line(left_line, html_lines: file_highlighting).to_html %></span>
+
+                  <% if left_line.nonewline? %>
+                    <span class="no-nl-marker">
+                      <%= primer_octicon(:"no-entry", aria: { label: "No newline at end of file" }) %>
+                    </span>
+                  <% end %>
+                </td>
+              <% else %>
+                <td class="blob-num blob-num-<%= left_line.type %> empty-cell"></td>
+                <td class="blob-code blob-code-<%= left_line.type %> empty-cell" data-split-side="left"></td>
+              <% end %>
+
+              <% if right_line.type && right_line.position %>
+                <td class="blob-num blob-num-<%= right_line.type %>" data-line-number="<%= right_line.right %>"></td>
+
+                <td data-split-side="right" data-lock-side-selection="" class="blob-code blob-code-<%= right_line.type %>">
+                  <span class="blob-code-inner blob-code-marker"><%= HighlightedDiffLine.for_line(right_line, html_lines: file_highlighting).to_html %></span>
+
+                  <% if right_line.nonewline? %>
+                    <span class="no-nl-marker">
+                      <%= primer_octicon(:"no-entry", aria: { label: "No newline at end of file" }) %>
+                    </span>
+                  <% end %>
+                </td>
+              <% else %>
+                <td class="blob-num blob-num-<%= right_line.type %> empty-cell"></td>
+                <td class="blob-code blob-code-<%= right_line.type %> empty-cell" data-split-side="right"></td>
+              <% end %>
+            </tr>
+
+            <% if alert_ends_on_line?(left_line) %>
+              <tr <%= test_selector("split-diff-annotation-on-alert-location") %>>
+                <td class="blob-num empty-cell"></td>
+                <td class="color-bg-subtle" data-split-side="left">
+                  <%= annotation_on_alert_location %>
+                </td>
+                <td class="blob-num empty-cell border-left color-border-muted"></td>
+                <td class="empty-cell"></td>
+              </tr>
+            <% end %>
+          <% end %>
+          <% last_right = right_line.right if right_line.right %>
+          <% last_left  = left_line.left if left_line.left %>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</div>

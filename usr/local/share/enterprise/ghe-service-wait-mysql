@@ -1,0 +1,61 @@
+#!/bin/bash
+#/ Usage: ghe-service-wait-mysql --local --all <timeout>
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+check_local=false
+if [ "$1" = "--local" ]; then
+  shift
+  check_local=true
+fi
+
+check_all=false
+if [ "$1" = "--all" ]; then
+  shift
+  check_all=true
+fi
+
+timeout=${1:-600}
+
+check_mysql_local() {
+  echo "/* ping */ SELECT 1 AS output" | sudo mysql -u root | grep -q 1
+}
+
+check_mysql_github() {
+  /usr/local/share/enterprise/github-mysql "/* ping */ SELECT 1 AS output" | grep -q 1
+}
+
+mysql_nomad_running() {
+  # pull the allocations from the Nomad API
+  # Print out the status of the MySQL job on the last pass if we don't ever detect MySQL running.
+  # Return ClientStatus == Running 
+  response=$(ghe-nomad-api allocations | jq '.[] | select(.JobID=="mysql").ClientStatus')
+  if [ "$1" = "output" ] ; then
+    echo "MySQL Nomad Job Status is: $response"
+  fi
+
+  [[ $response =~ "running" ]] 
+}
+
+check_mysql() {
+  if $check_all; then
+    mysql_nomad_running $1 && check_mysql_local && check_mysql_github
+  elif $check_local; then
+    mysql_nomad_running $1 && check_mysql_local
+  else
+    check_mysql_github
+  fi
+}
+
+for i in $(seq $timeout); do
+  if check_mysql 2>/dev/null; then
+    exit 0
+  fi
+  sleep 1
+done
+check_mysql "output" # so we will have last try with the err output in logs
+exit 1

@@ -1,0 +1,123 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#
+#/ Usage: ghe-security-configurations-info [options]
+#/
+#/ This utility outputs information about Security Configurations which
+#/ should be submitted to GitHub Support to aid in debugging.
+#/
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -o, --stdout       Print output to STDOUT. Optional.
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+use_stdout = false
+
+ARGV.options do |opts|
+  opts.on("-o", "--stdout")    { use_stdout = true }
+  opts.on_tail("-h", "--help") { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+
+unless GitHub.enterprise? || Rails.env.development?
+  puts "This script can only be run on a GitHub Enterprise server!"
+  exit
+end
+
+date = Time.now.strftime("%Y%m%d%H%M%S")
+if use_stdout
+  output_io = STDOUT
+else
+  file = "/tmp/security-configurations-info-#{date}.json"
+  puts "Saving Security Configurations debugging info to '#{file}'..."
+  output_io = File.open(file, "w")
+end
+
+def records_to_json(arel, fields: [])
+  # Attributes which can safely be included in serialized output by default. Will be merged with `fields`
+  default_serialization_fields = %i(id target_type target_id security_configuration_id created_at updated_at repository_id organization_id state)
+
+  arel.as_json(root: nil, only: default_serialization_fields.concat(fields))
+end
+
+def security_configurations
+  # Sensitive fields to exclude from the SecurityConfiguration output:
+  exclude_fields = %w(name description)
+
+  configs = SecurityConfiguration.includes(:security_configuration_defaults, :security_configuration_policies)
+  configs.find_each(batch_size: 50).collect do |config|
+    base = config.attributes.without(exclude_fields)
+
+    counts_by_state_and_failure_reason = config.repository_security_configurations
+      .group(:state, :failure_reason)
+      .count
+      .reduce({}) do |memo, ((state, failure_reason), count)|
+      # Since we're grouping by state and failure reason, the keys returned are formatted as [state, failure_reason]
+      # In order to make it clearer, we will change the key to only the state if failure_reason is nil:
+      key = failure_reason.nil? ? state : "#{state}: '#{failure_reason}'"
+      memo[key] = count
+      memo
+    end
+
+    base.merge!({
+      repository_security_configuration_counts: counts_by_state_and_failure_reason,
+      security_configuration_defaults: records_to_json(
+        config.security_configuration_defaults,
+        fields: %i(default_for_new_public_repos default_for_new_private_repos)
+      ),
+      security_configuration_policies: records_to_json(
+        config.security_configuration_policies,
+        fields: %i(enforcement),
+      ),
+    })
+
+    base
+  end
+end
+
+def failed_attachments
+  # First 100K failed attachment records w/ org id, config id, repo id, state, and failure reason
+  output = []
+
+  RepositorySecurityConfiguration.failed.limit(100_000).find_each do |rsc|
+    output.push(records_to_json(rsc, fields: %i(failure_reason)))
+  end
+
+  output
+end
+
+license = GitHub::Enterprise.license(sync_global_business: false)
+services = SecurityProductsEnablement::SecurityProductsManager.new.services
+
+output = {
+  audit_generated_at: date,
+  security_configurations:,
+  ghas_info: {
+    license_has_ghas: license.advanced_security_enabled,
+    metered: license.metered_advanced_security?,
+    seats: license.advanced_security_seats,
+    # TODO: Figure out how to determine # of seats in use on GHES, add this later!
+  },
+  failed_repository_security_configurations: failed_attachments,
+  service_statuses: services,
+}
+
+json = JSON.pretty_generate(output)
+output_io.write(json)
+
+unless use_stdout
+  puts "Done."
+end

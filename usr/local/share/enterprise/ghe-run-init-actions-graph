@@ -1,0 +1,69 @@
+#!/bin/bash
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+. /etc/github/enterprise-release
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+set -x
+
+if ghe-config --true app.actions.enabled; then
+  actions_org="$(ghe-config 'app.actions.actions-org' || true)"
+  github_org="$(ghe-config 'app.actions.github-org' || true)"
+  if [ -z "$actions_org" ] || [ -z "$github_org" ] ; then
+    echo '"app.actions.actions-org" and "app.actions.github-org" must both be set to run ghe-run-init-actions-graph'
+    if ghe-config --true app.actions.setup-failures-detected; then
+       echo "Errors detected during setup of Actions org. See this doc for steps to resolve:"
+       echo "https://docs.github.com/en/admin/github-actions/advanced-configuration-and-troubleshooting/troubleshooting-github-actions-for-your-enterprise#bundled-actions"
+
+       # Exit with a good exit code so ghe-config-apply can continue when we hit this known issue
+       exit 0
+    else
+       # Exit with a bad exit code if actions orgs aren't defined but setup-failures-detected flag isn't set
+       # This isn't expected unless someone runs this script directly before actions orgs are set up
+       exit 1
+    fi
+  fi
+
+  config_key="app.actions.actions-repos-sha1sum"
+  repos_sha="$(cat /data/ghes-actions/current/SHA1)"
+  if ghe-config --ne "$config_key" "$repos_sha"; then
+    declare -a init_action_pids=()
+    for repo in /data/ghes-actions/current/repos/*; do
+      nwo=$(basename "$repo")
+      dotcom_org="$(echo "$nwo" | cut -d'_' -f1)"
+      case "$dotcom_org" in
+        "actions")
+          org=$actions_org
+          ;;
+        "github")
+          org=$github_org
+          ;;
+        *)
+          echo "The action repository $nwo has an unknown source org: $dotcom_org" >&2
+          exit 1
+      esac
+
+      repo_name="$(echo "$nwo" | cut -d'_' -f2)"
+      #shellcheck disable=SC2140
+      github-env bin/rake --trace enterprise:actions:init_action["$org","$repo_name","${repo}"] &
+      init_action_pids+=("$!")
+    done
+    for init_action_pid in "${init_action_pids[@]}"; do
+      wait "$init_action_pid"
+    done
+    ghe-config "$config_key" "$repos_sha"
+
+    # Clear this flag if it exists. Reaching here means setup succeeded and any issues are resolved
+    ghe-config --unset app.actions.setup-failures-detected || true
+  fi
+  # #shellcheck disable=SC2140
+  # https://github.com/github/c2c-actions-experience/issues/2910
+  # github-env bin/rake --trace enterprise:actions:set_org_avatar["$org","/usr/share/actions/actions_logo.png"]
+fi

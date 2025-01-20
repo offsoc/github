@@ -1,0 +1,77 @@
+<%# locals: (pat_type:) %>
+
+<%= render(Primer::Beta::Text.new(tag: :p)) do %>
+  Control the maximum lifetime for <%= pat_type.name %> in your enterprise and organizations. If set, your enterprise
+  and organization members can only use <%= pat_type.name %> against your resources if the
+  tokens are set to expire within the period you provide. <a target="_blank" href="<%= GitHub.help_url %>/enterprise-cloud@latest/admin/policies/enforcing-policies-for-your-enterprise/enforcing-policies-for-personal-access-tokens-in-your-enterprise">Learn more about token expiration policies.</a>
+<% end %>
+
+<%= form_with model: this_business, url: settings_maximum_lifetime_enterprise_path(this_business), method: :patch, class: "d-block" do |f| %>
+  <%= f.hidden_field :pat_type, value: pat_type.serialize %>
+  <% field_disabled = pat_type == ProgrammaticAccessTokenType::FineGrained ? this_business.personal_access_tokens_restricted? : this_business.legacy_personal_access_tokens_restricted? %>
+  <% lifetime_configuration = ProgrammaticAccessTokenLifetimeConfiguration.new(this_business, pat_type) %>
+
+  <div>
+
+  <div class="form-group form-checkbox">
+    <%= f.check_box :require_pat_to_expire, id: "require_pat_to_expire", class: "form-checkbox-details-trigger", checked: lifetime_configuration.personal_access_token_expiration_limit_enabled?, disabled: field_disabled %>
+    <%= f.label :require_pat_to_expire, "#{pat_type.name.capitalize} must expire", for: "require_pat_to_expire" %>
+
+    <%= render(Primer::Beta::Text.new(tag: :p, font_weight: :normal)) do %>
+      Select a maximum lifetime for <%= pat_type.name %> to be allowed to access your organizations.
+    <% end %>
+
+    <div class="form-checkbox-details" aria-live="polite" <%= "hidden" if field_disabled %>>
+      <div class="d-flex gap-2">
+        <%= f.select(
+            :fine_grained_personal_access_token_expiration_limit,
+            options_for_select(expiration_timeframes(allow_none: false), custom_expiration_timeframe?(lifetime_configuration.expiration_limit) ? "custom" : lifetime_configuration.expiration_limit),
+            {},
+            class: "js-pat-expiration-limit",
+            style: "min-height: 35px;",
+            aria: { label: "Select the maximum lifetime for #{pat_type.name}" }
+          )
+        %>
+
+        <div id="custom-pat-expiration-limit-wrapper" class="d-inline-block" <%= "hidden" if field_disabled || !custom_expiration_timeframe?(lifetime_configuration.expiration_limit) %>>
+          <span class="border rounded-2 pr-3 d-inline-flex" style="min-height: 35px;">
+            <%=
+              f.number_field(
+                :custom_fine_grained_personal_access_token_expiration_limit,
+                in: 1..365,
+                class: "form-control border-0",
+                style: "width: 6em; background-color: transparent;",
+                value: custom_expiration_timeframe?(lifetime_configuration.expiration_limit) ? lifetime_configuration.expiration_limit : nil,
+                aria: { label: "Enter a custom maximum lifetime for #{pat_type.name}" }
+              )
+            %>
+            <span class="flex-self-center">
+              days
+            </span>
+          </span>
+          <small class="ml-2 text-small color-fg-muted">between 1 and 365 days</small>
+        </div>
+      </div>
+
+      <hr>
+
+      <div class="form-checkbox">
+        <label>
+          <%=
+            f.check_box :exempt_administrators, checked: lifetime_configuration.exemptions_enabled?
+          %>
+
+          <div class="d-inline-block">
+            Exempt <%= avatar_for this_business, 20, class: "avatar" %> <%= this_business.name %> <%= link_to "administrators", enterprise_admins_path(this_business), target: "_blank" %>.
+          </div>
+
+          <%= render(Primer::Beta::Text.new(tag: :p, font_weight: :normal)) do %>
+            Enterprise owners often use personal access tokens to configure user provisioning (SCIM) and other long-lived automations. If your enterprise owners have automation set up that hasn't been moved to a GitHub App yet, you may want to exempt them from this policy.
+          <% end %>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <%= f.submit "Save", class: "btn", "data-confirm" => "Are you sure you want to update your selection?", disabled: field_disabled %>
+<% end %>

@@ -1,0 +1,59 @@
+#!/bin/sh
+#/ Usage: ghe-export-mysql [-h]
+#/
+#/ Export all MySQL data, which includes users, commit comments, pull requests,
+#/ issues, etc. The data is streamed as plain text to STDOUT.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Export the MySQL data to a file:
+#/    $ ghe-export-mysql > dump-file
+#/
+#/  Transfer the MySQL data from the current appliance to another:
+#/    $ ghe-export-mysql | ssh -p 122 admin@[hostname] -- ghe-import-mysql
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+fail() {
+  (>&2 echo "${1}")
+  exit 1
+}
+
+export_type="logical"
+
+if ghe-config --true 'mysql.backup.binary'; then
+  export_type="binary"
+fi
+
+# Using logical backup as defaults if external db configured.
+# This script should not be called if the user has custom scripts
+# configured for their external backup strategy.
+if ghe-config --true 'mysql.external.enabled'; then
+  export_type="logical"
+fi
+
+while getopts "b" flag; do
+  case $flag in
+    b)
+      export_type="binary"
+      ;;
+    *) # unknown
+      fail "unknown flag $flag"
+      ;;
+  esac
+done
+
+if [ "${export_type}" = "binary" ] ; then
+  ghe-export-mysql-xtrabackup "$@"
+else
+  ghe-export-mysql-mysqldump "$@"
+fi

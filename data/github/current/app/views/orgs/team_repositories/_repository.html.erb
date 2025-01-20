@@ -1,0 +1,124 @@
+<%
+  adminable_by_current_user = ability[:adminable_by_current_user]
+  inherited = ability[:inherited]
+  inherited_is_most_capable = ability[:inherited_is_most_capable]
+  permission_name = ability[:permission_name].to_s
+  parent_name = ability[:parent_name]
+  is_custom = ability[:custom]
+
+  inherited_text = "(inherited from #{parent_name})" if inherited_is_most_capable
+  most_capable_permission = permission_name
+
+  # force action name for all repo roles
+  case most_capable_permission
+  when "all_repo_read"
+    most_capable_permission = "read"
+  when "all_repo_write"
+    most_capable_permission = "write"
+  when "all_repo_admin"
+    most_capable_permission = "admin"
+  when "all_repo_triage"
+    most_capable_permission = "triage"
+  when "all_repo_maintain"
+    most_capable_permission = "maintain"
+  end
+
+  most_capable_permission_level = ability[:permission_level]
+  inherited_permission_level = ability[:parent_level]
+  role_button_text = "Role: #{is_custom ? most_capable_permission : most_capable_permission.capitalize}"
+%>
+<li class="table-list-item js-team-row js-bulk-actions-item <%= "adminable" if viewer_can_administer_team %>" data-bulk-actions-id="<%= repo.name %>">
+  <div class="table-list-cell">
+    <div class="d-flex flex-items-center">
+      <div class="nested-teams-checkbox <%= "show" if viewer_can_administer_team %>">
+        <% if viewer_can_administer_team %>
+          <input type="checkbox" name="teams[]" value="<%= repo.name %>" id="team-<%= repo.name %>" class="js-bulk-actions-toggle" aria-label="Select <%= repo.name %>" <%= test_selector "repo-remove-checkbox" %> <%= repo.advisory_workspace? ? "disabled" : "data-check-all-item" %>>
+        <% end %>
+      </div>
+      <div>
+        <%= link_to repository_path(repo).to_s, class: "f4", data: hovercard_data_attributes_for_repository(repo) do %>
+          <span><%= repo.owner.display_login %>/<strong><%= repo.name %></strong></span>
+        <% end %>
+       <%= repository_label(repo, tooltip: true) %>
+       <%= repository_group_settings_label(repo) %>
+       <% network_count = repo.forks_count %>
+       <% if network_count > 0 %>
+         <span <%= test_selector("accessible-to-members-repo-forks-page-link") %>>
+           <%= render Primer::Beta::Octicon.new(icon: :"repo-forked", size: :small, ml: 2, color: :muted) %>
+           <%= link_to forks_path(repo.owner_display_login, repo.name) do %>
+             <%= number_with_delimiter network_count %> <%= pluralize_without_number network_count, "fork" %>
+           <% end %>
+         </span>
+       <% end %>
+        <div class="description mt-1" <%= test_selector "repo-#{repo.id}-timestamp" %>>
+          <% if repo.pushed_at %>
+            Updated <%= time_ago_in_words_js repo.pushed_at %>
+          <% else %>
+            Created <%= time_ago_in_words_js repo.created_at %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="table-list-cell f5 text-center">
+    <poll-include-fragment src="<%= participation_path(repo.owner, repo.name, w: 155, h: 28, type: "sparkline") %>">
+    </poll-include-fragment>
+  </div>
+
+  <div class="table-list-cell pr-3 f5 text-right v-align-middle" <%= test_selector("team-menu") %>>
+    <% if viewer_can_administer_team %>
+      <% if repo.advisory_workspace? %>
+        <%= render(Primer::Beta::Button.new(
+          id: "team-permission-#{repo.id}",
+          block: true,
+          disabled: true,
+        )) do |component| %>
+          <% component.with_tooltip(
+            type: :description,
+            text: "Access to temporary private forks must be managed through their advisories",
+            "data-test-selector": "fork-advisory-#{repo.id}-tooltip",
+          ) %>
+          <%= role_button_text %>
+        <% end %>
+      <% elsif adminable_by_current_user %>
+        <%= render partial: "edit_repositories/admin_screen/access_management/permission_select", locals: {
+          view: create_view_model(
+            Orgs::Repositories::PermissionSelectView,
+            repository:       repo,
+            selected_action:  most_capable_permission,
+            submit_path:      team_repository_path(this_team, repo),
+            base_role:        repo.organization.default_repository_permission,
+            team:             this_team,
+            ability:          ability,
+            inherited_is_most_capable: inherited_is_most_capable,
+            most_capable_permission_level: most_capable_permission_level,
+          ),
+          id: "permission-select-team-#{this_team.id}-repo-#{repo.id}",
+          title: "Change the role of #{this_team.name}",
+          button_text: role_button_text,
+        } %>
+      <% else %>
+        <%= render(Primer::Beta::Button.new(
+          id: "team-permission-#{repo.id}",
+          block: true,
+          disabled: true,
+        )) do |component| %>
+          <% component.with_tooltip(
+            type: :description,
+            text: inherited ? "Permissions inherited from the #{ parent_name } team" : "You do not have admin permissions on this repository",
+            "data-test-selector": "team-permission-#{repo.id}-tooltip",
+          ) %>
+          <%= role_button_text %>
+        <% end %>
+      <% end %>
+    <% else %>
+        <%= render(Primer::Beta::Button.new(
+          id: "team-permission-#{repo.id}",
+          block: true,
+          disabled: true,
+        )) do %>
+          <%= role_button_text %>
+        <% end %>
+    <% end %>
+  </div>
+</li>

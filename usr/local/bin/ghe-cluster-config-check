@@ -1,0 +1,725 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-config-check [-h] [file] [json]
+#/
+#/ Validate GitHub Enterprise cluster configuration file and individual options.
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/   file            The full path to the cluster.conf file to check.
+#/   json            Output data as json.
+#/
+set -e
+
+. /usr/local/share/enterprise/lib/ghe-commons
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+export CLUSTER_CONFIG=${1:-/data/user/common/cluster.conf}
+if [ -z "$HA_CLUSTER" ] && [ "$(ghe-config "cluster.ha")" = "true" ]; then
+  export HA_CLUSTER=1
+fi
+if [ -n "$(ghe-config "cluster.mysql-master-replica")" ]; then
+  export CLUSTER_DR=1
+fi
+json_output=''
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -Eu root "$0" "$@"
+}
+
+if [ "$2" = "json" ]; then
+  json_output='1'
+fi
+
+curl_timeout=""
+if [ -n "$CURL_TIMEOUT" ];then
+  curl_timeout="--connect-timeout $CURL_TIMEOUT"
+fi
+
+error_count=0
+warning_count=0
+
+json_arg() {
+  sep=","
+  if [ -n "$3" ]; then
+    sep=""
+  fi
+  echo "  \"$1\": $2$sep"
+}
+
+add_error() {
+  error_count=$((error_count + 1))
+  value=$(echo "$3" | ruby -e "puts \$stdin.read.chomp.inspect")
+  if [ -n "$json_output" ]; then
+    json_arg "$2" "[\"$1\", $value]"
+  else
+    echo "Error: Validation $1 failed for $2 (\"$3\")"
+  fi
+}
+add_warning() {
+  warning_count=$((warning_count + 1))
+  value=$(echo "$3" | ruby -e "puts \$stdin.read.chomp.inspect")
+  if [ -n "$json_output" ]; then
+    json_arg "$2" "[\"$1\", $value, \"warning\"]"
+  else
+    echo "Warning: Validation $1 failed for $2 (\"$3\")"
+  fi
+}
+
+is-format() {
+  ruby -e "ARGV[0] =~ %r{$2}i ? exit(0) : exit(1)" "$1" || return 1
+}
+is-ipv4() {
+  is-format "$1" "\\A(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\z"
+}
+is-ipv6() {
+  ruby -rresolv -e "ARGV[0] =~ Resolv::IPv6::Regex ? exit(0) : exit(1)" "$1" || return 1
+}
+is-port-up() {
+  if [ -z "$SKIP_NETWORK_CHECKS" ]; then
+    nc_out=$(nc.openbsd -v -z -w 2 $1 $2 2>&1 || true)
+    echo $nc_out | grep -q -e "succeeded\|refused" || return 1
+  fi
+}
+
+gh es configure --auto >/dev/null || true
+
+check_ports="122 80 443 8443 22"
+all_roles="git web job mysql elasticsearch redis memcache metrics pages storage"
+external_roles=""
+
+# remove Bring Your Own X services if enabled
+for role in $all_roles; do
+  if is_service_external $role ; then
+    all_roles=("${all_roles[@]/$r}")
+    external_roles=("${external_roles[@]} $r")
+  fi
+done
+
+declare -A consul_datacenters
+
+get_cluster_subsections() {
+  # Use grep to find all lines that start with "[cluster"
+  # Then use sed to remove the brackets and extract the cluster name
+  # Finally, use sed to remove the quotes
+
+  # Cannot assume ghe-config --get-regexp cluster.*.hostname will work because typo could cause node to be added without valid config
+  ghe-config --get-regexp "cluster.*" | sed 's/cluster\.\(.*\)\..*/\1/g' | grep -v "\." | sort | uniq
+}
+
+setup_hostnames() {
+  hosts=$(get_cluster_subsections)
+  hostnames=""
+  for hostname in $hosts; do
+    hostnames="$hostnames $hostname"
+  done
+}
+
+json_open() {
+  if [ -n "$json_output" ]; then
+    echo "{"
+  fi
+}
+
+# Check for valid host configuration
+# This is to make sure hosts configured with typos do not run through config apply and break the cluster
+check_valid_host_subsection() {
+  # host must have hostname configured
+  if [ -z "$(ghe-config cluster.$host.hostname)" ]; then
+    add_error "has-hostname" "$host" "false"
+  fi
+
+  # Check that subsection matches configured hostname
+  if [ "$(ghe-config cluster.$host.hostname)" != $host ]; then
+    add_error "subsection-matches-hostname" "$host" "$(ghe-config cluster.$host.hostname)"
+  fi
+}
+
+# Check for valid ipv4 or ipv6 configuration
+check_valid_host_ip() {
+  # host must have ip configured
+  if [ -z "$(ghe-config cluster.$host.ipv4)" ] &&  [ -z "$(ghe-config cluster.$host.ipv6)" ]; then
+    add_error "has-ip" "$host" ""
+  fi
+
+  # configured ipv4 or ipv6 must be valid
+  if [ -n "$(ghe-config cluster.$host.ipv4)" ]; then
+    ip="$(ghe-config cluster.$host.ipv4)"
+    if ! is-ipv4 "$ip"; then
+      add_error "valid-ipv4" "$host" "$ip"
+    fi
+  fi
+  if [ -n "$(ghe-config cluster.$host.ipv6)" ]; then
+    ip="$(ghe-config cluster.$host.ipv6)"
+    if ! is-ipv6 "$ip"; then
+      add_error "valid-ipv6" "$host" "$ip"
+    fi
+  fi
+}
+
+# Check the IP and listening ports for a host from `check_hosts`
+check_host_cluster_ip_ports() {
+  # skip ip checks for Cluster-HA
+  if [ -z "$HA_CLUSTER" ]; then
+    # if ipv6
+    if [ -n "$(ghe-config cluster.$host.ipv6)" ]; then
+      ip="$(ghe-config cluster.$host.ipv6)"
+      if [ -z "$SKIP_NETWORK_CHECKS" ] && [ "$(ghe-config cluster.$host.offline)" != "true" ]; then
+        for port in $check_ports; do
+          if ! is-port-up "$ip" "$port"; then
+            add_error "connect-to-port-$port-ipv6" "$host" "failed"
+          fi
+        done
+      fi
+    # if ipv4
+    else
+      ip="$(ghe-config cluster.$host.ipv4)"
+      if [ -z "$SKIP_NETWORK_CHECKS" ] && [ "$(ghe-config cluster.$host.offline)" != "true" ]; then
+        for port in $check_ports; do
+          if ! is-port-up "$ip" "$port"; then
+            add_error "connect-to-port-$port-ipv4" "$host" "failed"
+          fi
+        done
+      fi
+    fi
+  fi
+}
+
+check_host_cluster_role_preflight_with_ghes_manage_api(){
+  if [ -z "$HA_CLUSTER" ]; then
+    if [ -z "$SKIP_NETWORK_CHECKS" ]; then
+      # Check if gh es cli is available and don't fail the script if it's not, eg. in unit test
+      gh es configure --auto || return 1
+      result=$(gh es checks system-requirements -c $CLUSTER_CONFIG --json)
+      if echo $result | jq 'has("error_code")' | grep -q true; then
+        add_error "preflight-check-cluster" "gh-es-cli" "Error occurred when running preflight checks with gh es cli"
+        return 0
+      fi
+
+      while IFS=',' read -r hostname role message; do
+        add_error "preflight-check-$role-server" "$hostname" "$message";
+      done < <(echo $result | jq -r '.nodes[] | .hostname as $hostname | .roles_status[] | select(.status == "FAILED") | "\($hostname),\(.role),\(.message)"')
+    fi
+  fi
+  return 0
+}
+
+check_connectivity_with_ghes_manage_api(){
+  if [ -z "$RUN_GHES_MANAGE_CONNECTIVITY_CHECKS" ] && ([ -n "$HA_CLUSTER" ] || [ -n "$SKIP_NETWORK_CHECKS" ]); then
+    return 0
+  fi
+
+  result="$(gh es checks connectivity -c $CLUSTER_CONFIG -t 10 --json)"
+
+  if echo $result | jq  'has("error_code")' | grep -q true; then
+    echo "Error occurred when running connectivity checks with GHES Manage API"
+    echo "Falling back to legacy Enterprise Manage API"
+    return 1
+  fi
+
+  while IFS=': ' read -r hostname ports; do
+    add_error "connectivity-check" "$hostname" "Unreachable ports: $ports";
+  done < <(echo $result | jq -r '.nodes[] | {name: .hostname, failedPorts: [.port_checks[] | select(.status == "FAILED").port]} | select(.failedPorts | length > 0) | .name + ": " + (.failedPorts | join(", "))')
+
+  return 0
+}
+
+# Check the `consul-datacenter` is defined for the host from `check_hosts`.
+# If using Cluster HA, also check `datacenter` is not the same as any others
+# (primary and replica(s) need separate values)
+# Note, the env var SKIP_DC_CHECKS can be used to skip this if required
+check_host_consul_datacenter() {
+  if [ -z "$SKIP_DC_CHECKS" ] && \
+    [ "$(ghe-config cluster.$host.offline)" != "true" ]; then
+    dc=$(ghe-config cluster.$host.consul-datacenter || true)
+    if [ -n "$dc" ]; then
+      if [ -n "$HA_CLUSTER" ] && [ -n "${consul_datacenters[$dc]}" ]; then
+        add_error "unique-consul-datacenter" "$host" "$dc"
+      fi
+      consul_datacenters[$dc]=1
+    else
+      add_error "missing-consul-datacenter" "$host"
+    fi
+  fi
+}
+
+# Run a series of checks for hostnames from `setup_hostnames`
+check_hosts() {
+  preflight_check_exit_code=0
+  check_host_cluster_role_preflight_with_ghes_manage_api || preflight_check_exit_code=$?
+  if [ $preflight_check_exit_code -eq 1 ]; then
+    add_error "preflight-check-cluster" "gh-es-cli" "failed to configure gh es cli"
+  fi
+  connectivity_check_exit_code=0
+  check_connectivity_with_ghes_manage_api || connectivity_check_exit_code=$?
+
+  for host in $hostnames; do
+    ip=""
+    check_valid_host_subsection "$host"
+    check_valid_host_ip "$host"
+    check_host_consul_datacenter "$host"
+    if [ $connectivity_check_exit_code -eq 1 ]; then
+      check_host_cluster_ip_ports "$host"
+    fi
+  done
+}
+
+check_primary_consul_datacenter() {
+  if [ -z "$(ghe-config cluster.primary-datacenter)" ]; then
+    if [ -n "$HA_CLUSTER" ]; then
+      add_warning "missing-primary-datacenter" "cluster-conf" "no primary datacenter defined, a default value will be used"
+    else
+      # on true cluster, we enforce the presence of the primary-datacenter field
+      add_error "missing-primary-datacenter" "cluster-conf" "no primary datacenter defined"
+    fi
+  fi
+}
+
+check_redis_master() {
+  if [ -z "$(ghe-config cluster.redis-master)" ]; then
+    add_error "missing-redis-master" "cluster-conf" "no redis-master defined"
+  fi
+}
+
+# Check the minimum quantities present for various roles
+check_all_roles() {
+  for role in $all_roles; do
+    if [ "$role" = "mysql" ] || [ "$role" = "redis" ]; then
+      master_host=$(ghe-config cluster.$role-master) || true # to prevent errexit
+      # mysql should have master, except for byodb
+      if [ "$role" = "mysql" ] && ! ghe-config --true "mysql.external.enabled"; then
+        if [ -z "$master_host" ]; then
+          add_error "role-has-host" "$role-master" "0"
+        fi
+      fi
+
+      if [ "$(ghe-config cluster.$master_host.offline)" = "true" ]; then
+        add_error "role-marked-offline" "$role-server" "$master_host"
+        break
+      fi
+      if [ "$(ghe-config cluster.$master_host.hostname)" != "$master_host" ]; then
+        break
+      fi
+    fi
+    if [ "$role" = "elasticsearch" ]; then
+      found=''
+      for node in $(ghe-config cluster.elasticsearch-nodes); do
+        if [ "$(ghe-config cluster.$node.hostname)" != "$node" ]; then
+          found=1
+          break
+        fi
+      done
+      if [ "$found" = "1" ]; then
+        break
+      fi
+    fi
+
+    role_count=0
+    for host in $hostnames; do
+      if [ "$(ghe-config cluster.$host.offline)" = "true" ]; then
+        echo "Skipping $host because it's marked offline"
+        continue
+      fi
+      if [ "$(ghe-config cluster.$host.$role-server)" = "true" ]; then
+        role_count=$((role_count + 1))
+      fi
+    done
+
+    if [ "$role_count" -lt 1 ]; then
+      if ! ghe-config --true "mysql.external.enabled"; then
+        add_error "role-count" "$role-server" "$role_count"
+      fi
+    fi
+
+    if [ "$role" = "git" ]; then
+      if [ -n "$HA_CLUSTER" ]; then
+        if [ "$role_count" -lt 2 ]; then
+          add_warning "$role-server-redundancy" "$role-server" "$role_count"
+        fi
+      else
+        if [ "$role_count" -lt 3 ]; then
+          if [ "$(ghe-config app.spokesd.storage-policy)" = "single-node" ]; then
+            # during tests, only warn:
+            add_warning "$role-server-redundancy" "$role-server" "$role_count"
+          else
+            add_warning "$role-server-redundancy" "$role-server" "$role_count"
+          fi
+        fi
+      fi
+    fi
+
+    if [ "$role" = "pages" ]; then
+      if [ "$role_count" -lt 3 ] && [ -z "$HA_CLUSTER" ]; then
+        add_warning "$role-server-redundancy" "$role-server" "$role_count"
+      fi
+    fi
+
+    if [ "$role" = "storage" ]; then
+      if [ "$role_count" -lt 3 ] && [ -z "$HA_CLUSTER" ]; then
+        add_warning "$role-server-redundancy" "$role-server" "$role_count"
+      fi
+    fi
+
+    if [ "$role" = "metrics" ]; then
+      if [ "$role_count" -lt 2 ] && [ -z "$HA_CLUSTER" ]; then
+        add_warning "$role-server-redundancy" "$role-server" "$role_count"
+      fi
+    fi
+
+    if [ "$role" = "elasticsearch" ]; then
+      if [ "$role_count" -eq 1 ]; then
+        add_warning "$role-server-redundancy" "$role-server" "$role_count"
+      fi
+
+      if [ "$role_count" -eq 2 ] && [ -z "$HA_CLUSTER" ]; then
+       add_warning "$role-server-quorum" "$role-server" "$role_count"
+      fi
+    fi
+
+    if [ "$role" = "web" ] || [ "$role" = "job" ]; then
+      if [ "$role_count" -lt 2 ] && [ -z "$HA_CLUSTER" ]; then
+        add_warning "$role-server-redundancy" "$role-server" "$role_count"
+      fi
+    fi
+  done
+}
+
+check_external_roles() {
+  for role in $external_roles; do
+    role_count=0
+    for host in $hostnames; do
+      if [ "$(ghe-config cluster.$host.offline)" = "true" ]; then
+        echo "Skipping $host because it's marked offline"
+        continue
+      fi
+      if [ "$(ghe-config cluster.$host.$role-server)" = "true" ]; then
+        role_count="$((role_count + 1))"
+      fi
+    done
+
+    if [ "$role" = "mysql" ]; then
+      # when BYODB is enabled, there should not be a mysql-master role
+      master_host=$(ghe-config cluster.$role-master) || true # to prevent errexit
+      if [ -n "$master_host" ]; then
+        add_error "incompatible-role-for-external-mysql" "$role-master" "$master_host"
+      fi
+
+      # when BYODB is enabled, there should not be a mysql-master-replica role
+      master_replica_host=$(ghe-config cluster.$role-master-replica) || true # to prevent errexit
+      if [ -n "$master_replica_host" ]; then
+        add_error "incompatible-role-for-external-mysql" "$role-master-replica" "$master_replica_host"
+      fi
+
+      # when BYODB is enabled, ensure no nodes have mysql-server role set
+      if [ "$role_count" -gt 0 ]; then
+        add_error "incompatible-role-count-for-external-mysql" "$role-server" "$role_count"
+      fi
+
+      # Check external read replica config
+      datacenters=$(ghe-config --get-regexp 'cluster\..+\.datacenter' | cut -d ' ' -f2 | sort | uniq || true)
+      external_mysql_replicas=$(ghe-config --get-regexp 'cluster-external-mysql.*' | grep -oP 'cluster-external-mysql\.\K[^\.]+' | sort | uniq || true)
+
+      for node in $external_mysql_replicas; do
+        datacenter="$(ghe-config "cluster-external-mysql.$node.datacenter")"
+        if ! (echo "$datacenters" | grep -qx "$datacenter"); then
+          add_error "mismatch-datacenter-for-external-mysql-read-replica" "cluster-external-mysql" "$datacenter"
+        fi
+        host="$(ghe-config "cluster-external-mysql.$node.address")" || true
+        if [ -z "$host" ]; then
+          add_error "missing-address-for-external-mysql-read-replica" "cluster-external-mysql" "$node"
+        fi
+        port="$(ghe-config "cluster-external-mysql.$node.port")" || true
+        if [ -z "$port" ]; then
+          add_error "missing-port-for-external-mysql-read-replica" "cluster-external-mysql" "$node"
+        fi
+      done
+    fi
+  done
+}
+
+check_consul_cluster_config() {
+  local server_count=0
+  for host in $hostnames; do
+    if [ "$(ghe-config cluster.$host.offline)" = "true" ]; then
+      echo "Skipping $host because it's marked offline"
+      continue
+    fi
+    if [ "$(ghe-config cluster.$host.consul-server)" = "true" ]; then
+      server_count="$((server_count + 1))"
+    fi
+  done
+
+  if [ "$server_count" -eq 1 ]; then
+    add_warning "consul-server-redundancy" "consul-server" "$server_count"
+  fi
+
+  if [ "$server_count" -lt 3 ] && [ -z "$HA_CLUSTER" ]; then
+    add_warning "consul-server-quorum" "consul-server" "$server_count"
+  fi
+}
+
+check_cluster_consul_datacenters() {
+  # only check true cluster
+  if [ -n "$HA_CLUSTER" ]; then
+    return
+  fi
+
+  for host in $hostnames; do
+    if [ -n "$CLUSTER_DR" ]; then
+      replica_enabled=$(ghe-config cluster.$host.replica || true)
+      if [ -n "$replica_enabled" ]; then
+        replica_cluster_nodes="$replica_cluster_nodes $host"
+      else
+        primary_cluster_nodes="$primary_cluster_nodes $host"
+      fi
+    else
+      primary_cluster_nodes="$primary_cluster_nodes $host"
+    fi
+  done
+
+  # can't do the check if there's no primary-datacenter
+  # the existence of which we check for in check_primary_consul_datacenter
+  primary_dc="$(ghe-config cluster.primary-datacenter || return)"
+
+  for host in $primary_cluster_nodes; do
+    if [ "$(ghe-config cluster.$host.offline)" == "true" ]; then
+      continue
+    fi
+
+    consul_dc=$(ghe-config cluster.$host.consul-datacenter || true)
+    # can't do the check if there's no consul-datacenter
+    # the existence of which we check for in check_host_consul_datacenter
+    if [ -n "$consul_dc" ] && [ "$consul_dc" != "$primary_dc" ]; then
+      add_error "matching-consul-datacenter" "$host" "$consul_dc"
+    fi
+  done
+
+  # if this isn't a cluster DR, then replica_cluster_nodes will be empty and this won't loop
+  for host in $replica_cluster_nodes; do
+    if [ "$(ghe-config cluster.$host.offline)" == "true" ]; then
+      continue
+    fi
+
+    consul_dc=$(ghe-config cluster.$host.consul-datacenter || true)
+    # check that the replica nodes don't have the same consul-datacenter as the primary nodes
+    # can't do the check if there's no consul-datacenter
+    # the existence of which we check for in check_host_consul_datacenter
+    if [ -n "$consul_dc" ] && [ "$consul_dc" == "$primary_dc" ]; then
+      add_error "different-replica-consul-datacenter" "$host" "$consul_dc"
+    fi
+    # check that the replica nodes all have the same consul-datacenter value
+    if [ -n "$previous_consul_dc" ] && [ "$consul_dc" != "$previous_consul_dc" ]; then
+      add_error "matching-consul-datacenter" "$host" "$consul_dc"
+    fi
+    previous_consul_dc="$consul_dc"
+  done
+}
+
+check_actions_config() {
+  if ghe-config --true 'app.actions.enabled'; then
+    # Should have mssql master and the mssql master node should be an mssql-server
+    mssql_master_host=$(ghe-config cluster.mssql-master) || true # to prevent errexit
+    mysql_master_host=$(ghe-config cluster.mysql-master) || true
+    if [ -z "$mssql_master_host" ]; then
+      add_error "mssql-master" "cluster-conf" "no mssql-master defined"
+    elif [ "$mssql_master_host" != "$mysql_master_host" ] && [[ "$(ghe-config --true mysql.external.enabled)" -ne 0 ]]; then
+      # MSSQL and MySQL should run on the same node unless BYODB is enabled
+      add_warning "mssql-master" "cluster-conf" "mssql-master does not equal mysql-master"
+    fi
+    if [ -z "$(ghe-config cluster.$mssql_master_host.mssql-server)" ]; then
+      add_error "mssql-role-on-mssql-master" "cluster-conf" "no mssql-server role defined on mssql master node"
+    fi
+
+    # If actions is enabled cluster should have actions-server, mssql-server and launch-server roles
+    actions_nodes=0
+    mssql_nodes=0
+    launch_nodes=0
+    for node in $(ghe-config --get-regexp 'cluster.*.hostname'); do
+      if [ "$(ghe-config cluster.$node.actions-server)" = "true" ]; then
+        actions_nodes=$((actions_nodes+1))
+      fi
+      if [ "$(ghe-config cluster.$node.launch-server)" = "true" ]; then
+        launch_nodes=$((launch_nodes+1))
+      fi
+      if [ "$(ghe-config cluster.$node.mssql-server)" = "true" ]; then
+        mssql_nodes=$((mssql_nodes+1))
+      fi
+      if [ "$(ghe-config cluster.$node.mssql-server)" != "$(ghe-config cluster.$node.mysql-server)" ] && [[ "$(ghe-config --true mysql.external.enabled)" -ne 0 ]]; then
+        add_warning "mssql-server does not equal mysql-server" "cluster-conf" "$node does not have the same value for mssql-server and mysql-server"
+      fi
+    done
+    # should have at least 1 actions-server node
+    if [ $actions_nodes -eq 0 ]; then
+      add_error "actions-server-nodes" "cluster-conf" "actions is set as enabled but no actions-server nodes are present"
+    fi
+    # should have at least 1 launch-server node
+    if [ $launch_nodes -eq 0 ]; then
+      add_error "launch-server-nodes" "cluster-conf" "actions is set as enabled but no launch-server nodes are present"
+    fi
+    # Should have mssql-master set if any nodes have mssql-server role
+    if [ $mssql_nodes -ne 0 ] && [ -z "$mssql_master_host" ]; then
+      add_error "mssql-nodes" "cluster-conf" "$mssql_nodes mssql-server node found, but no mssql-master is defined"
+    fi
+  fi
+}
+
+check_cluster_dr() {
+  # only check true cluster
+  if [ -n "$HA_CLUSTER" ]; then
+    return
+  fi
+
+  declare -a primary_cluster_nodes
+  declare -a replica_cluster_nodes
+
+  for host in $hostnames; do
+    replica_enabled=$(ghe-config cluster."$host".replica || true)
+    if [ -n "$replica_enabled" ]; then
+      replica_cluster_nodes+=("$host")
+    else
+      primary_cluster_nodes+=("$host")
+    fi
+  done
+
+  # if there are no replica node entries, it's not cluster HA/DR
+  if [ ${#replica_cluster_nodes[@]} -lt 1 ]; then
+    return
+  fi
+
+  if [ -z "$(ghe-config cluster.mysql-master-replica)" ] ; then
+    add_error "missing-mysql-master-replica" "cluster-conf" "no mysql-master defined"
+  fi
+
+  if [ -z "$(ghe-config cluster.redis-master-replica)" ]; then
+    add_error "missing-redis-master-replica" "cluster-conf" "no redis-master defined"
+  fi
+
+  # only bother checking if values point to existing nodes if they are both set
+  if [ -n "$(ghe-config cluster.mysql-master-replica)" ] && [ -n "$(ghe-config cluster.redis-master-replica)" ]; then
+    mysql_master_replica=$(ghe-config cluster.mysql-master-replica)
+    redis_master_replica=$(ghe-config cluster.redis-master-replica)
+  else
+    return
+  fi
+
+  mysql_master_node_defined=false
+  redis_master_node_defined=false
+  for host in "${replica_cluster_nodes[@]}"; do
+    if [ "$mysql_master_replica" = "$host" ]; then
+      mysql_master_node_defined=true
+    fi
+    if [ "$redis_master_replica" = "$host" ]; then
+      redis_master_node_defined=true
+    fi
+    if [ "$mysql_master_node_defined" = "true" ] && [ "$redis_master_node_defined" = "true" ]; then
+      break
+    fi
+  done
+
+  if [ "$mysql_master_node_defined" = "false" ]; then
+    add_error "undefined-mysql-master-replica" "cluster-conf" "mysql-master-replica node is not defined"
+  else
+    offline=$(ghe-config cluster."$mysql_master_replica".offline || true)
+    if [ "$offline" = "true" ]; then
+      add_error "offline-mysql-master-replica" "cluster-conf" "mysql-master-replica node is offline"
+    fi
+  fi
+
+  if [ "$redis_master_node_defined" = "false" ]; then
+    add_error "undefined-redis-master-replica" "cluster-conf" "redis-master-replica node is not defined"
+  else
+    offline=$(ghe-config cluster."$redis_master_replica".offline || true)
+    if [ "$offline" = "true" ]; then
+      add_error "offline-redis-master-replica" "cluster-conf" "redis-master-replica node is offline"
+    fi
+  fi
+}
+
+# Render error output for JSON
+json_error_count() {
+  if [ -n "$json_output" ]; then
+    json_arg "num_errors" "$error_count" "1"
+  fi
+}
+
+# Report number of errors and warnings
+error_warning_count() {
+  if [ -n "$json_output" ]; then
+    return 0
+  fi
+
+  if [ "$error_count" -gt 0 ]; then
+    echo "$error_count configuration errors"
+  fi
+  if [ "$warning_count" -gt 0 ]; then
+    echo "$warning_count configuration warning"
+  fi
+
+  if [ $((error_count + warning_count)) -eq 0 ]; then
+    echo "Configuration validation complete. No errors found."
+  fi
+}
+
+# End JSON hash
+json_close() {
+  if [ -n "$json_output" ]; then
+    echo "}"
+  fi
+}
+
+run_gcm_validations() {
+  # Check if gh es topologyconfig verify command is available
+  # This will happen on brand new clusters where the gh cli is not yet configured
+  # Temporarily disable 'set -e' for the command check
+  set +e
+  result=$(gh es topologyconfig verify --help > /dev/null 2>&1)
+  exit_code=$?
+
+  if [ $exit_code -ne 0 ]; then
+    echo "gh es topologyconfig verify is not available. Skipping GCM validations."
+    return
+  fi
+
+  # We run the validations as the admin user because we configure the gh es cli as the admin user
+  result=$(sudo -u admin gh es topologyconfig verify -c "$CLUSTER_CONFIG")
+  exit_code=$?
+
+  if [ "$(ghe-config "core.enforce-gcm-cluster-config-validation")" = "true" ] && [ $exit_code -ne 0 ]; then
+    echo "$result"
+    echo "GCM validations failed. Exiting."
+    exit $exit_code
+  fi
+
+  set -e # re-enable 'set -e'
+}
+
+# Check and report various aspects of the cluster.conf file.
+# Note, these methods all pass around several global variables.
+main() {
+  setup_hostnames
+  json_open
+  check_hosts
+  check_primary_consul_datacenter
+  check_redis_master
+  check_consul_cluster_config
+  check_all_roles
+  check_external_roles
+  check_cluster_consul_datacenters
+  check_actions_config
+  check_cluster_dr
+  json_error_count
+  error_warning_count
+  json_close
+  exit $error_count
+}
+
+# If the toggle is enabled, run the separate GCM validations
+if [ "$(ghe-config "core.toggle-gcm-cluster-config-validation")" == "true" ]; then
+  run_gcm_validations
+fi
+
+main

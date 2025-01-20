@@ -1,0 +1,275 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# view is an instance of Settings::Organization::Roles::IndexView %>
+<% page_info responsive: false, :title => "Repository roles", selected_link: :roles %>
+
+<%= render layout: "orgs/settings/layout" do %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Repository roles<% end %>
+    <% component.with_description(test_selector: "roles-info") do %>
+      Roles are used to grant access and permissions for teams and members.
+      <% if view.organization.custom_roles_supported? %>
+        In addition to the available pre-defined roles, you can create up to
+        <%= pluralize(RepositoryRole.custom_role_limit_for_org(view.organization), "custom role") %>
+        to fit your needs.
+        <%= render(Primer::Beta::Link.new(
+          href: "#{GitHub.help_url}/organizations/managing-peoples-access-to-your-organization-with-roles/about-custom-repository-roles",
+          classes: "Link--inTextBlock",
+          target: "_blank",
+          rel: "noopener"
+        ))  do %>
+          Learn more about custom repository roles
+        <% end %>.
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <div class="border rounded-2 mb-2 d-flex flex-column">
+    <div class="clearfix p-3 color-bg-subtle rounded-top-2">
+      <div>
+        <h3 class="text-bold h5"> Pre-defined roles </h3>
+        <div class="text-small color-fg-muted">
+          <% if view.viewer_permissions[:org_admin] %>
+            You can
+            <%= link_to "set the base role", settings_org_member_privileges_path, data: test_selector_hash("set-org-default-role-link"), class: "Link--inTextBlock" %>
+            for this organization from one of these roles.
+          <% end %>
+        </div>
+      </div>
+    </div>
+
+    <% view.system_roles.each do |role| %>
+      <div class="border-top d-flex <% if view.is_disabled?(role) %>color-bg-subtle<% end %>">
+        <div class="py-4 px-3 color-fg-muted flex-items-center">
+          <%= primer_octicon(view.icon_for_role(role.name)) %>
+        </div>
+        <div class="css-truncate css-truncate-overflow flex-1 my-3">
+          <h4 class="h5">
+            <%= role&.display_name %>
+            <% if view.is_disabled?(role) %>
+              <%= render(Primer::Beta::IconButton.new(
+                scheme: :invisible,
+                size: :small,
+                icon: :info,
+                inactive: true,
+                "aria-label": "This role can only be assigned to #{outside_collaborators_verbiage(view.organization)}",
+              )) do |icon| %>
+                <% icon.with_tooltip(
+                  type: :description,
+                  text: "This role can only be assigned to #{outside_collaborators_verbiage(view.organization)}"
+                ) %>
+              <% end %>
+            <% end %>
+            <% if view.show_base_role_badge?(role.name) %>
+              <%= render(Primer::Beta::Label.new(scheme: :info, ml: 1, classes: "js-base-role-badge")) { "Base Role" } %>
+            <%end%>
+          </h4>
+          <span class="color-fg-muted">
+            <%= view.system_role_description(role.name) %>
+            <% if role.admin? && view.viewer_permissions[:org_admin] %>
+              <%= link_to "Modify Admin Role", settings_org_member_privileges_path(anchor: "admin-repository-permissions"), data: test_selector_hash("modify-admin-role-link"), class: "Link--inTextBlock" %>
+            <% end %>
+          </span>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <% if view.organization.custom_roles_supported? %>
+    <div class="border <%= "border-dashed" unless view.custom_repo_roles_present? %> rounded-2 mb-2 mt-5 d-flex flex-column" <%= test_selector "custom-roles-active" %>>
+      <div class="clearfix p-3 color-bg-subtle rounded-top-2">
+        <div class="float-right mt-2">
+          <% if view.viewer_permissions[:write] %>
+            <% if view.is_org_repo_role_limit_max? %>
+              <%= render Primer::Beta::Button.new(scheme: :primary, disabled: true) do %>
+                Create a role
+              <% end %>
+            <% else %>
+              <%= button_to "Create a role",
+                new_settings_org_repository_roles_path,
+                method: :get,
+                class: "btn btn-primary",
+                data: test_selector_hash("create-custom-repo-role-button")
+              %>
+            <% end %>
+          <% end %>
+        </div>
+        <div>
+          <h3 class="text-bold h5">Custom roles</h3>
+          <div class="text-small color-fg-muted">
+            <%= view.custom_role_message %>
+          </div>
+        </div>
+      </div>
+
+      <% if view.custom_repo_roles_present? %>
+        <% view.custom_repo_roles.each do |custom_role| %>
+          <div class="border-top d-flex">
+            <div class="py-4 px-3 color-fg-muted d-flex flex-items-center">
+              <%= primer_octicon(:person) %>
+            </div>
+            <div class="d-flex flex-column flex-justify-center flex-1 my-3">
+              <h4 class="css-truncate css-truncate-overflow h5" style="max-width: 560px">
+                <%= custom_role.name %>
+              </h4>
+              <% if view.has_description?(custom_role) %>
+                <span class="css-truncate css-truncate-target color-fg-muted" style="max-width: 560px">
+                  <%= custom_role.description %>
+                </span>
+              <% end %>
+            </div>
+
+            <div class="p-4 timeline-comment-actions">
+              <% if view.viewer_permissions[:write] %>
+                <%= render(Primer::Alpha::ActionMenu.new("data-test-selector": "edit-and-delete-repo-role")) do |menu| %>
+                  <% menu.with_show_button(icon: :"kebab-horizontal", "aria-label": "Show custom role actions") %>
+                  <% menu.with_item(
+                    label: "Edit role",
+                    href: edit_settings_org_repository_roles_path(view.organization, custom_role)
+                  ) %>
+                  <% menu.with_item(
+                    label: "Delete role",
+                    tag: :button,
+                    content_arguments: { "data-show-dialog-id": "delete-role-dialog-#{custom_role.id}" },
+                    value: "",
+                    scheme: :danger
+                  ) %>
+                <% end %>
+
+                <%= render(Primer::Alpha::Dialog.new(
+                  id: "delete-role-dialog-#{custom_role.id}",
+                  title: "Confirm repository role deletion",
+                  size: :medium_portrait
+                )) do |d| %>
+                  <% d.with_body do %>
+                    <%= render(Primer::Beta::Flash.new(scheme: :warning, my: 2)) do %>
+                      Deleting a custom role may result in downgrade of permissions for all the persons and teams who have been assigned that role.
+                    <% end %>
+                    <%= render(Primer::Beta::Text.new) do %>
+                      You are about to delete the <%= render(Primer::Beta::Text.new(font_weight: :bold)) { custom_role.name } %> role.
+                    <% end %>
+
+                    <%= render(Primer::Box.new(mt: 2, display: :flex, direction: :column)) do %>
+                      <%= render(Primer::Beta::Text.new) { "This role is currently assigned to:" } %>
+                      <ul class="m-0 p-0 list-style-none">
+                        <li class="d-flex">
+                          <%= render(Primer::Beta::Octicon.new(icon: :person, color: :muted, mr: 2)) %>
+                          <%= render(Primer::Beta::Text.new(font_weight: :bold)) { pluralize(custom_role.user_count, "person") } %>
+                          <%= render(Primer::Beta::Text.new(color: :subtle, ml: 1)) { "(#{pluralize(custom_role.org_member_count, "org member")}, #{pluralize(custom_role.collaborator_count, outside_collaborators_verbiage(view.organization))})" } %>
+                        </li>
+                        <li class="d-flex">
+                          <%= render(Primer::Beta::Octicon.new(icon: :people, color: :muted, mr: 2)) %>
+                          <%= render(Primer::Beta::Text.new(font_weight: :bold)) { pluralize(custom_role.team_count, "team") } %>
+                        </li>
+                        <% if view.role_invitation_count(custom_role) > 0 %>
+                          <li class="d-flex">
+                            <%= render(Primer::Beta::Octicon.new(icon: :mail, color: :muted, mr: 2)) %>
+                            <%= render(Primer::Beta::Text.new(font_weight: :bold)) { pluralize(view.role_invitation_count(custom_role), "invitation") } %>
+                          </li>
+                        <% end %>
+                      </ul>
+
+                      <%= render(Primer::Beta::Text.new(my: 2)) do %>
+                        When deleted, all people and teams with <%= render(Primer::Beta::Text.new(font_weight: :bold)) { custom_role.name } %>
+                        role will be assigned the pre-defined repository role it inherits from:
+                      <% end %>
+                      <%= render(Primer::Box.new(bg: :inset, mb: 2, p: 2, border: true, border_radius: 2, border_color: :subtle)) do %>
+                        <%= render(Primer::Box.new(display: :flex, align_items: :center)) do %>
+                          <%= render(Primer::Beta::Octicon.new(mr: 2, icon: view.icon_for_role(custom_role.base_role.name), color: :muted)) %>
+                          <%= render(Primer::Beta::Text.new(font_weight: :bold, display: :block)) { custom_role.base_role.display_name } %>
+                        <% end %>
+                        <%= render(Primer::Beta::Text.new) { view.system_role_description(custom_role.base_role.name) } %>
+                      <% end %>
+                    <% end %>
+                  <% end %>
+                  <% d.with_footer do %>
+                    <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "delete-role-dialog-#{custom_role.id}" })) { "Cancel" } %>
+                    <%= form_tag view.delete_organisation_repository_role_path(custom_role), method: :delete do |f| %>
+                      <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger, block: true, data: { "close-dialog-id": "delete-role-dialog-#{custom_role.id}" })) { "Delete role" } %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% else %>
+        <div class="border-0 border-top border-dashed d-flex">
+          <div class="flex-1 m-3">
+            <span class="color-fg-muted">You do not have any custom roles yet.</span>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <%= render Primer::Box.new(
+      mt: 5,
+      border: true,
+      border_radius: 2,
+      id: "custom-roles",
+      classes: "color-bg-premium",
+      test_selector: "custom-roles-disabled"
+    ) do %>
+      <%= render Primer::Beta::BorderBox.new(border: false) do |c| %>
+        <% c.with_header(border_top: 0, border_right: 0, border_left: 0, m: 0) do %>
+          <div class="d-flex flex-items-center flex-justify-between">
+            <h3 class="h5 color-fg-subtle">Custom roles</h3>
+            <%= render Primer::Beta::Button.new(scheme: :primary, ml: 3, disabled: true) do %>
+              Create a role
+            <% end %>
+          </div>
+        <% end %>
+
+        <% c.with_body(mb: 0) do %>
+          <div class="blankslate">
+            <div class="position-relative bg-blur" style="z-index:1;">
+              <h3 class="blankslate-heading">Create custom roles with GitHub Enterprise</h3>
+              <p>Enterprise accounts offer organizations more granular control over permissions by allowing you to configure up to three custom repository roles. This enables greater control over who and how your users access code and data in your organization.</p>
+              <div class="blankslate-action">
+                <%= render Primer::Beta::Button.new(
+                  tag: :a,
+                  href: enterprise_trial_accounts_new_path,
+                  classes: "btn-premium",
+                  data: analytics_click_attributes(category: "start_a_free_trial", action: "click_to_set_up_enterprise_trial", label: "ref_page:#{request.fullpath};ref_cta:try_github_enterprise;ref_loc:custom_roles;"),
+                ) do %>
+                  <%= render(Primer::Beta::Octicon.new(icon: :rocket, color: :sponsors, mr: 1)) %>
+                  Try GitHub Enterprise
+                <% end %>
+              </div>
+              <div class="blankslate-action">
+                <%= render(Primer::Beta::Button.new(
+                  scheme: :link,
+                  tag: :a,
+                  href: "https://docs.github.com/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/managing-custom-repository-roles-for-an-organization",
+                  data: analytics_click_attributes(category: "Suggestion", action: "click to read docs", label: "ref_page:#{request.fullpath};ref_cta:Learn more;ref_loc:Custom roles;"),
+                )) { "Learn more" } %>
+              </div>
+            </div>
+            <div class="position-absolute top-0 right-0 bottom-0 left-0 overflow-hidden">
+              <div class="d-flex flex-items-center my-5">
+                <div class="rounded-3 color-bg-subtle mr-3" style="width:32px;height:32px;"></div>
+                <div class="col-md-6">
+                  <div class="col-8 rounded-3 color-bg-subtle p-2 mb-2"></div>
+                  <div class="rounded-3 color-bg-subtle p-1"></div>
+                </div>
+              </div>
+              <div class="d-flex flex-items-center my-5">
+                <div class="rounded-3 color-bg-subtle mr-3" style="width:32px;height:32px;"></div>
+                <div class="col-md-6">
+                  <div class="col-8 rounded-3 color-bg-subtle p-2 mb-2"></div>
+                  <div class="rounded-3 color-bg-subtle p-1"></div>
+                </div>
+              </div>
+              <div class="d-flex flex-items-center my-5">
+                <div class="rounded-3 color-bg-subtle mr-3" style="width:32px;height:32px;"></div>
+                <div class="col-md-6">
+                  <div class="col-8 rounded-3 color-bg-subtle p-2 mb-2"></div>
+                  <div class="rounded-3 color-bg-subtle p-1"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

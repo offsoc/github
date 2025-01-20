@@ -1,0 +1,127 @@
+<%
+  profile_name = listing.sponsorable_name
+  sponsorable = listing.sponsorable
+  show_queue_link = params[:filter].present? &&
+                    params[:filter][:state] == "waitlisted" &&
+                    params[:filter][:suspended] == "0" &&
+                    params[:filter][:spammy] == "0"
+%>
+
+<tr class="js-sponsors-bulk-action-row" <%= test_selector "listing-#{listing.sponsorable_login}" %>>
+  <td class="sponsors-bulk-action-column text-center v-align-middle">
+    <input name="sponsorable_logins[]" type="checkbox" aria-label="Select maintainer <%= listing.sponsorable_login %>"
+      data-autocomplete-value="<%= listing.sponsorable_login %>"
+      class="js-sponsors-bulk-action-checkbox" value="<%= listing.sponsorable_login %>">
+  </td>
+  <td class="v-align-middle pr-0">
+    <a href="<%= stafftools_sponsors_member_path(listing.sponsorable_login) %>" <%= safe_data_attributes(sponsorable_hovercard_attributes(listing)) %>>
+      <%= render Sponsors::Sponsorables::AvatarComponent.new(sponsors_listing: listing, size: 20, mr: 2) %>
+    </a>
+  </td>
+  <td class="v-align-middle pl-0">
+    <a href="<%= stafftools_sponsors_member_path(listing.sponsorable_login) %>" <%= safe_data_attributes(sponsorable_hovercard_attributes(listing)) %> class="text-bold">
+      <%= render Primer::Beta::Truncate.new do |component| %>
+        <% component.with_item(max_width: 125) do %>@<%= listing.sponsorable_login %><% end %>
+      <% end %>
+      <% unless profile_name == listing.sponsorable_login %>
+        <span class="d-block color-fg-muted text-small"><%= profile_name %></span>
+      <% end %>
+      <% if listing.ignored? %>
+        <span class="color-bg-attention-emphasis py-1 px-2 color-fg-default d-inline-block h6 rounded-2 ml-1" <%= test_selector "ignored-tag" %>>
+          Ignored
+        </span>
+      <% end %>
+    </a>
+  </td>
+  <td class="text-center v-align-middle">
+    <%= render Stafftools::Sponsors::Members::SponsorsListingStateComponent.new(listing: listing) %>
+  </td>
+  <td class="no-wrap text-center v-align-middle">
+    <span class="d-block <%= account_age_text_class(sponsorable.created_at) %>">
+      <%= account_age_description(sponsorable.created_at) %>
+    </span>
+    <span class="color-fg-subtle text-small"><%= full_month_date(sponsorable.created_at) %></span>
+  </td>
+  <td class="text-center v-align-middle">
+    <% if (stripe_account = listing.active_stripe_connect_account) %>
+      <a href="<%= stafftools_sponsors_member_stripe_connect_account_transfers_path(listing.sponsorable_login, stripe_account) %>" class="Link--secondary no-wrap">
+        <%= primer_octicon(
+          stripe_account.verified_verification_status? ? :check : :x,
+          color: stripe_account.verified_verification_status? ? :success : :danger,
+          size: :small,
+        ) %>
+        <%= stripe_account.verified_verification_status? ? "Verified" : "Not verified" %>
+        <% if stripe_transfer_count > 0 %>
+          <span class="d-block text-small color-fg-subtle">
+            <%= social_count(stripe_transfer_count) %> <%= "transfer".pluralize(stripe_transfer_count) %>
+          </span>
+        <% end %>
+      </a>
+    <% end %>
+  </td>
+  <td class="text-center v-align-middle">
+    <% if listing.country_of_residence_flag_emoji_alias %>
+      <%= render Primer::Alpha::Dialog.new(
+        title: "Country or region of residence",
+        text_align: :left,
+      ) do |dialog| %>
+        <% dialog.with_show_button(scheme: :invisible) do %>
+          <%= emoji_tag(
+            Emoji.find_by_alias(listing.country_of_residence_flag_emoji_alias),
+            class: "emoji d-inline-block f2",
+          ) %>
+        <% end %>
+        <% dialog.with_body(text_align: :left) do %>
+          <%= listing.country_of_residence_name %>
+        <% end %>
+      <% end %>
+    <% else %>
+      <% if listing.supported_country_of_residence? %>
+        <%= listing.country_of_residence_name %>
+      <% else %>
+        <%= listing.country_of_residence_name || "none" %>
+      <% end %>
+    <% end %>
+    <% unless listing.supported_country_of_residence? %>
+      <%= render Primer::Beta::Label.new(
+        scheme: :warning,
+        font_size: :small,
+      ).with_content("Unsupported") %>
+    <% end %>
+  </td>
+  <td class="text-center v-align-middle">
+    <%= listing.active_stripe_connect_account_default_currency %>
+  </td>
+  <td class="no-wrap text-center v-align-middle">
+    <% unless listing.sponsorable_has_public_non_fork_repository? %>
+      <%= render Primer::Beta::Label.new(scheme: :danger).with_content("R") %>
+    <% end %>
+    <% if listing.recently_created_github_account? %>
+      <%= render Primer::Beta::Label.new(scheme: :danger).with_content("A") %>
+    <% elsif listing.sponsorable_has_received_abuse_report? %>
+      <%= render Primer::Beta::Label.new(scheme: :warning).with_content("A") %>
+    <% end %>
+    <% if listing.for_user? %>
+      <% if listing.sponsorable_time_zone_name.blank? %>
+        <%= render Primer::Beta::Label.new(scheme: :warning).with_content("T") %>
+      <% elsif !listing.sponsorable_has_supported_timezone? %>
+        <%= render Primer::Beta::Label.new(scheme: :danger).with_content("T") %>
+      <% elsif !listing.sponsorable_timezone_matches_country_of_residence? %>
+        <%= render Primer::Beta::Label.new(scheme: :warning).with_content("T") %>
+      <% end %>
+    <% end %>
+    <% unless listing.sponsorable_has_customized_user_profile? %>
+      <%= render Primer::Beta::Label.new(scheme: :danger).with_content("P") %>
+    <% end %>
+  </td>
+  <td class="text-right v-align-middle">
+    <%= date_with_time_tooltip(listing.in_current_state_since || listing.created_at, format: "%b %-d, %Y") %>
+    <%= render Primer::Beta::Link.new(
+      href: stafftools_sponsors_waitlist_queue_index_path(after: listing.id),
+      test_selector: "waitlist-queue-link",
+      font_size: :small,
+      display: :block,
+      classes: "no-wrap",
+    ).with_content("Jump to in waitlist") if show_queue_link %>
+  </td>
+</tr>

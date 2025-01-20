@@ -1,0 +1,83 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "octokit"
+require "optparse"
+
+def exit_with_error(msg, err = nil)
+  $stderr.puts msg
+  $stderr.puts err unless err.nil?
+  exit 1
+end
+
+def github_token
+  # Make this script work both in Janky, GitHub Actions, and Codespaces by trying a couple of variables
+  github_token = ENV.fetch("GAUNTLET_TESTS_API_TOKEN", ENV["GITHUB_TOKEN"])
+
+  if github_token.nil?
+    exit_with_error "GITHUB_TOKEN or GAUNTLET_TESTS_API_TOKEN environment variable must be set"
+  end
+
+  github_token
+end
+
+def get_commit_range_files(client, options)
+  file_states = options[:file_states]
+  base_commit = options[:base_commit]
+  head_commit = options[:head_commit]
+
+  begin
+    compare_result = client.compare("github/github", base_commit, head_commit)
+    file_list = compare_result
+      .files
+      .select { |f| file_states.include?(f.status) }
+      .map(&:filename)
+  rescue Octokit::ServerError => e
+    exit_with_error "Failed to get files in PR #{pr.number}", e
+  end
+
+  file_list
+end
+
+def parse_options
+  options = {
+    file_states: %w[added modified renamed copied changed]
+  }
+
+  OptionParser.new do |parser|
+    parser.banner = "Usage: bundle exec script/find-files-by-commit-range -b BASE_SHA -h HEAD_SHA [OPTIONS]"
+
+    parser.on("-b", "--base COMMIT", String, "The base commit for listing files that have changed") do |base|
+      options[:base_commit] = base
+    end
+
+    parser.on("-h", "--head COMMIT", String, "The head commit for listing files that have changed") do |head|
+      options[:head_commit] = head
+    end
+
+    parser.on("-s", "--file-states [FILE_STATES]", String, "Only return PR file that match this comma-separated list of states. See https://docs.github.com/rest/pulls/pulls#list-pull-requests-files for a complete list of valid states.") do |file_states|
+      options[:file_states] = file_states.split(",")
+    end
+
+    parser.on("--help", "Display this help message.") do
+      puts parser
+      exit
+    end
+
+    if ARGV.length == 0
+      puts parser
+      exit
+    end
+  end.parse!
+
+  options
+end
+
+# run it and return the file list
+# -------------------------------
+
+options = parse_options
+client = Octokit::Client.new(access_token: github_token)
+files = get_commit_range_files(client, options)
+
+$stdout.puts files

@@ -1,0 +1,64 @@
+#!/bin/bash
+#/ Usage: ghe-check-pins
+#/
+#/ Checks the pinned version of the same component used in different places
+#/ on GitHub Enterprise (such as git, lariat, and git-sizer).
+#/
+
+run_in_image() {
+  container=$1
+  command=$2
+  shift 2
+  tag=$(docker images -f "reference=$container" --format '{{ .Tag }}' | head -n1)
+  docker run --entrypoint="$command" "$container:$tag" "$@"
+}
+
+exit_code=0
+
+echo "Checking Git..."
+enterprise2_git_pin=$(git --version)
+github_git_pin=$(run_in_image github git --version)
+gitrpcd_git_pin=$(run_in_image gitrpcd git --version)
+
+# Deactivate pages Git pin check until we pin the installed Git version properly
+# pages_git_pin=$(docker exec $(docker ps -f "name=pages-" -f "label=org.opencontainers.image.source=https://github.com/github/pages" --format '{{ .Names }}') git --version)
+
+if [ "$enterprise2_git_pin" != "$github_git_pin" ] || \
+   # [ "$enterprise2_git_pin" != "$pages_git_pin" ] || \
+   [ "$enterprise2_git_pin" != "$gitrpcd_git_pin" ]; then
+  echo "Git pinned in enterprise2: ${enterprise2_git_pin}"
+  echo "Git pinned in github:      ${github_git_pin}"
+  echo "Git pinned in gitrpcd:     ${gitrpcd_git_pin}"
+  # echo "Git pinned in pages:       ${pages_git_pin}"
+  echo
+  echo "ERROR: Git pin mismatch!"
+  exit_code=1
+fi
+
+echo
+echo "Checking Lariat..."
+github_lariat_pin=$(run_in_image github lariat-go --version)
+gitrpcd_lariat_pin=$(run_in_image gitrpcd lariat-go --version)
+
+if [ "$github_lariat_pin" != "$gitrpcd_lariat_pin" ] ; then
+  echo "Lariat pinned in github:   ${github_lariat_pin}"
+  echo "Lariat pinned in gitrpcd:  ${gitrpcd_lariat_pin}"
+  echo
+  echo "ERROR: Lariat pin mismatch!"
+  exit_code=1
+fi
+
+echo
+echo "Checking GitRPCd..."
+docker_gitrpcd_pin=$(docker images -f "reference=gitrpcd" --format '{{ .Tag }}  {{ .CreatedAt }}' | sort -rk 2 | awk 'NR==1{print $1}' | cut -c 1-8)
+github_gitrpcd_pin=$(run_in_image github apt-cache show gitrpcd | sed -n 's/^Version: [^g]\+g\([a-f0-9]\{8\}\).*/\1/p')
+
+if [ "$docker_gitrpcd_pin" != "$github_gitrpcd_pin" ] ; then
+  echo "GitRPCd pinned in docker:  ${docker_gitrpcd_pin}"
+  echo "GitRPCd pinned in github:  ${github_gitrpcd_pin}"
+  echo
+  echo "ERROR: GitRPCd pin mismatch!"
+  exit_code=1
+fi
+
+exit $exit_code

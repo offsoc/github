@@ -1,0 +1,16 @@
+export const SORTED_BY_COLUMN_ID_KEY = 'sortedBy[columnId]'
+export const SORTED_BY_COLUMN_DIRECTION_KEY = 'sortedBy[direction]'
+export const FILTER_QUERY_PARAM = 'filterQuery'
+export const VIEW_TYPE_PARAM = 'layout'
+export const HORIZONTAL_GROUPED_BY_COLUMN_KEY = 'groupedBy[columnId]'
+export const VERTICAL_GROUPED_BY_COLUMN_KEY = 'verticalGroupedBy[columnId]'
+export const SLICE_BY_COLUMN_ID_KEY = 'sliceBy[columnId]'
+export const SLICE_VALUE_KEY = 'sliceBy[value]'
+
+export const X_AXIS_GROUP_BY_PARAM = 'xAxis[groupBy]'
+export const X_AXIS_DATASOURCE_COLUMN_PARAM = 'xAxis[dataSource][column]'
+export const Y_AXIS_AGGREGATE_COLUMNS_PARAM = 'yAxis[aggregate][columns]'
+export const Y_AXIS_AGGREGATE_OPERATION_PARAM = 'yAxis[aggregate][operation]'
+
+export const PANE_PARAM = 'pane'
+export const ITEM_ID_PARAM = 'itemId'

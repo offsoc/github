@@ -1,0 +1,148 @@
+import type {SuggestedRepository} from '../../client/api/repository/contracts'
+import {not_typesafe_nonNullAssertion} from '../../client/helpers/non-null-assertion'
+
+export const mockRepos = new Array<SuggestedRepository>(
+  {
+    name: 'memex',
+    nameWithOwner: 'github/memex',
+    id: 1,
+    url: 'https://github.com/github/memex',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'github',
+    nameWithOwner: 'github/github',
+    id: 2,
+    url: 'https://github.com/github/github',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: false,
+    isForked: false,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'rails',
+    nameWithOwner: 'rails/rails',
+    id: 3,
+    url: 'https://github.com/rails/rails',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: true,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'react',
+    nameWithOwner: 'facebook/react',
+    id: 4,
+    url: 'https://github.com/facebook/react',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'text-expander-element',
+    nameWithOwner: 'github/text-expander-element',
+    id: 5,
+    url: 'https://github.com/github/text-expander-element',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: false,
+    isForked: true,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'mobx-react',
+    nameWithOwner: 'mobx/mobx-react',
+    id: 6,
+    url: 'https://github.com/mobx/mobx-react',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: true,
+    hasIssues: true,
+  },
+  {
+    name: 'empty',
+    nameWithOwner: 'github/empty',
+    id: 7,
+    url: '#',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: true,
+    hasIssues: true,
+  },
+  {
+    name: 'many-items',
+    nameWithOwner: 'github/many-items',
+    id: 8,
+    url: '#',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: true,
+    hasIssues: true,
+  },
+  {
+    name: 'private-server',
+    nameWithOwner: 'github/private-server',
+    id: 9,
+    url: '#',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: false,
+    hasIssues: true,
+  },
+  {
+    name: 'public-server',
+    nameWithOwner: 'github/public-server',
+    id: 10,
+    url: '#',
+    createdAt: new Date(),
+    pushedAt: new Date(),
+    lastInteractionAt: new Date(),
+    isPublic: true,
+    isForked: false,
+    isArchived: false,
+    hasIssues: true,
+  },
+)
+
+export function getRepository(id: number) {
+  const repository = mockRepos.find(m => m.id === id)
+  if (!repository) {
+    throw Error(`Unable to find repository with id ${id} - please check the mock data`)
+  }
+
+  return repository
+}
+
+export const mockPublicRepo = not_typesafe_nonNullAssertion(mockRepos[0])
+export const mockPrivateRepo = not_typesafe_nonNullAssertion(mockRepos[1])
+export const mockMilestonelessRepo = not_typesafe_nonNullAssertion(mockRepos[3])

@@ -1,0 +1,198 @@
+#!/bin/bash
+#/ Usage: ghe-mssql-console [-h]
+#/
+#/ Open a MS SQL database session on your GitHub Enterprise appliance.  Do not
+#/ use it to modify your database unless you are asked to do so by our
+#/ Enterprise support team.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -p | --primary     Connect to the primary mssql instance.
+#/   -q | --query       The string query to execute.
+#/   -i | --input       Input script file to execute (not compatible with --primary).
+#/   -n | --no-headers  Do not display column headers.
+#/   -r | --read-only   Read-only mode for connecting to read-only replicas.
+#/   -y | --yes         Do not show the warning prompt.
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-nomad-lib
+source /usr/local/share/enterprise/ghe-nomad-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+source /usr/local/share/enterprise/ghe-mssql-lib
+
+
+prompt_less=
+query=
+no_headers=
+read_only=
+input=
+primary=
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+fail() {
+    >&2 echo "$@"
+    exit 1
+}
+
+validate() {
+    if [ -n "$input" ] && [ -n "$query" ]; then
+        fail "Can not specify both --input and --query"
+    fi
+
+    if [ -n "$input" ]; then
+        if [ ! -f "$input" ]; then
+            fail "Input $input does not exist"
+        fi
+    fi
+}
+
+proceed() {
+    if [ -z "$prompt_less" ]; then
+        echo "$(basename "$0") should only be used when requested by the GitHub Enterprise Support team.  Incorrect use could cause damage or data loss."
+        read -p "Proceed with ghe-mssql-console? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+
+get_mssql_container_name_from_alloc() {
+    alloc_id="$1"
+    name=$(sudo docker ps --filter 'label=service=actions' --format '{{.Names}}' | grep "mssql")
+
+    if [ "$(echo "$name" | wc -l)" -gt 1 ] ; then
+        # There may be 2 mssql containers running for a short time when we switch between default nomad
+        # datacenter and primary/replica datacenters during failover or HA setup/teardown. Consider retrying from whatever calling routine is calling ghe-mssql-console.
+        fail "Found multiple MS SQL containers, can't determine which to execute against: $name"
+    else
+        alloc_id_from_container=$(docker inspect "$name" | grep "NOMAD_ALLOC_ID")
+        if ! echo "$alloc_id_from_container" | grep -q "$alloc_id" ; then
+            fail "Found local MSSQL container $name on $(hostname), but $alloc_id_from_container doesn't match expected $alloc_id at $(date -u +%Y-%m-%d\ %H:%M:%S.%3N)"
+        else
+            echo "$name"
+        fi
+    fi
+}
+
+console() {
+    local interval=2
+    local retries=10
+
+    for i in $(seq 1 "$retries"); do
+
+        if [[ -n "$primary" && -z "$input" ]]; then
+            # If you want to talk to the primary you can do so from any node. We'll find any mssql alloc which could be on any node with mssql to be the client.
+            # This would allow you to talk to the primary even on a node without an mssql allocation on it.
+            alloc_id=$(find_allocation mssql) || true
+        else
+            # If you don't want to talk to the primary, OR if you want to talk to the primary with an input file, you need to find the LOCAL mssql container.
+            # This is true if you want to use an input file because docker cp, which we need to copy the file around, can only operate on local containers.
+            # If there is no local container on the node you're executing from, then fail.
+            alloc_id=$(get-local-mssql-alloc) || true
+            if [ -n "$alloc_id" ]; then
+                # We actually don't need local_container unless we have the --input parameter. But, it may be a good idea to *always* evaluate local_container to make sure docker and nomad are in a consistent state.
+                local_container=$(get_mssql_container_name_from_alloc "$alloc_id") || true
+            fi
+        fi
+
+        if [[ -z "$alloc_id" || ( -z "$primary" && -z "$local_container" ) ]]; then
+            if [ "$i" -eq "$retries" ]; then
+                fail "Couldn't find mssql alloc/container: $alloc_id, $primary, $local_container"
+            fi
+            sleep $interval
+        else
+            break # We have successfully found the alloc_id and the corresponding local_container name (only necessary for docker cp, but nice to know it's there anyway).
+        fi
+    done
+
+    # in 2022-CU14-ubuntu-22.04 this way changed from mssql-tool
+    command=("run_in_allocation" "$alloc_id" "/opt/mssql-tools18/bin/sqlcmd")
+    if [ -n "$primary" ]; then
+        command+=("-S" "localhost,1443")
+    else
+        # Because of HAProxy configuration, when we want to talk to the local instance, we don't need to specify the port
+        # Port 1443 is routed to the MSSQL primary, port 1433 is not and goes to the local one.
+        command+=("-S" "localhost")
+    fi
+    command+=("-U" "SA")
+    command+=("-l" "30") # The default timeout value of 8 is usually sufficient, but some corner cases can be alleviated with 30.
+
+    if [ -n "$no_headers" ]; then
+        command+=("-h-1")
+    fi
+
+    if [ -n "$read_only" ]; then
+        command+=("-Kreadonly")
+    fi
+
+    command+=("-No") # Do not required encryption
+
+    if [ -n "$input" ] || [ -n "$query" ]; then
+        command+=("-b") # terminate batch job if there is an error
+
+        if [ -n "$input" ]; then
+            dest_file="$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1).sql"
+            docker cp "$input" "$local_container":"/tmp/$dest_file"
+            docker exec -u root "$local_container" chown mssql "/tmp/$dest_file"
+            command+=("-i" "/tmp/$dest_file")
+        elif [ -n "$query" ]; then
+            command+=("-Q" "$query")
+        fi
+    fi
+
+    exit_code=0
+    "${command[@]}" || exit_code=$?
+
+    if [ -n "$input" ]; then
+        docker exec -u mssql "$local_container" rm -f "/tmp/$dest_file"
+    fi
+
+    exit $exit_code
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -y|--yes)
+            prompt_less=1
+            shift
+            ;;
+        -q|--query)
+            query="$2"
+            shift 2
+            ;;
+        -n|--no-headers)
+            no_headers=1
+            shift
+            ;;
+        -r|--read-only)
+            read_only=1
+            shift
+            ;;
+        -i|--input)
+            input="$2"
+            shift 2
+            ;;
+        -p|--primary)
+            primary=1
+            shift
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+validate
+proceed
+console

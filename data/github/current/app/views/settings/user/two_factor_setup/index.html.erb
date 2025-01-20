@@ -1,0 +1,71 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  page_info title: "Configure two-factor authentication", class: "page-two-factor-auth session-authentication color-bg-inset", html_class: "color-bg-inset", responsive: true
+  sms_enabled = GitHub.two_factor_sms_enabled?
+  reconfigure_message = "You're about to change your two-factor authentication device. This will invalidate your current two-factor devices and recovery codes."
+  if sms_enabled
+    reconfigure_message += " This will not affect your fallback SMS configuration. It can be updated on the two-factor settings page."
+  end
+  cancel_confirm_text = "Two-factor authentication changes are not yet saved. Are you sure you want to cancel?"
+  exit_url = !return_to.blank? ? sanitize_url(return_to) : settings_security_path
+%>
+
+<%= render layout: "settings/user/enable_two_factor" do %>
+  <div class="mt-4 container-md p-responsive">
+    <noscript>
+      <%= render(Primer::Beta::Flash.new(scheme: :danger)) do %>
+        Please enable JavaScript to configure two-factor authentication.
+      <% end %>
+    </noscript>
+    <% if current_user.two_factor_authentication_enabled? %>
+      <%= render(Primer::Beta::Flash.new(id: "two-factor-reconfigure-notification", mb: 3, scheme: :warning, dismissible: true, display: :flex, align_items: :center)) do %>
+        <div class="mr-2">
+          <%= reconfigure_message %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <h1 class="text-center text-light" id="wizard-title-in-progress"><%= current_user.two_factor_authentication_enabled? ? "Reconfigure" : "Enable" %> two-factor authentication (2FA)</h1>
+    <div id="wizard-title-complete" hidden>
+      <div class="text-center mb-3">
+        <%= primer_octicon(:"shield-check", color: :success, :height => 48) %>
+      </div>
+      <h1 class="text-center text-light mx-auto" style="width: 80%;">Two-factor authentication (2FA) is now enabled for your GitHub account</h1>
+    </div>
+    <%= render SinglePageWizard::WizardComponent.new(
+      show_last_step_celebration: !current_user.is_coerced_2fa_enrollment?,
+      horizontal_steps: true,
+      complete_url: exit_url,
+      cancel_url: exit_url,
+      cancel_confirm_text: cancel_confirm_text
+    ) do |c| %>
+      <% c.with_step(title: "Setup authenticator app", id: "factor",
+        show_cancel_button: true, inside_buttons: true, next_text: "Continue", warn_unsaved: true) do %>
+        <two-factor-setup-verification id="two-factor-setup-verification-step" data-error-message="There was a problem initiating two-factor authentication setup">
+          <%= render partial: "settings/user/two_factor_setup/app" %>
+          <%= render partial: "settings/user/two_factor_setup/sms" %>
+          <div hidden>
+            <%=form_with url: settings_user_2fa_initiate_path, data: { target: "two-factor-setup-verification.switchForm" } do %>
+              <%= csrf_hidden_input_for settings_user_2fa_initiate_path, method: :post, class: "js-data-url-csrf" %>
+            <% end %>
+          </div>
+        </two-factor-setup-verification>
+      <% end %>
+      <% c.with_step(title: "Download your recovery codes", show_cancel_button: true, inside_buttons: true, next_text: "I have saved my recovery codes", warn_unsaved: true) do %>
+        <%= render partial: "settings/user/two_factor_setup/recovery_codes" %>
+      <% end %>
+      <% c.with_step(
+        title: "Don't get locked out, configure additional authentication methods",
+        step_icon: "shield-check",
+        next_text: return_to.blank? ? "Done" : "Return to your work",
+        show_banner: true
+      ) do %>
+        <%= render partial: "settings/user/two_factor_setup/add_two_factor_methods" %>
+      <% end %>
+    <% end %>
+    <% if sms_enabled && !current_user.employee? %>
+      <%= render partial: "settings/user/two_factor_setup/switch_selection" %>
+    <% end %>
+  </div>
+<% end %>

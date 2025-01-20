@@ -1,0 +1,114 @@
+<%
+  avatars_hostname = "avatars.#{@config["github-hostname"]}"
+  storage_hostname = "media.#{@config["github-hostname"]}"
+-%>
+
+location ~ ^/(github-enterprise-assets|github-enterprise-releases)/ {
+  access_log /var/log/nginx/alambic.log main;
+  error_log  /var/log/nginx/alambic.error.log;
+  <% if @config["subdomain-isolation"] -%>
+  return 301 "$http_x_forwarded_proto://<%= storage_hostname %>$request_uri";
+  <% else -%>
+  return 301 "$http_x_forwarded_proto://<%= @config["github-hostname"] %>/storage$request_uri";
+  <% end -%>
+}
+
+location ~ ^/avatars/ {
+  <% if @config["subdomain-isolation"] -%>
+  if ($http_host != <%= avatars_hostname %>) {
+    rewrite ^/avatars/(.*)$ $http_x_forwarded_proto://<%= avatars_hostname %>/$1 permanent;
+  }
+  <% end -%>
+  # Require private mode authentication.
+  include /etc/nginx/private_mode_location_include.conf;
+
+  # Don't spill requests to disk if they don't fit in proxy_buffers
+  proxy_request_buffering off;
+  proxy_max_temp_file_size 0;
+
+  access_log /var/log/nginx/alambic.avatars.log main;
+  error_log  /var/log/nginx/alambic.avatars.error.log;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_pass http://alambic_upstream;
+  break;
+}
+
+# includes private mode checks through nginx
+# used for public downloadable files: avatars, issue image attachments, etc
+location ~ ^/download/ {
+  <% if @config["subdomain-isolation"] -%>
+  if ($http_host != <%= storage_hostname %>) {
+    rewrite ^/download/(.*)$ $http_x_forwarded_proto://<%= storage_hostname %>/download/$1 permanent;
+  }
+  <% end -%>
+
+  include /etc/nginx/private_mode_location_include.conf;
+
+  # Don't spill requests to disk if they don't fit in proxy_buffers
+  proxy_request_buffering off;
+  proxy_max_temp_file_size 0;
+
+  access_log /var/log/nginx/alambic.assets.log main;
+  error_log  /var/log/nginx/alambic.assets.error.log;
+  rewrite ^/download/(.*)$ /storage/$1 break;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_pass http://alambic_upstream;
+  break;
+}
+
+# relies on private mode checks through the api
+location ~ ^/storage/ {
+<% if @config["subdomain-isolation"] -%>
+  set $is_storage_host 0;
+  if ($http_host = <%= storage_hostname %>) {
+    set $is_storage_host 1;
+  }
+<% if cluster_ha_replica_cache_domain -%>
+  if ($http_host = <%= cluster_ha_replica_cache_domain %>) {
+    set $is_storage_host 1;
+  }
+<% end -%>
+  if ($is_storage_host = 0) {
+    rewrite ^/storage/(.*)$ $http_x_forwarded_proto://<%= storage_hostname %>/$1 permanent;
+  }
+<% end -%>
+
+  client_max_body_size 50g;
+  # Don't spill requests to disk if they don't fit in proxy_buffers
+  proxy_request_buffering off;
+  proxy_max_temp_file_size 0;
+  
+  # 10800s is 3h, which aligns with the HAProxy-frontend configuration
+  proxy_read_timeout 10800s;
+  proxy_connect_timeout 10800s;
+  proxy_send_timeout 10800s;
+
+  access_log /var/log/nginx/alambic.assets.log main;
+  error_log  /var/log/nginx/alambic.assets.error.log;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_pass http://alambic_upstream;
+  break;
+}
+
+location ~ ^/api/uploads/ {
+  client_max_body_size 50g;
+  # Don't spill requests to disk if they don't fit in proxy_buffers
+  proxy_request_buffering off;
+  proxy_max_temp_file_size 0;
+
+  # 10800s is 3h, which aligns with the HAProxy-frontend configuration
+  proxy_read_timeout 10800s;
+  proxy_connect_timeout 10800s;
+  proxy_send_timeout 10800s;
+
+  access_log /var/log/nginx/alambic.uploads.log main;
+  error_log  /var/log/nginx/alambic.uploads.error.log;
+  rewrite ^/api/uploads(?!/(avatars|storage|assets|cluster|media|cdn))(.*)$ $2;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_pass http://alambic_upstream;
+  break;
+}

@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: router
+spec:
+    replicas: 1
+    strategy:
+        rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
+    template:
+        metadata:
+            labels:
+                service: router
+            annotations:
+        spec:
+            volumes:
+                - name: haproxy-errors-400
+                  configMap:
+                    name: router-haproxy-errors-400
+                - name: haproxy-errors-500
+                  configMap:
+                    name: router-haproxy-errors-500
+                - name: haproxy-config
+                  configMap:
+                    name: router-haproxy-config
+                - name: syslogng-socket
+                  emptyDir: {}
+            containers:
+                - name: haproxy
+                  image: octofactory.service.private-us-east-1.github.net/kustomize-labs-docker-releases-local/github/haproxy/haproxy-focal:cf648c4a9accb8d6ed4127956e44fc4e6e47d192
+                  command: ["haproxy", "-W", "-db", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+                  ports:
+                    - name: ssh
+                      containerPort: 22
+                      protocol: TCP
+                    - name: http
+                      containerPort: 80
+                      protocol: TCP
+                    - name: git
+                      containerPort: 9418
+                      protocol: TCP
+                    - name: stats
+                      containerPort: 8086
+                      protocol: TCP
+                    - name: health
+                      containerPort: 8087
+                      protocol: TCP
+                  resources:
+                    requests:
+                        cpu: 0.002
+                        memory: "10Mi"
+                    limits:
+                        cpu: 0.1
+                        memory: "25Mi"
+                  readinessProbe:
+                    tcpSocket:
+                        port: health
+                  env:
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: UNICORN_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: ALIVE_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: alive-hostname
+                    - name: DISABLE_GENERATE_SELF_SIGNED_CERT
+                      value: "true"
+                  volumeMounts:
+                    - mountPath: /usr/local/etc/haproxy/
+                      name: haproxy-config
+                    - mountPath: /etc/haproxy/errors/400
+                      name: haproxy-errors-400
+                    - mountPath: /etc/haproxy/errors/500
+                      name: haproxy-errors-500
+                    - mountPath: /var/run/syslogng
+                      name: syslogng-socket
+                - name: syslogng
+                  image: octofactory.service.private-us-east-1.github.net/kustomize-labs-docker-releases-local/github/docker-syslogng/docker-syslogng:1a47357772fdb260440f07f4e6c8490f29fa6178
+                  imagePullPolicy: IfNotPresent
+                  volumeMounts:
+                    - mountPath: /var/run/syslogng
+                      name: syslogng-socket
+                  readinessProbe:
+                    exec:
+                        command:
+                            - test
+                            - -S
+                            - /var/run/syslogng/socket
+                  resources:
+                    requests:
+                        cpu: 0.001
+                        memory: "5Mi"
+                    limits:
+                        cpu: 0.1
+                        memory: "20Mi"
+            restartPolicy: Always
+    selector:
+        matchLabels:
+            service: router

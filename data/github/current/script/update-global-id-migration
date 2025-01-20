@@ -1,0 +1,223 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# Usage: script/update-global-id-migration
+
+require_relative "../config/environment"
+require "global_id_migration"
+
+raise "you must have the GITHUB_TOKEN env var set for this script to work" if ENV["GITHUB_TOKEN"].nil?
+
+unless Rails.env.development?
+  raise "This is a dev-only script"
+end
+
+# Description of this script:
+#
+# run the GlobalId::Schedule to get json output of current status, which includes:
+#
+# 1. name of object
+# 2. status (rolled out/etc)
+# 3. ready date
+# 4. sample code
+#
+# Get a list of all the issues in the github/global-id-migration
+#
+# search the list of issues for the exact title of the name of the object(s).
+#
+# if not found, create it
+#  - once created, set it as opened/closed based on if its implemented with a ready date or not.
+# if found
+#  - if its open and its already rolled out, then close it
+#
+# Lastly, via the ProjectNext GraphQL API create/update  projectItem with its ready_date, status and type.
+
+# memex project https://github.com/orgs/github/projects/3398
+# repo https://github.com/github/global-id-migration
+
+node_interface = ::Platform::Schema.get_type("Node")
+node_implementors = ::Platform::Schema.possible_types(node_interface)
+  .sort_by { |x| x.graphql_name }
+  .delete_if { |x| !x.visibility.include?(:public) }
+
+metadata = GlobalIdMigration::Metadata.build(node_implementors)
+schedule = GlobalIdMigration::Schedule.run(metadata)
+
+schedule["rows"].each do |row|
+  sample_code = GlobalIdMigration::Formatting::Code.new(metadata[row[0]])
+  row << sample_code.format
+end
+
+CLIENT = Octokit::Client.new(access_token: ENV["GITHUB_TOKEN"])
+PROJECT_ID = "MDExOlByb2plY3ROZXh0MTc5NA"
+STATUS_FIELD_ID = "MDE2OlByb2plY3ROZXh0RmllbGQxNTE3MQ"
+READY_DATE_FIELD_ID = "MDE2OlByb2plY3ROZXh0RmllbGQyMTc0NQ"
+TYPE_FIELD_ID = "MDE2OlByb2plY3ROZXh0RmllbGQyMTk2Mw"
+STATUS_IDS = {
+  "Rolled Out" => "98236657",
+  "Implemented" => "b51d7261",
+  "In Progress" => "47fc9ee4",
+  "TODO" => "f75ad846",
+}
+
+GET_ISSUE_GLOBAL_ID = <<~'GRAPHQL'
+query {
+  repository(owner: "github", name: "global-id-migration") {
+    issue(number: %{issue_number}) {
+      id
+    }
+  }
+}
+GRAPHQL
+
+ADD_TO_PROJECT_MUTATION = <<~'GRAPHQL'
+mutation {
+  addProjectNextItem(input:{ projectId: "%{project_id}", contentId: "%{issue_id}"}) {
+    clientMutationId
+    projectNextItem {
+      id
+      fieldValues(last: 4) {
+        nodes {
+          id
+          value
+          projectField {
+            name
+            id
+          }
+      }
+      }
+    }
+  }
+}
+GRAPHQL
+
+UPDATE_PROJECT_MUTATION = <<~'GRAPHQL'
+mutation {
+  status: updateProjectNextItemField(input: { projectId: "%{project_id}", itemId: "%{item_id}", fieldId: "%{status_field_id}", value: "%{status_value}"}) {
+    projectNextItem {
+      id
+    }
+  }
+  ready_date: updateProjectNextItemField(input: { projectId: "%{project_id}", itemId: "%{item_id}", fieldId: "%{ready_date_field_id}", value: "%{ready_date_value}"}) {
+    projectNextItem {
+      id
+    }
+  }
+
+  type: updateProjectNextItemField(input: { projectId: "%{project_id}", itemId: "%{item_id}", fieldId: "%{type_field_id}", value: "%{type_value}"}) {
+    projectNextItem {
+      id
+    }
+  }
+}
+GRAPHQL
+
+issues = []
+
+#arbitrary amount of pages
+(1..10).each do |i|
+  issue_page = CLIENT.list_issues("github/global-id-migration", state: "all", page: i, per_page: 100)
+  next if issue_page.empty?
+  issues << issue_page
+  sleep(0.2) # rate limits :shakes_fist:
+end
+
+issues = issues.flatten
+
+def create_issue(issue)
+  title = issue[0]
+  labels = [issue[2]]
+  state = issue[2] == "Rolled Out" ? "closed" : "open"
+  body = <<~BODY
+:globe_with_meridians: :rocket: :globe_with_meridians: :rocket:
+
+This issue is open to track the progess of the implementation of the next GlobalID format for the `#{issue[0]}` object. Below you will find the relevant details for implementing this object.
+
+**Ready Date:** #{issue[1]}
+
+This means you should set the `ready_date:` argument to the `implements_node` call to `#{issue[1]}`.
+
+**Sample Code Command:**
+
+```
+  bin/global-id-migration sample-code #{issue[0]}
+```
+
+You can run this from github/github to get some sample code output for this object.
+
+NOTE: If the `templates:` argument is an empty array, some leg work will be needed to determine the proper ownership for this object.
+
+This could include:
+
+  1. Inspecting the `belongs_to` definitions of the backing model.
+  2. Reaching to #data-partitioning for guidance.
+  3. Reaching out to the owning teams.
+  4. Ask questions in #global-id-migration slack channel.
+  BODY
+
+  puts "Created Issue for #{issue[0]}"
+  CLIENT.create_issue("github/global-id-migration", title, body, labels: labels, state: state)
+end
+
+def update_project(existing_issue, issue)
+  results = CLIENT.post("/graphql", { query: GET_ISSUE_GLOBAL_ID % { issue_number: existing_issue.number } }.to_json)
+  issue_id = results[:data][:repository][:issue][:id]
+
+  data = {
+    query: ADD_TO_PROJECT_MUTATION % {
+      project_id: PROJECT_ID,
+      issue_id: issue_id,
+    }
+  }.to_json
+
+  results = CLIENT.send(:request, :post, "/graphql", data)
+  item_id = results[:data][:addProjectNextItem][:projectNextItem][:id]
+
+  if in_progress?(existing_issue)
+    status = STATUS_IDS["In Progress"]
+  else
+    status = STATUS_IDS[issue[2]]
+  end
+
+  data = {
+    query:  UPDATE_PROJECT_MUTATION % {
+      project_id: PROJECT_ID,
+      item_id: item_id,
+      status_field_id: STATUS_FIELD_ID,
+      status_value: status,
+      ready_date_field_id: READY_DATE_FIELD_ID,
+      ready_date_value: DateTime.parse(issue[1]).to_s,
+      type_field_id: TYPE_FIELD_ID,
+      type_value: "Object Implementation",
+    }
+  }.to_json
+
+  results = CLIENT.send(:request, :post, "/graphql", data, options)
+  status_id = results[:data][:status][:projectNextItem][:id]
+  ready_date_id = results[:data][:ready_date][:projectNextItem][:id]
+  puts "Updated Project for #{existing_issue.title}"
+end
+
+def in_progress?(issue)
+  issue.assignee && issue.labels.detect { |l| ["TODO", "In Progress"].include?(l[:name]) }
+end
+
+schedule["rows"].each do |issue|
+  if existing_issue = issues.detect { |i| i.title == issue[0] }
+    state = ["Rolled Out", "Implemented"].include?(issue[2]) ? "closed" : "open"
+    state = "closed" if existing_issue.state == "closed" # don't reopen something
+
+    if in_progress?(existing_issue)
+      labels = ["In Progress"]
+    else
+      labels = [issue[2]]
+    end
+
+    CLIENT.update_issue("github/global-id-migration", existing_issue.number, labels: labels, state: state)
+    puts "Updated Issue for #{existing_issue.title}"
+  else
+    existing_issue = create_issue(issue)
+  end
+
+  update_project(existing_issue, issue)
+  sleep(0.2) # rate limits :shake_fist:
+end

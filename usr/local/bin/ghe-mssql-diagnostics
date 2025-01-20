@@ -1,0 +1,190 @@
+#!/bin/bash
+#/ Usage: ghe-mssql-diagnostics [-h]
+#/
+#/ Displays diagnostic information for MSSQL to help GitHub Enterprise Support investigate
+#/ issues.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+# Start a new section that displays a title followed by a line containing dashes (-)
+section() {
+  echo ""
+  echo "$*"
+  echo "$*" | sed 's/./-/g'
+}
+
+finished() {
+  section "Finished"
+  echo "MSSQL diagnostics collected at $(date)"
+}
+
+# Always run the final section even if we exit early
+trap finished EXIT
+
+section "Action Enable State"
+if ghe-config --true app.actions.enabled; then
+  echo "Actions is enabled"
+else
+  echo "Actions is not currently enabled, many of the following checks will be inconclusive"
+fi
+
+section "Disk Storage"
+sudo du --human-readable --max-depth 1 /data/user/mssql | sort --human-numeric-sort --reverse
+
+section "Database Storage"
+sudo du --all --human-readable /data/user/mssql/data | sort --human-numeric-sort --reverse
+
+section "Nomad Info"
+nomad status mssql
+
+section "Container Info"
+mssql_container=$(docker ps --format '{{.Names}}' --filter name=mssql --filter status=running)
+if [ -n "$mssql_container" ]; then
+  echo "Name: $mssql_container"
+  echo "ID: $(docker inspect --format '{{.Id}}' $mssql_container)"
+  echo "Image: $(docker inspect --format '{{.Config.Image}}' $mssql_container)"
+  echo "Hostname: $(docker inspect --format '{{.Config.Hostname}}' $mssql_container)"
+  echo "PID: $(docker inspect --format '{{.State.Pid}}' $mssql_container)"
+  mssql_memory_limit_mb=$(docker exec $mssql_container env | grep MSSQL_MEMORY_LIMIT_MB | cut -d'=' -f2)
+  [ -n "$mssql_memory_limit_mb" ] && echo "Memory Limit: ${mssql_memory_limit_mb}MB" || echo "Failed to get memory limit"
+else
+  echo "No running mssql container"
+fi
+
+section "Health Check"
+if ! ghe-mssql-console -y -q "print CONCAT(@@SERVERNAME, ' is alive!')"; then
+  echo "MSSQL is unhealthy or unavailable, skipping the rest of the checks"
+  exit 0
+fi
+
+section "Database Info"
+all_dbs=$(ghe-mssql-console -y -n -r -q "SET NOCOUNT ON; SELECT name FROM sys.databases")
+
+dbs=()
+for db in $all_dbs; do
+  if [[ ! "$db" =~ ^(master|tempdb|model|msdb)$ ]] && [[ "$db" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    dbs+=("$db")
+  fi
+done
+
+for db in "${dbs[@]}"; do
+  [ "$db" = "${dbs[0]}" ] && header_opt='' || header_opt='-n'
+  ghe-mssql-console -y $header_opt -r -q "SET NOCOUNT ON; SELECT name, state_desc, recovery_model_desc, log_reuse_wait_desc FROM sys.databases WHERE name='$db'"
+done
+
+for db in "${dbs[@]}"; do
+  section "Database Stats - $db"
+  ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT t.name AS Name, sum(p.rows) AS Rows, count(*) AS SysPartitions FROM [$db].sys.tables t INNER JOIN [$db].sys.partitions p ON p.object_id=t.object_id group by t.name"
+done
+
+section "Log Perf Stats"
+ghe-mssql-console -y -r -q "DBCC SQLPERF(LOGSPACE)"
+
+section "File IO Stats"
+ghe-mssql-console -y -r -q "SELECT db.name ,vfs.* FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS vfs JOIN sys.databases AS db ON vfs.database_id = db.database_id"
+
+section "Replication"
+REPL_STATE=$(cat /etc/github/repl-state 2>/dev/null || true)
+
+if [ "$REPL_STATE" = "primary" ]; then
+  echo "Repl State: Primary"
+
+  section "Replication - Cluster Nodes"
+  ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT * FROM sys.dm_hadr_availability_replica_cluster_nodes"
+
+  section "Replication - Cluster States"
+  ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT * FROM sys.dm_hadr_availability_replica_cluster_states"
+
+  section "Replication - Replica States"
+  ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT * FROM sys.dm_hadr_availability_replica_states"
+
+  section "Replication - Database States"
+  ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT * FROM sys.dm_hadr_database_replica_states"
+elif [ "$REPL_STATE" = "replica" ]; then
+  echo "Repl State: Replica"
+  section "Replication - Replica Status"
+  /usr/local/share/enterprise/ghe-repl-status-mssql -v
+else
+  echo "Repl State: Standalone"
+fi
+
+section "Replication - Replication Certificates"
+ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT start_date, expiry_date, name FROM master.sys.certificates WHERE name LIKE 'dbm_%'"
+
+section "Seeding (In Progress)"
+ghe-mssql-console -y -r -q "
+SET NOCOUNT ON;
+SELECT
+    seeding.start_time,
+    seeding.operation_id,
+    CAST(db.database_name AS VARCHAR(64)) AS database_name,
+    CAST(ar.replica_server_name AS VARCHAR(64)) AS remote_name,
+    CAST(seeding.current_state AS VARCHAR(32)) AS current_state,
+    CAST(stats.internal_state_desc AS VARCHAR(32)) AS transfer_internal_state,
+    CASE WHEN transferred_size_bytes <= database_size_bytes AND database_size_bytes <> 0 AND internal_state_desc <> 'Success' THEN (transferred_size_bytes * 100)/database_size_bytes ELSE 100 END as percent_copied,
+    stats.transfer_rate_bytes_per_second / 1024 / 1024 as transfer_rate_MB
+FROM sys.dm_hadr_automatic_seeding seeding
+LEFT JOIN sys.availability_groups ag ON ag.group_id = seeding.ag_id
+LEFT JOIN sys.availability_replicas ar ON ar.group_id = seeding.ag_id AND ar.replica_id = seeding.ag_remote_replica_id
+LEFT JOIN sys.availability_databases_cluster db ON db.group_id = seeding.ag_id AND db.group_database_id = seeding.ag_db_id
+LEFT JOIN sys.dm_hadr_physical_seeding_stats stats ON CASE
+  WHEN stats.local_physical_seeding_id = seeding.operation_id THEN 1
+  WHEN stats.remote_physical_seeding_id = seeding.operation_id THEN 1
+  ELSE 0
+  END = 1
+WHERE seeding.current_state NOT IN ('COMPLETED', 'FAILED')
+ORDER BY start_time DESC
+"
+
+section "Seeding (Failed)"
+ghe-mssql-console -y -r -q "
+SET NOCOUNT ON;
+SELECT
+    seeding.start_time,
+    seeding.completion_time,
+    seeding.operation_id,
+    CAST(db.database_name AS VARCHAR(64)) AS database_name,
+    CAST(ar.replica_server_name AS VARCHAR(64)) AS remote_name,
+    seeding.error_code,
+    seeding.failure_state,
+    CAST(seeding.failure_state_desc AS VARCHAR(64)) AS failure_state_desc
+FROM sys.dm_hadr_automatic_seeding seeding
+LEFT JOIN sys.availability_groups ag ON ag.group_id = seeding.ag_id
+LEFT JOIN sys.availability_replicas ar ON ar.group_id = seeding.ag_id AND ar.replica_id = seeding.ag_remote_replica_id
+LEFT JOIN sys.availability_databases_cluster db ON db.group_id = seeding.ag_id AND db.group_database_id = seeding.ag_db_id
+LEFT JOIN sys.dm_hadr_physical_seeding_stats stats ON stats.local_physical_seeding_id = seeding.operation_id
+WHERE seeding.current_state = 'FAILED'
+ORDER BY completion_time DESC, start_time DESC
+"
+
+section "Seeding (Complete)"
+ghe-mssql-console -y -r -q "
+SET NOCOUNT ON;
+SELECT
+    seeding.start_time,
+    seeding.completion_time,
+    seeding.operation_id,
+    CAST(db.database_name AS VARCHAR(64)) AS database_name,
+    CAST(ar.replica_server_name AS VARCHAR(64)) AS remote_name
+FROM sys.dm_hadr_automatic_seeding seeding
+LEFT JOIN sys.availability_groups ag ON ag.group_id = seeding.ag_id
+LEFT JOIN sys.availability_replicas ar ON ar.group_id = seeding.ag_id AND ar.replica_id = seeding.ag_remote_replica_id
+LEFT JOIN sys.availability_databases_cluster db ON db.group_id = seeding.ag_id AND db.group_database_id = seeding.ag_db_id
+WHERE seeding.current_state = 'COMPLETED'
+ORDER BY completion_time DESC, start_time DESC
+"
+
+for db in "${dbs[@]}"; do
+  section "Backup History - $db"
+  ghe-mssql-console -y -q "select backup_set_id, database_name, server_name, user_name, type, first_lsn, last_lsn, checkpoint_lsn, database_backup_lsn, begins_log_chain, recovery_model, backup_start_date, backup_finish_date, physical_device_name, device_type FROM msdb.dbo.backupset bs inner join msdb.dbo.backupmediafamily bmf on bs.media_set_id=bmf.media_set_id where database_name='$db' order by backup_finish_date desc"
+done
+
+section "Log and Backup Health Check"
+ghe-mssql-health-check -y || true

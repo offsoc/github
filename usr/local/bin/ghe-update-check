@@ -1,0 +1,377 @@
+#!/bin/bash
+#/ Usage: ghe-update-check [options]
+#/
+#/ Download the latest upgrade package for your version of GitHub Enterprise.
+#/
+#/ OPTIONS:
+#/   -t <target> | --target <target>    Location to download the package to. Defaults to /var/lib/ghe-updates.
+#/   -f | --force                       (Force) Overwrite existing files.
+#/   -i | --ignore                      Ignore current series, go to latest.
+#/   -q | --quiet                       Quiet Mode. Suppress console output. Still logs.
+#/   -e | --enable                      Enable automatic Update checking.
+#/   -d | --disable                     Disable automatic update checking.
+#/   -h | --help                        Show this message.
+#/   -v | --verbose                     Run with verbose output.
+
+#/
+#/ EXIT CODES:
+#/    3                 No upgrade package found for platform.
+#/    4                 Not enough free space at target location to download package.
+#/    5                 Downloaded package failed dry run verification using ghe-upgrade -V.
+#/    6                 Network error or empty response from external server, check settings and connection.
+#/    7                 GitHub Enterprise Server version may be unsupported.
+#/    8                 Package download failed.
+#/    9                 ghe-update-check was killed or interrupted.
+#/    10                Downloaded package failed upgrade check using ghe-upgrade -c.
+#/
+# Exit codes.
+readonly ERROR_NO_PACKAGE=3
+readonly ERROR_NOT_ENOUGH_SPACE=4
+readonly ERROR_VERIFICATION_FAILED=5
+readonly ERROR_NETWORK=6
+readonly ERROR_UNSUPPORTED_VERSION=7
+readonly ERROR_DOWNLOADING=8
+readonly ERROR_INTERRUPTED=9
+readonly ERROR_UPGRADE_CHECK_FAILED=10
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+message() {
+  if [ -z "$quiet_mode" ]; then
+    echo " --> ${1}"
+  fi
+}
+
+log_error() {
+  [ -z "$quiet_mode" ] && echo >&2 "Error: $1"
+  logger -t ghe-update-check -i "$1"
+}
+
+log_external() {
+  [ -z "$quiet_mode" ] && echo "External Call: $1"
+  logger -t ghe-update-check -i "$1"
+}
+
+update_status() {
+  echo "$(date +%s) $1" | dd of="$status_file" 2>/dev/null
+}
+
+enable_updates() {
+  cmd="/usr/local/bin/ghe-update-check -q -i"
+  cron_job="0 0,12 * * * $cmd"
+  ( crontab -l | grep -v "$cmd" ; echo "$cron_job" ) | crontab -
+  ghe-config "auto-update.enabled" "true"
+}
+
+disable_updates() {
+  cmd="/usr/local/bin/ghe-update-check -q"
+  ( crontab -l | grep -v "$cmd" ) | crontab -
+  ghe-config "auto-update.enabled" "false"
+}
+
+interrupted() {
+  log_error "ghe-update-check received SIGKILL or SIGINT"
+  update_status "ERROR_INTERRUPTED null $RELEASE_VERSION"
+  exit $ERROR_INTERRUPTED
+}
+
+check_for_curl_errors() {
+  if [ $1 -eq 0 ]; then
+    return 0
+  fi
+
+  case "$1" in
+    5)  log_error "When making an external call, curl couldn't resolve proxy. Check your proxy settings."
+        return $1
+        ;;
+    6)  log_error "When making an external call, curl couldn't resolve host. Check your network settings."
+        return $1
+        ;;
+    7)  log_error "When making an external call, curl failed to connect to host. Check your network and proxy settings."
+        return $1
+        ;;
+    28) log_error "When making an external call, curl timed out. Check network conditions and try again."
+        return $1
+        ;;
+    *)  log_error "When making an external call, curl returned an unexpected error code ($1). Check the curl man page for more information."
+        return $1
+        ;;
+  esac
+}
+
+if [ -f /etc/github/cluster ] ; then
+  if ! ghe-config --true cluster.ha ; then
+    echo "ghe-config-check is not supported on clustering."
+    exit 1
+  fi
+
+  if [ "$(cat /etc/github/repl-state 2>/dev/null)" = "replica" ]; then
+    echo "ghe-config-check cannot be run on a replica."
+    exit 1
+  fi
+fi
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+trap 'interrupted' INT TERM
+
+# Defaults
+target="/var/lib/ghe-updates"
+status_file="/var/lib/ghe-updates/ghe-update-check.status"
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,target:,force,ignore,enable,disable,quiet --options t:fiedqhv -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      verbose=true
+      set -x
+      ;;
+    -t|--target)
+      target=$2
+      shift
+      ;;
+    -f|--force)
+      force=1
+      ;;
+    -i|--ignore)
+      ignore_series=1
+      ;;
+    -e|--enable)
+      enable_updates
+      exit
+      ;;
+    -d|--disable)
+      disable_updates
+      exit
+      ;;
+    -q|--quiet)
+      quiet_mode=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+existing_pid=$(pidof -x -o %PPID ghe-update-check)
+if [ -n "$existing_pid" ]; then
+  log_error "A copy of ghe-update-check is already running (pid $existing_pid)."
+  exit 1
+fi
+
+if [ ! -f /data/user/common/enterprise.ghl ]; then
+  log_error "No license file found (/data/user/common/enterprise.ghl)"
+  exit 1
+fi
+
+mkdir -p "/var/lib/ghe-updates"
+
+if [ -z "$UPDATE_CHECK_BASE_URL" ]; then
+  UPDATE_CHECK_BASE_URL="https://github-enterprise.s3.amazonaws.com"
+fi
+
+# If RELEASE_VERSION and RELEASE_PLATFORM haven't been passed in, get them
+if [ -z "$RELEASE_VERSION" ] && [ -z "$RELEASE_PLATFORM" ]; then
+  source /etc/github/enterprise-release
+fi
+
+# Pull in the system-wide proxy information and explicitly export it, if a proxy
+# isn't already set.
+[ -z "$https_proxy" ] && source /etc/environment && export https_proxy
+
+update_status "RUNNING null $RELEASE_VERSION"
+
+license_md5=$(md5sum /data/user/common/enterprise.ghl | awk '{ print $1 }')
+
+download_platform="$RELEASE_PLATFORM"
+
+user_agent="GHE/$RELEASE_VERSION/$RELEASE_PLATFORM/$license_md5"
+
+latest_cmd="curl -A $user_agent -s $UPDATE_CHECK_BASE_URL/release/latest.json"
+log_external "$latest_cmd"
+latest_json=$($latest_cmd)
+
+if ! check_for_curl_errors $?; then
+  update_status "ERROR_NETWORK null $RELEASE_VERSION"
+  exit $ERROR_NETWORK
+fi
+
+series=$(echo "$RELEASE_VERSION" | awk -F'.' '{print $1"."$2}')
+very_latest=$(echo "$latest_json" | jq -r '.["latest"]')
+
+if [ -z $ignore_series ]; then
+  latest_version=$(echo "$latest_json" | jq --arg series "$series" -r '.[$series]')
+else
+  allowed_series=$(echo "$latest_json" | jq -r 'keys[]' | sort --version-sort | grep -A2 "^$series" | tail -n1)
+  latest_version=$(echo "$latest_json" | jq --arg allowed_series "$allowed_series" -r '.[$allowed_series]')
+fi
+
+if [ "$latest_version" = "null" ]; then
+  log_error "Your series ($series) of GitHub Enterprise Server may no longer be supported, contact GitHub Support at https://support.github.com"
+  update_status "ERROR_UNSUPPORTED_VERSION $latest_version $RELEASE_VERSION"
+  exit $ERROR_UNSUPPORTED_VERSION
+fi
+
+if dpkg --compare-versions "$latest_version" gt "$RELEASE_VERSION"; then
+  packages_cmd="curl -A $user_agent -s $UPDATE_CHECK_BASE_URL/release/release-$latest_version.yml"
+  log_external "$packages_cmd"
+  packages=$($packages_cmd)
+
+  if ! check_for_curl_errors $?; then
+    log_error "Empty or no response from server. Check network settings and connection."
+    update_status "ERROR_NETWORK $latest_version $RELEASE_VERSION"
+    exit $ERROR_NETWORK
+  fi
+
+  latest_series="$(echo "$latest_version" | awk -F'.' '{print $1"."$2}')"
+  ruby_yaml="data = YAML::load(STDIN.read); puts"
+  if [ "$series" == "$latest_series" ]; then
+    # allow hotpatching if its version is for the current installations series
+    ruby_yaml="$ruby_yaml data['packages']['hotpatch'] ? data['packages']['hotpatch'][0]['url'] :"
+  fi
+  ruby_yaml="$ruby_yaml data['packages']['$download_platform'] ? data['packages']['$download_platform']['updates'][0]['url'] : nil;"
+
+  package_url=$(echo "$packages" | /usr/share/rbenv/versions/current/bin/ruby -ryaml -e "$ruby_yaml")
+
+  if [ -z "$package_url" ] || [ "$package_url" = "nil" ]; then
+    log_error "No upgrade package was found for your platform, contact GitHub Support at https://support.github.com"
+    update_status "ERROR_NO_PACKAGE $latest_version $RELEASE_VERSION"
+    exit $ERROR_NO_PACKAGE
+  fi
+
+  filename=$(echo "$package_url" | awk -F'/' '{ print $NF }')
+  target_file="$target/$filename"
+
+  if [ -f "$target_file" ] && [ -z $force ]; then
+    update_status "DOWNLOADED $latest_version $RELEASE_VERSION $target_file $package_size"
+    message "$target_file already downloaded. If you'd like to redownload, remove the file or run again with the -f option."
+    message "GitHub Enterprise Server $latest_version upgrade package downloaded to $target_file."
+    message "You can start the upgrade process with ghe-upgrade $target_file"
+
+    exit 0
+  fi
+
+  # Cleaning up older downloads
+  message "Cleaning up older downloads."
+  rm -f $target/*.pkg $target/*.hpkg
+  
+  # Check if the package url is valid
+  url_regex='^(https?|ftp|file)://[-[:alnum:]\+&@#/%?=~_|!:,.;]+$'
+  if [[ $package_url =~ $url_regex ]]; then
+       # Grab the size of the file we need to download and pad it by 500mb
+       package_size_curl_cmd="curl -sI '$package_url'"
+       log_external "$package_size_curl_cmd"
+       package_size=$($package_size_curl_cmd | grep Content-Length | awk '{print $2}' | tr -d '[:space:]')
+  else
+       update_status "ERROR_DOWNLOADING $latest_version $RELEASE_VERSION"
+       exit $ERROR_DOWNLOADING
+  fi
+  
+
+  if ! check_for_curl_errors $?; then
+    update_status "ERROR_NETWORK $latest_version $RELEASE_VERSION"
+    exit $ERROR_NETWORK
+  fi
+
+  space_needed=$(((package_size / 1024) + 512000))
+  free_space=$(df -k "$target" | tail -1 | awk '{print $4}' | tr -d '[:space:]')
+
+  # If we have a tmp file and it's smaller, resume downloading. If we have no tempfile, download.
+  downloaded_package_size=$([ -f "$target_file".tmp ] && du -b "$target_file".tmp | awk '{print $1}')
+  if [ -f "$target_file".tmp ] && [ "$downloaded_package_size" -eq "$package_size" ]; then
+    message "$target_file.tmp is a full download, skipping to verification."
+    download_package=0
+  elif [ -f "$target_file".tmp ]; then
+    message "$target_file.tmp exists, attempting to resume."
+    download_package=1
+  else
+    download_package=1
+  fi
+
+  if [ "$space_needed" -gt "$free_space" ]; then
+    log_error "There is not enough free space available at '$target/'. $space_needed needed, $free_space available"
+    update_status "ERROR_NOT_ENOUGH_SPACE $latest_version $RELEASE_VERSION"
+    exit $ERROR_NOT_ENOUGH_SPACE
+  fi
+
+  if [ "$download_package" -eq 1 ]; then
+    message "Downloading $filename from $package_url"
+    update_status "DOWNLOADING $latest_version $RELEASE_VERSION $target_file.tmp $package_size"
+    curl -L -o "$target_file".tmp -C - "$package_url"
+
+    if ! check_for_curl_errors $?; then
+      update_status "ERROR_DOWNLOADING $latest_version $RELEASE_VERSION $target_file.tmp $package_size"
+      exit $ERROR_DOWNLOADING
+    fi
+  fi
+
+  # only do upgrade checks on upgrade packages or hotpatches that are created with fix
+  if [[ $target_file = *.pkg ]] || dpkg --compare-versions "$latest_version" gt "3.9.0"; then
+    message "Running upgrade checks on downloaded package..."
+    sudo rm -f /tmp/ghe-upgrade-checks.out
+    sudo -u admin ghe-upgrade -c "$target_file".tmp |& tee /tmp/ghe-upgrade-checks.out
+    result=${PIPESTATUS[0]}
+    sudo rm -f /data/user/patch/$latest_version/hotpatch.status
+    if [ $result != 0 ]; then
+      error_msg=$(grep -i "ERROR" /tmp/ghe-upgrade-checks.out)
+      log_error "Upgrade check has failed: $error_msg"
+      failed_details=$(cat /tmp/ghe-upgrade-checks.out)
+      log_error "Upgrade check failure details: $failed_details"
+      update_status "ERROR_UPGRADE_CHECK_FAILED $latest_version $RELEASE_VERSION"
+      exit $ERROR_UPGRADE_CHECK_FAILED
+    else
+      message "Upgrade checks passed."
+      mv "$target_file".tmp "$target_file"
+    fi
+  else
+    message "Verifying file..."
+    if ! sudo -u admin ghe-upgrade -V "$target_file".tmp; then
+      log_error "Downloaded file is either not a valid upgrade package or corrupted."
+      update_status "ERROR_VERIFICATION_FAILED $latest_version $RELEASE_VERSION"
+      rm "$target_file".tmp
+      exit $ERROR_VERIFICATION_FAILED
+    else
+      mv "$target_file".tmp "$target_file"
+    fi
+  fi
+
+  message "GitHub Enterprise Server $latest_version upgrade package downloaded to $target_file."
+  message "You can start the upgrade process with ghe-upgrade $target_file"
+  if [ -z $ignore_series ]; then
+    update_status "DOWNLOADED $latest_version $RELEASE_VERSION $target_file $package_size"
+  else
+    if [ "$very_latest" = "$latest_version" ]; then
+      update_status "DOWNLOADED $latest_version $RELEASE_VERSION $target_file $package_size"
+    else
+      update_status "DOWNLOADEDINTERMEDIATE $latest_version $RELEASE_VERSION $target_file $package_size"
+      message "GitHub Enterprise Server $very_latest is the most recent release, but you must first upgrade to $latest_version."
+      message "Refer to https://docs.github.com/enterprise-server/admin/upgrading-your-instance/preparing-to-upgrade/overview-of-the-upgrade-process for more information."
+    fi
+  fi
+else
+  update_status "LATEST $latest_version $RELEASE_VERSION $target_file $package_size"
+  if [ -z $ignore_series ]; then
+    message "Your GitHub Enterprise Server install is currently on the latest patch release. You can check for new feature releases by running 'ghe-update-check -i'."
+  else
+    message "Your GitHub Enterprise Server install is currently on the latest feature release!"
+  fi
+
+fi

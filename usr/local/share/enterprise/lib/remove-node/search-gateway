@@ -1,0 +1,128 @@
+#!/bin/bash
+# This file contains utilties for removing Elasticsearch from a node.
+
+source /usr/local/share/enterprise/lib/ghe-cluster-commons
+
+#/ function: is_search_server
+#/ Desciption:
+#/    Returns 0 if host is an elasticsearch-server.
+#/    Returns 1 if host is NOT an elasticsearch-server.
+#/
+#/ Usage:
+#/    is_search_server <hostname>
+is_search_server() {
+  ghe-config --true "cluster.$1.elasticsearch-server"
+}
+
+#/ function: mark_search_offline
+#/ Desciption:
+#/   Removes node from master-eligible nodes via the voting configuration exlusion list.
+#/
+#/ Usage:
+#/    mark_search_offline <hostname>
+mark_search_offline() {
+  local hostname="$1"
+  is_search_server "$hostname" || {
+    echo "warn: $hostname is not an elasticsearch-server. Operation skipped." >&2
+    return 0
+  }
+
+  local node_ip
+  node_ip=$(ghe-config "cluster.$hostname.ipv4")
+
+  local output
+  output="$(curl -s -XPOST "localhost:9201/_cluster/voting_config_exclusions?node_names=$hostname&timeout=1m&pretty")"
+  echo "$output"
+
+  local timeout
+  local elapsed_time
+  timeout=30
+  elapsed_time=0
+
+  while [ $elapsed_time -lt $timeout ]; do
+   # Run the curl command to get shard information
+   shard_info=$(curl -s localhost:9201/_cat/allocation?format=json | jq)
+
+   # Extract the shard count for the replica node
+   replica_shards=$(echo "$shard_info" | jq -r ".[] | select(.node == \"$hostname\") | .shards")
+
+   # Check if the shard count is 0
+   if [ -n "$replica_shards" ] && [ "$replica_shards" -eq 0 ]; then
+     echo "Shards for $hostname are 0, stopping Elasticsearch"
+       break
+   fi
+
+   # Sleep for 1 second
+   sleep 1
+
+   # Increment the elapsed time
+   ((elapsed_time++))
+  done
+
+  return 0
+}
+
+#/ function: evacuate_search
+#/ Desciption:
+#/   Prevents Elasticsearch from allocation shards to this cluster node.
+#/
+#/ Usage:
+#/    evacuate_search <hostname>
+evacuate_search() {
+  local hostname="$1"
+  is_search_server "$hostname" || {
+    echo "warn: $hostname is not an elasticsearch-server. Operation skipped." >&2
+    return 0
+  }
+
+  local node_ip
+  node_ip=$(ghe-config "cluster.$hostname.ipv4")
+
+  local output
+
+  #Disable shard allocation
+  output="$(curl -s -o /dev/null -XPUT \
+             "localhost:9201/_cluster/settings" \
+              -H "Content-Type: application/json" \
+              -d "{ \"persistent\": { \"cluster.routing.allocation.enable\": "none" } }")"
+  echo "$output"
+
+  output="$(curl -s -o /dev/null -XPUT \
+              "localhost:9201/_cluster/settings?pretty" \
+              -H "Content-Type: application/json" \
+              -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"$node_ip\" } }")"
+  echo "$output"
+
+  return 0
+
+}
+
+#/ function: remove_search_server
+#/ Desciption:
+#/    Clears voting exclusions
+#/
+#/ Usage:
+#/    remove_search_server <hostname>
+remove_search_server() {
+  local hostname="$1"
+  is_search_server "$hostname" || {
+    echo "warn: $hostname is not an Elasticsearch server. Operation skipped." >&2
+    return 0
+  }
+
+  local node_ip
+  node_ip=$(ghe-config "cluster.$hostname.ipv4")
+
+  local output
+  output="$(curl -s -XPUT "localhost:9201/_cluster/settings?pretty" \
+  -H "Content-Type: application/json" \
+  -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"\" } }")"
+
+  curl -s -XDELETE "localhost:9201/_cluster/voting_config_exclusions?wait_for_removal=false"
+
+  curl -s -XPUT "localhost:9201/_cluster/settings" \
+          -H "Content-Type: application/json" \
+          -d "{ \"persistent\": { \"cluster.routing.allocation.enable\": "all" } }"
+
+  return 0
+}

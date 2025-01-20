@@ -1,0 +1,324 @@
+#!/bin/bash
+set -e
+set -x
+export PATH="$PATH:/usr/local/share/enterprise"
+
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+. /etc/github/enterprise-release
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+VERSION=1
+
+. /usr/local/share/enterprise/ghe-actions-lib
+if [ ! -d /data/user/mssql ]; then
+  mkdir -p /data/user/mssql
+  chown -R mssql:mssql /data/user/mssql
+fi
+
+# Make sure that XEvents directory exists as we will be mounting it into container
+if [ ! -d /data/user/mssql/log ]; then
+  mkdir -p /data/user/mssql/log
+  chown -R mssql:mssql /data/user/mssql/log
+fi
+
+if [ ! -d /data/user/mssql/log/mssql-xevent-trace ]; then
+  mkdir -p /data/user/mssql/log/mssql-xevent-trace
+  chown -R mssql:mssql /data/user/mssql/log/mssql-xevent-trace
+fi
+
+if [ ! -d /data/user/actions ]; then
+  mkdir -p /data/user/actions
+  chown -R actions:actions /data/user/actions
+fi
+
+# Ensure all of the required subfolders exist for mounting Nomad volumes.
+for name in certificates states dumps lightrail; do
+  path="/data/user/actions/$name"
+
+  if [ ! -d "$path" ]; then
+    mkdir -p "$path"
+    chown -R actions:actions "$path"
+  fi
+done
+
+# setup tmp dir for each nomad alloc
+if [ ! -d /data/user/actions/tmp ]; then
+  mkdir -p /data/user/actions/tmp
+  chown -R actions:actions /data/user/actions/tmp
+fi
+
+# better way to get roles? or better place to make this happen maybe...
+for service in $(action-services); do
+  if [ ! -d "/data/user/actions/tmp/$service-api-server" ]; then
+    mkdir -p "/data/user/actions/tmp/$service-api-server"
+    chown -R actions:actions "/data/user/actions/tmp/$service-api-server"
+  fi
+
+  if [ ! -d "/data/user/actions/tmp/$service-job-agent" ]; then
+    mkdir -p "/data/user/actions/tmp/$service-job-agent"
+    chown -R actions:actions "/data/user/actions/tmp/$service-job-agent"
+  fi
+done
+
+# Create LR logs folders so actions-console can write to them as actions:actions
+# Otherwise they might incorrectly be created as root-owned on first use
+for service in $(action-services); do
+  service_dir="$(capitalize "$service")"
+  path="/data/user/actions/lightrail/$service_dir/logs"
+
+  if [ ! -d "$path" ]; then
+    mkdir -p "$path"
+    chown -R actions:actions "/data/user/actions/lightrail/$service_dir"
+  fi
+done
+
+if ghe-config --true 'app.minio.enabled'; then
+  if [ ! -d /data/user/minio ]; then
+    mkdir -p /data/user/minio
+    chown -R minio:minio /data/user/minio
+  fi
+fi
+
+if [ ! -d /data/user/redis ]; then
+  mkdir /data/user/redis
+  chown redis:redis /data/user/redis
+fi
+
+if [ -d /var/log/redis ]; then
+  mkdir -p /var/log/redis
+  chown redis:redis -R /var/log/redis
+fi
+
+ghe-secrets-init
+
+if [ ! -d /data/user/consul ]; then
+  mkdir /data/user/consul
+  chown consul:consul /data/user/consul
+fi
+
+if [ ! -d /data/user/nomad ]; then
+  mkdir /data/user/nomad
+  chown nomad:nomad /data/user/nomad
+fi
+
+if [ ! -d /data/user/docker ]; then
+  mkdir /data/user/docker
+  chown docker:docker /data/user/docker
+fi
+
+if service_enabled git-daemon; then
+  if [ ! -d /data/user/repositories ]; then
+    mkdir -p /data/user/repositories/info
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > /data/user/repositories/info/nw-layout
+    chown git:git -R /data/user/repositories
+  fi
+  if [ ! -d /data/user/repositories/0 ]; then
+    for part in $(seq 0 15); do
+      char=$(printf "%x" $part)
+      mkdir -p /data/user/repositories/${char}
+    done
+    chown git:git -R /data/user/repositories
+  fi
+  if [ ! -d /data/user/git-hooks/environments/1 ]; then
+    mkdir -p /data/user/git-hooks/environments/1
+    ln -s /data/git-hooks/default /data/user/git-hooks/environments/1/0
+    chown git:git -R /data/user/git-hooks
+  fi
+fi
+
+if [ -d /var/log/enterprise-manage ]; then
+  chown enterprise-manage.enterprise-manage -R /var/log/enterprise-manage
+fi
+
+if [ -d /var/log/ghes-manage-agent ]; then
+  chown ghes-manage-agent.ghes-manage-agent -R /var/log/ghes-manage-agent
+fi
+
+if [ -d /var/log/ghes-manage-gateway ]; then
+  chown ghes-manage-gateway.ghes-manage-gateway -R /var/log/ghes-manage-gateway
+fi
+
+if [ -d /var/log/pages ]; then
+  chown pages:pages -R /var/log/pages
+fi
+
+# codeload config goes here.
+mkdir -p /data/codeload/shared
+chown -R codeload:codeload /data/codeload/shared
+chmod 700 /data/codeload/shared
+
+if [ -d /var/log/codeload ]; then
+  chown codeload:codeload -R /var/log/codeload
+fi
+
+if service_enabled codeload; then
+  if [ ! -d /data/user/codeload_archives/tmp ]; then
+    mkdir -p /data/user/codeload_archives/tmp
+    chown codeload:codeload -R /data/user/codeload_archives/
+  else
+    owner=$(stat -c '%U:%G' /data/user/codeload_archives)
+    if [ "$owner" != "codeload:codeload" ]; then
+     chown codeload:codeload -R /data/user/codeload_archives/
+    fi
+  fi
+fi
+
+if service_enabled alambic; then
+  if [ -d /data/user/repositories/__alambic_assets__ ]; then
+    rsync -a --delete /data/user/repositories/__alambic_assets__/ /data/user/alambic_assets/
+    rm -r /data/user/repositories/__alambic_assets__/
+    chown -R alambic:alambic /data/user/alambic_assets
+  fi
+
+  if [ ! -d /data/user/alambic_cdn ]; then
+    mkdir -p /data/user/alambic_cdn
+    chown alambic:alambic -R /data/user/alambic_cdn
+  else
+    owner=$(stat -c '%U:%G' /data/user/alambic_cdn)
+    if [ "$owner" != "alambic:alambic" ]; then
+      chown alambic:alambic -R /data/user/alambic_cdn
+    fi
+  fi
+
+  if [ ! -d /data/user/storage ]; then
+    for part in $(seq 0 15); do
+      char=$(printf "%x" $part)
+      mkdir -p "/data/user/storage/${char}"
+    done
+    chown alambic:alambic -R /data/user/storage
+  else
+    owner=$(stat -c '%U:%G' /data/user/storage)
+    if [ "$owner" != "alambic:alambic" ]; then
+      chown alambic:alambic -R /data/user/storage
+    fi
+  fi
+
+  if [ -d /data/user/alambic_assets ]; then
+    owner=$(stat -c '%U:%G' /data/user/alambic_assets)
+    if [ "$owner" != "alambic:alambic" ]; then
+      chown alambic:alambic -R /data/user/alambic_assets
+    fi
+  fi
+
+  if [ ! -d /data/user/storage/tmp/uploads ]; then
+    mkdir -p /data/user/storage/tmp/uploads
+    chown -R alambic:alambic /data/user/storage/tmp
+  fi
+fi
+
+# governor / gitmon config
+mkdir -p /data/user/gitmon /var/run/gitmon
+chown -R git:git /data/user/gitmon /var/run/gitmon
+
+if [ ! -d /data/user/mail ]; then
+  mkdir -p /data/user/mail/reply/new
+  mkdir -p /data/user/mail/lists/new
+  chown mail-replies:mail-replies -R /data/user/mail/
+else
+  owner=$(stat -c '%U:%G' /data/user/mail)
+  if [ "$owner" != "mail-replies:mail-replies" ]; then
+    chown mail-replies:mail-replies -R /data/user/mail/
+  fi
+fi
+
+if [ ! -d /data/user/incoming-mail ]; then
+  mkdir -p /data/user/incoming-mail/fail
+  mkdir -p /data/user/incoming-mail/success
+  mkdir -p /data/user/incoming-mail/unmatched
+  chown mail-replies:mail-replies -R /data/user/incoming-mail/
+else
+  owner=$(stat -c '%U:%G' /data/user/incoming-mail)
+  if [ "$owner" != "mail-replies:mail-replies" ]; then
+    chown mail-replies:mail-replies -R /data/user/incoming-mail/
+  fi
+fi
+
+# pages
+for part in $(seq 0 7); do
+  if [ ! -d "/data/user/pages/$part" ]; then
+    mkdir -p "/data/user/pages/$part"
+  fi
+  chown git:git "/data/user/pages/$part"
+done
+chown git:git /data/user/pages
+touch /data/user/pages/.dpages-layout
+chown git:git /data/user/pages/.dpages-layout
+
+# export ssh host keys
+for i in /data/user/common/ssh_host_{rsa,dsa,ecdsa}_key{,.pub}
+do
+  [ -f "$i" ] && cp "$i" /etc/ssh/
+done
+
+if [ -f /data/user/common/ssh_host_ed25519_key ]; then
+  fingerprint_blocklist="/usr/local/share/enterprise/ghe-ssh-leaked-host-keys-list.txt"
+  fingerprint=$(ssh-keygen -E MD5 -lf /data/user/common/ssh_host_ed25519_key | cut -d ' ' -f 2 | sed 's/^MD5://g')
+  if grep -q "$fingerprint" "$fingerprint_blocklist"; then
+    rm -rf /data/user/common/ssh_host_ed25519_*
+  fi
+fi
+
+if [ -f /data/user/common/ssh_host_ed25519_key ]; then
+  # This was added in a newer version so might not always exist.
+  cp /data/user/common/ssh_host_ed25519_key{,.pub} /etc/ssh/
+elif [ -f /etc/ssh/ssh_host_ed25519_key ]; then
+  cp /etc/ssh/ssh_host_ed25519_key{,.pub} /data/user/common
+  chown babeld:babeld /data/user/common/ssh_host_ed25519_key{,.pub}
+  setfacl -b /data/user/common/ssh_host_ed25519_key{,.pub}
+fi
+
+# babeld config goes here.
+mkdir -p /data/babeld/shared
+chown -R babeld:babeld /data/babeld/shared
+
+if [ ! -f /etc/github/cluster ] && service_enabled "elasticsearch"; then
+  # backup-utils places ES directory snapshots at /data/user/elasticsearch-restore
+  # to be moved into place on config run here. stop ES, move the old indices out
+  # of the way, and start ES back up.
+  if [ -d /data/user/elasticsearch-restore ]; then
+    /usr/local/share/enterprise/ghe-nomad-local-alloc-stop elasticsearch
+
+    # move existing elasticsearch dir out of the way and prune old backups
+    if [ -d /data/user/elasticsearch ]; then
+      mv /data/user/elasticsearch "/data/user/elasticsearch-backup-$(date +%s)"
+      ls -1d -r /data/user/elasticsearch-backup-* 2>/dev/null |
+        tail -n +1 | xargs rm -rf || true
+    fi
+
+    mv /data/user/elasticsearch-restore /data/user/elasticsearch
+
+    /usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/elasticsearch/elasticsearch.hcl
+  fi
+
+  if [ -f /data/user/common/enabled ] && ([ ! -f /data/user/elasticsearch/version ] || [ "$RELEASE_VERSION" != "$(cat /data/user/elasticsearch/version)" ]); then
+    if [ -d /data/user/elasticsearch ]; then
+      echo $RELEASE_VERSION > /data/user/elasticsearch/version
+    fi
+  fi
+fi
+
+if [ -d /data/user/repositories/info ]; then
+  chown -R git:git /data/user/repositories/info
+fi
+
+if [ -d /opt/graphite ]; then
+  chown -R graphite-web:graphite-web /opt/graphite
+fi
+
+if service_enabled grafana; then
+  mkdir -p /data/user/grafana
+  chown grafana:grafana -R /data/user/grafana
+fi
+
+
+mkdir -p /var/spool/postfix
+
+ghe-upgrade-progress
+
+echo $VERSION > /data/user/version

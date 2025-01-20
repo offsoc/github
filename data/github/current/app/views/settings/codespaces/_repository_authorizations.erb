@@ -1,0 +1,151 @@
+<% show_check = defined?(show_check) ? show_check : false %>
+
+<div data-replace-remote-form-target>
+  <%= render Primer::Beta::Subhead.new(display: :flex, justify_content: :space_between) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Trusted repositories<% end %>
+  <% end %>
+
+  <p>
+    The following repositories will be referenced by GPG verification and Settings Sync.
+  </p>
+
+  <%= form_tag settings_user_codespaces_repository_authorizations_path, method: :put, **test_selector_data_hash("codespaces-user-settings-form") do %>
+    <div class="form-checkbox">
+      <label class="d-flex">
+        <%= radio_button_tag \
+            'repository_authorization',
+            Configurable::CodespacesRepositoryAuthorization::ALL_REPOSITORIES,
+            current_user.codespaces_repository_authorization == Configurable::CodespacesRepositoryAuthorization::ALL_REPOSITORIES,
+            "data-autosubmit": "",
+            "aria-describedby": "codespaces_trusted_repos_all_note" %>
+        <div class="ml-2">All repositories</div>
+        <% if show_check && current_user.codespaces_repository_authorization == Configurable::CodespacesRepositoryAuthorization::ALL_REPOSITORIES %>
+          <%= render Primer::Box.new(display: :flex, direction: :column, classes: 'hx_anim-fade-out') do %>
+            <%= render Primer::Beta::Octicon.new(icon: "check-circle", size: :small, pt: 1, ml: 2, text: :green) %>
+          <% end %>
+        <% end %>
+      </label>
+      <p class="note" id="codespaces_trusted_repos_all_note" >
+        GPG signing and VS Code Settings Sync will be available for codespaces for all repositories
+      </p>
+    </div>
+    <div class="form-checkbox">
+      <label class="d-flex">
+        <%= radio_button_tag \
+            'repository_authorization',
+            Configurable::CodespacesRepositoryAuthorization::SELECTED_REPOSITORIES,
+            current_user.codespaces_repository_authorization == Configurable::CodespacesRepositoryAuthorization::SELECTED_REPOSITORIES,
+            "data-autosubmit": "",
+            "aria-describedby": "codespaces_trusted_repos_selected_note" %>
+        <div class="ml-2">Selected repositories</div>
+        <% if show_check && current_user.codespaces_repository_authorization == Configurable::CodespacesRepositoryAuthorization::SELECTED_REPOSITORIES %>
+          <%= render Primer::Box.new(display: :flex, direction: :column, classes: 'hx_anim-fade-out') do %>
+            <%= render Primer::Beta::Octicon.new(icon: "check-circle", size: :small, pt: 1, ml: 2, text: :green) %>
+          <% end %>
+        <% end %>
+      </label>
+      <p class="note" id="codespaces_trusted_repos_selected_note">
+        GPG signing and VS Code Settings Sync will be available for codespaces from the selected repositories
+      </p>
+    </div>
+  <% end %>
+
+  <% if current_user.codespaces_repository_authorization == Configurable::CodespacesRepositoryAuthorization::SELECTED_REPOSITORIES %>
+    <div class="form-checkbox">
+      <% if user_feature_enabled?(:primer_experimental_selectpanel_codespaces_repository_authorization) %>
+        <%= render(Primer::Alpha::SelectPanel.new(
+            title: "Select repository",
+            id: "trusted_repositories_repo_selection",
+            test_selector: "trusted_repositories_repo_selection",
+            src: repository_select_codespaces_path(trusted_repositories: true),
+            select_variant: :multiple,
+            no_results_label: "No matching repositories."
+          )) do |menu| %>
+          <% menu.with_show_button do |button| %>
+            <% button.with_leading_visual_icon(icon: :repo) %>
+            <% button.with_trailing_action_icon(icon: :"triangle-down") %>
+            Select repository
+          <% end %>
+          <% menu.with_footer do %>
+            <%= render(Primer::Beta::Button.new(id: "trusted_repositories_repo_selection_cancel_button")) do %>
+              Cancel
+            <% end %>
+            <%= render(Primer::Beta::Button.new(scheme: :primary, id: "trusted_repositories_repo_selection_submit_button")) do %>
+              Submit
+            <% end %>
+          <% end %>
+        <% end %>
+        <%= form_tag settings_user_codespaces_repository_authorizations_path, class: "js-codespaces-update-trusted-repositories-select-form", method: :put, **test_selector_data_hash("codespaces-user-settings-form") do %>
+          <span data-target="add-repo-info"></span>
+        <% end %>
+        <div class="ml-2 mt-1 mb-3">
+          <%= form_tag settings_user_codespaces_repository_authorizations_path, method: :put, **test_selector_data_hash("codespaces-user-settings-form") do %>
+            <input type="hidden" name="delete" value="1">
+            <%= render(Primer::Alpha::ActionList.new(id: 'codespaces-trusted-repositories-selected-list')) do |component| %>
+              <% component.with_heading(title: "Selected #{ Codespaces.trusted_repository_authorizations_with_repository(current_user).length } repositories.", aria: { live: "polite", atomic: true }) %>
+              <% Codespaces.trusted_repository_authorizations_with_repository(current_user).each do |repository_authorization| %>
+                <% component.with_item(label: repository_authorization.repository.name_with_display_owner) do |item| %>
+                  <% item.with_trailing_action(icon: "x", scheme: :invisible, type: :submit, "aria-label": "Remove #{ repository_authorization.repository }", name: "repo", "data-autosubmit": "", value: repository_authorization.repository.id) %>
+                  <% item.with_leading_visual_icon(icon: repository_authorization.repository.repo_type_icon) %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <%= form_tag settings_user_codespaces_repository_authorizations_path, method: :put, **test_selector_data_hash("codespaces-user-settings-form") do %>
+          <div class="mt-2 position-relative">
+            <details class="select-menu details-reset details-overlay mb-2" id="trusted_repositories_repo_selection" <%= test_selector("trusted_repositories_repo_selection") %>>
+              <%= render Primer::Beta::Button.new(tag: :summary, classes: "select-menu-button") do %>
+                <%= render Primer::Beta::Octicon.new(icon: 'repo') %>
+                <span>Select repositories</span>
+              <% end %>
+              <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                <div class="select-menu-filters">
+                  <div class="select-menu-text-filter">
+                    <remote-input
+                      aria-owns="repository-menu-list"
+                      src="<%= repository_select_codespaces_path %>">
+                      <input
+                        type="text"
+                        class="form-control"
+                        placeholder="Search for a repository"
+                        aria-label="Search for a repository"
+                        autocomplete="off"
+                        autofocus>
+                    </remote-input>
+                  </div>
+                </div>
+                <div class="select-menu-list" id="repository-menu-list">
+                </div>
+              </details-menu>
+            </details>
+          </div>
+        <% end %>
+
+        <div class="text-small color-fg-muted mb-3">
+          Selected <%= Codespaces.trusted_repository_authorizations_with_repository(current_user).length %> repositories.
+        </div>
+
+        <%= form_tag settings_user_codespaces_repository_authorizations_path, method: :put, **test_selector_data_hash("codespaces-user-settings-form") do %>
+          <input type="hidden" name="delete" value="1">
+          <% Codespaces.trusted_repository_authorizations_with_repository(current_user).each do |repository_authorization| %>
+            <div class="mini-repo-list-item css-truncate pr-3">
+              <%= render Primer::Beta::Octicon.new(icon: repository_authorization.repository.repo_type_icon, classes: "repo-icon") %>
+                <%= render Primer::Beta::Button.new(type: :submit, name: "repo", "data-autosubmit": "", value: repository_authorization.repository.id, scheme: :link, float: :right, classes: "Link--muted", "aria-label": "Remove #{ repository_authorization.repository }") do %>
+                  <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+                <% end %>
+                <span class="repo-and-owner css-truncate-target">
+                    <span class="owner css-truncate-target"><%= repository_authorization.repository.owner %></span>/<span class="repo"><%= repository_authorization.repository %></span>
+                </span>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <p class="note">
+        GPG and VS Code Settings Sync will be available for Codespaces from these repositories.
+      </p>
+    </div>
+  <% end %>
+</div>

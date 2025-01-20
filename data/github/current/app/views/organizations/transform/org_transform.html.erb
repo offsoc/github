@@ -1,0 +1,294 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  creation_view = Orgs::CreationView.new({
+    per_seat_pricing_model: @per_seat_pricing_model,
+    annual_per_seat_pricing_model: @annual_per_seat_pricing_model,
+    monthly_per_seat_pricing_model: @monthly_per_seat_pricing_model,
+    annual_business_plus_pricing_model: @annual_business_plus_pricing_model,
+    monthly_business_plus_pricing_model: @monthly_business_plus_pricing_model,
+    coupon: @coupon
+  })
+  page_info :title => "Sign up your team", :class => "page-create-org"
+%>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle "site" %>
+<% end %>
+
+<div class="container-lg p-responsive py-5" <%= test_selector("org-transform-redesign") %>>
+  <%= form_for @current_organization, :url => create_or_transform_org_path,
+    :html => {
+      :id                  => "new-organization",
+      :class               => "clearfix js-braintree-encrypt setup-form",
+      "data-braintree-key" => GitHub.braintree_client_side_encryption_key
+    } do |f| %>
+    <% if @coupon.present? %>
+      <% coupon_view = Coupons::ShowView.new :coupon => @coupon %>
+      <% if @coupon.business_plus_only_coupon? %>
+        <%= render :partial => "coupons/business_plus_only/header", :locals => { :view => coupon_view, :lead => :create_org } %>
+      <% else %>
+        <%= render "coupons/coupon_header", view: coupon_view %>
+      <% end %>
+    <% else %>
+      <div class="setup-header setup-org">
+        <h1>Transform your user into an organization</h1>
+        <input class="js-transform-user" type="hidden" name="transform_user" value="1">
+        <%= render "organizations/transform/transform_steps", step1: "current" %>
+      </div><!-- /.setup-header -->
+    <% end %>
+
+    <div class="d-sm-flex gutter-sm-spacious mb-3">
+      <div class="col-sm-12">
+        <div class="setup-form-container currency-container js-details-container Details">
+          <%= render Primer::Beta::Subhead.new(mb: 6) do |component| %>
+            <% component.with_heading(tag: :h2, font_size: 2, font_weight: :light) do %>Set up the organization<% end %>
+            <% component.with_description(color: :muted, text_align: :center, font_size: 3) do %>
+              Organizations allow your team to plan, build, review, and ship software — all while tracking bugs and discussing ideas.
+            <% end %>
+          <% end %>
+
+          <% if @current_organization.errors.any? -%>
+            <%= render(Primer::Beta::Flash.new(scheme: :danger, mt: 2)) do %>
+              There were problems creating your organization.
+            <% end %>
+          <% end %>
+          <%
+            login_error = @current_organization.try(:errors) && @current_organization.errors[:login].any?
+            login_value = current_user
+            hint_name = current_user
+          %>
+          <div class="col-md-6">
+            <%=
+              f.text_group("Organization name", :profile_name, {
+                error:    login_error && "Name is unavailable",
+                value:    login_value,
+                disabled: true,
+                class:    "js-new-organization-name",
+                hint:     safe_join([
+                  "This will be your organization name on #{GitHub.url}/",
+                  content_tag(:strong, hint_name, :class => "js-field-hint-name"),
+                  "."
+                ]),
+                required: true
+              })
+            %>
+
+            <% if GitHub.terms_of_service_enabled? %>
+              <dl class="form-group required mt-6">
+                <dt class="input-label">
+                  <label required>This organization belongs to:</label>
+                </dt>
+                <dd>
+                  <div class="form-checkbox">
+                    <%= radio_button_tag(:terms_of_service_type, "standard") %>
+                    <%= label_tag(:terms_of_service_type_standard, "My personal account") %>
+
+                    <p class="note" id="help-text-for-checkbox">
+                      I.e., <%= current_user.display_login %>
+
+                      <% unless current_user.profile_name.blank? %>
+                        (<%= current_user.profile_name %>)
+                      <% end %>
+                    </p>
+                  </div>
+
+                  <div class="form-checkbox">
+                    <%= radio_button_tag(:terms_of_service_type, "corporate", false, class: "form-checkbox-details-trigger js-company-owned", "data-optional": true) %>
+                    <%= label_tag(:terms_of_service_type_corporate, "A business or institution") %>
+
+                    <p class="note">
+                      For example: GitHub, Inc., Example Institute, American Red Cross
+                    </p>
+
+                    <div class="mt-4 form-checkbox-details">
+                      <%= f.text_group("Name of business or institution this organization belongs to", :company_name, {
+                        class: "mb-2 js-company-name-input",
+                        required: true,
+                        hint: safe_join([
+                          "This business or institution — not ",
+                          content_tag(:strong, current_user.name),
+                          " (your personal account) — will control this organization."
+                        ])
+                      }) %>
+                    </div>
+                  </div>
+                </dd>
+              </dl>
+            <% end %>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-form-container">
+
+      <div id="org-owner" class="f2-light mb-2">Choose an organization owner</div>
+
+      <div class="Box mb-3 p-2 collaborators js-team-add-user-form"
+        data-template-url="/account/organizations/access_list_members">
+        <ul class="table-list collab-list org-owner js-team-user-logins"></ul>
+        <div class="js-team-add-user-form" data-template-url="/account/organizations/access_list_members">
+          <label for="choose-org-owner" class="d-block px-2 my-2">
+            Search by username, full name or email address
+          </label>
+
+          <div class="input-group px-2 mb-2">
+            <auto-complete src="<%= autocomplete_users_path %>" for="org-owner-complete-results" class="position-relative d-block">
+              <input type="text" id="choose-org-owner" class="form-control js-team-add-user-name">
+              <ul id="org-owner-complete-results" class="autocomplete-results"></ul>
+            </auto-complete>
+
+            <span class="input-group-button">
+              <%= render Primer::ButtonComponent.new(type: :submit, classes: "js-team-add-user-button js-auto-complete-button") do %>Choose<% end %>
+            </span>
+          </div>
+        </div>
+        <p class="text-small px-2 mb-0">
+          Choose either your secondary personal account or another user you
+          trust to manage your new organization. This person will be able to manage every aspect of the organization (<%= "billing, " if GitHub.billing_enabled? %>repositories, teams, etc).
+        </p>
+      </div>
+    </div>
+
+    <% if GitHub.billing_enabled? %>
+      <%= hidden_field_tag "coupon", @coupon.try(:code) %>
+
+      <% if current_user.free_plan? %>
+        <%= hidden_field_tag 'plan', current_user.plan %>
+      <% elsif current_user.coupon.nil? && !current_user.has_billing_record? %>
+        <%# Paid plan but no coupon or CC info. Downgrade them to free. %>
+        <%= hidden_field_tag 'plan', "free" %>
+      <% elsif current_user.coupon && current_user.owned_private_repositories.empty? %>
+        <%# Paid plan, has coupon and doesn't have private repositories %>
+        <% new_plan = GitHub::Plan.org_plan_for_discount(current_user.coupon.discount) %>
+        <%= hidden_field_tag 'plan', new_plan %>
+      <% else %>
+        <%# Show plan selection %>
+        <% if show_team_signup_modal_flow? %>
+          <%= render :partial => "organizations/transform/modal_cards", locals: {
+            creation_view: creation_view,
+            coupon: @coupon,
+            business_plus_pricing_model: @business_plus_pricing_model,
+            per_seat_pricing_model: @per_seat_pricing_model,
+            plan_effective_at: @plan_effective_at,
+            plan: @plan,
+            current_organization: @current_organization}
+          %>
+        <% else %>
+          <%= render Primer::Beta::Subhead.new(mb: 6) do |component| %>
+            <% component.with_heading(tag: :h2, font_size: 2, font_weight: :light) do %>
+              <% if @coupon && @coupon.business_plus_only_coupon? %>
+                Your new subscription
+              <% else %>
+                Choose a subscription
+              <% end %>
+            <% end %>
+            <% component.with_description do %>
+              <%= render "billing_settings/currency_notice" %>
+            <% end %>
+          <% end %>
+
+          <% if current_user.has_any_trade_restrictions? %>
+          <div class="d-md-flex gutter-md-spacious">
+            <div class="col-md-8">
+              <%= render Primer::Beta::Flash.new(scheme: :danger, mb: 3, col: 12) do %>
+                <%= render partial: "notices/ofac_sanctioned" %>
+              <% end %>
+            </div>
+          </div>
+          <% end %>
+
+          <div class="py-1"></div>
+          <%= render partial: "organizations/transform/plan_cards", locals: {
+            creation_view: creation_view,
+            coupon: @coupon,
+            business_plus_pricing_model: @business_plus_pricing_model,
+            per_seat_pricing_model: @per_seat_pricing_model,
+            plan_effective_at: @plan_effective_at,
+            plan: @plan,
+            current_organization: @current_organization}
+          %>
+        <% end %>
+
+        <%= render :partial => "billing_settings/contact_us" %>
+        <%= hidden_field_tag 'plan', @plan, class: "js-plan" %>
+        <%= hidden_field_tag 'plan_duration', creation_view.current_plan_duration %>
+
+        <%= render(Primer::Beta::Subhead.new(spacious: true)) do |component| %>
+          <% component.with_heading(tag: :h2) do %>Billing details<% end %>
+        <% end %>
+
+        <div class="col-md-6">
+          <% email_error = @current_organization.try(:errors) && @current_organization.errors[:billing_email] %>
+          <% billing_hint = [] %>
+          <% if GitHub.billing_enabled? %>
+            <% billing_hint += ["We’ll send receipts to this inbox."] %>
+          <% end %>
+
+          <%=
+            f.text_group "#{org_contact_email_label} email", :billing_email,
+              hint: (safe_join(billing_hint)),
+              error: email_error.any? && "#{org_contact_email_label} email " + email_error.first,
+              disabled: true,
+              required: true
+          %>
+        </div>
+
+        <div data-login="<%= @current_organization.display_login %>"
+             class="<%= "has-billing" if @current_organization.has_valid_payment_method? %>
+           js-payment-summary js-billing-section
+           <% unless @current_organization.new_record? && @coupon.nil? && @plan.try(:paid?) %>has-removed-contents<% end %>
+           <% if !current_user.has_valid_payment_method? %>
+             PaymentMethod--creditcard
+           <% end %>
+           zuora-billing-section">
+           <% if @current_organization.errors[:billing].any? %>
+             <div class="error">
+               <p><%= @current_organization.errors[:billing].to_sentence %></p>
+             </div>
+           <% end %>
+
+          <% if current_user.has_valid_payment_method? %>
+            <div class="cards_select">
+              <p>We will use your <%= current_user.friendly_payment_method_name %> on file for this upgrade.</p>
+            </div>
+          <% else %>
+            <%= fields_for :organization do |billing_form| %>
+              <%=
+                render partial: "payment_method/fields", locals: {
+                  owner: @current_organization,
+                  form: billing_form,
+                }
+              %>
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <% if GitHub.terms_of_service_enabled? %>
+      <div class="col-md-8">
+        <p class="my-6">
+          By clicking on "Create organization" below, you are agreeing to the
+          <a href="<%= site_terms_path %>" target="_blank" rel="noopener noreferrer" class="Link--inTextBlock js-tos-link">Terms of Service</a>
+          <a href="<%= site_corp_terms_path %>" target="_blank" rel="noopener noreferrer" class="Link--inTextBlock js-corp-tos-link d-none">Corporate Terms of Service</a>
+          <span data-wording="on behalf of" class="js-company-name-text"></span>.
+          For more information about GitHub's privacy practices, see the
+          <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy Statement</a>.
+        </p>
+      </div>
+    <% end %>
+
+    <div class="SignUpContinueActions">
+      <div>
+        <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, classes: "js-purchase-button", "data-disable-invalid": "", "data-disable-with": "Creating organization&hellip;") do %>
+          Create organization<% end %>
+      </div>
+    </div>
+  <% end %> <!--/ end form //-->
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "billing" %>
+<% end %>

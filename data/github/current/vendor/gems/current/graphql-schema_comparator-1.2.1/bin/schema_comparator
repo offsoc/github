@@ -1,0 +1,68 @@
+#!/usr/bin/env ruby
+
+require "bundler/setup"
+require "thor"
+require "graphql/schema_comparator"
+
+class GraphQLSchema < Thor
+  desc "verify OLD_SCHEMA NEW_SCHEMA", "Behaves exactly like `compare` but returns an exit code for CI purposes"
+
+  def verify(old_schema, new_schema)
+    result = run_compare(old_schema, new_schema)
+    exit_code = result.breaking? ? 1 : 0
+    exit(exit_code)
+  end
+
+  desc "compare OLD_SCHEMA NEW_SCHEMA", "Compares OLD_SCHEMA with NEW_SCHEMA and returns a list of changes"
+
+  def compare(old_schema, new_schema)
+    run_compare(old_schema, new_schema)
+  end
+
+  private
+
+  def run_compare(old_schema, new_schema)
+    parsed_old = parse_schema(old_schema)
+    parsed_new = parse_schema(new_schema)
+
+    say "⏳  Checking for changes..."
+    result = GraphQL::SchemaComparator.compare(parsed_old, parsed_new)
+
+    say "🎉  Done! Result:"
+    say "\n"
+
+    if result.identical?
+      say "✅  Schemas are identical"
+    else
+      print_changes(result)
+    end
+    result
+  end
+
+  def print_changes(result)
+    say "Detected the following changes between schemas:"
+    say "\n"
+
+    result.changes.each do |change|
+      if change.breaking?
+        say "🛑  #{change.message}", :red
+      elsif change.dangerous?
+        say "⚠️  #{change.message}", :yellow
+      else
+        say "✅  #{change.message}", :green
+      end
+    end
+  end
+
+  def parse_schema(schema)
+    if File.file?(schema)
+      File.read(schema)
+    elsif schema.is_a?(String)
+      schema
+    else
+      raise ArgumentError, "Invalid argument #{schema}. Must be an IDL string or file containing the schema IDL."
+    end
+  end
+end
+
+GraphQLSchema.start(ARGV)

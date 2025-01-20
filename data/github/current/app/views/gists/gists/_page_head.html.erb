@@ -1,0 +1,236 @@
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%# rubocop:disable GitHub/ContentFor %>
+<% content_for :head do %>
+  <%= dont_index if view.gist.secret? || view.gist.anonymous? %>
+<% end %>
+
+<% if view.show_spammy_message? %>
+  <%= render(Primer::Alpha::Banner.new(icon: :alert, scheme: :danger, mb: 4, py: 2)) { "The owner of this gist is flagged spammy" }%>
+<% end %>
+<div class="mb-3 d-flex px-3 px-md-3 px-lg-5">
+  <div class="flex-auto min-width-0 width-fit mr-3">
+    <div class="d-flex">
+      <div class="d-none d-md-block">
+        <%= linked_avatar_for(view.owner, 32, link_class: "mr-2 flex-shrink-0", img_class: "avatar") %>
+      </div>
+      <div class="d-flex flex-column width-full">
+        <div class="d-flex flex-row width-full">
+          <h1 class="wb-break-word f3 text-normal mb-md-0 mb-1">
+            <span class="author"><%= profile_link(view.owner) %></span><!--
+                --><span class="mx-1 color-fg-muted">/</span><!--
+                --><strong itemprop="name" class="css-truncate-target mr-1" style="max-width: 410px"><%= link_to view.gist.title, user_gist_path(view.user_param, view.gist)%></strong>
+            <% if view.gist.secret? %>
+              <%= render Primer::Beta::Label.new(vertical_align: :middle, title: "Only those with the link can see this gist.") do %>
+                Secret
+              <% end %>
+            <% end %>
+          </h1>
+        </div>
+
+        <% if view.show_fork_flag? %>
+          <span class="note m-0">
+            <% fork_link = link_to view.parent.name_with_title, user_gist_path(view.parent.user_param, view.parent) %>
+            Forked from <%= fork_link %>
+          </span>
+        <% end %>
+        <div class="note m-0">
+          <%= view.date_info_text %>
+          <%= render Primer::Beta::RelativeTime.new(datetime: view.date_info_date, tense: :past) %>
+          <% if view.show_report_abuse_link? %>
+            &bull;
+            <%= link_to("Report abuse",
+              flavored_contact_path(
+                flavor: "report-content",
+                report: "#{view.gist.user ? view.gist.user.display_login : "ghost"} (user)",
+                content_url: view.gist.url
+              ), class: "color-fg-muted"
+            ) %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+  <ul class="d-md-flex pagehead-actions float-none mr-2">
+    <% if logged_in? && view.show_social_functions? %>
+      <li <%= test_selector("subscription-button") %>>
+        <%= render(
+          Notifications::ThreadSubscriptionComponent.new(
+            thread: view.gist,
+            list: view.gist.notifications_list,
+            form_path: subscribe_gist_path,
+            websocket_url: subscription_gist_path,
+            deferred: GitHub.flipper[:notifications_async_gist_subscription_button].enabled?(current_user)
+          ),
+        ) do |component| %>
+          <%= component.with_spinner do %>
+            <%= render(Primer::Beta::Button.new(
+              size: :small,
+              aria: { disabled: true, label: "Subscribe"},
+            )) do |c| %>
+              <% c.with_leading_visual_icon(icon: "bell") %>
+              Subscribe
+            <% end %>
+          <% end %>
+          <%= component.with_fallback_error do %>
+            <span class="d-flex pt-1">
+              <%= primer_octicon(:alert, mr: 1) %>
+              Couldn't load subscription status.
+              <%= render(Primer::Beta::Button.new(scheme: :link, classes: "Link--muted", "data-retry-button": "")) { "Retry" } %>
+            </span>
+          <% end %>
+        <% end %>
+      </li>
+    <% end %>
+  </ul>
+  <div class="d-inline-block d-md-none ml-auto">
+    <%= render(Primer::Alpha::ActionMenu.new(
+      menu_id: "gist_options",
+      align_self: :start,
+      ml: :auto,
+      display: :inline_block,
+    )) do |menu| %>
+      <% menu.with_show_button(icon: "kebab-horizontal", size: :small, "aria-label": "Show Gist options" ) %>
+      <% if view.show_edit_link? || view.show_delete_link? %>
+        <% if view.show_edit_link? %>
+          <% menu.with_item(
+            item_id: "edit_from_gist_options",
+            label: "Edit",
+            href: edit_user_gist_path(view.user_param, view.gist)
+          ) %>
+        <% end %>
+        <% if view.show_delete_link? %>
+          <% menu.with_item(
+            item_id: "delete_from_gist_options",
+            label: "Delete",
+            scheme: :danger,
+            href: user_gist_path(view.user_param, view.gist),
+            form_arguments: {
+              method: :delete
+            },
+            content_arguments: { "data-confirm": "Are you positive you want to delete this Gist?" }
+          ) %>
+        <% end %>
+        <% menu.with_divider%>
+      <% end %>
+      <% menu.with_item(
+        item_id: "download_from_gist_options",
+        label: "Download ZIP",
+        href: zipball_user_gist_path(view.user_param, view.gist, view.tree_name),
+        rel: "nofollow",
+        data: download_zip_button_data_attributes(view.gist, ga_click: "Gist, download zip, location:gist overview")
+      )%>
+      <% if view.show_social_functions? && logged_in? %>
+        <% menu.with_divider %>
+        <% if is_starred?(view.gist) %>
+          <% menu.with_item(
+            item_id: "unstar_from_gist_options",
+            label: "Unstar",
+            href: gh_unstar_path(view.gist),
+            form_arguments: { method: :post },
+            data: star_button_data_attributes(view.gist, controller_action_slug)
+          )%>
+        <% else %>
+          <% menu.with_item(
+            item_id: "star_from_gist_options",
+            label: "Star",
+            href: gh_star_path(view.gist),
+            form_arguments: { method: :post },
+            data: star_button_data_attributes(view.gist, controller_action_slug)
+          )%>
+        <% end %>
+        <% if view.show_fork_link? && !view.viewer_must_verify_email? %>
+          <% menu.with_item(
+            item_id: "fork_from_gist_options",
+            label: "Fork",
+            href: fork_user_gist_path(view.user_param, view.gist),
+            form_arguments: { method: :post }
+          )%>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+  <ul class="d-md-flex d-none pagehead-actions float-none">
+    <% if view.show_edit_link? %>
+      <li>
+        <%= render Primer::Beta::Button.new(
+          size: :small,
+          tag: :a,
+          href: edit_user_gist_path(view.user_param, view.gist),
+          "aria-label": "Edit this Gist",
+        ) do |c| %>
+          <% c.with_leading_visual_icon(icon: :pencil) %>
+          Edit
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.show_delete_link? %>
+      <li>
+        <%= form_tag user_gist_path(view.user_param, view.gist), :method => :delete do %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            size: :small,
+            scheme: :danger,
+            "data-confirm": "Are you positive you want to delete this Gist?",
+            "aria-label": "Delete this Gist"
+          ) do |c| %>
+            <% c.with_leading_visual_icon(icon: :trash) %>
+            Delete
+          <% end %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.show_social_functions? %>
+      <li>
+        <%= render "gists/gists/star_button", view: view %>
+      </li>
+      <% if view.show_fork_link? %>
+        <li>
+          <%= render "gists/gists/fork_button", :view => view %>
+        </li>
+      <% end %>
+    <% end %>
+  </ul>
+</div>
+
+<% if view.show_social_functions? %>
+  <ul class="d-flex d-md-none px-3 mb-2 pagehead-actions float-none" >
+    <li>
+      <% protocol_selector_view = Gists::ShareAndProtocolSelectorView.new(
+        :context => :gist_header,
+        :repository => view.gist,
+        :user => current_user,
+        :base_url => base_url
+      ) %>
+      <%= render "gists/gists/share_and_clone_options", view: protocol_selector_view, id: "sized-down" %>
+    </li>
+    <li>
+      <%= render "gists/files/desktop_clone_options", :git_repo => view.gist %>
+    </li>
+  </ul>
+<% end %>
+
+<div class="d-flex flex-md-row flex-column px-0 pr-md-3 px-lg-5">
+  <div class="flex-md-order-1 flex-order-2 flex-auto">
+    <%= render "navigation/gist_next", view: create_view_model(Gists::NavigationView, :gist => view.gist) %>
+  </div>
+
+  <div class="d-md-flex d-none flex-items-center flex-md-order-2 flex-order-1" data-multiple>
+    <% protocol_selector_view = Gists::ShareAndProtocolSelectorView.new(
+      :context => :gist_header,
+      :repository => view.gist,
+      :user => current_user,
+      :base_url => base_url
+    ) %>
+    <%= render "gists/gists/share_and_clone_options", view: protocol_selector_view, id: "original" %>
+
+    <div class="ml-2">
+      <%= render "gists/files/desktop_clone_options", :git_repo => view.gist %>
+    </div>
+
+    <div class="ml-2">
+      <%= link_to "Download ZIP", zipball_user_gist_path(view.user_param, view.gist, view.tree_name), class: "btn btn-sm", rel: "nofollow", data: download_zip_button_data_attributes(view.gist, ga_click: "Gist, download zip, location:gist overview") %>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,99 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<h4>Commit changes</h4>
+<%= form_tag save_issue_templates_path(current_repository.owner, current_repository), class: "js-commit-templates-form" do %>
+  <div class="js-hidden-template-fields">
+    <% issue_templates.each do |template| %>
+      <input type="hidden" name="templates[][<%= template.filename_for_display %>]" value="<%= template.to_markdown %>" data-filename="<%= template.filename_for_display %>">
+    <% end %>
+  </div>
+
+  <dl class="form-group">
+    <dt><label for="commit-title">Commit message</label></dt>
+    <dd><input name="commit[title]" class="form-control" type="text" value="Update issue templates" id="commit-title"></dd>
+  </dl>
+  <dl class="form-group">
+    <dt><label for="commit-description">Extended commit message</label></dt>
+    <dd>
+      <textarea name="commit[description]" class="form-control" placeholder="Add an optional extended description" id="commit-description"></textarea>
+    </dd>
+  </dl>
+
+  <% if current_repository.branch_protected?(current_repository.default_branch) %>
+    <%= render(Branch::BranchProtectionNotEnforcedWarningComponent.new(repository: current_repository, branch: current_repository.default_branch)) %>
+  <% end %>
+
+  <div class="form-group mb-0 <% if current_repository.empty? %>d-none<% end %>">
+    <dd>
+      <div class="form-checkbox pl-4 mt-0 mb-2">
+        <label class="text-normal">
+          <input type="radio" class="js-quick-pull-choice-option" name="commit-choice" value="direct" autocomplete="off"
+            <% if can_commit_to_this_branch?(current_repository, current_repository.default_branch) %>
+              checked
+            <% else %>
+              disabled
+            <% end %>
+          >
+          <% if can_commit_to_this_branch?(current_repository, current_repository.default_branch) %>
+            <%= primer_octicon(:"git-commit", color: :muted, mr: 1, text_align: :center) %>
+            Commit directly to the <strong class="branch-name"><%= current_repository.default_branch %></strong> branch.
+            <% if can_commit_to_branch_status(current_repository, current_repository.default_branch) == :can_bypass %>
+              <div>
+                <%= render Primer::Beta::Octicon.new(icon: "alert", color: :danger, mr: 1, text_align: :center) %>
+                <%= render Primer::Beta::Text.new(color: :danger).with_content("Some rules will be bypassed by committing directly") %>
+              </div>
+            <% end %>
+          <% else %>
+            <%= primer_octicon(:"shield-lock", color: :muted, mr: 1, text_align: :center) %>
+            You can’t commit to <span class="branch-name"><%= current_repository.default_branch %></span> because it is a <a class="Link--inTextBlock" href="<%= docs_url "repositories/about-protected-branches" %>">protected branch</a>.
+          <% end %>
+        </label>
+      </div>
+      <div class="form-checkbox pl-4 my-0">
+        <label class="text-normal">
+          <input type="radio" class="form-checkbox-details-trigger js-quick-pull-choice-option" name="commit-choice" value="quick-pull" autocomplete="off"
+            <% if will_create_branch?(current_repository, current_repository.default_branch) %>
+                checked
+            <% end %>
+          >
+          <%= primer_octicon(:"git-pull-request", color: :muted, mr: 1, text_align: :center) %>
+          Create a <strong>new branch</strong> for this commit and start a pull request.
+
+          <div class="form-checkbox-details ml-3 mt-2">
+            <div class="position-relative mt-2 ml-2">
+              <%= primer_octicon(:"git-branch", classes: "quick-pull-new-branch-icon", text_align: :center, position: :absolute, color: :muted) %>
+              <%
+                data_check_url = ref_check_url(current_repository.owner, current_repository)
+                temp_branch = current_repository.heads.temp_name(topic: "patch", prefix: current_user.display_login)
+              %>
+              <input type="text" value="<%= temp_branch %>"
+                class="form-control input-contrast mr-1 pl-5 input-monospace js-quick-pull-new-branch-name"
+                placeholder="New branch name…"
+                aria-label="Enter a branch name"
+                data-generated-branch="<%= temp_branch %>"
+                data-check-url="<%= data_check_url %>">
+              <%= csrf_hidden_input_for data_check_url, class: "js-data-check-url-csrf" %>
+              <p class="color-fg-muted js-quick-pull-normalization-info"></p>
+            </div>
+          </div>
+        </label>
+      </div>
+    </dd>
+  </div>
+
+  <input type="hidden" name="target_branch" class="js-quick-pull-target-branch" value="<%= temp_branch %>" data-default-value="<%= current_repository.default_branch %>" autocomplete="off">
+  <input type="hidden" name="quick_pull" class="js-quick-pull-choice-value" value="true" autocomplete="off">
+
+  <p class="mt-3">
+    <button type="submit" class="btn btn-primary js-blob-submit input-block"
+      id="submit-file"
+      data-edit-text="Save files"
+      data-pull-text="Open pull request"
+      <% unless issue_templates.all?(&:valid?) %>disabled<% end %>
+      >
+      Commit changes
+    </button>
+
+    <span class="color-fg-danger js-template-commit-form-error-message <% if issue_templates.all?(&:valid?) %>d-none<% end %>">There are some templates with problems still.</span>
+    <span class="js-template-commit-form-loading-message d-none">Validating templates...</span>
+  </p>
+<% end %>

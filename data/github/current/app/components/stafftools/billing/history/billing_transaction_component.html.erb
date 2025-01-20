@@ -1,0 +1,169 @@
+<billing-transaction-component
+  id="transaction-<%= payment.transaction_id %>"
+  class="d-flex flex-column px-3 py-2 billing-transaction <%= transaction_status_klass %>"
+  <%= test_selector "billing-transaction" %>
+>
+  <div class="d-flex flex-row flex-items-center">
+    <div class="pr-2">
+      <% if payment.paid_line_items.any? || payment.refund.present? %>
+        <%= render Primer::Beta::IconButton.new(
+          icon: :"chevron-right",
+          scheme: :invisible,
+          color: :muted,
+          tooltip_direction: :n,
+          "aria-label": "View Transaction Line Items",
+          classes: "view-transaction-line-items-button",
+          data: {
+            action: "click:billing-transaction-component#toggleLineItems",
+            target: "billing-transaction-component.toggleLineItemsButton"
+          }
+        ) %>
+      <% else %>
+        <div class="px-3"></div>
+      <% end %>
+    </div>
+    <div class="col-2 pr-2 color-fg-muted">
+      <%= date_with_time_tooltip(payment.created_at, format: "%a") %>
+      <br>
+      <%= date_with_time_tooltip(payment.created_at) %>
+    </div>
+    <div class="col-6 pr-2">
+      <span class="h4 no-wrap">
+        <% if payment.zero_charge? %>
+          <%= payment.short_transaction_id %>
+        <% elsif payment.transaction_id %>
+          <%= render Primer::Beta::Link.new(
+            href: payment.platform_url,
+            target: :_blank,
+            title: "Open Transaction #{payment.transaction_id.upcase} in #{payment.platform_name}",
+            test_selector: "bt-transaction-link"
+          ) do |component| %>
+            <%= payment.short_transaction_id %>
+          <% end %>
+        <% end %>
+        <span>
+          <%= render(Primer::Beta::Truncate.new) do |component| %>
+            <%= component.with_item(max_width: 200) { payment.is_authorization? ? "Authorization hold" : payment.plan_info } %>
+          <% end %>
+        </span>
+      </span>
+      <div class="color-fg-muted text-small" <%= test_selector("bt-payment-method-information") %>>
+        <%= payment_method_information %>
+      </div>
+    </div>
+    <div class="col-4 pr-2 d-flex flex-items-center flex-justify-between" <%= test_selector("bt-payment-status") %>>
+      <%= payment_status_label %>
+      <% if payment.notes.any? %>
+        <%= render Primer::Beta::IconButton.new(
+          icon: :file,
+          "aria-label": payment.notes.map(&:note).join(", "),
+          tooltip_direction: :w
+        ) %>
+      <% end %>
+    </div>
+    <div class="col-2 pr-2 d-flex">
+      <% actions_component = Stafftools::Billing::History::BillingTransactionActionsComponent.new(payment: payment) %>
+      <% if actions_component.show_actions_dropdown? %>
+        <%= render actions_component %>
+      <% else %>
+        <div class="px-3 ml-3"></div>
+      <% end %>
+    </div>
+    <div class="col-2 text-right" <%= test_selector("bt-payment-amount") %>>
+      <span class="h4"><%= payment.amount.format %></span>
+      <% if payment.was_refunded? %>
+        <span class="h4 color-fg-attention">-<%= payment.refund_amount.format %></span>
+      <% end %>
+    </div>
+  </div>
+  <div hidden data-target="billing-transaction-component.lineItemsContainer">
+    <div class="d-flex flex-row flex-items-center pt-1">
+      <div class="pr-2">
+        <div class="px-3"></div>
+      </div>
+      <div class="col-6 pr-2">
+        <b>Description</b>
+      </div>
+      <div class="col-4">
+        <b>Service Period</b>
+      </div>
+      <div class="col-2 pr-2 text-right">
+        <b>Quantity</b>
+      </div>
+      <div class="col-2 text-right">
+        <b>Amount</b>
+      </div>
+      <div class="col-2 pr-2 text-right">
+        <b>Tax</b>
+      </div>
+      <div class="col-2 text-right">
+        <b>Total</b>
+      </div>
+    </div>
+    <% payment.paid_line_items.each do |line_item| %>
+      <div class="d-flex flex-row flex-items-center pt-1">
+        <div class="pr-2">
+          <div class="px-3"></div>
+        </div>
+        <div class="col-6 pr-2">
+          <%= render(Primer::Beta::Truncate.new) do |component| %>
+            <%= component.with_item(max_width: 400) { line_item.description } %>
+          <% end %>
+        </div>
+        <div class="col-4 color-fg-subtle">
+          <%= line_item.formatted_service_period %>
+        </div>
+        <div class="col-2 pr-2 text-right" <%= test_selector("billing-transaction-item-quantity-value")%>>
+          <%= line_item.quantity %>
+        </div>
+        <div class="col-2 text-right" <%= test_selector("billing-transaction-item-amount-value") %>>
+          <%= line_item.to_money.format %>
+        </div>
+        <div class="col-2 pr-2 text-right" <%= test_selector("billing-transaction-item-tax-value") %>>
+          <%= line_item.tax_amount.format %>
+        </div>
+        <div class="col-2 text-right" <%= test_selector("billing-transaction-item-total-value") %>>
+          <%= line_item.total_amount.format %>
+        </div>
+      </div>
+    <% end %>
+    <% if payment.refund.present? %>
+      <div class="d-flex flex-row flex-items-center pt-1 color-fg-attention" <%= test_selector "refund-#{payment.refund.transaction_id}" %>>
+        <div class="pr-2">
+          <div class="px-3"></div>
+        </div>
+        <div class="col-6 pr-2">
+          Refund
+        </div>
+        <div class="col-4 color-fg-subtle">
+          <%= payment.refund.created_at.to_date %>
+        </div>
+        <div class="col-2 pr-2 d-flex">
+          <%= render Primer::Alpha::Dialog.new(title: "Send a refund receipt", color: :default) do |component| %>
+            <% component.with_show_button(scheme: :invisible, px: 2, py: 0, title: "Email refund receipt") do %>
+              <%= render Primer::Beta::Octicon.new(icon: :mail, color: :attention) %>
+            <% end %>
+            <% component.with_header(show_divider: true) %>
+            <% component.with_body do %>
+              <p>This will email a refund receipt for
+              <%= payment.formatted_date %> to
+              <strong><%= payment.billing_email_address %></strong>.
+              </p>
+            <% end %>
+            <% component.with_footer do %>
+              <%= form_tag stafftools_receipts_path(id: payment.refund.transaction_id), class: "width-full" do %>
+                <%= render Primer::Beta::Button.new(type: :submit, block: true).with_content("Send refund receipt") %>
+              <% end %>
+            <% end %>
+          <% end %>
+          <%= render Primer::Beta::Button.new(tag: :a, href: stafftools_receipt_path(payment.refund.transaction_id), scheme: :invisible, px: 2, border: 0, title: "Download refund receipt") do |component| %>
+            <%= render Primer::Beta::Octicon.new(icon: :download, color: :attention) %>
+          <% end %>
+        </div>
+        <div class="col-2 text-right">
+          <%= payment.refund.amount.format %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+</billing-transaction-component>

@@ -1,0 +1,42 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+def die(msg)
+  STDERR.puts "Error: #{msg}"
+  STDERR.puts "Usage: redaction_reason <key1> [key2] ... [keyN]"
+  STDERR.puts "Tip: keys may be JSON arrays (copy-paste from Sentry, wrap in single quotes)"
+  STDERR.puts "Example: redaction_reason foo bar '[\"baz\", \"boo\"]'"
+  exit -1
+end
+
+begin
+  keys = ARGV
+    .flat_map { |x| JSON.parse(x) }
+    .map { |k| k.to_s.delete_prefix("#") }
+    .compact
+    .sort
+    .uniq
+rescue
+  die("Bad input format")
+end
+
+if keys.count < 1
+  die("No key provided")
+end
+
+require_relative "../config/environment"
+
+incomplete = keys.map do |key|
+  problems = []
+
+  if !GitHub::FailbotKeyConfiguration.instance.definitions.keys.include?(key)
+    problems << "missing documentation for `#{key}`: Add an entry to `failbot_allowed_keys` for it"
+  elsif !GitHub::FailbotKeyConfiguration.key_allowed?(key)
+    problems << "`#{key}` is not allowed to sent to Sentry."
+  end
+
+  { key: key, problems: problems }
+end.select { |hsh| hsh[:problems].any? }
+
+puts JSON.pretty_generate(incomplete)
+exit 0

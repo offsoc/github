@@ -1,0 +1,1 @@
+(function(){$(function(){return $(document).ready(function(){element=window.location.hash;var e=$("#userHashMatches").data("value");"#set-password"===element&&e&&($("#set-password").show(),$("#email-confirmation").hide())})})}).call(this);

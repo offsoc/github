@@ -1,0 +1,45 @@
+#!/bin/bash
+
+set -e
+
+KREDZ_IMAGE_TAG="kredz:$(cat /data/docker-image-tags/kredz_image_tag)"
+
+MYSQL_USERNAME="${MYSQL_USERNAME:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)}"
+export DATABASE_URL="$MYSQL_USERNAME:$MYSQL_PASSWORD@tcp(localhost:3307)/github_enterprise?parseTime=true"
+export VARZ_DATABASE_URL=${DATABASE_URL}
+export KREDZ_LOG_DEBUG="${KREDZ_LOG_DEBUG:-false}"
+
+MONOLITH_TWIRP_HMAC_SECRET=not_needed_if_actions_never_enabled
+is_actions_ever_enabled=$(jq -r .is_actions_ever_enabled /etc/github/configapply.json)
+if [ "$is_actions_ever_enabled" = "true" ]; then
+    MONOLITH_TWIRP_HMAC_SECRET=$(ghe-config secrets.github.api-internal-twirp-hmac-keys-for-kredz)
+fi
+export MONOLITH_TWIRP_HMAC_SECRET
+
+# Note: cmd is an array to handle quoted values appropriately
+case "$1" in
+migrate-varz)
+    cmd=(migratorctl migrate varz -d "$DATABASE_URL" -s migrations/varz)
+    ;;
+*)
+    echo "Usage: ghe-kredz-varz (migrate-varz)" >&2
+    exit 1
+    ;;
+esac
+shift
+
+docker run --rm --network host \
+    -e KREDZ_ENV=production \
+    -e KREDZ_MODE=enterprise \
+    -e IS_DRY_RUN=false \
+    -e DISABLE_FRENO=true \
+    -e STATS_PREFIX=kredz \
+    -e STATS_ADDR=localhost:8125 \
+    -e GITHUB_TWIRP_ADDR=http://localhost:1337/api/v3/internal \
+    -e MONOLITH_TWIRP_HMAC_SECRET \
+    -e DATABASE_URL \
+    -e VARZ_DATABASE_URL \
+    -e KREDZ_LOG_DEBUG \
+    -i "$KREDZ_IMAGE_TAG" \
+    "${cmd[@]}" "$@"

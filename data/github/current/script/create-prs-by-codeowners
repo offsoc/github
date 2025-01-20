@@ -1,0 +1,121 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Format:
+# bin/create-prs-by-codeowners "commit message" "pr title" "file with pr description markdown"
+
+# Example:
+# bin/create-prs-by-codeowners "Change buttons to primary" "Update buttons across multiple features" "PR.log"
+
+begin
+  require "codeowners"
+rescue LoadError
+  puts "Please rerun the script with safe-ruby"
+  puts "bin/create-prs-by-codeowners #{ARGV.join(" ")}"
+  exit
+end
+
+pwd = Dir.getwd
+
+puts "🚀 Let's start creating pull requests by CODEOWNERS\n\n"
+puts "Please note that this script only works with modified files, and not with added/removed files"
+
+# Get all currently modified files.
+modified_files = `git status --short`.lines
+                  .select { |line| line.start_with?(/^\s?M\s+/) }
+                  .map { |line| line.chomp.sub(/^\s?M\s+/, "") }
+
+total_files = modified_files.length
+puts "📁 Total files: #{total_files}\n\n"
+
+# Taken from script/codeowners
+# We could call out to the script, but that'd end up loading the file repeatedly.
+codeowners_file = File.expand_path("../../CODEOWNERS", __FILE__)
+codeowners = Codeowners::File.new(File.read(codeowners_file))
+
+modified_files_by_team = modified_files.group_by do |file|
+  codeowners.for(file).keys.first.to_s
+end
+
+total_teams = modified_files_by_team.length
+puts "👩 Total teams to be notified by your changes: #{total_teams}\n\n"
+
+# get current branch name
+starting_branch = `git branch --show-current`
+
+# Get commandline args
+commit_message = ARGV[0]
+pr_title = ARGV[1]
+pr_body_file = ARGV[2]
+pr_body_file_path = "#{pwd}/#{pr_body_file}"
+
+# Make sure no other branches are prefixed with this base yet to avoid conflicts
+branch_base = ARGV[3] || "batch-update-#{Time.now.to_i}"
+
+if commit_message.nil? || commit_message.empty?
+  puts "❌ The first argument must be the commit message. For example: 'Change buttons to primary'."
+  exit
+end
+
+if pr_title.nil? || pr_title.empty?
+  puts "❌ The second argument must be a pull request title. For example: 'Update buttons across multiple features'."
+  exit
+end
+
+if pr_body_file.nil? || pr_body_file.empty?
+  puts "❌ The third argument must be the path to your pull request body file. This file can be placed in the root. For example: 'PR.log'. Usage of a .log extension is recommended since it gets gitignored by default."
+  exit
+end
+
+puts "📝 Content we'll use to create your pull requests:"
+puts "1️⃣  Commit message: #{commit_message}"
+puts "2️⃣  Pull request title: #{pr_title}"
+puts "3️⃣  Pull request body file path (markdown): #{pr_body_file_path}"
+puts "4️⃣  Branch base: #{branch_base}\n\n"
+
+# stash the changes before running all the steps
+# to avoid potential for errors if there are existing stashes
+puts "🦺 Stashing all changes to avoid potential errors.\n\n"
+`git stash`
+
+# run all the steps to create the PRs by code owner team
+modified_files_by_team.each do |team, files|
+  team = team.gsub("@github/", "")
+  team = "unowned" if team.empty?
+
+  puts "🔄 Building a pull request for #{team}."
+  branch_name = "#{branch_base.strip}/#{team}"
+
+  # create PR from starting branch
+  puts "ℹ️ Checking out #{starting_branch}..."
+  `git checkout #{starting_branch}`
+
+  # get changes from stash
+  puts "ℹ️ Get changes from stash..."
+  `git stash pop`
+
+  # create team branch
+  puts "ℹ️ Checking out #{branch_name}..."
+  `git checkout -B #{branch_name}`
+
+  puts "ℹ️ Stage everything that's owned by #{team}..."
+  `git add #{files.join(" ")}`
+
+  # commit and push changes
+  puts "ℹ️ Committing..."
+  `git commit --message "#{commit_message}"`
+  puts "ℹ️ Pushing... (#{branch_name})"
+  `git push -u origin #{branch_name}`
+
+  # stash everything that isn't owned by the specified team
+  puts "ℹ️ Stash everything else"
+  `git stash`
+
+  # create draft pr with needed info, settings and reviewers
+  puts "ℹ️ Creating a PR for #{team}."
+  `gh pr create -d --body-file #{pr_body_file_path} -t "[codeowner: github/#{team}] #{pr_title}"`
+  puts "✅ Finished creating a PR for #{team}."
+end
+
+# move back to where we started
+`git checkout #{starting_branch}`

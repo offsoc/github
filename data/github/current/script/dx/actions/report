@@ -1,0 +1,101 @@
+#!/bin/bash
+
+log () {
+  [[ $silent == "true" ]] || echo "DX Actions Report: $1"
+}
+
+check_arguments () {
+  expected=$1
+  shift
+  command=$1
+  shift
+  actual=$#
+  if [[ $expected -ne $actual ]]; then
+    log "Invalid number of arguments for '$command'. Expected $expected arguments, got $actual."
+    exit 1
+  fi
+}
+
+add_entry () {
+  entry=""
+  while(($#)); do
+    entry="${entry}:$(echo -n "$1" | base64 -w0)"
+    shift
+  done
+  [ -f $report_file ] && [ -s $report_file ] && echo -n '&' >> $report_file
+  echo -n "${entry}" | sed 's/^://' >> $report_file
+}
+
+clear_report() {
+  rm -f $report_file
+  touch $report_file
+  chmod a+rw $report_file
+}
+
+read_report () {
+  [ -f $report_file ] && cat $report_file
+}
+
+output_report() {
+  echo "$1=$(read_report)" >> $output_file
+}
+
+report_file="/tmp/dx-actions-report"
+output_file=$GITHUB_OUTPUT
+silent=false
+
+while [[ $1 == --* ]]; do
+  case "$1" in
+    --report-file)
+      shift
+      report_file=$1
+      shift
+      ;;
+    --output-file)
+      shift
+      output_file=$1
+      shift
+      ;;
+    --silent)
+      shift
+      silent=true
+      ;;
+    *)
+      log "Unknown option '$1'"
+      exit 1
+      ;;
+  esac
+done
+
+case "$1" in
+  clear)
+    check_arguments 0 "$@"
+    log "Clearing report."
+    clear_report
+    ;;
+  read)
+    check_arguments 0 "$@"
+    log "Reading report."
+    read_report
+    echo
+    ;;
+  output)
+    check_arguments 1 "$@"
+    log "Writing report to output '$2'."
+    output_report $2
+    ;;
+  job-name|job-group|job-status|job-runtime|build-runtime|setup-runtime|test-runtime|job-start|job-end|build-start|build-end|test-start|test-end|test-slop)
+    check_arguments 1 "$@"
+    log "Reporting $1 as '$2'."
+    add_entry "$@"
+    ;;
+  test-failure|test-flake)
+    check_arguments 6 "$@"
+    log "Reporting $1 for '$2#$3'."
+    add_entry "$@"
+    ;;
+  *)
+    log "Unknown command '$1'"
+    exit 1
+    ;;
+esac

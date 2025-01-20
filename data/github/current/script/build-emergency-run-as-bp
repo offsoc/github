@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# This is intended to be run only in an emergency situation.
+# This script allows to build and push the deploy tarballs and docker images that are needed to deploy GitHub.
+
+# Prerequisites:
+
+# You will need have the docker images from the build pipelines project. To do so, do the following:
+# - git clone github.com:github/bp-agents
+# - cd bp-agents
+# - ./script/bootstrap
+#
+# NOTE: you must be connected to the VPN to be able to pull images.
+
+set -x
+
+IMAGE_LATEST=$(docker pull octofactory.githubapp.com/github-golden-docker/github-github:bootstrap | grep 'up to date')
+# fetch the golden image from octofactory
+if [ ! -f "../golden.tar" ] || [ -z "$IMAGE_LATEST" ]; then
+    rm -rf ../golden.tar || true
+    docker save octofactory.githubapp.com/github-golden-docker/github-github:bootstrap > ../golden.tar
+fi
+
+# setting -e only here because grep above could return 1 and fail the script
+set -e
+
+unset AWS_PROFILE
+awssume --uc moda-prod
+
+# run the bp image and build the artifacts. the docker image is pushed from inside this docker run
+docker run --privileged --rm -w /workspace \
+    -v "$(pwd)"/../golden.tar:/golden.tar \
+    -v "$(pwd)":/local-github \
+    -v ~/.aws/credentials:/root/.aws/credentials:ro \
+    -e BUILD_BRANCH="$(git rev-parse --symbolic-full-name --abbrev-ref HEAD)" \
+    -e AWS_DEFAULT_REGION="us-east-1" \
+    -e AWS_PROFILE="moda-prod" \
+    895557238572.dkr.ecr.us-east-1.amazonaws.com/build-pipelines-github-full /local-github/script/build-emergency-deploy-artifacts
+
+
+BUILD_HOST="github-builds-72d7b78.cp1-iad.github.net"
+# FIXME currently uploading to a single host to reduce upload time
+rsync --progress --ignore-existing --rsync-path 'sudo -u deploy rsync' -razv -e "ssh -o StrictHostKeyChecking=no" out/github $BUILD_HOST:/data/builds
+rsync --progress --ignore-existing --rsync-path 'sudo -u deploy rsync' -razv -e "ssh -o StrictHostKeyChecking=no" ssh out/moda $BUILD_HOST:/data/builds
+
+echo "Please enter your root password to delete leftovers."
+# erase previous content of the output directory
+sudo rm -rf out || true

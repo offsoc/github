@@ -1,0 +1,41 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-mysql [-v] [--check]
+#/ Show replication status.
+#/ In --check mode, act like a nagios check.
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+ensure_replica
+
+status=$(echo "show slave status\G" | sudo mysql -su root | tail -n+2)
+master_host=$(echo "$status" | grep Master_Host | awk '{print $2}')
+io_running=$(echo "$status" | grep Slave_IO_Running | head -1 | awk '{print $2}')
+sql_running=$(echo "$status" | grep Slave_SQL_Running | head -1 | awk '{print $2}')
+delay=$(echo "$status" | grep Seconds_Behind_Master | awk '{print $2}')
+
+if [ "$1" = "-v" ]; then
+  echo "$status"
+  exit 0
+elif [ $# -eq 0 ]; then
+  echo "IO running: $io_running, SQL running: $sql_running, Delay: $delay"
+  exit 0
+fi
+
+if [ -n "$io_running" ]; then
+  if [ "$io_running" != "Yes" -o "$sql_running" != "Yes" ]; then
+    echo "CRITICAL: mysql replication link is down"
+    exit 2 # CRITICAL
+  elif [ "$delay" -lt 10 ]; then
+    echo "OK: mysql replication is in sync"
+  elif [ "$delay" -gt 10 -a "$delay" -lt 120 ]; then
+    echo "WARNING: mysql replication delay is ${delay}s"
+    exit 1 # WARNING
+  elif [ "$delay" -gt 120 ]; then
+    echo "CRITICAL: mysql replication delay is ${delay}s"
+    exit 2 # CRITICAL
+  fi
+else
+  echo "UNKNOWN: mysql replication is not setup"
+  exit 3 # UNKNOWN
+fi

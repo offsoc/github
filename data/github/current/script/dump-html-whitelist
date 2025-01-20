@@ -1,0 +1,64 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require File.expand_path("../../config/environment", __FILE__)
+
+def protos_for(el, a, protocols:)
+  if p = protocols.fetch(el, {})[a].dup
+    relative = p.delete :relative
+    p.sort!
+    p.map! { |pr| "`#{pr}`" }
+    p << "relative" if relative
+    " (must be #{p[0..-2].join(", ")}#{p.length > 1 ? " or " : ""}#{p[-1]} URL)"
+  else
+    ""
+  end
+end
+
+w = GitHub::HTML::WHITELIST
+name_prefix = GitHub::Goomba::NAME_PREFIX
+
+# Mimic GitHub::Goomba::Sanitizer.from_whitelist.
+w[:elements] = w.fetch(:elements, []) - %w[h7 h8]
+
+# Mimic markdown_sanitizer definition in lib/github/goomba.rb.
+w[:require_any_attributes] = { "a" => %w[href id name] }
+
+elements = w.fetch(:elements, [])
+
+remove_contents = w.fetch(:remove_contents, [])
+attributes = w.fetch(:attributes, {})
+protocols = w.fetch(:protocols, {})
+require_any_attributes = w.fetch(:require_any_attributes, {})
+
+puts "Any allowed `id` and `name` attributes have `\"#{name_prefix}\"` prefixed to their value."
+puts
+puts "| Allowed Element | Allowed Attributes |"
+puts "| --- | --- |"
+
+if all_attributes = attributes.delete(:all)
+  print "| _All allowed elements_ | "
+  print all_attributes.sort.map { |a| "`#{a}`" }.join(", ")
+  print " |\n"
+end
+
+elements.sort.each do |el|
+  print "| `#{el}` | _As above_ "
+  if attrs = attributes[el]
+    print "plus "
+    print attrs.sort.map { |a| "`#{a}`" + protos_for(el, a, protocols: protocols) }.join(", ")
+    print " "
+  end
+  if remove_contents.include?(el)
+    print "— text and HTML content is removed, if any "
+  end
+  if raa = require_any_attributes[el]
+    print "— "
+    if raa.length == 1
+      print "`#{raa[0]}` attribute is required "
+    else
+      print "one of the following attributes is required: #{raa.map { |ra| "`#{ra}`" }.join(", ")} "
+    end
+  end
+  print "|\n"
+end

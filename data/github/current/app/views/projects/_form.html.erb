@@ -1,0 +1,156 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  url = project.new_record? ? projects_path(owner: project_owner) : project_path(project)
+  method = project.new_record? ? "post": "put"
+%>
+<%= form_tag url, method: method do %>
+  <input type="hidden" name="client_uid" class="js-client-uid-field">
+  <dl class="form-group">
+    <dt><label for="project_name">Project board name</label></dt>
+    <dd class="position-relative">
+      <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>">
+        <%= text_field_tag "project[name]",
+          project.name,
+          class: "form-control js-quick-submit required",
+          maxlength: 140,
+          autofocus: true,
+          "aria-label": "Project board name",
+          placeholder: "Project board name",
+          required: 'required' %>
+      </text-expander>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt><label for="project_body">Description <span class="note">(optional)</span></label></dt>
+    <dd class="position-relative">
+      <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>">
+        <%= text_area_tag "project[body]", project.body, class: "form-control long js-quick-submit", style: "height: 150px; min-height: 150px;" %>
+      </text-expander>
+    </dd>
+  </dl>
+
+  <% if project.new_record? %>
+    <div class="form-group my-4">
+      <p class="mb-1">
+        <strong>Project template</strong>
+      </p>
+      <p class="color-fg-muted">Save yourself time with a pre-configured project board template.</p>
+
+      <details class="d-flex d-md-block details-reset details-overlay select-menu">
+        <summary class="btn select-menu-button text-center flex-auto">
+          <i>Template:</i>
+          <span data-menu-button><%= selected_template ? ProjectTemplate.template_klass(selected_template).title : ProjectTemplate::DEFAULT.title %></span>
+        </summary>
+
+        <details-menu class="select-menu-modal position-absolute" style="z-index: 99;" aria-label="Template options"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <div class="select-menu-header">
+            <span class="select-menu-title">Templates</span>
+          </div>
+          <div class="select-menu-list">
+            <% ProjectTemplate.list.each do |template| %>
+              <label class="select-menu-item" tabindex="0" role="menuitemradio" aria-checked="<%= template.selected?(selected_template) %>">
+                <%= radio_button_tag "project_template", template.template_key, template.selected?(selected_template) %>
+                <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                <div class="select-menu-item-text">
+                  <span class="select-menu-item-heading" data-menu-button-text><%= template.title %></span>
+                  <span class="text-normal"><%= template.description %></span>
+                </div>
+              </label>
+            <% end %>
+          </div>
+        </details-menu>
+      </details>
+    </div>
+
+    <% if project_owner.is_a?(User) %>
+      <% if Project.owner_can_have_public_projects?(project_owner) %>
+        <% disabled = !Project.viewer_can_create_public_project?(viewer: current_user, project_owner: project_owner) %>
+        <div class="form-group my-4">
+          <p class="mb-0">
+            <strong>Visibility</strong>
+          </p>
+          <dl>
+            <dt>
+              <dd>
+                <div class="form-checkbox">
+                  <label>
+                    <%= radio_button_tag("project[public]", "true", false, disabled: disabled, data: test_selector_hash("public-project-option")) %>
+                    <%= public_project_label.capitalize %>
+                  </label>
+                  <p class="note">
+                    <% if disabled %>
+                      You may not create public projects by organization policy.
+                    <% else %>
+                      <%= public_project_description %>
+                    <% end %>
+                  </p>
+                </div>
+              </dd>
+
+              <dd>
+                <div class="form-checkbox">
+                  <label>
+                    <%= radio_button_tag("project[public]", "false", true, disabled: disabled, data: test_selector_hash("private-project-option")) %>
+                    Private
+                  </label>
+                  <p class="note">
+                    You choose who can see and make changes to this project.
+                  </p>
+                </div>
+              </dd>
+            </dt>
+          </dl>
+        </div>
+      <% else %>
+        <%= hidden_field_tag 'project[public]', false %>
+      <% end %>
+
+      <div class="form-group my-4">
+        <p class="mb-1">
+          <strong>Linked repositories</strong>
+        </p>
+
+        <p class="color-fg-muted">
+          Search <span class="text-bold"><%= project_owner.display_login %></span> to link repositories to this project for more accurate suggestions and better search results.
+        </p>
+
+        <div class="js-project-create-linked-repo-search-input-group">
+          <auto-complete
+              src="<%= project_linkable_repositories_path(project_owner) %>"
+              for="project-repository-links-search"
+              class="auto-search-group d-block d-md-inline-block js-project-create-repo-link-auto-complete">
+            <input
+              type="text"
+              class="form-control auto-search-input input-contrast mr-0 js-project-create-linked-repo-search"
+              aria-label="Search by repository name"
+              placeholder="Search by repository name"
+              autofocus>
+            <%= render(Primer::Beta::Octicon.new(icon: "repo")) %>
+            <ul id="project-repository-links-search" class="autocomplete-results"></ul>
+          </auto-complete>
+        </div>
+
+        <div class="d-none color-fg-danger ml-1 js-project-create-linked-repo-max" data-max="<%= Project::MAX_REPOSITORY_LINKS %>"><%= render(Primer::Beta::Octicon.new(icon: "alert")) %> You've reached the limit of <%= Project::MAX_REPOSITORY_LINKS %> linked <%= "repository".pluralize(Project::MAX_REPOSITORY_LINKS) %>.</div>
+
+        <div class="js-project-create-linked-repo-list mt-2">
+          <%= primer_octicon(:link) %>
+          Linked repositories:
+          <% if selected_repositories&.any? %>
+            <% selected_repositories.each do |repository| %>
+              <%= render partial: "project_repository_links/repository_results_badge", locals: { repository: repository, hidden: false } %>
+            <% end %>
+          <% else %>
+            <span class="color-fg-muted js-blankslate">None yet!</span>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+    <hr>
+  <% end %>
+
+  <div class="form-actions d-flex d-md-block mb-4">
+    <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, float: [:none, nil, :left], flex: :auto, "data-disable-invalid": "", "data-disable-with": "Saving project…") do %><%= project.new_record? ? "Create" : "Save" %> project<% end %>
+  </div>
+<% end %>

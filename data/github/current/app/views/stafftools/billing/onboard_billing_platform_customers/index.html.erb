@@ -1,0 +1,192 @@
+<% page_info title: "Current Billing Platform Customers" %>
+<%= render layout: "stafftools/stafftools" do %>
+
+
+  <%= render Primer::Beta::Subhead.new(display: :flex, justify_content: :space_between) do |component| %>
+    <% component.with_heading(tag: :h2) do %>
+      Current Billing Platform Customers
+    <% end %>
+    <% component.with_actions do %>
+      <%= link_to "Onboard Customers", new_stafftools_billing_onboard_billing_platform_customer_path, class: "btn" %>
+    <% end %>
+  <% end %>
+
+
+  <%= render Primer::Box.new(display: :flex) do %>
+    <%= form_with(url: stafftools_billing_onboard_billing_platform_customers_path, method: :get) do |form| %>
+      <div class="auto-search-group mb-2">
+        <input class="form-control input-contrast auto-search-input"
+          type="text"
+          name="customer_id"
+          value="<%= params[:customer_id] %>"
+          placeholder="Find a customer by id"
+          aria-label="Find a customer by id…"
+          autocomplete="off"
+          data-throttled-autosubmit>
+        <%= render Primer::Beta::Octicon.new(icon: "search") %>
+        <% if params[:product].present? %>
+          <input type="hidden" name="product" value="<%= params[:product] %>" data-throttled-autosubmit>
+        <% end %>
+      </div>
+
+      <% if params[:customer_id].present? %>
+        <div class="mb-2">
+          <%= link_to stafftools_billing_onboard_billing_platform_customers_path(product: params[:product].presence), class: "text-bold color-fg-muted" do %>
+            <%= render(Primer::Beta::Octicon.new(icon: :x, color: :muted)) %>
+            Clear current search query
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <%= render Primer::Alpha::ActionMenu.new(menu_id: "product-filter-menu", select_variant: :single, dynamic_label: true, ml: 2) do |menu| %>
+      <% menu.with_show_button do |button| %>
+        <% button.with_trailing_action_icon(icon: :"triangle-down") %>
+        <% "Product" %>
+      <% end %>
+      <% menu.with_item(active: params[:product].nil?, tag: :a, href: stafftools_billing_onboard_billing_platform_customers_path(customer_id: params[:customer_id].presence)) do %>
+        All products
+      <% end %>
+      <% product_options = products.map { |product| product.serialize } %>
+      <% product_options.each do |product_option| %>
+        <% menu.with_item(active: product_option == params[:product], tag: :a, href: stafftools_billing_onboard_billing_platform_customers_path(product: product_option, customer_id: params[:customer_id].presence)) do %>
+          <%= product_option.humanize %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <div class="mb-2">
+    Customers onboarded: <%= render Primer::Beta::Counter.new(count: customers.total_entries, limit: nil, scheme: :default) %>
+  </div>
+
+  <% if customers.length > 0 %>
+    <%= render(Primer::Beta::BorderBox.new(overflow: :hidden)) do |box| %>
+      <% box.with_body(p: 0, overflow: :hidden) do %>
+        <table class="stafftools-table">
+          <thead>
+            <th class="p-3">Customer ID</th>
+            <th class="p-3">Customer Name</th>
+            <th class="p-3">Customer Type</th>
+            <th class="p-3">Products Enabled in BP</th>
+            <th class="p-3">Products Enabled in Dotcom</th>
+            <th class="p-3">Migration Date?</th>
+          </thead>
+          <tbody>
+            <% customers.each do |customer| %>
+            <% billable_owner = customer.billable_owner %>
+              <tr>
+                <td class="p-3">
+                  <%= customer.id %>
+                </td>
+                <td class="p-3 wb-break-word width-md-auto">
+                  <% if billable_owner.is_a?(Business) %>
+                    <%= link_to(customer.business.name, stafftools_enterprise_path(customer.business)) %>
+                  <% elsif billable_owner.is_a?(User) %>
+                    <%= link_to(customer.name, stafftools_user_path(customer.billable_owner)) %>
+                  <% else %>
+                    &nbsp;
+                  <% end %>
+                </td>
+                <td class="p-3">
+                  <% if billable_owner.is_a?(Business) %>
+                    Enterprise
+                  <% elsif billable_owner.is_a?(Organization) %>
+                    Organization
+                  <% elsif billable_owner.is_a?(User) %>
+                    User
+                  <% else %>
+                    &nbsp;
+                  <% end %>
+                </td>
+                <td class="p-3 width-md-auto" <%= test_selector("#{customer.id}-bp-status") %> >
+                  <% if bp_customers[customer.id].present? && bp_customers[customer.id][:enabledProducts].any? %>
+                    <% bp_customers[customer.id][:enabledProducts].sort.each do |product| %>
+                      <%= render Primer::Beta::Label.new(
+                        title: product.humanize,
+                        scheme: customer.billing_platform_enabled_product&.all_enabled_products&.include?(product) ? :success : :secondary,
+                        test_selector: "collection-featured-badge",
+                      ) do %>
+                        <%= product %>
+                        <% unless Stafftools::Billing::OnboardBillingPlatformCustomersController::UNSUPPORTED_OFFBOARD_PRODUCTS.include?(product) %>
+                          <%= button_to(
+                            stafftools_billing_onboard_billing_platform_customer_path(customer.id),
+                            method: :delete,
+                            params: { customer_id: customer.id, product: product },
+                            class: "btn-link btn-danger",
+                            form_class: "btn-link",
+                            title: "Offboard",
+                            "aria-label": "Offboard #{customer.name} from #{product}",
+                            data: { :confirm => "Are you sure you want to offboard #{customer.name}? from #{product.humanize}", "disable-with" => "Offboarding" }
+                          ) do %>
+                            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+                          <% end %>
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  <% elsif bp_customers[customer.id].present? && bp_customers[customer.id][:enabledProducts].empty? %>
+                    No products enabled
+                  <% else %>
+                    Customer not found in BP
+                  <% end %>
+                </td>
+
+                <td class="p-3 width-md-auto" <%= test_selector("#{customer.id}-dotcom-status") %>>
+                  <% if customer.billing_platform_enabled_product&.all_enabled_products&.any? %>
+                    <% customer.billing_platform_enabled_product.all_enabled_products.sort.each do |product| %>
+                      <%= render Primer::Beta::Label.new(
+                        title: product.humanize,
+                        scheme: bp_customers.dig(customer.id, :enabledProducts)&.include?(product) ? :success : :secondary,
+                        test_selector: "collection-featured-badge",
+                      ) do %>
+                        <%= product %>
+                        <% unless Stafftools::Billing::OnboardBillingPlatformCustomersController::UNSUPPORTED_OFFBOARD_PRODUCTS.include?(product) %>
+                          <%= button_to(
+                            stafftools_billing_onboard_billing_platform_customer_path(customer.id),
+                            method: :delete,
+                            params: { customer_id: customer.id, product: product },
+                            class: "btn-link btn-danger",
+                            form_class: "btn-link",
+                            title: "Offboard",
+                            "aria-label": "Offboard #{customer.name} from #{product}",
+                            data: { :confirm => "Are you sure you want to offboard #{customer.name}? from #{product.humanize}", "disable-with" => "Offboarding" }
+                          ) do %>
+                            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+                          <% end %>
+                        <% end %>
+                      <% end %>
+
+                    <% end %>
+                  <% else %>
+                    No products enabled
+                  <% end %>
+                </td>
+
+                <td class="p-3 width-md-auto" <%= test_selector("#{customer.id}-migration-date") %>>
+                  <% if customer&.billing_platform_enabled_product&.migration_date %>
+                    <%= customer.billing_platform_enabled_product.migration_date %>
+                  <% else %>
+                    N/A
+                  <% end %>
+                </td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      <% end %>
+    <% end %>
+
+    <% if customers.total_pages > 1 %>
+      <nav class="paginate-container" aria-label="Billing platform customers pagination">
+        <%= will_paginate(customers) %>
+      </nav>
+    <% end %>
+
+  <% elsif params[:customer_id].present? && customers.empty? %>
+    Could not find a billing platform customer for that query
+  <% elsif params[:product].present? && customers.empty? %>
+    <%= "No billing platform customers are onboarded to #{params[:product].humanize}" %>
+  <% else %>
+   There are currently no customers on billing platform
+  <% end %>
+<% end %>

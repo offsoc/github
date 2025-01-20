@@ -1,0 +1,169 @@
+<turbo-frame id="bypass-reviewers-frame">
+  <div <%= test_selector("secret-scanning-delegated-bypass-settings")%>>
+    <%= render(Primer::Beta::BorderBox.new(mb: 4)) do |component| %>
+      <%= component.with_body do %>
+        <div class="d-flex flex-md-row flex-column flex-md-items-center">
+          <div class="mb-md-0 flex-auto">
+            <h5>Who can bypass push protection for secret scanning</h5>
+          </div>
+          <div class="flex-shrink-0">
+            <div class="BtnGroup flex-auto">
+              <% if org_enabled %>
+                <%= render(Primer::Beta::Button.new(
+                  scheme: :secondary,
+                  disabled: true,
+                  test_selector: "secret-scanning-delegated-bypass-disabled-enablement",
+                )) do %>
+                  <%= enablement_display_option %>
+                <% end %>
+              <% else %>
+                <details class="dropdown details-reset details-overlay" <%= test_selector("secret-scanning-delegated-bypass-enablement") %>>
+                  <%= render(Primer::Beta::Button.new(
+                    tag: :summary,
+                    "aria-haspopup": true
+                  )) do |c| %>
+                    <% c.with_trailing_action_icon(icon: "triangle-down") %>
+                    <%= enablement_display_option %>
+                  <% end %>
+                  <div class="SelectMenu">
+                    <div class="SelectMenu-modal">
+                      <div class="SelectMenu-list" role="menu">
+                        <% delegated_bypass_choices.each do |key, description| %>
+                          <%= button_to(update_path,
+                            class: "SelectMenu-item",
+                            "aria-checked": enablement_selection == key,
+                            data: test_selector_hash(key),
+                            role: "menuitemradio",
+                            method: :put,
+                            params: { display_option: key },
+                            ) do %>
+                              <input
+                                type="hidden"
+                                name="token_scanning_delegated_bypass_enabled"
+                                value="<%= key == :delegated_bypass_enabled ? 1 : 0 %>"
+                                id="token_scanning_delegated_bypass_enabled"
+                              >
+                              <%= render(Primer::Beta::Octicon.new(icon: "check", classes: "SelectMenu-icon SelectMenu-icon--check")) %>
+                              <%= description %>
+                            <% end %>
+                        <% end %>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+    <% if delegated_bypass_enabled %>
+      <div class="mb-3" <%= test_selector("secret-scanning-delegated-bypass-reviewers")%>>
+        <div class="d-flex flex-md-row flex-column flex-md-items-center pb-3 py-2">
+          <div class="mb-md-0 mb-2 mr-2 flex-auto">
+            <div>
+              <%= render(Primer::Beta::Text.new(classes: "h4")) { "Bypass list" } %>
+              <%= render(GitHub::BetaFlagComponent.new(px: 2)) %>
+            </div>
+            Grant specific roles or teams the ability to bypass push protection and review bypass requests.
+            Everyone else will need to submit a request to bypass push protection.
+            <%= render(Primer::Beta::Link.new(
+              href: helpers.docs_url("code-security/about-delegated-bypass-for-push-protection"),
+              classes: "Link--inTextBlock",
+            )) { "Learn more about bypass lists" } %>.
+          </div>
+          <div class="flex-shrink-0">
+            <div class="BtnGroup flex-auto">
+              <% if org_enabled %>
+                <%= render(Primer::Beta::Button.new(
+                  scheme: :secondary,
+                  disabled: true,
+                  test_selector: "secret-scanning-delegated-bypass-disabled-add-button",
+                )) do %>
+                  Add role or team
+                <% end %>
+              <% else %>
+                <%= helpers.render_react_partial name: "secret-scanning-bypass-reviewers-dialog", props: {
+                  baseAvatarUrl: GitHub.alambic_avatar_url,
+                  enabledBypassActors: enabled_bypass_actors,
+                  addBypassReviewerPath: add_reviewers_path,
+                  initialSuggestions: suggested_bypass_reviewers,
+                  suggestionsUrl: suggested_reviewers_path,
+                  ownerId: @source.id,
+                  ownerScope: @source.is_a?(Organization) ? :ORGANIZATION_SCOPE : :REPOSITORY_SCOPE
+                }, ssr: true %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+        <%= render(Primer::Beta::BorderBox.new) do |component| %>
+          <% component.with_header do |h| %>
+            <% h.with_title(tag: :h4) do %>
+              <%= pluralize(type_count(:ROLE), "role") %> and <%= pluralize(type_count(:TEAM), "team") %>
+            <% end %>
+          <% end %>
+          <% if current_reviewers.length > 0 %>
+            <% current_reviewers.each_with_index do |reviewer, idx| %>
+              <% component.with_row(display: :flex, align_items: :center) do %>
+                <div>
+                  <% if reviewer[:reviewer_type] == :TEAM %>
+                    <%= render(Primer::Beta::Avatar.new(
+                      src: reviewer[:preferred_avatar_url],
+                      alt: "avatar for #{reviewer[:name]}",
+                      size: 16,
+                    )) %>
+                    <%= render(Primer::Beta::Text.new(font_weight: :bold, ml: 2, mr: 2)) { reviewer[:name] } %>
+                    <%= render(Primer::Beta::Text.new(color: :muted, font_size: :small)) { "#{reviewer[:reviewer_type].capitalize} • @#{reviewer[:name]}" } %>
+                  <% else %>
+                    <%= render(Primer::Beta::Octicon.new(icon: (role_icon_map[reviewer[:name].to_sym] || :eye), color: :muted)) %>
+                    <%= render(Primer::Beta::Text.new(font_weight: :bold, ml: 2, mr: 2)) { reviewer[:name] } %>
+                    <%= render(Primer::Beta::Text.new(color: :muted, font_size: :small)) { "#{reviewer[:reviewer_type].capitalize}" } %>
+                  <% end %>
+                </div>
+                <div class="ml-auto mr-1">
+                  <%= form_tag(remove_reviewers_path, :method => :delete, data: { pjax: true, turbo: true, turbo_frame: "bypass-reviewers-frame", turbo_action: "replace" }) do %>
+                    <input type="hidden" name="owner_id" value="<%= @source.id %>" id="owner_id">
+                    <input type="hidden" name="owner_scope" value="<%= @source.is_a?(Organization) ? :organization : :repository %>" id="owner_scope">
+                    <%= render(Primer::Beta::IconButton.new(
+                      icon: :trash,
+                      "aria-label": "Delete",
+                      type: :submit,
+                      name: "bypass_reviewer_id",
+                      value: reviewer[:id],
+                      disabled: org_enabled,
+                      scheme: :invisible,
+                      show_tooltip: false,
+                    )) %>
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
+          <% else %>
+            <% component.with_body do %>
+              <%= render(Primer::Beta::Blankslate.new(test_selector: "secret-scanning-delegated-bypass-reviewers-empty")) do |component| %>
+                <% component.with_heading(tag: :h3).with_content("Bypass list is empty") %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+        <% if current_reviewers.length == 0 %>
+          <div class="mt-2" <%= test_selector("secret-scanning-delegated-bypass-empty-reviewers-warning")%>>
+            <%= render(Primer::Beta::Octicon.new(icon: :alert, color: :attention)) %>
+            <%= render(Primer::Beta::Text.new(color: :attention)) { "The bypass list must have at least one role or team. If empty, anyone with write access can bypass." } %>
+          </div>
+        <% elsif hollow_reviewers %>
+          <div class="mt-2" <%= test_selector("secret-scanning-delegated-bypass-hollow-reviewers-warning")%>>
+            <%= render(Primer::Beta::Octicon.new(icon: :alert, color: :attention)) %>
+            <%= render(Primer::Beta::Text.new(color: :attention)) { "The selected bypass reviewer options don't have any members." } %>
+          </div>
+        <% end %>
+        <% if org_enabled %>
+          <div class="mt-2" <%= test_selector("secret-scanning-delegated-bypass-org-enabled-warning")%>>
+            <%= render(Primer::Beta::Octicon.new(icon: :alert, color: :muted)) %>
+            <%= render(Primer::Beta::Text.new(color: :muted)) { "This setting has been set by organization administrators." } %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+</turbo-frame>

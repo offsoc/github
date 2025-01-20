@@ -1,0 +1,73 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+#/ Usage: ghe-es-dump-json 'http://localhost:9200/audit_log*' > dump.json
+require "rubygems"
+require "net/http"
+require "json"
+require "uri"
+
+if ARGV.size < 1
+  puts File.read(__FILE__).lines.select { |l| l =~ /^#\// }.map { |l| l[3, l.size] }.join("\n")
+  exit 1
+end
+
+url = ARGV[0]
+uri = URI.parse(url)
+
+Net::HTTP.start(uri.host, uri.port) do |http|
+  # Get initial pit id
+  pit_url =  URI.parse(url)
+  pit_url.path <<  "/_pit"
+  pit_url.query ||= ""
+  pit_url.query << "keep_alive=1m"
+  request = Net::HTTP::Post.new(pit_url)
+  response = http.request request
+  body = JSON.parse(response.body)
+  pit_id = body["id"]
+
+  # delete pit on exit
+  at_exit do
+   pit_url.query = ""
+   request = Net::HTTP::Delete.new(pit_url)
+   request.body = JSON.generate({"id" => pit_id})
+  end
+
+  # search
+  uri.path =  "/_search"
+  uri.query ||= ""
+  uri.query << "&" unless uri.query.empty?
+
+  search_after = nil
+
+  loop do
+    request_body = {"size" => 10_000, "sort" => [{"_shard_doc" => "desc"}], "pit" => {"id" => pit_id, "keep_alive" => "1m"}}
+    request_body["search_after"] = search_after unless search_after.nil?
+    request = Net::HTTP::Post.new(uri)
+    request.body = JSON.generate(request_body)
+    request["Content-Type"] = "application/json"
+    response = http.request request
+    body = JSON.parse(response.body)
+
+    if body["hits"].nil?
+      STDERR.puts(body.inspect)
+      exit 1
+    end
+    hits = body["hits"]["hits"]
+    break if hits.empty?
+
+    pit_id = body["pit_id"]
+    search_after = hits.last["sort"]
+
+    hits.each do |hit|
+      hit.delete("sort")
+      hit.delete("_score")
+      begin
+        STDOUT.puts JSON.dump(hit)
+      rescue Errno::EPIPE
+        exit 0
+      rescue => e
+        STDERR.puts "DUMP ERROR: #{e.message} (#{e.class})"
+        STDERR.puts hit.inspect
+      end
+    end
+  end
+end

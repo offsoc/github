@@ -1,0 +1,179 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  org_param = is_org_level? ? this_organization&.to_param : nil
+  page_info title: "New Discussion · #{ is_org_level? ? this_organization.display_login : current_repository.name_with_display_owner }",
+    container_xl: true,
+    selected_link: :repo_discussions
+%>
+<%= render layout: "discussions/conditional_discussions_layout" do %>
+  <%= form_with model: discussion, url: discussions_path(user_id: current_repository.owner_display_login, repository: current_repository.name), id: "new_discussion" do |f| %>
+    <%= spamurai_form_signals %>
+    <% layout_data_attributes = {
+        "data-discussion-hovercards-enabled": true,
+        "data-issue-and-pr-hovercards-enabled": true,
+        "data-project-hovercards-enabled": true } %>
+    <%= render(Primer::Alpha::Layout.new(first_in_source: :main, **layout_data_attributes)) do |component| %>
+      <% component.with_sidebar(col_placement: :end, row_placement: :end, width: :narrow) do %>
+        <section aria-labelledby="discussion-options-section">
+          <%= render(Primer::Beta::Heading.new(tag: :h2, classes: "sr-only", id: "discussion-options-section")) { "Discussion options" } %>
+          <% if viewer_can_label || discussion.labels.any? %>
+            <%= render Discussions::LabelsComponent.new(
+              repository: current_repository,
+              discussion: discussion,
+              can_edit_labels: viewer_can_label,
+              defer_menu_content: true,
+              org_param: org_param,
+            ) %>
+          <% end %>
+          <% unless current_user.must_verify_email? %>
+            <%= render "discussions/helpful_resources" %>
+          <% end %>
+          <% if show_first_time_contributor_sidebar_for?(contribution_type: Discussion) %>
+            <%= render "discussions/first_time_contributor" %>
+          <% end %>
+          <% if welcome_message %>
+            <%= render "discussions/welcome_message" %>
+          <% end %>
+        </section>
+      <% end %>
+      <% component.with_main do %>
+        <% if emu_contribution_blocked?(current_repository) %>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+            <%= emu_contribute_block_warning %>
+          <% end %>
+      <% elsif current_user.must_verify_email? %>
+        <%= render partial: "issues/no_verified_email_message" %>
+      <% else %>
+        <div class="timeline-comment-wrapper timeline-new-comment composer composer-responsive">
+          <% if User::InteractionAbility.interaction_allowed?(user: current_user, repository: current_repository) %>
+            <%= render(Primer::Beta::Heading.new(tag: :h1, font_size: 2, mb: 2)) { "Start a new discussion" } %>
+            <%= render(Primer::Box.new) do %>
+              <%= render(Primer::Box.new(display: :flex, align_items: :center)) do %>
+                <%= render(Primer::Box.new(display: :flex, justify_content: :center, bg: :subtle, border_radius: 2, flex_shrink: 0, style: "width: 42px; height: 42px;")) do %>
+                  <%= render(Primer::Box.new(display: :flex, align_items: :center, color: :muted)) do %>
+                    <%= discussion_category_emoji_tag(discussion.category, classes: "f3") %>
+                  <% end %>
+                <% end %>
+                <%= render(Primer::Box.new(display: :flex, direction: :column, p: 2, test_selector: "category-header-name")) do %>
+                  <%= render(Primer::Beta::Truncate.new(font_weight: :bold, font_size: 4)) do |component| %>
+                    <% component.with_item(max_width: 210) do %>
+                      <% if discussion.category.supports_announcements? %>
+                        <%= render(Primer::Beta::Octicon.new(icon: "lock", aria: { label: "Restricted" })) %>
+                      <% end %>
+                      <%= discussion.category.name %>
+                    <% end %>
+                  <% end %>
+                  <%= render(Primer::Beta::Text.new(word_break: :break_word, font_size: 5)) { discussion.category.description } %>
+                  <% if discussion.category.supports_mark_as_answer? %>
+                  <%= render(Primer::Beta::Text.new(font_weight: :bold, color: :success,  font_size: 5)) { "Answers enabled" } %>
+                  <% end %>
+                <% end %>
+              <% end %>
+              <%= render(Primer::Beta::Text.new(tag: :p, font_size: 6, mt: 2)) do %>
+                If this doesn’t look right you can
+                <%= render Primer::Beta::Link.new(
+                  href: agnostic_choose_category_discussion_path(current_repository, org: is_org_level? ? this_organization : nil),
+                  classes: "Link--inTextBlock",
+                  test_selector: "choose-category-link",
+                ).with_content("choose a different category.") %>
+              <% end %>
+            <% end %>
+            <div>
+              <div class="d-md-flex flex-column discussion-topic-header p-0 py-md-2 mb-3 mb-md-0">
+                  <%= f.hidden_field(:category_id) %>
+                  <div
+                    class="<%= class_names(
+                      "js-remove-error-state-on-click width-full m-0",
+                      "errored" => discussion.errors[:title].present?,
+                    ) %>"
+                  >
+                    <%= render(Primer::Beta::Heading.new(tag: :h2, font_size: 4, mb: 2, id: "discussion_title_header")) do %>
+                      Add a title
+                    <% end %>
+                    <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>" class="position-relative">
+                      <%= f.text_field(:title,
+                        class: class_names(
+                          "required title js-session-resumable width-full mb-3",
+                          "FormControl-input FormControl-large",
+                          "valid" => f.object.title.present?
+                        ),
+                        id: "js-discussion-title",
+                        error: false,
+                        required: true,
+                        autofocus: true,
+                        autocomplete: "off",
+                        placeholder: "Title",
+                        "aria-labelledby": "discussion_title_header",
+                        "aria-describedby": "title-input-validation",
+                      ) %>
+                    </text-expander>
+                    <% if discussion.errors[:title].present? %>
+                      <p class="note error" id="title-input-validation">
+                        <%= discussion.errors.full_messages_for(:title).to_sentence %>
+                      </p>
+                    <% end %>
+                  </div>
+                </div>
+
+                <div class="js-slash-command-surface">
+                  <% if discussion.template.blank? || !discussion.template.valid? %>
+                    <%= render(Comments::PreviewableCommentFormComponent.new(
+                      show_discussion_validation_errors: true,
+                      body: discussion.body,
+                      field_name: "discussion[body]",
+                      textarea_id: "discussion_body",
+                      required: true,
+                      placeholder: "Ask a question, start a conversation, or make an announcement",
+                      subject: discussion,
+                      current_repository: current_repository,
+                      slash_commands_enabled: SlashCommands::DISCUSSION_SURFACE,
+                      use_fixed_width_font: current_user.use_fixed_width_font?,
+                      local_storage_resumable: current_user.feature_enabled?(:local_storage_resumable_discussion_posts),
+                      session_resumable: !current_user.feature_enabled?(:local_storage_resumable_discussion_posts)
+                    )) do |component| %>
+                      <% component.with_header(tag: :h2, text: "Add a body") %>
+                    <% end %>
+                    <% if discussion.category&.supports_polls? %>
+                      <%= render(Discussions::PollFormComponent.new(
+                        discussion: discussion,
+                        category: discussion.category,
+                      ))%>
+                    <% end %>
+                  <% else %>
+                    <div class="d-block p-0 p-md-3" <%= test_selector("discussion-form-component") %>>
+                      <%= render StructuredTemplates::TemplateComponent.new(
+                        template: discussion.template,
+                        templatable: discussion
+                      ) %>
+                    </div>
+                    <div class="comment-form-error js-comment-form-error" role="alert" <% if discussion.errors.empty? %>hidden<% end %>>
+                      There was an error creating your discussion<%= ": " + discussion.errors.full_messages.join(", ").downcase if discussion.errors.any? %>.
+                    </div>
+                  <% end %>
+                  <%= render Discussions::DuplicatePreventionComponent.new(
+                    user: current_user,
+                    repository: current_repository,
+                    org_param: org_param,
+                  ) %>
+                  <div class="flex-items-center flex-justify-end d-md-flex my-3">
+                    <%= render(Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :primary,
+                    data: { disable_with: "" },
+                  )) { "Start discussion" } %>
+                  </div>
+                </div>
+              </div>
+            <% else %>
+              <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+                <%= interaction_ban_copy(current_repository, current_user, "open a discussion") %>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+  <%= render partial: "issues/label_creation_modal", locals: { model: discussion } %>
+<% end %>

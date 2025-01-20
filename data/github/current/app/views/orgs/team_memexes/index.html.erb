@@ -1,0 +1,79 @@
+<%
+  page_info(
+    title: "#{team.name} · #{organization.name} Team",
+    class: "team",
+    dashboard_pinnable_item_id: team.id
+  )
+
+  is_templates_selected = show_templates_index && params[:query]&.include?("is:template")
+  selected_item_id = if is_templates_selected
+    Memex::UIIndexSearch::Categories::Templates
+  elsif params[:type] == "classic"
+    Memex::UIIndexSearch::Categories::Classic
+  else
+    Memex::UIIndexSearch::Categories::Projects
+  end
+  org_projects_disabled = !project_owner.organization_projects_enabled?
+  index_navigation_component_options = {
+    selected_item_id: selected_item_id.serialize,
+    beta_path: team_projects_path(type: "new"),
+    classic_path: disable_classic_projects ? nil : team_projects_path(type: "classic"),
+    template_path: show_templates_index ? team_projects_path(query: "is:open is:template") : nil
+  }
+%>
+
+<div class="<%= class_names(
+  "clearfix container-xl",
+  "d-flex flex-column flex-auto" => full_height?,
+  "px-3 px-md-4 px-lg-5" => !full_height? && !skip_responsive_padding?,
+  "p-0" => !(!full_height? && !skip_responsive_padding?),
+  "mt-4" => !full_height?
+) %>">
+  <%= render Memex::IndexHeadingComponent.new(
+      project_owner: current_user,
+      team: team,
+      search_category: selected_item_id
+    )
+  %>
+
+  <%= render Memex::ProjectListContainerComponent.new(
+      project_owner: project_owner,
+      index_navigation_component_options: index_navigation_component_options,
+    ) do %>
+      <%= render Memex::ProjectListComponent.new(
+        context: Team,
+        projects: org_projects_disabled ? [] : memexes,
+        owner: project_owner,
+        is_recent_selected: false,
+        has_next_page: has_next_page,
+        cursor: cursor,
+        sort_query_cursor: sort_query_cursor,
+        parsed_query: parsed_query,
+        open_memex_count: open_memex_count,
+        closed_memex_count: closed_memex_count,
+        team: team,
+        load_more_path: team_projects_beta_path,
+        write_accessible_project_ids: write_accessible_project_ids,
+      ) do |list| %>
+        <%= list.with_controls do %>
+          <%= render Primer::Box.new(ml: 0, flex: :auto) do %>
+            <%= primer_form_with(method: :get) do |f| %>
+              <%= render Memex::ProjectList::SearchForm.new(f, parsed_query: parsed_query, context: Team) %>
+            <% end %>
+          <% end %>
+          <%= render Memex::ProjectList::AddOrLinkProjectButtonContainerComponent.new(
+            context: Team,
+            team: team,
+            owner: project_owner,
+            multiselect: false,
+            tooltip: "Only projects that you are an admin of can be searched for and added to a team",
+            is_template: is_templates_selected,
+            ui: MemexStats::UIValues::TeamIndex,
+          ) do |link| %>
+            <%= link.with_link_interstitial(scheme: "primary").with_content("This team currently has no access permissions on this project. To provide access to the project, the team #{ team.name } will be added as a collaborator with read permissions.") %>
+            <%= link.with_unlink_interstitial(scheme: "danger").with_content("This team currently has access permissions to this project. If this project is removed, \"#{ team.name }\" access will be revoked and the team will no longer be able to access the project.") %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+</div>

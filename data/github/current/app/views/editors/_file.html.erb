@@ -1,0 +1,186 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# rubocop:disable GitHub/DeprecatedViewHelpers %>
+<%= file_attachment_tag(model: :assets,
+                        class: "js-upload-markdown-image is-default file-editor-upload",
+                        input: "blob-dragged-file-input",
+                        enabled: !workflow_yaml_file? && !dev_container_file?,
+                        data: { "upload-repository-id" => current_repository&.id, "upload-container-type" => "blob", "upload-container-id" => current_repository&.id }) do %>
+  <% load_blob_editor_configs!(current_commit, view.blob) if view.blob %>
+
+  <%# `view` is [Blob or Gist]::EditorView %>
+  <blob-editor data-simplediff-enabled="<%= view.show_simple_diff? ? "true" : "false" %>"
+    class="js-file file <% if view.editable? %>js-code-editor<% end %> container-preview <%= view.default_tab %> <%= "mt-0 position-relative d-flex flex-column flex-auto overflow-hidden" if blob_fullwidth? %> <%= "js-mobile-code-editor" if responsive? && mobile? %><% if view.gist? && responsive? %> mx-0<% else %> <%= "mx-lg-3" unless workflow_yaml_file? || dev_container_file? || issue_form_template_file? || custom_slash_command? || discussion_template_file? %><% end %> <%= "issue-template-editor " if issue_form_template_file? || discussion_template_file? %>"
+    data-github-confirm-unload="<%= view.try(:confirm_unload) %>"
+    data-is-gist="<%= view.gist? %>"
+    discovered-secrets="<%= flash[:secret_detected] && view.detected_secrets ? view.detected_secrets.to_json : nil %>"
+    data-hpc>
+    <div class="file-header <%= " d-flex flex-items-center pr-0" if responsive? %><%= " pr-3 wants-full-width-container flex-shrink-0" if blob_fullwidth? %><%= " mb-4" if responsive? && mobile? %>">
+      <%
+        navigation = if view.new_file?
+          then {
+              edit_text: "Edit new file",
+              preview_text: "Preview",
+          }
+          else {
+            edit_text: "Edit file",
+            preview_text: view.show_simple_diff? ? "Preview" : "Preview changes",
+          }
+          end
+      %>
+
+        <% if view.gist? %>
+          <%= render "editors/gist_header", view: view %>
+        <% end %>
+        <div class="tabnav-tabs js-file-editor-nav
+          <%= responsive? ? "d-flex flex-auto d-md-block": "float-left" %>
+          <%= view.gist? ? "pl-3": "" %>"
+          <% if view.gist? && !view.markdown_file? %>
+            hidden
+          <% end %>>
+
+          <button type="button" class="btn-link code
+            <%= "px-3 px-sm-6 px-lg-3 flex-1 flex-md-auto" if responsive? %>
+            <%= "selected" %>
+            tabnav-tab js-blob-edit-code js-blob-edit-tab
+            <%= " rounded-0" if view.gist? %>"
+            aria-current="true"
+            data-tab="show-code">
+            <%= render(Primer::Beta::Octicon.new(:code)) %>
+            <%= navigation.fetch(:edit_text) %>
+          </button>
+          <button type="button" class="<%= "flex-1 flex-md-auto" if responsive? %> btn-link preview tabnav-tab js-blob-edit-preview js-blob-edit-tab"
+            data-tab="preview">
+            <%= render(Primer::Beta::Octicon.new(:eye)) %>
+            <%= navigation.fetch(:preview_text) %>
+          </button>
+        </div>
+
+        <% if view.show_simple_diff? && !(responsive? && mobile?) %>
+          <div hidden class="preview-actions d-none d-md-flex<%= " px-3 px-lg-3" if responsive? %><%= " mr-1" if blob_fullwidth? %>">
+            <div class="form-checkbox my-0">
+              <label>
+                <input class="js-preview-diff-toggle" type="checkbox"> Show diff
+              </label>
+            </div>
+          </div>
+        <% end %>
+
+        <% if view.show_file_actions? && !(responsive? && mobile?) %>
+          <div class="file-actions d-none d-md-flex
+            <%= " px-3 pr-md-6 px-lg-2" if responsive? %>
+            <%= " mr-1" if blob_fullwidth? %>
+            <%= " ml-auto" if view.gist? %>
+            ">
+            <select class="form-select select-sm js-code-indent-mode" aria-label="Indent mode">
+              <optgroup label="Indent mode">
+                <% selected_indent_style = blob_editor_indent_style(view.blob) if view.blob %>
+                <%= options_for_select({
+                      "Spaces" => "space",
+                      "Tabs" => "tab"
+                    }, selected_indent_style) %>
+              </optgroup>
+            </select>
+
+            <select class="form-select select-sm js-code-indent-width" aria-label="Indent size">
+              <optgroup label="Indent size">
+                <% selected_indent_size = blob_editor_indent_size(view.blob) if view.blob %>
+                <%= options_for_select [2, 4, 8, selected_indent_size].compact.uniq.sort, selected_indent_size %>
+              </optgroup>
+            </select>
+
+            <select class="form-select select-sm js-code-wrap-mode" aria-label="Line wrap mode">
+              <optgroup label="Line wrap mode">
+                <% selected_wrap_mode = blob_editor_wrap_mode(view.blob) if view.blob %>
+                <%= options_for_select({
+                      "No wrap" => "off",
+                      "Soft wrap" => "on"
+                    }, selected_wrap_mode) %>
+              </optgroup>
+            </select>
+          </div>
+        <% end %>
+      </div>
+
+      <input type="hidden" name="content_changed" class="js-blob-contents-changed" value="<%= view.allow_contents_unchanged %>">
+
+    <% if !view.editable? %>
+      <% blob_view = Gists::BlobView.new :blob => view.blob,
+        :gist => view.gist, :revision => view.gist.sha %>
+      <%= render :partial => "blob/blob_content", :locals => {
+        :blob => blob_view.blob,
+        :use_render => blob_view.use_render?,
+        :named_anchor_prefix => blob_view.named_anchor_prefix,
+        :snippet => blob_view.snippet?,
+        :force_raw => view.blob_truncated?,
+        :raw_url => raw_user_gist_sha_file_path(blob_view.gist.owner, blob_view.gist, blob_view.revision, blob_view.encoded_blob_name)
+        } %>
+    <% else %>
+    <div class="commit-create <%= "d-flex flex-column flex-auto overflow-hidden pt-1" if blob_fullwidth? %> position-relative <%= "m-2 m-md-0" if responsive? && mobile? %>">
+      <%
+        # The extra <div> ensures the code editor (rendered as the last thing on the
+        # textarea container) apears above the "Attach files by..." label/"status bar"
+      %>
+      <div class="<%= "d-flex flex-column flex-auto overflow-hidden" if blob_fullwidth? %>">
+        <textarea
+          class="form-control file-editor-textarea js-blob-contents js-code-textarea <%= "flex-auto" if blob_fullwidth? %>"
+          rows="<%= view.textarea_rows %>" name="<%= view.textarea_name %>"
+          data-filename="<%= view.blob_filename %>"
+          data-codemirror-mode="<%= view.codemirror_mode %>"
+          data-allow-unchanged="<%= view.allow_contents_unchanged %>"
+          data-hotkey-scope-id="<%= Blob::EditorView::CODE_EDITOR_HOTKEY_SCOPE_ID %>"
+          data-codemirror-fixed-height="<%= !view.issue_template? && !workflow_yaml_file? && !dev_container_file?  && !view.discussion_template? %>"
+          placeholder="Enter file contents here"
+          aria-label="Enter file contents here"
+          spellcheck="false"
+          <% if view.gist? %>
+            aria-describedby="focus-trap-banner"
+          <% end %>
+          <% if responsive? && mobile? %>
+            wrap="off"
+            style="-webkit-overflow-scrolling: touch"
+          <% end %>
+          <% if !view.gist? %>autofocus<% end %>>
+<%= view.blob_contents %></textarea>
+        </div>
+        <%= render partial: "comments/drag_and_drop",
+          locals: { asset_types: view.asset_types,
+          file_chooser_id: "blob-dragged-file-input",
+          gist: view.gist? } %>
+      </div>
+
+        <% if workflow_yaml_file? || stack_template_file? %>
+          <div class="color-bg-subtle color-fg-muted px-3 py-1 m-0 border-top">
+            <code id="yaml-editor-help-default">
+              Use <kbd>Control</kbd> + <kbd>Space</kbd><% if request.user_agent.match?(/Macintosh/) %> or <kbd>Option</kbd> + <kbd>Space</kbd><% end %> to trigger autocomplete in most situations.
+            </code>
+            <code id="yaml-editor-help" hidden>
+              <span class="js-yaml-editor-help-placeholder pr-1"></span>
+              <span class="js-yaml-editor-help-tab">Use <kbd>Tab</kbd> to navigate to the next placeholder.</span>
+            </code>
+          </div>
+        <% end %>
+        <% if dev_container_file? %>
+          <div class="color-bg-subtle color-fg-muted px-3 py-1 m-0 border-top">
+            <code id="dev-container-editor-help-default">
+              See the <a class="Link--inTextBlock" target="_blank" href="https://containers.dev/implementors/json_reference/">devcontainer.json</a> reference for more information
+            </code>
+          </div>
+        <% end %>
+      <% end %>
+
+      <% if view.gist? %>
+        <div class="color-bg-subtle color-fg-muted px-3 py-1 m-0 border-top focus-trap-banner" id="focus-trap-banner">
+          Use <kbd>Control+Shift+m</kbd> to toggle the <kbd>tab</kbd> key moving focus.
+        </div>
+      <% end %>
+
+      <div class="loading-preview-msg"><p class="preview-msg color-fg-muted">Loading preview&hellip;</p></div>
+      <div class="no-changes-preview-msg"><p class="preview-msg color-fg-muted">No changes to display.</p></div>
+      <div class="error-preview-msg"><p class="preview-msg color-fg-muted">Unable to load this preview, sorry.</p></div>
+      <div class="js-commit-preview commit-preview
+        <%= "p-5 markdown-body" if view.gist? %>
+        <%= "d-flex flex-column flex-auto position-relative" if blob_fullwidth? %>
+        <%= "overflow-auto" if view.new_file? && blob_fullwidth? %> ">
+      </div>
+  </blob-editor>
+<% end %>

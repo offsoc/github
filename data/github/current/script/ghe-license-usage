@@ -1,0 +1,74 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-license-usage [options]
+#/
+#/ This utility exports a list of all the users in the installation in JSON
+#/ format. By default the user list is encrypted. This information is used for
+#/ reporting user licensing back to GitHub Enterprise Cloud.
+#/
+#/ Warning: Using the --unencrypted option will export user data including logins
+#/ and email addresses in clear text. You can use this for debugging or to see
+#/ the user fields that are exported by this command. It is not recommended to
+#/ use the --unencrypted option for exports that will be uploaded.
+#/
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -y                 Bypass the confirmation prompt.
+#/   -o, --stdout       Print output to STDOUT. Optional.
+#/   -i                 Include personal user information to be shown in github.com UI.
+#/   -u, --unencrypted  Don't encrypt the user list. This will export user data
+#/                      including logins and email addresses in clear text.
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+use_stdout = false
+bypass_warning = false
+encrypt_users = true
+include_full_user_info = false
+
+ARGV.options do |opts|
+  opts.on("-o", "--stdout")      { use_stdout = true }
+  opts.on("-y")                  { bypass_warning = true }
+  opts.on("-i")                  { include_full_user_info = true }
+  opts.on("-u", "--unencrypted") { encrypt_users = false }
+  opts.on_tail("-h", "--help")   { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+unless bypass_warning
+  printf "WARNING: The exported user list contains#{" logins and" if include_full_user_info} email addresses for all your users. Do you want to proceed? (y/N) "
+  exit(0) if STDIN.gets.chomp.downcase != "y"
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+
+if use_stdout
+  output_io = STDOUT
+else
+  date = Time.now.strftime("%Y%m%d%H%M%S")
+  file = "/tmp/#{GitHub.host_name}-#{date}.json"
+  puts "Saving list of users to '#{file}'..."
+  output_io = File.open(file, "w")
+end
+
+begin
+  info = DotcomConnection.new.license_info(include_full_user_info: include_full_user_info, encrypt_users: encrypt_users)
+  json = JSON.pretty_generate(info)
+  output_io.write(json)
+rescue UserListGenerator::Error => e
+  abort e.message
+end
+
+unless use_stdout
+  puts "Done."
+end

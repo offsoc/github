@@ -1,0 +1,239 @@
+<li class="Box-row d-flex flex-justify-between flex-items-center" <%= test_selector "verifiable-domain-#{domain.id}" %>>
+  <div <%= "class=color-fg-muted" unless domain.verified? %>>
+    <% if domain.verified? %>
+      <span class="text-bold"><%= domain.domain %></span>
+      <%= render Primer::Beta::Label.new(ml: 2, scheme: :success, title: "Domain is verified") do %>
+        Verified
+      <% end %>
+    <% elsif domain.approved? %>
+      <span class="text-bold"><%= domain.domain %></span>
+      <%= render Primer::Beta::Label.new(ml: 2, scheme: :success, title: "Domain is approved") do %>
+        Approved
+      <% end %>
+      <%= render Primer::Beta::Label.new(ml: 2, scheme: :secondary, title: "Domain is pending verification",
+        test_selector: "verifiable-domain-pending-verification") do %>
+        Pending verification
+      <% end %>
+    <% else %>
+      <span class="text-bold"><%= domain.domain %></span>
+      <%= render Primer::Beta::Label.new(ml: 2, scheme: :secondary, title: "Domain is pending verification",
+        test_selector: "verifiable-domain-pending-verification") do %>
+        Pending verification
+      <% end %>
+    <% end %>
+  </div>
+  <div>
+    <% if show_enterprise_label? %>
+      <%= render Primer::Beta::Label.new \
+        tag: :summary,
+        scheme: :info,
+        mr: 2,
+        title: "Label: Enterprise domain",
+        test_selector: "enterprise-domain-label" do %>
+        Enterprise domain
+      <% end %>
+    <% end %>
+    <% if available_actions.any? %>
+      <%= render(Primer::Alpha::ActionMenu.new(display: :inline_block)) do |menu| %>
+        <% menu.with_show_button(
+          icon: :"kebab-horizontal",
+          "aria-label": "Domain menu",
+        ) %>
+
+        <% if action_available?(:enterprise_admin) %>
+          <% menu.with_item(
+            label: "Enterprise domains",
+            href: settings_enterprise_domains_enterprise_path(domain.owner),
+            test_selector: "enterprise-admin-action",
+          ) %>
+        <% end %>
+
+        <% if action_available?(:verify) %>
+          <% menu.with_item(
+            label: "Continue verifying",
+            href: owner_domain_path_for_action(action: :verification_steps),
+            test_selector: "verify-action",
+          ) %>
+        <% end %>
+
+        <% if action_available?(:approve) %>
+          <% menu.with_item(
+            label: "Approve",
+            test_selector: "approve-action",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "approve-domain-dialog-#{domain.id}" },
+            value: "",
+          ) %>
+        <% end %>
+
+        <% if action_available?(:delete_warn) %>
+          <% menu.with_item(
+            label: "Delete",
+            scheme: :danger,
+            test_selector: "delete-warn-action",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "delete-warn-domain-dialog-#{domain.id}" },
+            value: "",
+          ) %>
+        <% end %>
+
+        <% if action_available?(:children_warn) %>
+          <% menu.with_item(
+            label: "Delete",
+            scheme: :danger,
+            test_selector: "children-warn-action",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "children-warn-domain-dialog-#{domain.id}" },
+            value: "",
+          ) %>
+        <% end %>
+
+        <% if action_available?(:delete) %>
+          <% menu.with_item(
+            label: "Delete",
+            scheme: :danger,
+            test_selector: "delete-action",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "delete-domain-dialog-#{domain.id}" },
+            value: "",
+          ) %>
+        <% end %>
+      <% end %>
+
+      <% if action_available?(:approve) %>
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "approve-domain-dialog-#{domain.id}",
+          title: "Confirm approval of #{domain.domain}"
+        )) do |d| %>
+          <%= render partial: "verifiable_domains/approve_notice", locals: { domain: domain } %>
+        <% end %>
+      <% end %>
+
+      <% if action_available?(:delete_warn) %>
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "delete-warn-domain-dialog-#{domain.id}",
+          title: "Confirm deleting #{domain.domain}"
+        )) do |d| %>
+          <%= render(Primer::Alpha::Dialog::Body.new) do %>
+            <p class="mb-2">
+              <strong><%= domain.domain %></strong> is the only verified/approved
+              domain in the <strong><%= domain.owner.to_param %></strong> <%= domain.owner_description %>.
+              Because at least one verified or approved domain
+              is required to restrict email notifications to domain emails, deleting this domain will also
+              disable that restriction.
+            </p>
+
+            <p class="color-fg-danger">
+              <strong>
+                <% if domain.owner.instance_of?(Business) %>
+                  Deleting this domain may immediately allow enterprise members to receive notifications at
+                  any email address. Members receiving notifications will depend upon the restrict email
+                  policy setting for their organization.
+                <% else %>
+                  Deleting this domain will immediately allow organization members to receive notifications
+                  for this organization at any email address.
+                <% end %>
+              </strong>
+            </p>
+          <% end %>
+
+          <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+            <%= render(Primer::Beta::Button.new(
+              data: {
+                "close-dialog-id": "delete-warn-domain-dialog-#{domain.id}"
+              }
+            )) { "Cancel" } %>
+            <%= form_tag(
+              owner_domain_path_for_action(action: :destroy),
+              method: :delete
+            ) do %>
+              <%= render(Primer::Beta::Button.new(
+                scheme: :danger,
+                type: :submit,
+                data: {
+                  "disable-with": ""
+                }
+              )) { "Delete this domain and disable notification restrictions" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if action_available?(:children_warn) %>
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "children-warn-domain-dialog-#{domain.id}",
+          title: "Confirm deleting #{domain.domain}"
+        )) do |d| %>
+          <%= render(Primer::Alpha::Dialog::Body.new) do %>
+            <p class="mb-2">
+              <strong><%= domain.domain %></strong> is the only verified/approved
+              domain in the <strong><%= owner.to_param %></strong> enterprise.
+              Because at least one verified or approved domain
+              is required to restrict email notifications to domain emails, deleting this domain may disable
+              restrictions for member organizations.
+            </p>
+
+            <p class="color-fg-danger">
+              <strong>
+                Deleting this domain may allow members to receive notifications at any email address for
+                any associated organizations which had enabled notification restrictions, but had not
+                verified or approved any additional domains.
+              </strong>
+            </p>
+          <% end %>
+
+          <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+            <%= render(Primer::Beta::Button.new(
+              data: {
+                "close-dialog-id": "children-warn-domain-dialog-#{domain.id}"
+              }
+            )) { "Cancel" } %>
+            <%= form_tag(
+              owner_domain_path_for_action(action: :destroy),
+              method: :delete
+            ) do %>
+              <%= render(Primer::Beta::Button.new(
+                scheme: :danger,
+                type: :submit,
+                data: {
+                  "disable-with": ""
+                }
+              )) { "Delete this domain and disable notification restrictions" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if action_available?(:delete) %>
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "delete-domain-dialog-#{domain.id}",
+          title: "Confirm deleting #{domain.domain}"
+        )) do |d| %>
+          <%= render(Primer::Alpha::Dialog::Body.new) do %>
+            Are you sure you want to delete the domain <strong><%= domain.domain %></strong>?
+          <% end %>
+
+          <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+            <%= render(Primer::Beta::Button.new(
+              data: {
+                "close-dialog-id": "delete-domain-dialog-#{domain.id}"
+              }
+            )) { "Cancel" } %>
+            <%= form_tag(
+              owner_domain_path_for_action(action: :destroy),
+              method: :delete
+            ) do %>
+              <%= render(Primer::Beta::Button.new(
+                scheme: :danger,
+                type: :submit,
+                data: {
+                  "disable-with": ""
+                }
+              )) { "Delete this domain" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+</li>

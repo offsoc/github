@@ -1,0 +1,126 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# `view` is an instance of Orgs::Invitations::ShowPendingPageView %>
+<% page_info :title => "Invitation to join #{view.organization.safe_profile_name}", :class => "min-width-0" %>
+
+<% if session[:show_email_not_verified_error_message] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, full: true, display: :flex, dismissible: true, test_selector: "email-not-verified-warning") do %>
+    <div class="container-lg">
+      <%= OrganizationInvitation::EMAIL_NOT_VERIFIED_ERROR_MESSAGE %>
+      <%= link_to("Learn more about organization invitations.", "#{GitHub.help_url}/organizations/managing-membership-in-your-organization/inviting-users-to-join-your-organization") %>
+    </div>
+  <% end %>
+<% end %>
+
+<div class="container-md">
+  <div class="Box mx-auto my-6 p-4 col-11" data-hpc>
+    <div class="text-center position-relative">
+      <%= avatar_for view.organization, 75, :class => "avatar mb-4" %>
+
+      <%= render(Primer::Beta::Heading.new(tag: :h1, font_size: 3, font_weight: :normal, mb: 2)) do %>
+        You’ve been invited to the
+        <a class="Link--inTextBlock" href="<%= user_path view.organization %>"><strong><%= view.organization.safe_profile_name %></strong></a>
+        organization!
+      <% end %>
+
+      <% if view.invitation.show_inviter? %>
+        <p class="color-fg-muted text-small mb-4">
+          Invited by <strong><%= view.invitation.inviter.safe_profile_name %></strong>
+        </p>
+      <% end %>
+
+      <% if session[:show_email_not_verified_error_message] %>
+        <div class="my-4">
+          <p class="color-fg-muted text-small mb-4">
+            To accept this invitation, add and verify the email address that received the invitation or have the organization invitation sent to a verified email associated with <strong><%=current_user.safe_profile_name%></strong>.
+          </p>
+          <p class="color-fg-muted text-small mb-4">
+            To accept the invitation as <strong><%=current_user.safe_profile_name%></strong>:
+          </p>
+        </div>
+
+      <% elsif !view.two_factor_auth_settings_permit_joining? %>
+        <%= render Primer::Beta::Flash.new(scheme: :warning, full: true, p: 3, classes: "invitation-2fa-banner") do %>
+          <p class="mb-3">
+            <strong><%= view.organization.safe_profile_name %></strong> requires
+            all members to have two-factor authentication enabled.
+          </p>
+
+          <%= render Primer::Beta::Button.new(tag: :a, href: settings_user_2fa_intro_path, scheme: :primary, mr: 0) do %> Enable two-factor authentication <% end %>
+        <% end %>
+      <% end %>
+
+      <div class="my-4">
+        <% if session[:show_email_not_verified_error_message] %>
+
+          <%= form_tag \
+            show_with_email_verification_banner_settings_email_preferences_path,
+          method: :put do %>
+          <%= render(Primer::Beta::Button.new(
+            type: :submit,
+            scheme: :primary
+            )) { "Add verified email" } %>
+          <% end %>
+
+        <% elsif view.sso_required_for_joining? %>
+          <%= form_tag view.idm_saml_initiate_url, class: "inline-form" do %>
+            <%= hidden_field_tag :return_to, org_show_invitation_path(
+                          view.organization,
+                          :invitation_token => params[:invitation_token],
+                          :via_email => params[:via_email],
+                          :return_to => params[:return_to]
+                        )
+                      %>
+            <%
+              button_args = { type: :submit, scheme: :primary }
+              button_args[:disabled] = true unless view.two_factor_auth_settings_permit_joining?
+            %>
+            <%= render Primer::Beta::Button.new(**button_args) do %>Authenticate to join<% end %>
+          <% end %>
+        <% else %>
+          <%= render partial: "orgs/invitations/accept_invitation",
+            locals: { view: view, invitation_token: params[:invitation_token], via_email: params[:via_email], return_to: params[:return_to] } %>
+        <% end %>
+
+        <% unless session[:show_email_not_verified_error_message] %>
+          <%= form_tag destroy_org_invitation_path(view.invitation), class: "inline-form", method: :delete do %>
+              <%= render Primer::Beta::Button.new(
+                type: :submit,
+                scheme: :secondary,
+                mr: 0,
+                disabled: !view.two_factor_auth_settings_permit_joining?,
+                data: analytics_click_attributes(
+                  category: "Org Invitation Decline Button",
+                  action: "click to decline org invitation",
+                  label: "location:org_invitation_confirmation_page")) do %> Decline <% end %>
+          <% end %>
+        <% end %>
+      </div>
+      <% if session[:show_email_not_verified_error_message] %>
+        <p class="color-fg-muted text-small mb-4">
+          To have a new invitation sent, contact your organization owner for support.
+        </p>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="color-fg-muted p-0 my-0 mx-auto col-sm-8 col-md-6 col-11">
+    <p>
+      <%= primer_octicon(:lock) %>
+      <a class="Link--inTextBlock" href="<%= view.invitation_disclosure_article_url %>">Owners</a> of
+      <%= view.organization.safe_profile_name %> may be able to see:
+      <ul class="pl-3">
+        <li>If you have <a class="Link--inTextBlock" href="<%= view.two_factor_auth_disclosure_url %>">two-factor authentication</a> enabled or not</li>
+        <li>Your public profile information</li>
+        <li><a class="Link--inTextBlock" href="<%= view.audit_log_disclosure_url %>">Certain activity</a> within this organization</li>
+        <li>Country of request origin</li>
+        <li>Your access level to repositories within the organization</li>
+        <li>Your IP address</li>
+      </ul>
+    </p>
+
+    <p class="color-fg-muted mb-0">
+      <%= link_to "Opt out", show_org_invitation_opt_out_confirmation_path(view.organization, invitation_token: params[:invitation_token]), class: "Link--inTextBlock" %> of future invitations from this organization.
+    </p>
+  </div>
+</div>

@@ -1,0 +1,153 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "net/http"
+require "uri"
+
+class CachedGem
+  RAILS_GEMS = %w[
+    actioncable
+    actionmailbox
+    actionmailer
+    actionpack
+    actiontext
+    actionview
+    activejob
+    activejob
+    activemodel
+    activerecord
+    activestorage
+    activesupport
+    rails
+    railties
+  ]
+
+  TYPES = %i[rails rubygems rubygems_sha_bump rubygems_unknown_bump does_not_match_rubygems unknown]
+
+  attr_reader :filename
+
+  def initialize(filename)
+    @filename = filename
+    @basename = File.basename(filename, ".gem")
+    idx = @basename.index(/-[0-9]/)
+    @file_name = @basename[0, idx]
+    @file_version = @basename[idx + 1, 99999]
+  end
+
+  def source
+    source_info[0]
+  end
+
+  def description
+    "#{name} #{version} #{source_info[1]}"
+  end
+
+  def source_info
+    @source_info ||=
+      if RAILS_GEMS.include?(@file_name)
+        # We do our own custom packaging for rails
+        [:rails, "packaged from rails/rails"]
+      elsif name_on_rubygems?
+        if version_on_rubygems?
+          [:rubygems, "is from rubygems"]
+        elsif bumped_from_rubygems?
+          if @file_version =~ /\.g([0-9a-f]{7})\z/
+            [:rubygems_sha_bump, "looks to be bumped from SHA #{$1} from #{closest_rubygems_match} on rubygems"]
+          else
+            [:rubygems_unknown_bump, "looks to be bumped from #{closest_rubygems_match} on rubygems"]
+          end
+        else
+          [:does_not_match_rubygems, "does not match rubygems versions (latest was #{rubygems_versions.last})"]
+        end
+      else
+        [:unknown, "is not on rubygems"]
+      end
+  end
+
+  def name
+    @file_name
+  end
+
+  def version
+    @file_version
+  end
+
+  def rubygems_response
+    @rubygems_response ||=
+      begin
+        uri = URI.parse("https://rubygems.org/info/#{name}")
+        response = Net::HTTP.get_response(uri)
+      end
+  end
+
+  def name_on_rubygems?
+    rubygems_response.code == "200"
+  end
+
+  def version_on_rubygems?
+    rubygems_versions.include?(@file_version)
+  end
+
+  def bumped_from_rubygems?
+    !!closest_rubygems_match
+  end
+
+  def closest_rubygems_match
+    return nil if version_on_rubygems?
+
+    rubygems_versions.detect do |gem_version|
+      version.start_with?("#{gem_version}.")
+    end
+  end
+
+  def rubygems_versions
+    if !name_on_rubygems?
+      []
+    else
+      lines = rubygems_response.body.lines
+      lines.shift
+      lines.map do |line|
+        line[0, line.index(" ")]
+      end
+    end
+  end
+end
+
+require "optparse"
+
+options = {}
+types = CachedGem::TYPES.join(",")
+OptionParser.new do |opt|
+  opt.banner = "Usage: audit-gems [NAMES]"
+  opt.on("--only=#{types}", "Only show gems of type") { |v| options[:only] = v.split(",") }
+  opt.on("--except=#{types}", "Don't show gems of type") { |v| options[:except] = v.split(",") }
+  opt.parse!(ARGV)
+end
+
+gems = Dir["vendor/cache/*.gem"].sort.map do |filename|
+  CachedGem.new(filename)
+end
+
+gems = gems.lazy
+
+unless ARGV.empty?
+  gems = gems.select do |g|
+    ARGV.include?(g.name)
+  end
+end
+
+if options[:only]
+  gems = gems.select do |g|
+    options[:only].include?(g.source.to_s)
+  end
+end
+
+if options[:except]
+  gems = gems.reject do |g|
+    options[:except].include?(g.source.to_s)
+  end
+end
+
+gems.each do |g|
+  puts g.description
+end

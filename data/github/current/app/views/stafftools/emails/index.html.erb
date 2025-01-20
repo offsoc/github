@@ -1,0 +1,713 @@
+<%# erblint:counter DeprecatedComponentsCounter 13 %>
+
+<% view = Stafftools::User::EmailsView.new(:user => this_user) %>
+
+<% page_info :title => view.page_title %>
+
+<div class="boxed-group">
+  <h3>Emails</h3>
+  <% if this_user.organization? %>
+    <div class="boxed-group-inner">
+      <%= form_for this_user, :as => :target, :url => set_email_stafftools_user_emails_path, :html => {:method => :put} do |f| %>
+        <dl class="form-group">
+          <dt><%= f.label :profile_email, "Profile email" %></dt>
+          <dd>
+            <%= f.text_field :profile_email %>
+          </dd>
+        </dl>
+        <% unless this_user.enterprise_managed_user_enabled? %>
+          <dl class="form-group">
+            <dt><%= f.label :billing_email, "#{org_contact_email_label} email primary" %></dt>
+            <dd>
+                <%= f.text_field :billing_email %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary) do %>Update<% end %>
+            </dd>
+          </dl>
+        <% end %>
+      <% end %>
+      <% if this_user.billing_external_emails&.present? %>
+        <h5>Billing Recipients</h5>
+        <%=
+          render Stafftools::Billing::BillingEmailRecipientsListComponent.new(
+            primary_email: this_user.billing_email,
+            external_emails: this_user.billing_external_emails.to_a
+          )
+        %>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="boxed-group-inner">
+      <% if !this_user.change_email_enabled? %>
+        <p><strong>Note</strong></p>
+
+        <% if view.enterprise_managed_user_not_owner? %>
+          <p>Enterprise Managed User (EMU) email addresses are managed by an Identity Provider and sent to GitHub via SCIM.</p>
+          <p>The following email address is the one that is visible to the EMU and other EMUs in their enterprise. This is the email address that should get used for all operations, such as Git operations, GPG commits, API calls, and email notifications.</p>
+        <% else %>
+          <p>User email addresses are managed by <%= GitHub.auth.name %>.</p>
+        <% end %>
+
+      <% elsif view.first_emu_owner? %>
+        <p><strong>Note</strong></p>
+        <p>The following email address is the one that is visible to the first EMU owner and other EMUs in their enterprise. This is the email address that should get used for all notifications. The first EMU owner should not have any Git operations or GPG commits.</p>
+      <% end %>
+
+      <ul class="boxed-group-list user-emails">
+        <% view.emails.each_with_index do |email, i| %>
+          <li class="clearfix">
+            <% clean_email = view.remove_shortcode(email.email) %>
+            <%= render(Primer::Beta::Truncate.new(style: "width: 320px")) do |truncate| %>
+              <% truncate.with_item(max_width: 320) do %>
+                <% if this_user.is_enterprise_managed? %>
+                  <strong><%= clean_email %></strong>
+                <% else %>
+                  <%= clean_email %>
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <span class="stafftools-email-state">
+              <% if email.valid? %>
+                <% if GitHub.email_verification_enabled? && email.verified? %>
+                  <%= primer_octicon(:check, "aria-labelledby": "verified-email", "aria-hidden": false) %>
+                <% elsif this_user.should_verify_email? %>
+                    <%= primer_octicon(:alert, color: :danger, "aria-labelledby": "no-verified-emails", "aria-hidden": false) %>
+                <% end %>
+                <% if view.primary_github_email?(email) %>
+                  <%= primer_octicon(:bookmark, "aria-labelledby": "primary-email", "aria-hidden": false) %>
+                <% end %>
+                <% if view.backup_github_email?(email) %>
+                  <%= primer_octicon(:"shield-lock", "aria-labelledby": "backup-email", "aria-hidden": false) %>
+                <% end %>
+                <% if view.primary_notification_email?(email) %>
+                  <%= primer_octicon(:eye, "aria-labelledby": "primary-notification-email", "aria-hidden": false) %>
+                <% end %>
+              <% else %>
+                <%= primer_octicon(:skip, color: :danger, "aria-labelledby": "invalid-email", "aria-hidden": false) %>
+              <% end %>
+              <% if email.bouncing? %>
+                <%= primer_octicon(:mail, color: :danger, "aria-labelledby": "bounced-email", "aria-hidden": false) %>
+              <% end %>
+              <% if UserEmail.generic_domain?(email.email) %>
+                <%= primer_octicon(:"circle-slash", color: :danger, "aria-labelledby": "generic-email", "aria-hidden": false) %>
+              <% end %>
+              <% if view.enterprise_managed_user_not_owner? %>
+                <%= primer_octicon(:key, "aria-labelledby": "emu-email", "aria-hidden": false) %>
+              <% end %>
+            </span>
+
+            <span class="stafftools-email-actions" >
+              <% if email.valid? %>
+                <% unless GitHub.enterprise? %>
+                  <%= render(Primer::Beta::ClipboardCopyButton.new(
+                    id: "clipboard-button",
+                    value: view.splunk_email_query(email),
+                    aria: { label: "Copy Splunk query for this email" } )) do |button| %>
+                    <% button.with_tooltip(text: "Copy Splunk query for this email") %>
+                  <% end %>
+                <% end %>
+              <% elsif this_user.emails.user_entered_emails.size == 1 %>
+                <%= button_to "Repair",
+                              repair_stafftools_user_email_path(this_user, email),
+                              :method => :put,
+                              :class => "btn btn-sm btn-danger" %>
+              <% end %>
+
+              <% if GitHub.enterprise? %>
+                <% unless this_user.emails.user_entered_emails.size == 1 %>
+                  <% if !this_user.change_email_enabled? %>
+                    <span class="team-label-ldap text-small color-fg-muted header-label-ldap" aria-labelledby="ladp-email" role="img"><%= GitHub.auth.name %></span>
+                  <% else %>
+                    <%= form_tag stafftools_user_email_path(this_user, email), :method => "delete", :class => "inline-form" do %>
+                      <%= render Primer::Beta::IconButton.new(type: :submit, scheme: :danger, "aria-label": "Delete email address", id: "delete-email-button", icon: :trash ) do |component| %>
+                        <% component.with_tooltip(text: "Delete email address") %>
+                      <% end %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% else %>
+                <% if view.disallow_emu_email_deletion?(email) %>
+                  <%= primer_octicon(:trash, color: :muted, "aria-labelledby": "emu-delete-email", "aria-hidden": false) %>
+                <% elsif stafftools_action_authorized?(controller: Stafftools::EmailsController, action: :destroy) %>
+                  <%= form_tag stafftools_user_email_path(this_user, email), :method => "delete", :class => "inline-form" do %>
+                    <%= render Primer::Beta::IconButton.new(type: :submit, scheme: :danger, "aria-label": "Delete email address", id: "delete-email-button", icon: :trash ) do |component| %>
+                      <% component.with_tooltip(text: "Delete email address") %>
+                    <% end %>
+                  <% end %>
+                <% else %>
+                  <%= form_tag stafftools_user_email_path(this_user, email), :method => "delete", :class => "inline-form" do %>
+                    <%= render Primer::Beta::IconButton.new(
+                      type: :submit,
+                      scheme: :danger,
+                      inactive: true,
+                      icon: :trash,
+                      "aria-label": stafftools_not_authorized_text,
+                      id: "delete-email-button" ) do |component| %>
+                      <% component.with_tooltip(text: stafftools_not_authorized_text) %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </span>
+          </li>
+        <% end %>
+      </ul>
+
+      <hr class="bleed-flush">
+
+      <% if this_user.is_enterprise_managed? %>
+        <% if view.first_emu_owner? %>
+          <p>The following email address is internal to GitHub and not visible to the EMU. Therefore, we should not disclose this email to the user. It is stored for the first EMU owner in the backend GitHub database to handle the GitHub user email uniqueness constraint, since some EMUs also have personal user accounts on GitHub.com with the same email address.</p>
+        <% else %>
+          <p>The following email address is internal to GitHub and not visible to the EMU. Therefore, we should not disclose this email to the user. It is stored for the EMU in the backend GitHub database to handle the GitHub user email uniqueness constraint, since some EMUs also have personal user accounts on GitHub.com with the same email address.</p>
+        <% end %>
+        <p><%= view.emails.first %></p>
+        <p>
+          <strong><%= view.user.git_author_email %></strong> will be used for web-based Git operations.
+        </p>
+      <% else %>
+        <p>
+          <strong><%= view.user.git_author_email %></strong> will be used for web-based Git operations.
+        </p>
+      <% end %>
+
+      <hr class="bleed-flush">
+
+      <% if this_user.warn_private_email? %>
+        <p>
+          This user has enabled the blocking of pushes with private emails in them.
+        </p>
+        <hr class="bleed-flush">
+      <% end %>
+
+      <div class="legend">
+        <h3>Legend</h3>
+        <ul>
+          <% if GitHub.email_verification_enabled? %>
+            <li>
+              <%= primer_octicon(:check) %>
+              <span id="verified-email">This email has been verified by the user.</span>
+            </li>
+          <% end %>
+          <li>
+            <%= primer_octicon(:alert, color: :danger) %>
+            <span id="no-verified-emails">The user has no verified email addresses</span>
+          </li>
+          <li>
+            <%= primer_octicon(:bookmark) %>
+            <span id="primary-email">The primary contact email for <%= GitHub.flavor %> system messages.</span>
+          </li>
+          <li>
+            <%= primer_octicon(:"shield-lock") %>
+            <span id="backup-email">The backup contact email for <%= GitHub.flavor %> password resets.</span>
+          </li>
+          <li>
+            <%= primer_octicon(:eye) %>
+            <span id="primary-notification-email">The primary contact email for user activity notifications such as comments mentioning the user.</span>
+          </li>
+          <li>
+            <%= primer_octicon(:skip, color: :danger) %>
+            <span id="invalid-email">This email is not valid</span>
+          </li>
+          <li>
+            <%= primer_octicon(:mail, color: :danger) %>
+            <span id="bounced-email">This email has bounced</span>
+          </li>
+          <li>
+            <%= primer_octicon(:"circle-slash", color: :danger) %>
+            <span id="generic-email">This email is generic and will not be used for commit blame</span>
+          </li>
+          <% if view.enterprise_managed_user_not_owner? %>
+            <li>
+              <%= primer_octicon(:key) %>
+              <span id="emu-email">Enterprise Managed User (EMU) email addresses are managed by an Identity Provider and sent to GitHub via SCIM.</span>
+            </li>
+            <li>
+              <%= primer_octicon(:trash, color: :muted) %>
+              <span id="emu-delete-email">Deletion of primary email address is not allowed.  Remove it through an IdP provider</span>
+            </li>
+          <% end %>
+          <% if GitHub.enterprise? %>
+            <li>
+              <span class="team-label-ldap text-small color-fg-muted header-label-ldap"><%= GitHub.auth.name %></span>
+              <span id="ladp-email">Delete email address by removing it in your identity provider</span>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+
+      <% if this_user.change_email_enabled? %>
+        <%= form_for "add_email_form",
+          :url => stafftools_user_emails_path(this_user),
+          :html => {:method => "post"} do %>
+          <dl class="form-group new-email-form">
+            <dt>
+              <label for="new-email">Add an email address to this user</label>
+            </dt>
+            <dd>
+              <% if stafftools_action_authorized?(controller: Stafftools::EmailsController, action: :create) %>
+                <input id="new-email" name="email" type="email" required class="form-control short">
+                <%= render Primer::ButtonComponent.new(type: :submit, "data-disable-with": "") do %>Add<% end %>
+                <p class="flash flash-error" style="display:none;">
+                  That email address is already in use.
+                </p>
+              <% else %>
+                <%= stafftools_not_authorized_html %>
+              <% end %>
+            </dd>
+          </dl>
+        <% end %>
+
+        <% unless this_user.has_primary_email? %>
+          <hr class="bleed-flush">
+          <%= form_for \
+                this_user,
+                :url => repair_primary_stafftools_user_emails_path(this_user),
+                :method => :put do |f| %>
+            <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+              Repair primary email
+            <% end %>
+          <% end %>
+          <h4>Repair primary email</h4>
+          <p>
+            <%= primer_octicon(:alert, classes: "error") %>
+            This user does not have a primary email set.
+          </p>
+        <% end %>
+      <% end %>
+
+      <% if view.password_reset_enabled? %>
+        <hr class="bleed-flush">
+        <h4 <%= test_selector("password-reset-visible") %>>Password Reset</h4>
+        <% if this_user.email %>
+          <p>
+            Send the user a password reset email.
+            This email will include a link that’s valid for 24 hours.
+          </p>
+          <%= form_for "reset_password",
+              :url => send_reset_email_stafftools_user_password_path,
+              :html => {:method => "put"} do |f| %>
+
+            <select name="email" aria-label="Request for password reset emails" class="form-select mr-2">
+              <% if view.first_emu_owner? %>
+                <option value="<%= this_user.profile_email %>">
+                  <%= this_user.profile_email %>
+                </option>
+              <% else %>
+                <% view.emails.each do |email| %>
+                  <option value="<%= email %>">
+                    <% if !email.user.is_password_reset_email?(email.email) || email.bouncing? %>*<% end %><%= email %>
+                  </option>
+                <% end %>
+              <% end %>
+            </select>
+            <%= render Primer::ButtonComponent.new(type: :submit) do %>Send Password Reset<% end %>
+          <% end %>
+        <% else %>
+          <p>
+            <%= primer_octicon(:alert, classes: "error") %>
+            This user is missing their primary email, you cannot send them a
+            password reset.
+          </p>
+        <% end %>
+
+        <p class="mt-2 f6 color-fg-severe">
+          <%= primer_octicon(:info, mr: 1) %>
+          Emails marked with * are not allowed for password reset requests initiated by the user. Use with caution.
+        </p>
+      <% end %>
+
+      <% if view.user.password_reset_with_primary_email_only? %>
+        <p>
+          User only allows passwords resets to their <strong>primary email</strong>.
+        </p>
+      <% elsif view.user.has_backup_email? %>
+        <p>
+          User only allows passwords resets to their <strong>primary and backup emails</strong>.
+        </p>
+      <% end %>
+
+      <% if view.enterprise_managed_user_not_owner? %>
+        <hr class="bleed-flush">
+        <div>
+          <% if stafftools_action_authorized?(controller: Stafftools::EmailClaimsController, action: :update) %>
+            <% if view.user.primary_user_email.claimed? %>
+              <%= form_tag unclaim_primary_email_stafftools_user_emails_path(this_user), method: :put, data: { test_selector: "unclaim-email-form" } do %>
+                <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger, classes: "boxed-action", aria: { label: "Unverify email for #{view.user.primary_user_email.deobfuscated_email}" }) do %>
+                  Unverify Email
+                <% end %>
+              <% end %>
+              <h4>Primary Email Verified</h4>
+              <p>
+                The primary email <%= view.user.primary_user_email.deobfuscated_email %> is verified for this user.
+              </p>
+            <% else %>
+              <% if view.user.primary_user_email.verification_token.present? && !view.user.suspended? %>
+                <%= form_tag email_claim_resend_verification_stafftools_user_emails_path(this_user), method: :put, data: { test_selector: "resend-verification-email-form" } do %>
+                  <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger, classes: "boxed-action", aria: { label: "Resend confirmation email for #{view.user.primary_user_email.deobfuscated_email}" }) do %>
+                    Resend Verification Email
+                  <% end %>
+                <% end %>
+              <% end %>
+              <h4>Primary Email Verified</h4>
+              <p>
+                The primary email <%= view.user.primary_user_email.deobfuscated_email %> is not verified for this user.
+                <% if view.user.primary_user_email.verification_token.present? %>
+                  <br>Status: Verification email sent, awaiting user confirmation.
+                <% end %>
+              </p>
+            <% end %>
+          <% else %>
+            <h4>Primary Email Verification</h4>
+            <p><%= stafftools_not_authorized_html %></p>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if GitHub.email_verification_enabled? %>
+        <hr class="bleed-flush">
+        <h4>Email Verification</h4>
+        <% if this_user.emails.unverified.empty? %>
+          <p>
+            All of this user’s emails have been verified.
+          </p>
+        <% else %>
+          <p>
+            Send the user a verification request email.
+          </p>
+          <%= form_for "request_verification",
+            :url => request_verification_stafftools_user_emails_path(this_user),
+            :html => {:method => "put"} do |f| %>
+
+            <select name="email" aria-label="Request for verification emails" class="form-select mr-2">
+              <% this_user.emails.unverified.each do |email| %>
+                <option value="<%= email %>">
+                  <%= email %>
+                </option>
+              <% end %>
+            </select>
+            <%= render Primer::ButtonComponent.new(type: :submit) do %>Request Verification<% end %>
+          <% end %>
+        <% end %>
+        <% if GitHub.mandatory_email_verification_enabled? %>
+          <hr class="bleed-flush">
+          <% if this_user.emails.verified.any? %>
+            <%= render Primer::ButtonComponent.new(classes: "boxed-action", disabled: true) do %>
+              Disable mandatory email verification
+            <% end %>
+            <p>
+              Mandatory email verification is <strong>enabled</strong> for this person,
+              but they’ve verified at least one email address, so they’re allowed to create content.
+            </p>
+          <% elsif this_user.exempt_from_mandatory_email_verification? %>
+            <%= form_for this_user,
+              :url => restore_mandatory_email_verification_stafftools_user_emails_path(this_user),
+              :method => :put do |f| %>
+              <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+                Restore mandatory email verification
+              <% end %>
+            <% end %>
+            <h4>Mandatory email verification</h4>
+            <p>
+              This person is <strong>currently exempt</strong> from mandatory email verification,
+              which means they’re permitted to create content without a verified email address.
+            </p>
+          <% else %>
+            <%= form_for this_user,
+              :url => disable_mandatory_email_verification_stafftools_user_emails_path(this_user),
+              :method => :put do |f| %>
+              <%= render Primer::ButtonComponent.new(type: :submit, classes: "boxed-action") do %>
+                Disable mandatory email verification
+              <% end %>
+            <% end %>
+            <h4>Mandatory email verification</h4>
+            <p>
+              Mandatory email verification is <strong>currently enabled</strong> for this person,
+              which prevents them from creating content without a verified email address.
+            </p>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if view.email_unlink_enabled? %>
+        <hr class="bleed-flush">
+        <h4 <%= test_selector("email-unlink-visible") %>>Email Unlink</h4>
+        <% if this_user.email %>
+          <p>
+            Send the user an email unlink mailer.
+            This email will include a link that's valid for 24 hours.
+          </p>
+          <%= form_for "request_unlink",
+              :url => request_unlink_stafftools_user_emails_path(this_user),
+              :html => {:method => "put"} do |f| %>
+            <select name="email" aria-label="Request for unlinked emails" class="form-select mr-2">
+              <% if view.first_emu_owner? %>
+                <option value="<%= this_user.profile_email %>">
+                  <%= this_user.profile_email %>
+                </option>
+              <% else %>
+                <% view.emails.each do |email| %>
+                  <option value="<%= email %>">
+                    <% if !email.user.is_password_reset_email?(email.email) || email.bouncing? %>*<% end %><%= email %>
+                  </option>
+                <% end %>
+              <% end %>
+            </select>
+            <%= render Primer::ButtonComponent.new(type: :submit) do %>Send Email Unlink<% end %>
+          <% end %>
+        <% else %>
+          <p>
+            <%= primer_octicon(:alert, classes: "error") %>
+            This user is missing their primary email, you cannot send them an email unlink mailer.
+          </p>
+        <% end %>
+
+        <p class="mt-2 f6 color-fg-severe">
+          <%= primer_octicon(:info, mr: 1) %>
+          Ensure that the user has no active payment configurations before proceeding.
+        </p>
+      <% end %>
+
+    </div>
+  <% end %>
+</div>
+
+<% if view.first_emu_owner? %>
+  <div class="boxed-group" <%= test_selector("update-first-emu-admin-email-visible") %>>
+    <h3>First EMU Admin</h3>
+    <div class="boxed-group-inner">
+      <%= form_for this_user, :as => :target, :url => set_email_stafftools_user_emails_path, :html => {:method => :put} do |f| %>
+        <dl class="form-group">
+          <dt><%= f.label :profile_email, "First EMU admin email" %></dt>
+          <dd>
+            <%= f.text_field :profile_email %>
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary) do %>Update<% end %>
+          </dd>
+        </dl>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% unless this_user.organization? %>
+  <div class="boxed-group">
+    <h3>Notifications</h3>
+
+    <div class="boxed-group-inner">
+      <% if view.settings_available? %>
+        <div class="f6">
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Participating</dt>
+            <dd class="flex-auto"><%= view.participating_handlers.to_sentence %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Watching</dt>
+            <dd class="flex-auto"><%= view.subscribed_handlers.to_sentence %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Mobile push notifications</dt>
+            <dd class="flex-auto"><%= view.notify_via_mobile_push %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">The user’s own activity</dt>
+            <dd class="flex-auto"><%= view.own_contributions %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Comment emails</dt>
+            <dd class="flex-auto"><%= view.notify_comment %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Pull Request Reviews</dt>
+            <dd class="flex-auto"><%= view.notify_pull_request_review %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Pull Request Pushes</dt>
+            <dd class="flex-auto"><%= view.notify_pull_request_push %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Continuous Integration</dt>
+            <dd class="flex-auto"><%= view.continuous_integration_handlers.to_sentence %></dd>
+          </dl>
+          <dl class="d-flex mt-0">
+            <dt class="col-4">Continuous Integration - failures only</dt>
+            <dd class="flex-auto"><%= view.notify_ci_failures %></dd>
+          </dl>
+
+          <dl class="d-flex mt-0">
+            <dt class="col-4">
+              <%= avatar_for this_user, 20, alt: "", class: "avatar" %>
+              <strong><%= this_user %></strong>
+            </dt>
+            <dd class="flex-auto"><%= view.primary_notification_email %></dd>
+          </dl>
+          <% this_user.organizations.each do |org| %>
+            <dl class="d-flex mt-0">
+              <dt class="col-4">
+                <%= avatar_for org, 20, alt: "", class: "avatar" %>
+                <strong><%= org %></strong>
+              </dt>
+              <dd class="flex-auto"><%= view.email_for_org org %></dd>
+            </dl>
+          <% end %>
+        </div>
+
+        <% unless GitHub.enterprise? %>
+          <hr class="bleed-flush">
+          <div>
+            <% if stafftools_action_authorized?(controller: Stafftools::EmailsController, action: :change_email_notifications) %>
+              <%= form_for this_user,
+                :url => change_email_notifications_stafftools_user_emails_path(this_user),
+                :method => :put do |f| %>
+                <input type="hidden" name="value" value="<%= !view.email_notifications_enabled? %>">
+                <% if view.email_notifications_enabled? %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, classes: "boxed-action") do %>
+                    Disable Email Notifications
+                  <% end %>
+                  <h4>Email Notifications</h4>
+                  <p>
+                    Email notifications are enabled for this user.
+                  </p>
+                <% else %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, classes: "boxed-action") do %>
+                    Enable Email Notifications
+                  <% end %>
+                  <h4>Email Notifications</h4>
+                  <p>
+                    Email notifications are disabled for this user.
+                  </p>
+                <% end %>
+              <% end %>
+            <% else %>
+              <h4>Email notifications</h4>
+              <p><%= stafftools_not_authorized_html %></p>
+            <% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <p>Notifications are not available at this time.</p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if SecurityProduct::VulnerabilityAlerts.enabled_for_instance? && view.user.user?  %>
+  <div class="boxed-group">
+    <h3>Vulnerability Notifications</h3>
+    <div class="boxed-group-inner">
+      <p>
+        <div class="summary">
+          <dl>
+            <dt>Web Notifications</dt>
+            <dd><%= view.vulnerability_web_notifications %></dd>
+          </dl>
+          <dl>
+            <dt>CLI Notifications</dt>
+            <dd><%= view.vulnerability_cli_notifications %></dd>
+          </dl>
+          <dl>
+            <dt>Email Notifications</dt>
+            <dd><%= view.vulnerability_email_notifications %></dd>
+          </dl>
+          <dl>
+            <dt>Digest emails</dt>
+            <dd><%= view.vulnerability_digest_emails %></dd>
+          </dl>
+        </div>
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.gravatar_enabled? && !view.enterprise_managed_user_enabled? %>
+  <div class="boxed-group" <%= test_selector("update-gravatar-email-visible") %>>
+    <h3>Gravatar</h3>
+    <div class="boxed-group-inner">
+      <%= form_for this_user, :as => :target, :url => set_email_stafftools_user_emails_path, :html => {:method => :put} do |f| %>
+        <dl class="form-group">
+          <dt><%= f.label :gravatar_email, safe_join(["Gravatar email ", content_tag(:small, "(Private)")]) %></dt>
+          <dd>
+            <%= f.text_field :gravatar_email %>
+            <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary) do %>Update<% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <dl>
+        <dt><label>Gravatar Image</label></dt>
+        <dd>
+          <%= link_to "Show", avatar_url_for(view.user, 400),
+                      target: "_blank" %> |
+          <%= link_to "Check on Gravatar.com",
+                      view.gravatar_check_url(this_user.gravatar_email),
+                      target: "_blank" %>
+        </dd>
+      </dl>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.email_preference_center_enabled? %>
+  <div class="boxed-group">
+    <h3>Email Marketing Preferences</h3>
+    <div class="boxed-group-inner">
+      <% if view.receives_any_marketing_email? %>
+        <%= render(Primer::Experimental::Dialog.new(
+          dialog_id: "disable-marketing-email-dialog",
+          header_variant: :large,
+          width: :large,
+          title: "Disable marketing email?",
+          form_url: disable_marketing_email_stafftools_user_emails_path,
+          form_method: :put
+        )) do |c| %>
+          <% c.with_show_button(
+            color: :danger,
+            classes: "boxed-action"
+          ) do |s| %>
+            Disable marketing email for <%= this_user %>
+          <% end %>
+          <% c.with_body do %>
+            <h2>Are you sure?</h2>
+            <p>
+              This unsubscribes the user from their current subscriptions, and
+              ensures that they are not subscribed to future campaigns.
+            </p>
+          <% end %>
+          <% c.with_button(
+            data: { "close-dialog-id": "disable-marketing-email-dialog" }
+          ) { "Cancel" } %>
+          <% c.with_button(
+            type: :submit,
+            scheme: :danger,
+            data: { "disable-with": "" }
+          ) { "Yes, disable marketing email for #{this_user}" } %>
+        <% end %>
+      <% end %>
+      <p>
+        <% if view.receives_new_marketing_email? %>
+          This user <strong>receives</strong> new marketing newsletters.
+        <% else %>
+          This user <strong>does not receive</strong> new marketing newsletters.
+        <% end -%>
+
+        <% if view.subscription_list.any? %>
+           This user <strong>has</strong> subscribed to individual newsletters.
+        <% else -%>
+          This user <strong>has not</strong> subscribed to any newsletters.
+        <% end -%>
+        <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+          View their
+          <%=
+            link_to(
+              "preference history",
+              stafftools_audit_log_path(
+                query: driftwood_ade_query?(current_user) ?
+                  view.subscription_audit_log_kql_query :
+                  view.subscription_audit_log_query
+              ),
+               class: "Link--inTextBlock"
+            )
+          %>.
+        <% end %>
+      </p>
+    </div>
+  </div>
+<% end %>

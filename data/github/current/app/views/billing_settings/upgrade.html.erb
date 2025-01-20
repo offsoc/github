@@ -1,0 +1,333 @@
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<% page_info title: page_title %>
+
+<div class='pb-6 mt-6'>
+  <div class='container-lg clearfix p-responsive'>
+    <h1 class='f1 mb-4' <%= test_selector("billing-upgrade-header") %>>
+      <%= page_title %>
+    </h1>
+
+    <div>
+      <%= render(Primer::Beta::Octicon.new(icon: :"chevron-left")) %>
+      <% if view.return_to_new_repository? %>
+        <%= render(Primer::Beta::Link.new(href: view.return_to)) { "Back to new repo" } %>
+      <% else %>
+        <%
+          click_attributes = analytics_click_attributes(
+            category: "#{analytics_account_prefix(view.account)} back to billing",
+            action: "click to back to billing settings",
+            label: "ref_cta:Back to billing settings;ref_loc:account_upgrade"
+          )
+        %>
+        <%= render(Primer::Beta::Link.new(href: view.billing_settings_path, data: click_attributes)) do %>
+          Back to billing settings
+        <% end %>
+      <% end %>
+    </div>
+
+    <% if view.apple_iap_subscription_enabled? %>
+      <%= render "billing_settings/apple_iap_banner",
+        message: "Your GitHub Pro subscription is billed through an App Store subscription and will not be switched to yearly pricing.",
+        user: target
+      %>
+    <% end %>
+    <synchronous-payment>
+      <div class="clearfix">
+      <%= form_tag view.billing_action_path(current_user),
+          :class               => "js-braintree-encrypt",
+          :method              => view.form_method(current_user),
+          "data-braintree-key" => GitHub.braintree_client_side_encryption_key,
+          "data-action" => "submit:synchronous-payment#collectPayment" do %>
+
+        <%= hidden_field_tag 'plan', view.plan.name, id: nil %>
+        <%= hidden_field_tag 'account', target, id: nil, class: "js-account-name" %>
+        <%= hidden_field_tag "return_to", return_to, id: nil %>
+
+        <div class='col-md-8'>
+          <% if !view.apple_iap_subscription_enabled? %>
+            <div <%= test_selector("duration-summary") %>>
+              <% if view.duration_change_only? %>
+                <h2 class="mt-4 mb-4">Change duration to</h2>
+                <% view.duration_options.each do |duration| %>
+                  <div class="Box color-shadow-small mb-2">
+                    <label class="d-flex flex-wrap flex-items-center Box-row js-plan-choice-label<% if view.duration_options.count > 1 %> pl-5<% end %>">
+                      <input
+                        name="plan_duration"
+                        type="radio"
+                        value="<%= duration %>"
+                        <%= "checked" if duration.to_s == view.duration.to_s %>
+                        required
+                        class="v-hidden mr-2"
+                        style="margin-left: -16px"
+                        id="plan_duration_<%= duration %>">
+                      <span class="flex-auto"><strong class="d=block">Pay <%= duration %>ly</strong>
+                        <span class="d-block text-normal">
+                          <%= short_plan_name(target.plan) %>
+                        </span>
+                        <% if duration.to_s.match(/year/) && !view.plan.pro? && view.plan.paid? %>
+                          <span class=" pl-1">
+                            <%= render(Primer::Beta::Octicon.new(icon: :tag, size: :small, color: :accent, pt: 1)) %>
+                            <span class="color-fg-accent f6">Get 1 month free</span>
+                          </span>
+                        <% end %>
+                      </span>
+                      <% if view.account.organization? %>
+                        <span class="f3-light flex-auto text-right lh-condensed" style="order:3;">
+                          <span <%= test_selector("plan_unit_price") %> ><%= casual_currency(view.plan_unit_price) %></span><span class="text-small d-block text-normal">per user<br>/ <%= view.duration %></span>
+                        </span>
+                      <% else %>
+                        <span class="f3-light flex-auto text-right lh-condensed" style="order:3;">
+                          <%= casual_currency(view.plan_price) %><span class="text-small d-block text-normal">
+                            / <%= view.duration %></span>
+                        </span>
+                      <% end %>
+                    </label>
+                  </div>
+                <% end %>
+              <% else %>
+                <h2 class="mt-4 mb-4">Plan details</h2>
+                <% if view.account.organization? %>
+                  <% unless view.duration_change_only? %>
+                    <div class="color-shadow-small mb-2">
+                      <% unless current_organization_for_member_or_billing.plan.business? || show_team_as_link %>
+                        <label class="d-flex flex-items-baseline Box-row
+                          js-plan-choice-label pl-5" <%= test_selector("team-as-card") %>>
+                          <%# -- input -- %>
+                          <input
+                            type="radio"
+                            class="js-upgrade-org-plan-change js-plan-choice mr-2"
+                            name="organization[plan]"
+                            style="margin-left:-16px;"
+                            value="business"
+                            <%= safe_analytics_click_attributes(
+                              category: "Radio GitHub Team",
+                              action: "click to choose GitHub Team",
+                              label: "ref_cta:GitHub Team;ref_loc:account_upgrade"
+                            ) %>
+                            <%= "checked" if view.plan.business? %>>
+                          <%# -- /input  %>
+                          <%# -- price per seat  %>
+                          <span class="f3-light flex-shrink-0 text-right lh-condensed" style="order:3;">
+                            <%= casual_currency(view.business_plan_unit_price) %><span class="text-small d-block text-normal">per user<br>/ <%= view.duration %></span>
+                          </span>
+                          <%# -- /price per seat  %>
+                          <%# -- plan title and description  %>
+                          <span class="flex-auto mb-2" style="order:2;">
+                            <span class="d-block mb-1 lh-condensed">
+
+                              <strong class="d-block"><%= branded_plan_name(GitHub::Plan.business) %></strong>
+
+                              <span class="text-normal text-small color-fg-muted">
+                                Starts at <%= casual_currency(view.business_plan_price) %> / <%= view.duration %> and includes your first <%= view.base_units %> users.
+                              </span>
+                            </span>
+
+                            <ul>
+                              <% feature_list(:team, current_user).each do |feature| %>
+                                <%= render partial: "billing_settings/upgrade_feature_list_item", locals: {
+                                  feature: feature,
+                                  test_selector_string: "upgrade-team-munich-features"
+                                } %>
+                              <% end %>
+                            </ul>
+                          </span>
+                          <%# -- /plan title and description  %>
+                        </label>
+                      <% end %>
+                      <label class="d-flex flex-wrap flex-items-baseline Box-row
+                        js-plan-choice-label
+                        <% if !current_organization_for_member_or_billing.plan.business? && !show_team_as_link %>
+                          pl-5
+                        <% end %>">
+                        <%# -- input  %>
+                        <input
+                          type="radio"
+                          class="mr-2 js-upgrade-org-plan-change js-plan-choice js-company-owned-autoselect
+                            <%= "v-hidden" if current_organization_for_member_or_billing.plan.business? %>"
+                          name="organization[plan]"
+                          value="business_plus"
+                          style="margin-left:-16px;"
+                          <%= "checked" if view.plan.business_plus? %>
+                          <% if show_team_as_link %>
+                            hidden
+                          <% end %>
+                          <%= safe_analytics_click_attributes(
+                            category: "Radio GitHub Enterprise",
+                            action: "click to choose GitHub Enterprise",
+                            label: "ref_cta:GitHub Enterprise;ref_loc:account_upgrade"
+                          ) %>
+                          >
+                        <%# -- /input  %>
+                        <%# -- price per seat  %>
+                        <span class="f3-light flex-auto text-right lh-condensed" style="order:3">
+                          <%= casual_currency(view.business_plus_plan_unit_price) %>
+                          <span class="text-small d-block text-normal">per user<br>/ <%= view.duration %></span>
+                        </span>
+                        <%# -- /price per seat  %>
+                        <%# -- plan title and description  %>
+                        <span class="flex-auto mb-2" style="order:2;">
+                          <span class="d-block mb-1 lh-condensed">
+                            <strong class="d-block"><%= branded_plan_name(GitHub::Plan.business_plus) %></strong>
+                            <span class="text-normal text-small color-fg-muted">
+                              Includes <% if current_organization_for_member_or_billing.plan.business? %>unlimited public and private repositories<% else %>everything in <strong><%= branded_plan_name(GitHub::Plan.business) %></strong><% end %> plus:
+                            </span>
+                          </span>
+
+                          <ul>
+                            <% feature_list(:team, current_user).each do |feature| %>
+                              <%= render partial: "billing_settings/upgrade_feature_list_item", locals: {
+                                feature: feature,
+                                test_selector_string: "upgrade-enterprise-munich-features"
+                              } %>
+                            <% end %>
+                          </ul>
+                        </span>
+                        <%# -- /plan title and description  %>
+                        <% unless org_transform? %>
+                          <span class="d-block flex-auto pl-1 mb-2 text-small" style="order:4;">
+                            Need help getting started or hosting code on your own servers?
+                            <%= link_to "Contact us.",
+                                enterprise_web_url("/sn-contact"),
+                                target: :_blank,
+                                class: "Link--inTextBlock",
+                                data: hydro_click_tracking_attributes("billing.upgrade.click", {
+                                  target: :NEED_HELP,
+                                  user_id: current_user&.id
+                                })
+                            %>
+                          </span>
+                        <% end %>
+                      </label>
+                    </div>
+
+                    <% if show_team_as_link %>
+                      <a
+                        class="f6 mb-3 d-block"
+                        href="<%= upgrade_path(org: current_organization, target: "organization", plan: "business") %>"
+                        <%= test_selector("team-as-link") %>
+                        data-ga-click="Billing settings upgrade, click, text:Downgrade to Team;"
+                      >
+                        Downgrade to Team
+                      </a>
+                    <% end %>
+                  <% end %>
+                <% else %>
+                  <div class="Box color-shadow-small mb-2">
+                    <label class="d-flex flex-wrap flex-items-baseline Box-row js-plan-choice-label">
+                      <!-- input -->
+                      <input
+                        type="radio"
+                        class="js-upgrade-plan-change js-plan-choice mr-2"
+                        name="pro[plan]"
+                        style="margin-left:-16px; visibility:hidden"
+                        value="developer"
+                        checked>
+                      <!-- /input  -->
+                      <!-- price  -->
+                      <span class="f3-light flex-auto text-right lh-condensed" style="order:3;">
+                        <%= casual_currency(view.pro_plan_price) %><span class="text-small d-block text-normal">
+                          / <%= view.duration %></span>
+                      </span>
+                      <!-- /price per seat  -->
+                      <!-- plan title and description  -->
+                      <span class="flex-,Fauto mb-2" style="order:2;">
+                        <span class="d-block mb-1 lh-condensed">
+                          <strong class="d-block"><%= short_plan_name(GitHub::Plan.pro) %></strong>
+                        </span>
+                        <span class="d-block text-normal">
+                          Includes everything in <strong><%= branded_plan_name(GitHub::Plan.free) %></strong> plus:
+                        </span>
+                        <ul>
+                          <% feature_list(:pro, current_user).each do |feature| %>
+                            <%= render partial: "billing_settings/upgrade_feature_list_item", locals: {
+                              feature: feature,
+                              test_selector_string: "upgrade-pro-munich-features"
+                            } %>
+                          <% end %>
+                        </ul>
+                      </span>
+                      <!-- /plan title and description  -->
+                    </label>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+          <%# -- /iap subscription check  %>
+
+          <h2 class="mb-4" id="payment-frequency-header">Payment frequency</h2>
+          <% unless view.duration_change_only? %>
+            <div class="mb-4 clearfix width-full">
+              <% current_duration = view.duration_options.find { |duration| duration.to_s == view.duration.to_s } %>
+              <%= hidden_field_tag 'plan_duration', current_duration, id: nil %>
+              <%= render(Primer::Alpha::SegmentedControl.new(aria: { labelledby: "payment-frequency-header" })) do |component| %>
+                <% view.duration_options.each do |duration| %>
+                  <% label = "Pay #{duration}ly" %>
+                  <% if duration.to_s.match(/year/) && !view.plan.pro? && view.plan.paid? %>
+                    <% label = "#{label} (1 month free)" %>
+                  <% end %>
+                  <% component.with_item(
+                    label: label,
+                    classes: view.account.organization? ? 'js-org-duration-change' : 'js-duration-change',
+                    data: { duration: duration },
+                    selected: duration.to_s == view.duration.to_s,
+                    autofocus: duration.to_s == params[:plan_duration]
+                  ) %>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+          <% if view.show_seats? %>
+            <div class="border-bottom pb-3 clearfix Details">
+              <div class="float-left">
+                <label for="seats" class="h4">Number of users</label>
+              </div>
+              <div class="float-right d-inline-block">
+                <input
+                  class="form-control short text-right js-trial-upgrade-seats"
+                  name="seats"
+                  type="number"
+                  required
+                  data-url="<%= upgrade_path(request.params) %>"
+                  value="<%= view.taken_seat_count %>"
+                  id="seats">
+              </div>
+            </div>
+          <% end %>
+
+          <%= render partial: "billing_settings/order_preview", locals: { view: view } %>
+          <%= render "billing_settings/billing_info", view: view, target: target,
+            data_collection_enabled: data_collection_enabled, payment_flow_loaded_from: "UPGRADE",
+            return_to: return_to %>
+
+          <% if view.allowed_to_submit_payment_information_or_upgrade? %>
+            <div class="js-awaiting-payment <%= "border-top py-3 mt-2" if data_collection_enabled %>" <%= "hidden" if view.needs_valid_payment_method? %> data-toggle-plan-upgrade-visibility="<%= !data_collection_enabled %>">
+              <% click_attributes = analytics_click_attributes(
+                category: "#{analytics_account_prefix(view.account)} #{view.call_to_action_text}",
+                action: "click to #{view.call_to_action_text}",
+                label: "ref_cta:#{view.call_to_action_text};ref_loc:account_upgrade",
+              ) %>
+              <%= render(Primer::Beta::Button.new(type: :submit, scheme: :primary, block: true, data: { target: "synchronous-payment.buttonElement", **click_attributes })) do %>
+                <span data-target="synchronous-payment.buttonCTA">
+                  <%= view.call_to_action_text %>
+                </span>
+                <span data-target="synchronous-payment.loadingStatus" class="AnimatedEllipsis"></span>
+              <% end %>
+
+              <p class="f6 mt-2">By clicking &ldquo;<%= view.call_to_action_text %>&rdquo;, you agree to our
+              <a href="<%= site_terms_path %>" target="_blank" class="Link--inTextBlock js-tos-link">Terms of Service</a>
+              <a href="<%= site_corp_terms_path %>" target="_blank" class="Link--inTextBlock js-corp-tos-link d-none">Corporate Terms of Service</a> and
+              <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank">Privacy Statement</a><span data-wording="on behalf of" class="js-company-name-text"></span>. We’ll occasionally send you account-related emails.</p>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+      <!-- /form -->
+      </div>
+    </synchronous-payment>
+  </div>
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "billing" %>
+<% end %>

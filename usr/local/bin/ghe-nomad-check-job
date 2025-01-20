@@ -1,0 +1,134 @@
+#!/bin/bash
+#/
+#/ Usage: ghe-nomad-check-job [-v] -j <job> [taskgroup[:expected_image]]...
+#/
+#/ Checks that a nomad job is running,
+#/ that all allocations that should be running are running, and
+#/ optionally that the image for a taskgroup matches an expected image
+#/ and has at least one allocation per taskgroup running. If a taskgroup is
+#/ supplied but a corresponding image ID is not, then the expected image
+#/ validation is skipped.
+#/
+# shellcheck disable=1091
+source /usr/local/share/enterprise/ghe-nomad-lib
+set -euo pipefail
+
+# usage
+#   Display usage information for this script.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+echo_verbose() {
+  if [ -n "$verbose" ]; then
+    echo "$@"
+  fi
+}
+
+ensure_running_job() {
+  local jobinfo=$1
+
+  echo_verbose "Checking that the job is running"
+  job_status=$(echo "$jobinfo" | jq -r ".Status")
+  if [ "$job_status" != "running" ]; then
+    echo "Job status is currently '$job_status'" >&2
+    exit 1
+  fi
+  echo_verbose "Job is running"
+}
+
+ensure_taskgroup_correct_image() {
+  local jobinfo=$1
+  local taskgroup=$2
+  local expected_image=$3
+
+  echo_verbose "Checking that taskgroup '$taskgroup' is running the image '$expected_image'"
+  running_images=$(echo "$jobinfo" |
+    jq -r "[.TaskGroups[] | select(.Name == \"$taskgroup\") | .Tasks[] | .Config | .image] | join(\" \")")
+  if [ ! "$running_images" ]; then
+    echo "Didn't find any tasks with taskgroup '$taskgroup'" >&2
+    exit 1
+  fi
+  for running_image in ${running_images[@]}; do
+    if [ "$running_image" != "$expected_image" ]; then
+      echo "Found a '$taskgroup' task running image '$running_image', which is not the expected image '$expected_image'" >&2
+      exit 1
+    fi
+  done
+  echo_verbose "All tasks for taskgroup '$taskgroup' are on the expected image '$expected_image'"
+}
+
+ensure_taskgroup_running_alloc() {
+  local allocs=$1
+  local job=$2
+  local job_version=$3
+  local taskgroup=$4
+  local healthy_allocs
+
+  echo_verbose "Checking that job '$job' (version $job_version) taskgroup '$taskgroup' has at least one running allocation"
+  healthy_allocs=$(echo "$allocs" |
+    jq -r "
+    [.[]
+    | select(.JobID == \"$job\" and .JobVersion == $job_version and .TaskGroup == \"$taskgroup\" and .DesiredStatus == \"run\" and .ClientStatus == \"running\")
+    | .ID]
+    | join(\" \")" )
+
+  if [ -n "$healthy_allocs" ]; then
+    echo_verbose "Found at least one running allocation for taskgroup '$taskgroup': $healthy_allocs"
+  else
+    echo "Didn't find any running allocs for taskgroup '$taskgroup'!" >&2
+    exit 1
+  fi
+}
+
+# Command line parsing
+verbose=''
+job=''
+node='localhost'
+expected_task_groups=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -v|--verbose)
+            verbose=true
+            shift
+            ;;
+        -j|--job)
+            job="$2"
+            shift 2
+            ;;
+        -n|--node)
+            if [ -n "$2" ]; then node="$2"; fi
+            shift 2
+            ;;
+        *)
+            expected_task_groups+=("$@")
+            break;
+            ;;
+    esac
+done
+if [ -z "$job" ]; then
+  usage
+fi
+
+echo_verbose "Checking job status and allocs for '$job'"
+jobinfo=$(fetch_job "$job" "$node")
+job_version=$(echo "$jobinfo" | jq -r ".Version")
+allocs=$(fetch_job_allocations "$job" "$node")
+
+for task_group_and_image in "${expected_task_groups[@]}"; do
+  IFS=':' read -r taskgroup expected_image <<< "$task_group_and_image"
+  # Check that the correct image is running before any other checks to prevent races
+  # when checking the health of new containers
+  if [ -n "$expected_image" ]; then
+    ensure_taskgroup_correct_image "$jobinfo" "$taskgroup" "$expected_image"
+  fi
+  ensure_taskgroup_running_alloc "$allocs" "$job" "$job_version" "$taskgroup"
+done
+
+ensure_running_job "$jobinfo"
+
+echo_verbose "Successfully validated nomad job '$job' is healthy"

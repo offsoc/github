@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+processor = CreditDecisionEngine::CreditCheckRequestProcessor.new
+processor_options = processor.options.merge(
+  ssl_ca_cert_file_path: "/etc/ssl/certs/cp1-iad-production-1487801205-root.pem",
+  ssl_client_cert: GitHub.credit_decision_hydro_nimbus_cert,
+  ssl_client_cert_key: GitHub.credit_decision_hydro_nimbus_key,
+)
+consumer = GitHub.hydro_consumer(processor_options)
+
+CreditCheckRequestProcessorError = Class.new(StandardError)
+
+begin
+  GitHub.logger.info("start", { "code.namespace" => processor.class.name })
+  GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+  GitHub.logger.info("finish", { "code.namespace" => processor.class.name })
+rescue => e
+  GitHub.logger.error("failed to run stream processor", { "code.namespace" => processor.class.name, :exception => e })
+  Failbot.report(CreditCheckRequestProcessorError.new)
+  raise
+end

@@ -1,0 +1,70 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-external-mysql-preflight-check -u <username> -p <password> -a <address> -P <port> -t <host type>
+#/
+#/ Validates that MySQL instance with given credentials can successfully be used as the external database.
+#/
+#/ OPTIONS:
+#/   -u <username> | --username <username>  External MySQL user
+#/   -p <password> | --password <password>  External MySQL password
+#/   -a <address> | --address <address>     External MySQL host name or IP
+#/   -P <port> | --port <port>              External MySQL port
+#/   -t <host type> | --type <host type>    External MySQL host type, 4 valid values are: aws, azure, gcp, other.
+#/   -h | --help                            Displays Help
+
+require "/usr/local/share/enterprise/lib/ghe/mysql/external_mysql_validator"
+
+require "optparse"
+
+options = {}
+options[:type] = "other"
+OptionParser.new do |opts|
+  opts.on("-u", "--username <username>", "External MySQL user") do |v|
+    options[:username] = v
+  end
+  opts.on("-p", "--password <password>", "External MySQL password") do |v|
+    options[:password] = v
+  end
+  opts.on("-a", "--address <address>", "External MySQL host name or IP") do |v|
+    options[:address] = v
+  end
+  opts.on("-P", "--port <port>", "External MySQL port") do |v|
+    options[:port] = v
+  end
+  opts.on("-t", "--type <type>", "External MySQL host type") do |v|
+    options[:type] = v
+  end
+  opts.on("-h", "--help", "Displays Help") do
+    system "grep '^#/' '#{__FILE__}' |cut -c 4-"
+    exit 2
+  end
+end.parse!
+
+if !(options.key?(:username) && options.key?(:password) && options.key?(:address) && options.key?(:port))
+  system "grep '^#/' '#{__FILE__}' |cut -c 4-"
+  exit 2
+end
+
+host_type = options[:type].downcase
+
+if host_type != "aws" && host_type != "azure" && host_type != "gcp" && host_type != "other"
+  system "grep '^#/' '#{__FILE__}' |cut -c 4-"
+  puts "Error: Please pass in a valid host type: aws, azure, gcp, or other."
+  exit 2
+end
+
+validator = Enterprise::Ghe::Mysql::ExternalMysqlValidator.new(username: options[:username], password: options[:password], address: options[:address], port: options[:port], host_type: host_type)
+
+if validator.warning?
+  validator.warnings.each do |warning|
+    puts warning
+  end
+  puts
+end
+
+unless validator.valid?
+  puts validator.error_message
+  exit 1
+end
+
+puts "Your MySQL instance is configured correctly and ready to be used as an external database."

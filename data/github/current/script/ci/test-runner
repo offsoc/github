@@ -1,0 +1,54 @@
+#!/bin/bash
+# Usage: script/ci/test-runner <path/to/test.rb> [path/to/test.rb] ...
+
+set -e
+
+source script/ci/common_functions.sh
+
+# Enable GitHubTest::ParallelReporter Minitest reporter
+export MINITEST_JSON_REPORTING=${MINITEST_JSON_REPORTING:-1}
+
+# CI will have an artifacts directory based on JOB_NAME. If JOB_NAME isn't set
+# (maybe the script is being run on dev machines for example), fallback to
+# creating a test-artifacts directory.
+export ARTIFACTS_DIR="/tmp/${JOB_NAME:-test}-artifacts"
+mkdir -p $ARTIFACTS_DIR
+
+echo
+
+start_actions_log_grouping "Full Testing Output -- Check here to debug test failures 🕵"
+echo "==> Performing tests"
+set +e
+bin/rails test "$@" > $ARTIFACTS_DIR/first_run_output.txt 2> >(tee /tmp/rails_test.stderr >&2)
+set -e
+
+echo
+echo "==> Run complete"
+end_actions_log_grouping
+
+# temporarily also add the vtcombo logs if present after test runs, for debugging purposes.
+[ -s tmp/vtcombo.INFO ] && gzip -c tmp/vtcombo.INFO > $ARTIFACTS_DIR/vtcombo.INFO.gz || true
+[ -s tmp/vtcombo.WARNING ] && gzip -c tmp/vtcombo.WARNING > $ARTIFACTS_DIR/vtcombo.WARNING.gz || true
+[ -s tmp/vtcombo.ERROR ] && gzip -c tmp/vtcombo.ERROR > $ARTIFACTS_DIR/vtcombo.ERROR.gz || true
+
+# temporarily add the MySQL error log if for debugging purposes.
+sudo /bin/cp /var/log/mysql/error.log /workspace/github/tmp/mysql-error.log && \
+  [ -s /workspace/github/tmp/mysql-error.log ] && \
+  cat /workspace/github/tmp/mysql-error.log > $ARTIFACTS_DIR/mysql-error.log || true
+
+script/ci/prepare-stackprof-output
+
+set +e
+script/ci/generate_csv_test_results $ARTIFACTS_DIR/first_run_output.txt > $ARTIFACTS_DIR/test_results.csv
+set -e
+
+if bin/safe-ruby script/ci/report-test-failures $ARTIFACTS_DIR/first_run_output.txt; then
+  cp .parallel_test_stats $ARTIFACTS_DIR/parallel_test_stats
+  if [ ! -z "$(grep 'FAILURE: The following test suites were not run!' /tmp/rails_test.stderr)" ]; then
+    echo "Aborting test runner (FAILURE: Some test suites were not run!)"
+    exit 1
+  fi
+else
+  cp .parallel_test_stats $ARTIFACTS_DIR/parallel_test_stats
+  exit 1
+fi

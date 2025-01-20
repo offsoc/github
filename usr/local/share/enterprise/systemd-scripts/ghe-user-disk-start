@@ -1,0 +1,91 @@
+#!/bin/bash
+set -e
+
+echo "*** ghe-user-disk-start"
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+preflight_gen(){
+  local tmpfile=$(mktemp)
+  /usr/share/rbenv/versions/current/bin/erb /usr/local/share/enterprise/preflight.html.erb > $tmpfile
+  chown enterprise-manage:enterprise-manage $tmpfile
+  chmod 0664 $tmpfile
+  mv $tmpfile /data/enterprise-manage/current/public/index.html
+
+  if ! [ "$UNICORN" -eq 1 ]; then
+    # Generate enterprise-manage503 for Haproxy config
+    cp /data/enterprise-manage/current/public/index.html /etc/haproxy/errors/enterprise-manage503.http
+    printf "HTTP/1.0 503 Service Unavailable\nCache-Control: no-cache\nConnection: close\nContent-Type: text/html\n\n" \
+    | cat  - /etc/haproxy/errors/enterprise-manage503.http \
+    | sponge /etc/haproxy/errors/enterprise-manage503.http
+
+    # Restart to pick up the new config
+    if systemctl is-active haproxy-pre-config; then
+      sudo systemctl restart haproxy-pre-config
+    elif ghe-nomad-check-job -j haproxy-frontend; then
+        /usr/local/share/enterprise/ghe-nomad-signal -l haproxy-frontend SIGHUP
+    fi
+  fi
+}
+
+# wait for storage to attach
+mountpoint -q /data/user || ghe-storage-init || UNICORN=0 preflight_gen
+
+echo "*** waiting for blkdev device to appear"
+while ! mountpoint -q /data/user; do
+  if ghe-storage-find >/dev/null 2>/tmp/ghe-storage-find-error; then
+    break
+  fi
+  sleep 1
+done
+
+ghe-storage-init && ghe-user-tmp-init || {
+  lsblk -f
+  pvdisplay -m
+  exit 1
+}
+
+# enable loading page for github
+UNICORN=1 preflight_gen
+
+if [ -L /data/user/mysql -o -L /data/user/redis -o -L /data/user/elasticsearch ]; then
+  echo "*** waiting for database blkdev to appear"
+  n=0
+  while [ "$n" -lt 60 ] && ! mountpoint -q /data/db; do
+    vgscan --mknodes
+    VGNAME=$(lvs --noheadings -o vg_name | grep ghe_db_ | awk '{ print $1 }')
+    if [ -n "$VGNAME" ]; then
+      vgchange -ay $VGNAME || true
+      vgscan --mknodes
+      if mount -o defaults,noauto,noatime,nofail,data=ordered /dev/mapper/$VGNAME-ghe_db_data /data/db; then
+        break
+      fi
+    fi
+    sleep 1
+    n=$((n + 1))
+  done
+
+  mountpoint -q /data/db || exit 126
+fi
+
+if [ -L /data/user/alambic_cdn -o -L /data/user/alambic_assets -o -L /data/user/storage ]; then
+  echo "*** waiting for storage blkdev to appear"
+  n=0
+  while [ "$n" -lt 60 ] && ! mountpoint -q /data/alambic-data; do
+    vgscan --mknodes
+    VGNAME=$(lvs --noheadings -o vg_name | grep ghe_alambic_data | awk '{ print $1 }')
+    if [ -n "$VGNAME" ]; then
+      vgchange -ay $VGNAME || true
+      vgscan --mknodes
+      if mount -o defaults,noauto,noatime,nofail,data=ordered /dev/mapper/$VGNAME-ghe_alambic_data_data /data/alambic-data; then
+        break
+      fi
+    fi
+    sleep 1
+    n=$((n + 1))
+  done
+
+  mountpoint -q /data/alambic-data || exit 126
+fi

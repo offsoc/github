@@ -1,0 +1,106 @@
+#!/bin/bash
+#/ Usage: ghe-repl-sync-settings [--dry-run] [--keys-only]
+#/
+#/ This script is used to sync the SSH keys, license file and settings from
+#/ the primary to the replica.
+#/
+#/ If run on the primary, the settings are pushed to the replica.
+#/ If run on the replica, the settings are pulled from the primary.
+#/
+#/ Options:
+#/
+#/ --dry-run        Display the list of files that could be sync'd
+#/ --keys-only      Sync only the SSH keys. This is used by the management console's
+#/                  automatic SSH key saving functionality.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+if [ "$(repl_role)" = "standalone" ]; then
+  exit 0
+fi
+
+dry_run=
+keys_only=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)
+            dry_run=true
+            shift 1
+            ;;
+        --keys-only)
+            keys_only=true
+            shift 1
+            ;;
+    esac
+done
+
+
+if [ -n "$keys_only" ]; then
+  files="/data/user/common/authorized_keys \
+  /home/admin/.ssh/authorized_keys"
+else
+  files="/data/user/common/authorized_keys \
+  /data/user/common/enterprise.ghl \
+  /data/user/common/github.conf \
+  /data/user/common/secrets.conf \
+  /data/user/common/saml-sp.p12 \
+  /home/admin/.ssh/authorized_keys"
+fi
+
+if [ -n "$dry_run" ]; then
+  echo $files
+  exit 0
+fi
+
+if [ -f /etc/github/cluster ]; then
+  if [ -n "$keys_only" ]; then
+    echo "Copying authorized keys to replica instances..."
+    config_update_flag="-s"
+  else
+    echo "Copying license and settings to replica instances..."
+    config_update_flag="-r"
+  fi
+  if [ "$REPL_STATE" == "primary" ]; then
+    sudo env HA_CLUSTER=1 /usr/local/share/enterprise/ghe-cluster-config-update $config_update_flag
+  else
+    primary_ssh sudo env HA_CLUSTER=1 /usr/local/share/enterprise/ghe-cluster-config-update $config_update_flag
+  fi
+  if [ -z "$keys_only" ]; then
+    for node in $(ghe-cluster-nodes -x --replica); do
+      ip=$(ghe-config cluster.$node.ipv4 || true)
+      if [ -z "$ip" ]; then
+        ip=$(ghe-config cluster.$node.ipv6 || true)
+      fi
+      if [ "$REPL_STATE" == "primary" ]; then
+        ghe-export-ssh-host-keys | ssh_cmd $ip ghe-import-ssh-host-keys
+      else
+        primary_ssh ghe-export-ssh-host-keys | ssh_cmd $ip ghe-import-ssh-host-keys
+      fi
+    done
+  fi
+elif [ "$REPL_STATE" == "primary" ]; then
+  if replica_ssh -- test -f /etc/github/repl-running; then
+    if [ -n "$keys_only" ]; then
+      echo "Copying authorized keys to replica instance..."
+    else
+      echo "Copying license and settings to replica instance..."
+    fi
+    sudo tar --acls -cpPzf - $(ls $files 2>/dev/null) | replica_ssh -- sudo tar --acls -xpPzf - 2>/dev/null
+    if [ -z "$keys_only" ]; then
+      ghe-export-ssh-host-keys | replica_ssh ghe-import-ssh-host-keys
+    fi
+  fi
+else
+  if [ -n "$keys_only" ]; then
+    echo "Copying authorized keys from primary instance..."
+  else
+    echo "Copying license and settings from primary instance..."
+  fi
+  primary_ssh sudo tar --acls -cpPzf - $(ls $files 2>/dev/null) | sudo tar --acls -xpPzf - 2>/dev/null
+  if [ -z "$keys_only" ]; then
+    primary_ssh ghe-export-ssh-host-keys | ghe-import-ssh-host-keys
+  fi
+fi

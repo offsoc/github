@@ -1,0 +1,66 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "#{Rails.root}/config/environment"
+require_relative "#{Rails.root}/script/seeds/objects"
+require_relative "#{Rails.root}/script/seeds/runner"
+require_relative "#{Rails.root}/script/seeds/runners/marketplace_listing"
+require_relative "#{Rails.root}/script/seeds/runners/marketplace_partner_action_listings"
+require_relative "#{Rails.root}/script/seeds/runners/azure_models"
+
+unless Rails.env.development?
+  raise "This is a dev-only script"
+end
+
+class SetupMarketplace
+  def call
+    puts("Starting Marketplace setup")
+
+    enable_feature_flags
+    create_apps
+    convert_some_listings_to_copilot_apps
+    create_actions
+    create_models
+
+    puts "Marketplace setup finished."
+  end
+
+  private
+
+  def enable_feature_flags
+    flags = [:project_neutron_playground]
+    puts "Enabling feature flags"
+
+    flags.each do |flag|
+      puts "Enabling #{flag}"
+      GitHub.flipper[flag].enable
+    end
+
+    puts "Enabling copilot_extension_access for github org"
+    GitHub.flipper[:copilot_extension_access].enable(Organization.find_by_login("github"))
+  end
+
+  def create_apps
+    puts "Creating apps"
+    Seeds::Runner::MarketplaceListing.execute({ count: 50, copilot_app: true })
+  end
+
+  def convert_some_listings_to_copilot_apps
+    puts "Converting a subset of integration listings to copilot apps"
+    Marketplace::Listing.where(listable_type: "Integration").limit(10).each do |listing|
+      listing.update!(copilot_app: true)
+    end
+  end
+
+  def create_actions
+    puts "Creating actions"
+    Seeds::Runner::MarketplacePartnerActionListings.execute({})
+  end
+
+  def create_models
+    puts "Creating models"
+    Seeds::Runner::AzureModels.execute({})
+  end
+end
+
+SetupMarketplace.new.call

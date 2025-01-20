@@ -1,0 +1,529 @@
+#!/bin/bash
+#/ Usage: ghe-ssl-acme [options]
+#
+# ghe-ssl-acme controls GitHub Enterprise's support for automatically-managed SSL certificates provided
+# by Let's Encrypt or other future ACME-based certificate authorities.
+#
+#/ Main commands:
+#/  -s               Show status of whether ACME certificates are enabled, and additional details
+#/  -e               Enable ACME (e.g. Let's Encrypt) feature and issue a certificate
+#/  -d               Disable ACME feature, which simply avoids future refreshes of ACME certificates (does not remove existing certificate)
+#/  -x               Clear all ACME-related settings from configuration (does not remove existing certificate)
+#/  -h               Print help
+#/
+#/ Internal commands:
+#/  -i               Issue a certificate; must enable feature with `-e` first
+#/  -c               Run from a cronjob to check certificate expiration and perform renewal
+#/
+#/ Options (must precede the command flag, e.g. `-v -t -e`):
+#/  -r               With `-e`, print a new key and Certificate Signing Request (CSR), but don't send the request
+#/  -p               Print the signed certificate and private key to STDOUT instead of writing to configuration
+#/  -t               Use Let's Encrypt s*t*aging server for Test certificates (uses invalid CA, but avoids rate limit risks during development)
+#/  -v               Run in verbose mode
+
+# Functions starting with acme_ are 1:1 with the above help options (except acme_sh_cmd);
+# other functions are for support
+
+# allow literal backticks in single-quote strings
+#shellcheck disable=SC2016
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck disable=SC1091
+. /etc/github/enterprise-release
+
+GITHUB_HOSTNAME=$(ghe-config --get core.github-hostname || true)
+VERBOSE=
+PRINT_CERT=
+STAGING_SERVER=
+CSR_ONLY=
+
+# These variables are hooks for testing
+# Besides these, GIT_CONFIG can specify an alternate github.conf
+
+# SKIP_INSTALL, if set in the environment, will stop after fetching the cert
+# should say "skipping install_cert" when used
+SKIP_INSTALL=${SKIP_INSTALL:-}
+
+# If set, don't do `ghe-config-apply`, to speed up tests
+SKIP_APPLY=${SKIP_APPLY:-}
+
+# For testing, specify a custom URL for mock ACME API
+OVERRIDE_PROVIDER=${OVERRIDE_PROVIDER:-}
+
+# Extra flags for acme.sh such as `EXTRA_ACME_FLAGS="--debug --output-insecure"`
+EXTRA_ACME_FLAGS=${EXTRA_ACME_FLAGS:-}
+
+# For acme_cron, set this to avoid exiting when cert is still fresh
+FORCE_EARLY_REFRESH=${FORCE_EARLY_REFRESH:-}
+
+# acme.sh working dir; defaults to a `mktemp` directory
+WORKDIR=${WORKDIR:-}
+HAPROXY_CFG=${HAPROXY_CFG:-/etc/haproxy/haproxy-frontend.cfg}
+HAPROXY_CRT=${HAPROXY_CRT:-/etc/haproxy/ssl.crt}
+
+echo_error() {
+  echo "ghe-ssl-acme error: $1" >&2
+  exit 1
+}
+
+# Prerequisites must be enabled before acme_enable can enable the feature
+check_acme_prerequisites() {
+  [[ -z $GITHUB_HOSTNAME ]] && \
+    echo_error "Configured hostname must be present to enable ACME certificate"
+
+  [[ $GITHUB_HOSTNAME =~ \. ]] || \
+    echo_error 'Configured hostname must include at least one dot (e.g. `example.com`) to enable ACME certificate'
+
+  # NOTE: this doesn't check for IPv6, and it could be an invalid IPv4,
+  #       but it's just a sanity check
+  [[ $GITHUB_HOSTNAME =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && \
+    echo_error "Configured hostname can't be an IP address to enable ACME certificate"
+
+  grep -q "$GITHUB_HOSTNAME" "$HAPROXY_CFG" || \
+    echo_error "Configured hostname must be configured in $HAPROXY_CFG"
+}
+
+# assert that the feature is enabled
+check_enabled() {
+  if ! ghe-config --true github-ssl.acme.enabled; then
+    if [[ ${1:-x} = "silent" ]] && [[ -z $VERBOSE ]]; then
+      exit 0
+    else
+      echo_error "ACME support is not enabled"
+    fi
+  fi
+}
+
+# Reconstitute an ephemeral working directory usable for `acme.sh --config-home`
+# Get account key from ghe-config, or register a new account if needed
+# This should be run only from acme_sh_cmd()
+setup_work_dir() {
+  [[ -z $CONFIG_CA_DIR ]] && echo_error "setup_work_dir must be run after CONFIG_CA_DIR is set"
+
+  # Global variable
+  if [[ -z $WORKDIR ]]; then
+    WORKDIR=$(mktemp -d -t tmp.acme-workdir.XXXXXXXXXX)
+    sudo chgrp acme-client "$WORKDIR"
+    chmod 770 "$WORKDIR"
+  fi
+
+  trap cleanup EXIT
+
+  local account_key_path account_key
+
+  account_key_path=$WORKDIR/ca/$CONFIG_CA_DIR
+
+  if ghe-config --present secrets.acme.account-key; then
+    # Validate that the config files needed by `acme.sh`,
+    # previously stashed, are present.
+    if ghe-config --blank github-ssl.acme.ca-conf || \
+       ghe-config --blank github-ssl.acme.domain-conf; then
+      echo 'ghe-ssl-acme warning: failed to load config files from ghe-config.' >&2
+      echo 'If this persists, and if using the -e (enable) or -c (cron) action,' >&2
+      echo 'try using -i (issue):' >&2
+      echo '  $ ghe-ssl-acme -i' >&2
+      echo 'Alternately, it may be necessary to reset the ACME configuration and try again:' >&2
+      echo '  $ ghe-ssl-acme -x' >&2
+      echo 'Note, resetting the ACME config should be used sparingly to avoid provider rate limits.' >&2
+    fi
+
+    # we have an account; write its key and config to the filesystem
+    sudo -u acme-client mkdir -p "$account_key_path"
+    ghe-config 'secrets.acme.account-key' | sudo -u acme-client tee "$account_key_path/account.key" > /dev/null
+    ghe-config 'github-ssl.acme.ca-conf' | sudo -u acme-client tee "$account_key_path/ca.conf" > /dev/null
+
+    # Reconstitute domain config file
+    sudo -u acme-client mkdir "$WORKDIR/$GITHUB_HOSTNAME"
+    ghe-config 'github-ssl.acme.domain-conf' | sudo -u acme-client tee "$WORKDIR/$GITHUB_HOSTNAME/$GITHUB_HOSTNAME.conf" > /dev/null
+  elif [[ -n $CSR_ONLY ]]; then
+    # Don't use the API to register an account if we're just generating the CSR
+    # Config will lack `github-ssl.acme.account-thumbprint, 'secrets.acme.account-key' and 'github-ssl.acme.ca-conf'
+    return
+  else
+    # we don't have an account key; register a new account and stash the resulting account.key and ca.conf
+
+    # Capture log output to a file so we can scrape the account thumbprint, for stateless domain validation
+    local register_log thumbprint
+    register_log=$(mktemp)
+
+    acme_sh_cmd --register-account --accountkeylength 4096 |& tee "$register_log"
+
+    # Scrape out the value from line: ACCOUNT_THUMBPRINT='wngPy4SyK7nPB_9MWLS_p-yIWJNycvZWhMmJS2LZosA'
+    thumbprint=$(grep ACCOUNT_THUMBPRINT= "$register_log" | cut -d\' -f2)
+    [[ -z $VERBOSE ]] && rm "$register_log"
+    [[ -n $thumbprint ]] || echo_error "Couldn't get ACCOUNT_THUMBPRINT from ACME registration"
+    ghe-config 'github-ssl.acme.account-thumbprint' "$thumbprint"
+
+    # Save account.key and ca.conf to config
+    account_key=$(sudo -u acme-client cat "$account_key_path/account.key")
+    ghe-config 'secrets.acme.account-key' "$account_key"
+    ca_conf=$(sudo -u acme-client cat "$account_key_path/ca.conf")
+    ghe-config 'github-ssl.acme.ca-conf' "$ca_conf"
+
+    # Replicate new ACME registration settings to all cluster nodes, which will write thumbprint to template file
+    [[ -z $SKIP_APPLY ]] && ghe-config-apply
+  fi
+}
+
+# Generate the needed acme.sh invocation to control working directory, provider, etc.
+acme_sh_cmd() {
+  local acme_cmd="sudo -u acme-client acme.sh --force --syslog 6"
+  if [[ -n $VERBOSE ]]; then acme_cmd="$acme_cmd --debug"; fi
+
+  local provider
+  provider=$(ghe-config 'github-ssl.acme.provider')
+  if [[ $provider = "letsencrypt" ]] && [[ -z $OVERRIDE_PROVIDER ]]; then
+    CONFIG_CA_DIR=acme-v02.api.letsencrypt.org/directory
+    acme_cmd="$acme_cmd --server $provider"
+    grep -q "issue" <<< "$*" && acme_cmd="$acme_cmd --preferred-chain isrg"
+  elif [[ $provider = "letsencrypt-staging" ]] && [[ -z $OVERRIDE_PROVIDER ]]; then
+    echo "Using ACME staging server; TLS certificate will have a non-trusted CA" >&2
+    acme_cmd="$acme_cmd --staging";
+    CONFIG_CA_DIR=acme-staging-v02.api.letsencrypt.org/directory
+  else
+    # ACME Directory Resource URI. (default: https://acme-v02.api.letsencrypt.org/directory)
+    provider=${OVERRIDE_PROVIDER:-$provider}
+    acme_cmd="$acme_cmd --server $provider"
+    CONFIG_CA_DIR=$(awk -F[/:] '{print $4}' <<<"$provider")
+    # If using pebble server for test, set /dir in ca directory path
+    grep -q "14000" <<< "$OVERRIDE_PROVIDER" && CONFIG_CA_DIR="$CONFIG_CA_DIR/dir"
+    
+  fi
+
+  if [[ -z $WORKDIR ]]; then setup_work_dir; fi
+
+  # $WORKDIR is set within setup_work_dir
+  acme_cmd="$acme_cmd --config-home $WORKDIR $EXTRA_ACME_FLAGS"
+
+  local acme_sh_status=0
+  echo "---> Running $acme_cmd $*"
+  if $acme_cmd "$@" >&2; then
+    echo "---> End"
+  else
+    acme_sh_status=$?
+    echo "---> End (failed: $acme_sh_status)"
+  fi
+
+  return $acme_sh_status
+}
+
+# show_csr_action provides an alternative action for issue_or_renew_cert,
+# to use acme.sh's "professional use only" flags to generate a key/cert/CSR
+# instead of invoking the ACME API. The `-p` CLI flag prints the X509 data.
+# Intended for testing the early part of the ACME workflow, e.g.:
+# `$ ghe-ssl-acme -r -p -i` (or `-e`)
+show_csr_action() {
+  local domains=$1
+  local csr_filename
+
+  # If there's already a domain key, this will fail and it'll be re-used for the CSR
+  #shellcheck disable=SC2086
+  acme_sh_cmd --create-domain-key $domains || true
+  #shellcheck disable=SC2086
+  acme_sh_cmd --createCSR $domains
+  csr_filename=$WORKDIR/$GITHUB_HOSTNAME/$GITHUB_HOSTNAME.csr
+
+  # Write CSR summary data to stderr like `acme_sh_cmd` does
+  echo "--- BEGIN CSR SUMMARY ---" >&2
+  acme_sh_cmd --showcsr --csr "$csr_filename"
+  echo "--- END CSR SUMMARY ---" >&2
+
+  # Write CSR X509 data to stdout for easy consumption
+  if [[ -n $PRINT_CERT ]]; then
+    sudo -u acme-client cat "$csr_filename"
+  fi
+}
+
+# Invoke ACME CA to issue cert, using HTTP based domain verification
+issue_or_renew_cert() {
+  local action=$1
+
+  # acme-challenge will be served by nginx as static content from `enterprise-manage.conf`
+
+  # Issue a cert for all subdomains (SAN cert), if subdomain-isolation is true
+  local domains
+  # prefix each domain with `-d` flag; first will be the main hostname, then the subdomains, sorted
+  domains=$(/usr/local/share/enterprise/ghe-http-hostnames | sed -e 's/^/-d /')
+
+  # Use only the first domain (hostname), for a single-domain cert
+  ghe-config --true core.subdomain-isolation || \
+    domains=$(head -n1 <<<"$domains")
+
+  local acme_sh_status=0
+  case "$(ghe-config 'github-ssl.acme.validation-type')" in
+    http-01)
+      if [[ $action = "renew" ]]; then
+        # --force is needed to ignore the fact that the domain `.conf` isn't persisted,
+        # and we want to control our own cron scheduling anyway
+        #shellcheck disable=SC2086
+        if ! acme_sh_cmd "--$action" --always-force-new-domain-key --force --stateless $domains; then
+          acme_sh_status=$?
+        fi
+      elif [[ $action = "csr" ]]; then
+        # Just generate a TLS key, cert, and CSR, and print them; skip ACME API calls
+        show_csr_action "$domains"
+      else
+        # shellcheck disable=SC2086
+        if ! acme_sh_cmd "--$action" --stateless $domains; then
+          acme_sh_status=$?
+        fi
+      fi
+      ;;
+    *)
+      echo_error 'Only validation type `http-01` is supported'
+      ;;
+  esac
+
+  # Stash domain config file, reconstituted later by setup_work_dir
+  domain_conf=$(sudo -u acme-client cat "$WORKDIR/$GITHUB_HOSTNAME/$GITHUB_HOSTNAME.conf")
+  ghe-config 'github-ssl.acme.domain-conf' "$domain_conf"
+  return $acme_sh_status
+}
+
+# install_cert is used when run on the command line only
+install_cert() {
+  [[ -z $WORKDIR ]] && echo_error "Must setup_work_dir before install_cert"
+
+  [[ ! -s $WORKDIR/$GITHUB_HOSTNAME/fullchain.cer ]] && \
+    echo_error "The certificate at $WORKDIR/$GITHUB_HOSTNAME/fullchain.cer is not present; did ACME fail?"
+
+  # This is mainly a hook for testing
+  if [[ -n $SKIP_INSTALL ]]; then
+    trap - EXIT
+    echo "skipping install_cert and stopping" >&2
+    exit 3
+  fi
+
+  # Print the cert and key, avoiding changing the config
+  if [[ -n $PRINT_CERT ]]; then
+    sudo -u acme-client cat "$WORKDIR"/"$GITHUB_HOSTNAME"/{fullchain.cer,"$GITHUB_HOSTNAME".key}
+    return 0
+  fi
+
+  ghe-config 'github-ssl.cert' "$(sudo -u acme-client cat "$WORKDIR/$GITHUB_HOSTNAME/fullchain.cer")"
+  ghe-config 'github-ssl.key' "$(sudo -u acme-client cat "$WORKDIR/$GITHUB_HOSTNAME/$GITHUB_HOSTNAME.key")"
+
+  [[ -z $SKIP_APPLY ]] && ghe-config-apply
+
+  # The cert should be in /etc/haproxy/haproxy.crt+key, since ghe-config-apply was run
+  (
+  echo ""
+  echo "############ ACME SSL CERTIFICATE ##################"
+  sudo /usr/bin/openssl x509 -noout -in "$HAPROXY_CRT" -subject -issuer -fingerprint -serial
+  echo "###########################################################"
+  echo ""
+  ) >&2
+}
+
+# Extract the issuer (certificate authority) from the specified cert
+cert_issuer() {
+  openssl x509 -in "$1" -noout -issuer -nameopt sep_semi_plus_space  | sed -e 's/.* O=\([^;]*\).*/\1/'
+}
+
+# -s flag
+acme_status() {
+  # boolean
+  echo -n "SSL enabled:           "; ghe-config 'github-ssl.enabled' || echo '(null)'
+  echo -n "Active certificate CA: "; cert_issuer "$HAPROXY_CRT"
+  # boolean
+  echo -n "ACME enabled:          "; ghe-config 'github-ssl.acme.enabled' || echo '(null)'
+  # 'letsencrypt' or 'letsencrypt-staging'
+  echo -n "ACME provider:         "; ghe-config 'github-ssl.acme.provider' || echo '(null)'
+  # boolean, always true
+  echo -n "ACME ToS accepted:     "; ghe-config 'github-ssl.acme.accept-tos' || echo '(null)'
+  # string, blank for now
+  echo -n "ACME Contact E-mail:   "; ghe-config 'github-ssl.acme.contact-email' || echo '(null)'
+
+  local account_key ca_conf
+
+  # 4096-bit RSA private key for ACME API authentication
+  account_key=$(ghe-config 'secrets.acme.account-key' || true)
+  local msg='(key is set; retrieve with `ghe-config "secrets.acme.account-key"`)'
+  echo -n "ACME Account Key:      "; [[ -n $account_key ]] && echo "$msg" || echo '(null)'
+
+  # contents of `ca.conf` file for WORKDIR
+  ca_conf=$(ghe-config 'github-ssl.acme.ca-conf' || true)
+  local msg='(CA conf is set; retrieve with `ghe-config "github-ssl.acme.ca-conf"`)'
+  echo -n "ACME CA conf string:   "; [[ -n $ca_conf ]] && echo "$msg" || echo '(null)'
+}
+
+# -e flag: Turn on the flag for ACME support and set other config values.
+# Because this is run on the CLI, also issue an ACME cert.  If these values
+# were set using Manage, we'd skip this and just use acme_issue
+acme_enable() {
+  check_acme_prerequisites
+
+  local perform_config_apply=""
+
+  # Process to "enable" varies depending on whether it's already enabled, or it was disabled (with `-d`),
+  # or we're configuring from scratch (either new instance or config was deleted with `-x`).
+  # Here, `|| true` ignores any error exit code if the ghe-config value is absent
+  case "$(ghe-config 'github-ssl.acme.enabled' || true)" in
+    "true")
+      echo_error 'ACME certificate management is already enabled.  To clear settings and fetch a new certificate, first use `ghe-ssl-acme -x`.'
+      ;;
+    "false")
+      perform_config_apply=1
+      ;;
+    "")
+      # ACME was neither enabled or disabled; set up the feature from scratch
+
+      ghe-config --bool 'github-ssl.acme.accept-tos' true
+      ghe-config 'github-ssl.acme.contact-email' ''
+      ghe-config 'github-ssl.acme.validation-type' 'http-01'
+
+      if [[ -z $STAGING_SERVER ]]; then
+        ghe-config 'github-ssl.acme.provider' 'letsencrypt'
+      else
+        ghe-config 'github-ssl.acme.provider' 'letsencrypt-staging'
+      fi
+      ;;
+  esac
+
+  ghe-config --bool 'github-ssl.acme.enabled' true
+
+  # Needed when moving from a "disabled" to an "enabled" state (but not from a "nil" state)
+  [[ -z $perform_config_apply ]] || ghe-config-apply
+
+  if [[ -n $CSR_ONLY ]]; then
+    issue_or_renew_cert csr
+    return
+  fi
+
+  action="issue"
+  # Renew if moving from a "disabled" to an "enabled" state (but not from a "nil" state)
+  # and the certificate is within 60 days of expiration.
+  if [[ -n $perform_config_apply ]]; then
+    if openssl x509 -checkend $((60*24*60*60)) -noout -in "$HAPROXY_CRT"; then
+      return
+    fi
+    action="renew"
+  fi
+
+  issue_or_renew_cert $action
+  install_cert
+}
+
+# -i flag
+# Mainly useful after changing hostname, to issue a new cert
+acme_issue() {
+  check_acme_prerequisites
+  check_enabled
+
+  if [[ -n $CSR_ONLY ]]; then
+    issue_or_renew_cert csr
+    return
+  fi
+
+  issue_or_renew_cert issue
+  install_cert
+}
+
+# -d flag
+# Just toggle the `enabled` flag, but keep our account key and other data
+acme_disable() {
+  ghe-config --bool 'github-ssl.acme.enabled' false
+
+  [[ -z $SKIP_APPLY ]] && ghe-config-apply
+
+  echo "Future refreshes of the ACME (Let's Encrypt) certificate are disabled,"
+  echo "but the existing certificate has not been removed."
+  echo "If desired, upload an externally-generated SSL certificate and key,"
+  echo "or, to install a self-signed certificate, run"
+  echo '`/usr/local/share/enterprise/ghe-ssl-certificate-setup -r`'
+}
+
+# -c flag Renew the certificate
+# Since this runs from crontab, silently exit if ACME isn't enabled
+# or the cert isn't due for renewal.  Otherwise try to renew it.
+acme_cron() {
+  check_enabled silent
+
+  # Only renew within 60 days of expiration (of 90 days)
+  if openssl x509 -checkend $((60*24*60*60)) -noout -in "$HAPROXY_CRT"; then
+    [[ -z $VERBOSE ]] || echo "Certificate expires in more than 60 days"
+    [[ -z $FORCE_EARLY_REFRESH ]] && exit 0
+  fi
+
+  local expdate
+  expdate=$(openssl x509 -enddate -noout -in "$HAPROXY_CRT" | cut -d= -f2)
+  echo "Certificate expires on '$expdate'; attempting ACME renewal"
+
+  issue_or_renew_cert renew
+  install_cert
+}
+
+# -x flag Totally clear ACME settings from config; don't affect active cert
+acme_clear() {
+  echo "Deleting all ACME settings from config and secrets, and applying new config files..."
+  ghe-config --remove-section github-ssl.acme || true
+  ghe-config --remove-section secrets.acme || true
+
+  [[ -z $SKIP_APPLY ]] && ghe-config-apply
+}
+
+function cleanup {
+  if [[ -z $VERBOSE ]]; then
+    sudo -u acme-client rm -Rf "$WORKDIR" 2>/dev/null || true
+    rmdir "$WORKDIR"  2>/dev/null || true
+  fi
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+while getopts "sedicxptrvh" OPTION; do
+  case $OPTION in
+    s)
+      COMMAND_FLAG=acme_status
+      ;;
+    e)
+      COMMAND_FLAG=acme_enable
+      ;;
+    d)
+      COMMAND_FLAG=acme_disable
+      ;;
+    i)
+      COMMAND_FLAG=acme_issue
+      ;;
+    c)
+      COMMAND_FLAG=acme_cron
+      ;;
+    x)
+      COMMAND_FLAG=acme_clear
+      ;;
+    p)
+      PRINT_CERT=1
+      ;;
+    t)
+      STAGING_SERVER=1
+      ;;
+    r)
+      CSR_ONLY=1
+      ;;
+    h)
+      usage
+      exit 2
+      ;;
+    v)
+      set -x
+      VERBOSE=1
+      ;;
+    \?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then usage; exit 2; fi
+
+if [[ -z ${COMMAND_FLAG:-} ]]; then echo_error "A command flag must be specified"; fi
+# Execute the function referenced by the flag above
+$COMMAND_FLAG

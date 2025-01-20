@@ -1,0 +1,126 @@
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# `view` is an instance of Orgs::TeamMembers::IndexPageView %>
+<%
+  page_info \
+    title: "#{this_team.name} · #{this_organization.name} Team",
+    responsive: false,
+    class: "team",
+    dashboard_pinnable_item_id: this_team.global_relay_id
+%>
+
+<div itemscope itemtype="http://schema.org/Organization" class="js-check-all-container js-bulk-actions-container" data-bulk-actions-url="<%= org_team_members_toolbar_actions_path(this_organization, this_team) %>" data-bulk-actions-parameter="member_logins">
+  <div class="container mt-4"><%# erblint:disable DeprecatedCustomCss %>
+    <% page_info :stafftools => gh_stafftools_team_path(this_team) %>
+    <% if view.show_team_maintainer_help_ui? %>
+      <div class="Box mb-4 d-flex flex-items-center js-notice">
+        <div class="px-3">
+          <%= primer_octicon(:"light-bulb", mr: 1) %>
+          <strong>Tip</strong>
+        </div>
+        <div class="px-3 py-2 border-left flex-auto">
+          <span class="text-bold"><%= this_team.name %> currently has no team maintainers.</span> Select a user below to manage roles.
+          <p class="note m-0">Team maintainers can add members, remove members, and manage repository permissions. <a class="Link--inTextBlock" aria-label="Learn more about giving team maintainer permissions to an organization member" href="<%= GitHub.help_url %>/articles/giving-team-maintainer-permissions-to-an-organization-member/">Learn more</a></p>
+        </div>
+        <div class="px-3">
+          <%= form_tag dismiss_notice_path("team_maintainers_banner"), :class => "js-notice-dismiss" do %>
+            <%= render Primer::Beta::CloseButton.new(type: :submit, "aria-label": "Hide this notice forever", color: :muted) %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
+    <div class="subnav d-flex flex-items-center">
+      <%= form_tag team_members_path(this_team), method: :get, class: "flex-auto", "data-autosearch-results-container" => "team-members" do %>
+        <div class="auto-search-group">
+          <input class="form-control subnav-search-input input-contrast auto-search-input js-member-filter-field" type="text" name="query" value="<%= params[:query] %>"
+            placeholder="Find a member…"
+            aria-label="Find a member…"
+            autocomplete="off"
+            data-throttled-autosubmit>
+          <%= primer_octicon(:search) %>
+          <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+        </div>
+      <% end %>
+      <% if this_team.externally_managed? && view.viewer_can_administer_team? %>
+        <% if view.group_provisioning_enabled? %>
+          <div>
+            <include-fragment src="<%= list_group_mappings_path %>" class="d-inline-block"<%= test_selector("team-externally-managed") %>>
+              <span data-show-on-error hidden>
+                <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+                Error loading sync status
+              </span>
+              <span data-hide-on-error>
+                <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+                Loading...
+              </span>
+            </include-fragment>
+            <%= render Primer::Beta::Button.new(tag: :a, scheme: :primary, ml: 2, "aria-label": "Edit team group mapping to change memberships managed through the identity provider.", href: edit_team_path(this_organization, this_team), id: "edit_team_button") do |component| %>
+                <% component.with_tooltip(text: "Edit team group mapping to change memberships managed through the identity provider.") %>
+                Edit team
+              <% end %>
+          </div>
+        <% else %>
+          <div>
+            <include-fragment src="<%= list_group_mappings_path %>" class="d-inline-block" <%= test_selector("team-externally-managed") %>>
+              <span data-show-on-error hidden>
+                <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+                Error loading sync status
+              </span>
+              <span data-hide-on-error>
+                <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+                Loading...
+              </span>
+            </include-fragment>
+            <%= render Primer::Beta::Button.new(tag: :a, scheme: :primary, ml: 3, "aria-label": "Team membership managed through #{view.identity_provider}", href: edit_team_path(this_organization, this_team), id: "edit_team_button") do |component| %>
+              <% component.with_tooltip(text: "Team membership managed through #{view.identity_provider}") %>
+              Edit team
+            <% end %>
+          </div>
+        <% end %>
+      <% elsif !this_team.ldap_mapped? && !this_team.ldap_synced? && view.viewer_can_administer_team? %>
+        <div>
+          <% if view.pending_invitations_count > 0 %>
+            <%= render Primer::Beta::Button.new("data-show-dialog-id": "add-team-member", mr: 2) do %>
+              <%= pluralize(view.pending_invitations_count, "pending member", "pending members") %>
+            <% end %>
+          <% end %>
+
+          <%= render(Primer::Alpha::Dialog.new(id: "add-team-member", title: "Add a member", style: "max-height: 80vh")) do |component| %>
+            <% component.with_show_button("data-ga-click": "Teams, add member, location:subnav; text:Add a member", scheme: :primary) { 'Add a member' } %>
+            <% component.with_header do %>
+              <div class="ml-5 d-flex flex-column">
+                <div class="flex-self-center">
+                  <%= render(Primer::Beta::Octicon.new(icon: "organization", size: :medium, mt: 4, mb: 2, color: :muted)) %>
+                </div>
+                <div class="text-center mb-2" style="font-size: 16px">
+                  <strong>Add member to <%= this_team.name %></strong>
+                </div>
+              </div>
+            <% end %>
+            <%= render partial: "orgs/team_members/manage_memberships_dialog_new", locals: {
+              rate_limited: rate_limited,
+              pending_invitations: view.pending_invitations,
+              pending_membership_requests: view.pending_membership_requests
+            } %>
+          <% end %>
+        </div>
+      <% elsif this_team.locally_managed? %>
+        <div <%= test_selector("non-emu-user-can-see-a-button") %>>
+          <%=
+            render partial: "orgs/teams/membership_toggle", locals: {
+              button_classes: "btn",
+              ga_location: "location:team members",
+              return_to_path_after_requesting: team_path(this_team),
+              return_to_path_after_cancelling: team_path(this_team),
+              return_to_path_after_leaving: this_team.secret? ? teams_path(this_organization) : team_path(this_team)
+            }
+          %>
+        </div>
+      <% end %>
+    </div>
+
+    <div id="team-members" data-hpc>
+      <%= render "orgs/team_members/member_table", view: view %>
+    </div>
+  </div>
+</div>

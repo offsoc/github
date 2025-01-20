@@ -1,0 +1,84 @@
+#!/bin/bash
+#/ Usage: ghe-check-blob-connection [-h] [-s actions] [-p s3] [-cs connectionstring] [-at credential] [-cn containername] [-d] [--tmpfs]
+#/
+#/ Check that blob storage provider for GitHub Packages is valid.
+#/ -OverrideBlobProvider -OverrideAuthenticationType -OverrideConnectionString -OverrideContainerName
+#/
+#/ OPTIONS:
+#/   -h  | --help                Show this message
+#/   -s  | --service             The Actions Service to leverage (actions/token, defaults to actions).
+#/   -p  | --provider            The name of the storage provider (azure/s3/gcs).
+#/   -cs | --connection-string   The connection string to the storage provider.
+#/   -at | --authentication-type The authentication type (credential, oidc)
+#/   -cn | --container-name      The container name to use
+#/   -d  | --debug               Request debug information
+#/       | --tmpfs               Use a temporary filesystem for ghe-actions-console
+#/
+#/  Sample S3 connection string:
+#/   "BucketName=github-dev;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=https://s3.us-east-1.amazonaws.com;PathPrefix=actions-storage-check"
+#/  Sample Minio connection string:
+#/   "ForcePathStyle=true;BucketName=github-dev;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=<url-to-minio-service>;PathPrefix=actions-storage-check"
+#/  Sample Azure connection string:
+#/   "DefaultEndpointsProtocol=https;AccountName=<azure-account-name>;AccountKey=<azure-account-key>;EndpointSuffix=core.windows.net"
+#/
+set -e
+
+# Default options
+cmdlet_params=""
+service="actions"
+params=()
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -s|--service)
+            service="$2"
+            shift 2
+            ;;
+        -p|--provider)
+            cmdlet_params="$cmdlet_params -OverrideBlobProvider $(echo $2| tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;
+        -cs|--connection-string)
+            cmdlet_params="$cmdlet_params -OverrideConnectionString '$2'"
+            shift 2
+            ;;
+        -at|--authentication-type)
+            cmdlet_params="$cmdlet_params -OverrideAuthenticationType '$2'"
+            shift 2
+            ;;
+        -cn|--container-name)
+            cmdlet_params="$cmdlet_params -OverrideContainerName '$2'"
+            shift 2
+            ;;
+        -d|--debug)
+            cmdlet_params="$cmdlet_params -Debug"
+            shift 1
+            ;;
+        --tmpfs)
+            params+=(--tmpfs)
+            shift 1
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+wait_blob_deletion=$(ghe-config --ctmpl app.actions.large-blob-wait)
+
+if [[ -n $wait_blob_deletion ]]; then
+    cmdlet_params="$cmdlet_params -WaitForBlobDeletionSeconds $wait_blob_deletion"
+fi
+params+=("-s" "$service")
+params+=("-c" "Test-StorageConnection $cmdlet_params")
+
+ghe-actions-console "${params[@]}"

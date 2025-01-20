@@ -1,0 +1,113 @@
+<%# view is an instance of RepositoryCodeScanning::IndexView %>
+
+<%
+  page_info(
+    title: "Code scanning alerts · #{view.repository.name_with_display_owner}",
+    container_xl: true,
+    selected_link: :code_scanning,
+  )
+%>
+
+<%= render layout: "layouts/repository/security", locals: { selected_tab: :code_scanning } do %>
+  <%= render "repos/code_scanning/site_admin_warning", view: view %>
+  <% if view.blank_slate_to_show.present? %>
+    <%= render "repos/code_scanning/blank_slate", view: view %>
+  <% else %>
+    <%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+      <% component.with_heading(display: :flex, align_items: :center, tag: :h2) do %>
+        <span>Code scanning</span>
+      <% end %>
+    <% end %>
+
+    <div class="Box width-full py-2 px-3 mb-3">
+      <include-fragment class="width-full d-flex flex-items-center flex-justify-between flex-wrap" src="<%= view.tool_status_path %>" <%= test_selector("tool_status_fragment") %>>
+        <span class="text-bold" data-hide-on-error>
+          Loading<span class="AnimatedEllipsis"></span>
+        </span>
+        <span data-show-on-error hidden>
+          <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+          Sorry, something went wrong loading this data.
+        </span>
+        <% if GitHub.actions_enabled? && current_repository.actions_enabled? %>
+          <%= render(Primer::Beta::Button.new(scheme: :invisible, tag: :a, href: actions_onboarding_filter_path(user_id: current_repository.owner_display_login, repository: current_repository, category: "security"), test_selector: "setup-tools-button")) do |component| %>
+            <% component.with_leading_visual_icon(icon: :plus) %>
+            Add tool
+          <% end %>
+        <% end %>
+      </include-fragment>
+    </div>
+
+    <% free_text_search_failed = view.response&.data&.search_status != :STATUS_OK %>
+    <% open_count = view.response&.data&.open_count || 0 %>
+    <% closed_count = view.response&.data&.resolved_count || 0 %>
+
+    <%= render CodeScanning::SearchBarComponent.new(
+      user: current_user,
+      repository: current_repository,
+      query: view.query,
+      language_percentages: language_percentages,
+      default_query_string: view.default_query_string
+    ) %>
+
+    <% if free_text_search_failed && view.text_search_warning_message %>
+      <div class="color-fg-attention mt-3" <%= test_selector("text-warning-message") %>>
+        <%= render Primer::Beta::Octicon.new(icon: "alert", color: :attention, mr: 1) %>
+        <%= view.text_search_warning_message %>
+      </div>
+    <% end %>
+
+    <%= render CodeScanning::TableComponent.new(
+      open_count: open_count,
+      closed_count: closed_count,
+      query: view.query,
+      alerts_code_scanning_index_path_method: view.method(:index_path),
+      repository: current_repository,
+      user: current_user,
+      ref_names: view.ref_names,
+      fixed_result_numbers: view.fixed_result_numbers,
+      alert_results: view.alert_results,
+      experimental_tag_path: view.tag_path("experimental"),
+      alert_number_plus_repository_id_to_issues:,
+      language_percentages: language_percentages,
+    ) %>
+
+    <% if view.results.size <= 0 %>
+      <div class="Box Box--condensed Box--responsive border-top-0 rounded-top-0 js-scanning-alert-list js-check-all-container">
+        <% if view.turboscan_unavailable? %>
+          <%= render Primer::Beta::Blankslate.new(my: 6, test_selector: "code-scanning-unavailable") do |c| %>
+            <% c.with_visual_icon(icon: "alert") %>
+            <% c.with_heading(tag: :h3, mt: 4) { "Loading alerts failed" } %>
+            <% c.with_description do %>
+              <% if GitHub.enterprise? %>
+                <p>If the problem persists <%= contact_support_snippet(true) %>.</p>
+              <% else %>
+                <p>We track these errors automatically, but if the problem persists feel free to <a class="Link--inTextBlock" href="<%= contact_path %>">contact us</a>.</p>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render "repos/code_scanning/no_results", view: view %>
+        <% end %>
+      </div>
+    <% end %>
+
+    <% if view.show_pagination? %>
+      <div class="paginate-container" <%= test_selector("paginate-container") %>>
+        <%= will_paginate view.results %>
+      </div>
+    <% end %>
+
+    <% unless view.turboscan_unavailable? %>
+      <div class="protip">
+        <%= primer_octicon(:"light-bulb", color: :muted) %>
+        <strong>ProTip!</strong>
+        <%= view.protip[:text] %>
+        <a href="<%= view.protip[:link_href] %>" class="Link--inTextBlock"><%= view.protip[:link_text] %></a>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "code-scanning" %>
+<% end %>

@@ -1,0 +1,84 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  repos_with_counts = collector.repository_contribution_counts
+  org_count = organization_selector_collector.organizations_contributed_to(selected_organization_id: selected_org&.id).count
+  contribution_counts = collector.contribution_counts
+  no_contribution_percentages = contribution_percentages_by_type(contribution_counts).values.all?(&:zero?)
+  no_contributions = team_count.zero? && repos_with_counts.blank? && no_contribution_percentages
+%>
+
+<% if logged_in? && !viewing_own_profile? && !current_user.dismissed_notice?("feature_tutorial_org_scoped_highlights") && !current_user.dismissed_notice?("org_scoped_activity_opt_in") %>
+  <div class="Popover js-notice" style="bottom: 100%; z-index: 1">
+    <div class="Popover-message Popover-message--large Popover-message--bottom-left p-4 Box color-shadow-large">
+      <h2 class="d-flex flex-items-baseline mb-2 f4"><%= emoji_tag(Emoji.find_by_alias("wave"), class: "emoji emoji-icon mr-2") %>Introducing activity overview</h2>
+      <p class="color-fg-muted">
+        Now you can see an overview of a GitHub user&rsquo;s activity and filter activity by
+        organization.
+      </p>
+
+      <%= form_tag dismiss_notice_path("feature_tutorial_org_scoped_highlights"), class: "js-notice-dismiss" do %>
+        <button type="submit" class="btn mt-2 text-bold">Got it!</button>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if org_count > 0 || !no_contributions %>
+  <div class="Box mb-5 p-3 activity-overview-box border-top border-xl-top-0">
+
+    <%= render(
+      partial: "users/tabs/organization_selector",
+      locals: {
+        selected_org: selected_org,
+        collector: collector,
+        organization_selector_collector: organization_selector_collector,
+      }
+    ) %>
+
+    <% if no_contributions %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          No activity overview available.
+        <% end %>
+      <% end %>
+    <% else %>
+      <div class="d-flex flex-column flex-lg-row">
+        <% classes = user_or_global_feature_enabled?(:hide_spider_graph) ? "width-full" : "col-12 col-lg-6 d-flex flex-column pr-lg-5" %>
+        <div class="<%= classes %>">
+          <h3 class="mb-3 text-normal f5">
+            Activity
+            <% if selected_org %>
+              in <span class="text-bold"><%= selected_org.name %></span>
+            <% else %>
+              overview
+            <% end %>
+          </h3>
+          <%= render partial: "users/tabs/activity_overview/most_active_repositories",
+                     locals: { repo_contrib_counts: repos_with_counts,
+                               include_owner: selected_org.nil?,
+                               selected_org_database_id: selected_org&.id } %>
+
+          <% if scoped_organization %>
+            <%= render Profiles::User::Tabs::ActivityOverview::TeamsComponent.new(
+              teams: Team.ranked_for(
+                this_user,
+                scope: this_user.async_visible_teams_for(current_user).sync,
+              ).owned_by(scoped_organization).to_a,
+              scoped_organization_id: scoped_organization.id,
+            ) %>
+          <% end %>
+        </div>
+
+        <% unless user_or_global_feature_enabled?(:hide_spider_graph) %>
+          <div class="pl-lg-3 col-6 border-lg-left">
+            <%= render(
+              "users/tabs/activity_overview/contribution_spider_graph",
+              user: this_user,
+              collector: collector,
+            ) %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

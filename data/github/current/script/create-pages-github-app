@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Usage: create-pages-github-app
+# Creates the Pages GitHub app
+
+puts "=> Loading the enviroment..."
+
+require_relative "../config/environment"
+
+unless Rails.env.development?
+  puts "=> This can only be run in the development environment!"
+  exit 1
+end
+
+class CreatePagesGitHubApp
+  def call
+    if GitHub.pages_github_app.present?
+      puts "=> The Pages GitHub app already exists."
+    else
+      puts "=> Creating the Pages GitHub app..."
+      Integration.create!(
+        owner: GitHub.trusted_oauth_apps_owner,
+        name: GitHub.pages_github_app_name,
+        url: "https://pages.github.com",
+        default_permissions: {
+          "checks"      => :write,
+          "deployments" => :write,
+          "statuses"    => :write,
+          "contents"    => :read,
+          "pages"       => :read,
+          "members"     => :read,
+          "metadata"    => :read,
+        },
+        public: false,
+        hook_attributes: { # Pages doesn't use webhooks. This is here to satisfy validation.
+          url: "https://pages.github.localhost/webhook",
+          secret: SecureRandom.hex(16),
+        },
+        application_callback_urls_attributes: [
+          { url: "https://pages.github.localhost/webhook/callback" },
+        ],
+        skip_restrict_names_with_github_validation: true,
+        skip_generate_slug: true,
+        no_repo_permissions_allowed: true,
+      )
+    end
+  end
+end
+
+class CreatePagesIntegrationInstallTrigger
+  def call
+    puts "=> Ensuring an integration install trigger exists."
+    IntegrationInstallTrigger.find_or_create_by!(integration: GitHub.pages_github_app, install_type: :page_build)
+  end
+end
+
+if __FILE__ == $0
+  CreatePagesGitHubApp.new.call
+  CreatePagesIntegrationInstallTrigger.new.call
+  puts "=> Done!"
+end

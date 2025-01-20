@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# Configures minimal feature flags for working with code nav features locally.
+
+warn "Make sure bin/server is running"
+warn "Loading rails environment..."
+$stderr.sync = true
+require File.expand_path("../../config/basic", __FILE__)
+require_relative "../config/environment"
+require_relative "../config/console"
+
+warn "Enabling aleph feature flags..."
+GitHub.flipper[:aleph_request_index].enable
+GitHub.flipper[:aleph_diff_request_index].enable
+# GitHub.flipper[:aleph_unified_code_nav].enable
+GitHub.flipper[:aleph_show_proxy_backend].enable
+GitHub.flipper[:aleph_lsp_rest_api].enable
+GitHub.flipper[:aleph_precise_code_nav].enable
+GitHub.flipper[:aleph_precise_preview_code_nav].enable
+GitHub.flipper[:aleph_precise_development_code_nav].enable
+GitHub.flipper[:aleph_code_navigation_diff_view].enable
+GitHub.flipper[:aleph_cross_repo_jump_to_definition].enable
+
+%w(
+  csharp
+  codeql
+  elixir
+  go
+  java
+  javascript
+  php
+  python
+  ruby
+  typescript
+).each do |language|
+  GitHub.flipper["aleph_language_#{language}".to_sym].enable
+end
+
+warn "Re-analyzing languages in all repos"
+GitHub::LinguistLanguageManager.synchronize_languages(dry_run: false)
+Repository.all.each do |repo|
+  GitHub.cache.delete(repo.languages_summary_cache_key)
+  repo.analyze_languages
+rescue GitRPC::InvalidRepository
+end
+
+warn <<-HELP
+
+Done!
+
+For syntax highlighting, clone and run https://github.com/github/treelights
+For code navigation, clone and run https://github.com/github/aleph
+HELP

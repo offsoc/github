@@ -1,0 +1,53 @@
+#!/bin/bash
+#/ Usage: ghe-es-snapshot
+#/ Take a point-in-time snapshot of all Elasticsearch indexes under
+#/ /data/user/elasticsearch-snapshot.
+set -e
+
+# Always run as admin user.
+[ "$(whoami)" = "admin" ] || {
+    exec sudo -u admin "$0" "$@"
+    exit 1
+}
+
+# Keep this many ES snapshots around. Older snapshots are deleted so that
+# documents no longer in use may be freed.
+: ${GHE_ES_SNAPSHOT_KEEP:=10}
+: ${GHE_ES_SNAPSHOT_DIR:=/data/user/elasticsearch-snapshots}
+
+# Create the local ES snapshot repository directory if needed
+if [ ! -d "$GHE_ES_SNAPSHOT_DIR" ]; then
+    sudo -u root mkdir "$GHE_ES_SNAPSHOT_DIR"
+    sudo -u root chown elasticsearch:elasticsearch "$GHE_ES_SNAPSHOT_DIR"
+fi
+
+# Register the snapshot repository in ES
+curl -s -o /dev/null -XPUT 'localhost:9200/_snapshot/local' -d '{
+    "type": "fs",
+    "settings": {
+        "location": "'$GHE_ES_SNAPSHOT_DIR'",
+        "compress": true
+    }
+}'
+
+# List of all current snapshot ids ordered from newest to oldest.
+snapshots="$(
+  cd "$GHE_ES_SNAPSHOT_DIR" &&
+  ls -1 snapshot-[0-9]* 2>/dev/null |
+  cut -f 2 -d - |
+  sort -rn
+)"
+
+# Generate a new snapshot id by incrementing the previous snapshot id.
+last=$(echo "$snapshots" | head -n 1)
+snapshot_id=$(( last + 1 ))
+
+# Perform the snapshot and wait for it to complete.
+echo "Creating Elasticsearch snapshot: $snapshot_id ..."
+curl -s -o /dev/null -XPUT "localhost:9200/_snapshot/local/$snapshot_id?wait_for_completion=true"
+
+# Prune old snapshots
+prune_list=$(echo "$snapshots" | tail -n +$GHE_ES_SNAPSHOT_KEEP)
+for snapshot_id in $(echo "$snapshots" | tail -n +$GHE_ES_SNAPSHOT_KEEP); do
+    curl -s -o /dev/null -XDELETE "localhost:9200/_snapshot/local/$snapshot_id"
+done

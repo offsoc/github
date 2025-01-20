@@ -1,0 +1,104 @@
+#!/bin/bash
+#/ Usage: ghe-config-archive [options]
+#/
+#/ Archives the current configuration files to a configuration history directory.
+#/ If run on cluster, it will archive the current configuration files and sync the history across all cluster nodes.
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -?                 Show this message
+#/   -v                 Run with verbose output
+
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+config_files=(
+  "/data/user/common/github.conf"
+  "/data/user/common/cluster.conf"
+  "/data/user/common/secrets.conf"
+)
+
+while getopts "hvs?" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      exit 2
+      ;;
+    v)
+      set -x
+      ;;
+    s)
+      # status.json is not included by default as this file is a product of ghe-config-apply
+      # and not a file that is typically edited by the user.
+      # The -s flag is for internal use only.
+      config_files+=("/data/user/config-apply/status.json")
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+# shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+echo "Archiving current configuration"
+
+ghe_config_apply_archive_dir=${GHE_CONFIG_APPLY_ARCHIVE_DIR:-"/data/user/common/ghe-config-apply/config-file-history"}
+config_apply_id=$(date +%Y%m%d-%H%M%S)
+current_config_apply_dir="$ghe_config_apply_archive_dir/$config_apply_id"
+
+# Sort the folders under config-apply-history based on timestamp descending and identify the most recent folder name
+most_recent_config_history_id=$(ls /data/user/common/ghe-config-apply/config-file-history/ | sort -r | head -n 1)
+most_recent_config_history_dir="$ghe_config_apply_archive_dir/$most_recent_config_history_id"
+
+mkdir -p $ghe_config_apply_archive_dir
+mkdir -p $current_config_apply_dir
+
+# Ensure permissions are correct
+/usr/local/share/enterprise/ghe-fix-permissions
+
+# https://tr.opensuse.org/Patch_Name_Convention
+# https://quaid.fedorapeople.org/TOS/Practical_Open_Source_Software_Exploration/html/sn-Fixing_the_Code-Naming_Conventions.html
+# Patch containing all changes
+patch_filename="ghe-config_$config_apply_id.diff"
+# Sanitized patch - excludes secrets.conf
+sanitized_patch_filename="ghe-config_${config_apply_id}_sanitized.diff"
+echo "Copying configuration files used for this execution of config apply to '$current_config_apply_dir'"
+for config_file in "${config_files[@]}"; do
+  if [ -f "$config_file" ]; then
+    config_filename=$(basename "$config_file")
+    sha256sum $config_file > "$current_config_apply_dir/$config_filename.sum"
+    cp "$config_file" $current_config_apply_dir
+  fi
+done
+
+if [ -n "$most_recent_config_history_id" ] && [ -d "$most_recent_config_history_dir" ]; then
+  diff_result=$(diff -u "$most_recent_config_history_dir" "$current_config_apply_dir" --exclude="*.diff" 2>&1) || true
+  if [ -n "$diff_result" ]; then
+    echo "$diff_result" > "$current_config_apply_dir/$patch_filename"
+  fi
+  # Inclusion of .sum files allows us to see that secrets.conf (and other files) have changed, while the exclusion of secrets.conf
+  # prevents us from seeing the contents of those changes.
+  support_diff_results=$(diff -u "$most_recent_config_history_dir" "$current_config_apply_dir" --exclude="secrets.conf" --exclude="*.diff" 2>&1) || true
+  if [ -n "$support_diff_results" ]; then
+    echo "$support_diff_results" > "$current_config_apply_dir/$sanitized_patch_filename"
+  fi
+fi
+
+# Ensure permissions are correct
+/usr/local/share/enterprise/ghe-fix-permissions
+
+echo "Current configuration has been archived"
+
+# Only keep the default number of most recent configurations
+sudo ghe-config-archive-cleanup
+
+# If running from a cluster, an HA cluster, or standalone HA (current node must be a primary or a replica with replication running), sync the configuration history
+if is_cluster || is_cluster_ha || is_ha_primary || is_replication_running_on_current_node; then
+ sudo ghe-config-archive-cluster-sync
+fi

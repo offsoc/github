@@ -1,0 +1,218 @@
+#!/bin/bash
+#/ Usage: ghe-repl-node [options]
+#/
+#/ Node-specific replication settings
+#/
+#/ OPTIONS:
+#/   -a | --active                                Enable active-replica setting on this node
+#/   -i | --inactive                              Disable active-replica setting on this node
+#/   -c | --cache <location>                      Make this node a cache server and set location
+#/   --cache-domain <domain>                      Set external domain name for cache location (requires --cache)
+#/   -d <datacenter> | --datacenter <datacenter>  Set datacenter for this node
+#/   --default-datacenter                         Reset datacenter to default value for this node
+#/   -h | --help                                  Show this message.
+#/   -v | --verbose                               Run with verbose output.
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+active_enable=false
+active_disable=false
+cache_enable=false
+set_datacenter=false
+datacenter=''
+verbose=false
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long active,cache:,cache-domain:,datacenter:,default-datacenter,inactive,help,verbose --options ac:d:ivh -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a|--active)
+      active_enable=true
+      shift
+      ;;
+    -c|--cache)
+      cache_enable=true
+      shift
+      cache_location="$1"
+      shift
+      ;;
+    --cache-domain)
+      shift
+      cache_domain="$1"
+      shift
+      ;;
+    -d|--datacenter)
+      set_datacenter=true
+      shift
+      datacenter="$1"
+      shift
+      ;;
+    --default-datacenter)
+      set_datacenter=true
+      datacenter="default"
+      shift
+      ;;
+    -i|--inactive)
+      active_disable=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      verbose=true
+      set -x
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+# shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+if is_standalone ; then
+  echo "This environment is a standalone node." >&2
+  echo "This command can only be run in a high availability configuration." >&2
+  exit 1
+fi
+
+if is_cluster ; then
+  echo "This environment is full cluster mode." >&2
+  echo "This command can only be run in a high availability configuration." >&2
+  exit 1
+fi
+
+if $cache_enable ; then
+  if [[ -z $cache_location ]]; then
+    echo "Error: Cache location must be non-empty" >&2
+    exit 1
+  fi
+else
+  if [[ -n $cache_domain ]]; then
+    echo "Error: Cache domain requires --cache location" >&2
+    exit 1
+  fi
+fi
+
+node=$(cat "${GHE_CLUSTER_FILE:-/etc/github/cluster}")
+messages=""
+
+if $set_datacenter; then
+
+  # make sure datacenter length 20 charactesr or less
+  if [ ${#datacenter} -gt 20 ]; then
+    echo "Error: Datacenter name must be 20 characters or less." >&2
+    exit 1
+  fi
+
+  ghe-config "cluster.$node.datacenter" "$datacenter"
+  messages+="Datacenter is set to $datacenter for this node.\n"
+fi
+
+if $active_enable || $active_disable || $cache_enable; then
+  if [ -z "$(ghe-config "cluster.$node.replica" || true)" ]; then
+    echo "Error: This command can only be run on a replica." >&2
+    exit 1
+  fi
+
+  if $cache_enable && ( $active_enable || $active_disable ); then
+    echo "Error: --cache is mutually exclusive with --active/--inactive." >&2
+    exit 1
+  fi
+
+  if $active_enable || $cache_enable; then
+    for n in $(ghe-config --get-regexp cluster.*.hostname | cut -d ' ' -f2); do
+      if ghe-config --blank "cluster.$n.datacenter" || ghe-config --eq "cluster.$n.datacenter" "default"; then
+        echo "Error: Enabling an active or cache replica requires that all nodes, including the" >&2
+        echo "       primary and any other replicas, have a non-default datacenter configured." >&2
+        exit 1
+      fi
+    done
+  fi
+fi
+
+if $active_enable || $active_disable; then
+  if $active_enable; then
+    label="enabled"
+    value="true"
+  else
+    value="false"
+    label="disabled"
+  fi
+
+  ghe-config "cluster.$node.active-replica-server" "$value"
+  ghe-config "cluster.$node.memcache-server" "$value"
+  messages+="Active replica mode is $label for this node.\n"
+
+elif $cache_enable; then
+  github_hostname="$(ghe-config --get core.github-hostname)"
+  if [[ -z $cache_domain ]]; then
+    cache_domain="$cache_location.$github_hostname"
+  fi
+
+  if [[ $cache_domain == *.$github_hostname ]]; then
+    for prefix in assets avatars codeload containers docker gist maven media notebooks npm nuget pages raw reply rubygems uploads viewscreen; do
+      if [[ $cache_domain = $prefix.$github_hostname ]]; then
+        echo "Error: Domain name $cache_domain" >&2
+        echo "       is reserved for subdomain isolation; please choose another cache name." >&2
+        exit 1
+      fi
+    done
+  fi
+
+  ghe-config "cluster.$node.cache-location" "$cache_location"
+  ghe-config "cluster.$node.cache-domain" "$cache_domain"
+
+  ghe-config "cluster.$node.active-replica-server" false
+  ghe-config "cluster.$node.elasticsearch-server" false
+  ghe-config "cluster.$node.metrics-server" false
+  ghe-config "cluster.$node.mssql-server" false
+  ghe-config "cluster.$node.pages-server" false
+
+  ghe-config "cluster.$node.cache-server" true
+  ghe-config "cluster.$node.git-server" true
+  ghe-config "cluster.$node.memcache-server" true
+  ghe-config "cluster.$node.mysql-server" true
+  ghe-config "cluster.$node.redis-server" true
+  ghe-config "cluster.$node.storage-server" true
+
+  messages+="Cache mode is enabled for this node.\n"
+  messages+="Cache replica domain name is set to $cache_domain for this node.\n"
+fi
+
+if [ -n "$messages" ]; then
+  if [ -z "$SKIP_SYNC" ]; then
+    # only sync the cluster.conf file since that's the only file that gets changed by ghe-repl-node
+    sudo env HA_CLUSTER=1 ghe-cluster-config-update -u
+  fi
+  echo -e "$messages"
+  if is_replication_running_on_current_node; then
+    echo "To apply the change please run \`ghe-config-apply\`."
+  elif is_replication_setup_on_current_node; then
+    echo "Replication has been set up but not started on this node. Finish up any \`ghe-repl-node\` operations, and run \`ghe-repl-start\` to start replication."
+  else
+    echo "Replication has not been setup on this node. Finish up any \`ghe-repl-node\` operations, and run \`ghe-repl-setup\` to start setup."
+  fi
+  exit
+else
+  usage
+  exit 2
+fi

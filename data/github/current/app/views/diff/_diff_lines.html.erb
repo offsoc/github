@@ -1,0 +1,61 @@
+<%# view is an instance of Diff::CodeLinesPartialView %>
+<%
+  last_right = nil
+  last_left  = nil
+%>
+
+<%# We use loop and Enumerator#next so we can peek at the next line within the loop %>
+<%# TODO: Remove this #to_enum call once line_enumerator is a real Enumerator %>
+<% line_enumerator = view.line_enumerator.to_enum %>
+<% hunk_id = nil %>
+<% loop do %>
+  <% line = line_enumerator.next %>
+  <% if line.type == :hunk %>
+    <% hunk_id = Digest::SHA256.hexdigest(line.text) %>
+    <%= render partial: "diff/directional_hunk_header", locals: {
+      view: create_view_model(
+        Diff::DirectionalHunkHeaderView,
+        line: line,
+        last_right: last_right,
+        last_left: last_left,
+        parent_view: view,
+        pull_request_context: view&.pull_request&.id,
+      )
+    } %>
+  <% else %>
+    <% threads = view.threads.position(line.position) %>
+    <%= render "diff/diff_line", view: view, line: line, hunk_id: hunk_id %>
+
+    <% annotations = view.annotations.end_line(line.right) %>
+    <% annotations = annotations.annotations_without_comments(view.pull_request) %>
+
+    <% if annotations.any? && line.type != :deletion %>
+    <%= render partial: "diff/inline_annotations", locals: {
+          annotations: annotations,
+          pull_request: view.pull_request,
+          end_line_text: line.text
+        }
+    %>
+    <% end %>
+
+    <% if threads.any? %>
+      <%= render :partial => "diff/inline_comments", :locals => {
+            :threads           => threads,
+            :comment_context  => :diff
+          }
+      %>
+    <% end %>
+  <% end %>
+  <% last_right = line.right %>
+  <% last_left  = line.left %>
+<% end %>
+<%= render partial: "diff/directional_hunk_header", locals: {
+  view: create_view_model(
+    Diff::DirectionalHunkHeaderView,
+    line: :last,
+    last_right: last_right,
+    last_left: last_left,
+    parent_view: view,
+    pull_request_context: view&.pull_request&.id,
+  )
+} %>

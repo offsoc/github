@@ -1,0 +1,100 @@
+<% content_for :header do %>
+  <%= @message.title %>
+<% end %>
+
+<%= render(Mail::BorderedRowComponent.new) do %>
+  <div class="p-1 d-inline">
+    <p>
+      <%= render(Mail::HeaderTitleComponent.new( title: "#{@message.security_advisory_title}", icon: "dependabot.png") ) %>
+      <%= render DependabotAlerts::SeverityLabelComponent.new(severity: @message.security_advisory.severity) %>
+    </p>
+  </div>
+
+  <%= render(Mail::SpacerComponent.new(size: 8)) %>
+
+  <div class="d-inline">
+    <p>
+      <%= render(Primer::Beta::Octicon.new(icon: "package", color: :muted)) %>
+      <%= @message.security_advisory.affects.join(", ") %>
+    </p>
+    <p class="text-gray-light"><%= @message.security_advisory.identifier %></p>
+  </div>
+
+  <%= render(Mail::SpacerComponent.new) %>
+
+  <%= render(Mail::ContainerComponent.new) do %>
+    <%= render(Mail::ButtonComponent.new(
+      text: "View all alerts",
+      url: @message.security_advisory_permalink, classes: "btn-primary btn-large"))
+    %>
+  <% end %>
+  <%= render(Mail::SpacerComponent.new(size: 32)) %>
+<% end %>
+
+<% repo_limit_counter = 0 %>
+<% @message.packages.each do |package| %>
+  <% @message.repositories_for_package(package).each do |repository| %>
+    <% break if repo_limit_counter >= @message.default_email_repository_count %>
+    <% last = repo_limit_counter + 1 == @message.affected_repository_count %>
+    <%= render(Mail::BorderedRowComponent.new(last: last, skip_padding: true, classes: "text-left")) do %>
+      <td style="width: 100%" class="p-2">
+        <p class="mb-0">
+          <% if repository.template? %>
+            <% if repository.public? %>
+              <%= render(Primer::Beta::Octicon.new(icon: "repo-template", color: :muted)) %>
+            <% else %>
+              <%= render(Primer::Beta::Octicon.new(icon: "lock", color: :muted)) %>
+            <% end %>
+          <% else %>
+            <%= render(Primer::Beta::Octicon.new(icon: repository.repo_type_icon, color: :muted)) %>
+          <% end %>
+
+          <span class="text-bold v-align-middle">
+            <%= repository.name_with_display_owner %>
+          </span>
+
+          <% alerts = @message.alerts_by_package_and_repository.fetch(package).fetch(repository) %>
+          <div class="mt-2 pl-3 ml-3">
+            <ul>
+              <% alerts.each do |alert| %>
+                <li>
+                  <%= render(Primer::Beta::Link.new(
+                    href: alert.permalink,
+                  )) do %>
+                    <%= alert.vulnerable_manifest_path %>
+                  <% end %>
+                </li>
+              <% end%>
+            </ul>
+          </div>
+        </p>
+      </td>
+      <% repo_limit_counter += 1 %>
+    <% end%>
+  <% end%>
+<% end%>
+
+<% remaining_vulnerable_repositories_count = @message.affected_repository_count - repo_limit_counter %>
+<% if remaining_vulnerable_repositories_count > 0 %>
+  <%= render(Mail::BorderedRowComponent.new(last: true, skip_padding: true, classes: "text-left")) do %>
+      <td style="width: 100%" class="p-2">
+      <p class="mb-0 text-gray-light">
+        <%= pluralize(remaining_vulnerable_repositories_count, "more repository") %>
+      </p>
+    </td>
+  <% end %>
+<% end %>
+
+<% content_for :footer_text do %>
+  <p class="f6 text-gray-light"> You are receiving this email because your repository has Dependabot enabled. If you want to ship secure code, make sure it is enabled on all your important repositories.
+  </p>
+
+  <%= render(Mail::ContainerComponent.new(classes: "text-center")) do %>
+    <%= render(Mail::SpacerComponent.new) %>
+      <p class="f6" role="contentinfo">
+        <% @message.footer_links.each_with_index do |link, index| %>
+          <a href="<%= link[:url] %>" class="d-inline-block"><%= link[:text] %></a> <% unless index == @message.footer_links.size - 1 %>・<% end %>
+        <% end %>
+      </p>
+  <% end %>
+<% end %>

@@ -1,0 +1,130 @@
+#!/bin/bash
+#/ Usage: ghe-actions-teardown [-h]
+#/
+#/ Removes GitHub Actions, including all related databases, from this GitHub
+#/ Enterprise appliance.  All data stored in GitHub Actions will be lost.
+#/
+#/ This script is intended to be used only when the GitHub Actions setup fails,
+#/ removing the incomplete installation.
+#/
+#/ OPTIONS:
+#/   --exclude-secrets        Excludes deleting secrets
+#/   -i | --ignore-prompts    Ignore all prompts, and do full teardown
+#/   -h | --help              Show this message
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. /usr/local/share/enterprise/ghe-repl-lib
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+exclude_secrets=false
+ignore_prompts=false
+while [ "${1:-none}" != "none" ]; do
+    case $1 in
+        --exclude-secrets)       shift
+                                exclude_secrets=true
+                                ;;
+        -i | --ignore-prompts)   shift
+                                ignore_prompts=true
+                                ;;
+        -h | --help )           usage
+                                ;;
+        * )                     usage
+    esac
+done
+
+prompt() {
+    if ! $ignore_prompts; then
+        read -p "$1 [y/N] " -r
+
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+
+# In full-cluster (not HA), `ghe-actions-teardown` should only be executed on the MySQL Master.
+if [ -f /data/user/common/cluster.conf ] && ghe-config --absent cluster.ha; then
+  mysql_master_node=$(ghe-config cluster.mysql-master)
+  mysql_master_hostname=$(ghe-config cluster.$mysql_master_node.hostname)
+  if [ "$mysql_master_hostname" != "$(cat /etc/github/cluster)" ]; then
+    echo Run this script on the mysql-master node. >&2
+    exit 1
+  fi
+fi
+
+echo "$(basename "$0") will completely remove GitHub Actions, including all databases.  All data stored in GitHub Actions will be lost."
+prompt "Proceed with $(basename "$0")?"
+
+# Stop all GitHub Actions services.
+echo "Stopping GitHub Actions services..."
+if ! ghe-actions-stop --wait; then
+    >&2 echo "Failed to stop GitHub Actions services"
+fi
+
+# Keep track of failures, but continue tearing down as much as possible.
+exit_code=0
+
+if [[ $(repl_role) == "primary" ]]; then
+    prompt "Tear down actions on replica(s)?"
+    ghe-cluster-each --replica -o -- "
+        echo -n 'Disabling Actions on: ' && hostname &&
+        /usr/local/share/enterprise/ghe-actions-teardown -i" || prompt "Failed to tear down actions on all nodes. If you proceed, you may need to run ghe-actions-teardown on them independently. Continue?"
+fi
+
+# Delete the databases.
+prompt "Delete all MSSQL data?"
+if ! clear-mssql-data-with-global-stop; then
+    >&2 echo "Failed to clean up MSSQL data. You may need to manually delete databases."
+    exit_code=1
+fi
+
+# Truncate data from the launch tables
+mysql_username=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+mysql_password=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+DATABASE_URL="$mysql_username:$mysql_password@tcp(localhost:3307)/github_enterprise"
+LAUNCH_SHA="$(cat /data/docker-image-tags/launch_image_tag)"
+LAUNCH_IMAGE_TAG="launch:${LAUNCH_SHA}"
+for database in deployer payloads; do
+    prompt "Truncate database tables for launch.$database"
+    docker run --network host "$LAUNCH_IMAGE_TAG" migratorctl truncate $database -d "$DATABASE_URL" --dry-run=false
+done
+
+if $exclude_secrets; then
+    prompt "Delete logs and config states?"
+else
+    prompt "Delete the certificates, secrets, and logs?"
+
+    echo "Clearing all certificates..."
+    sudo rm -rf /data/user/actions/certificates
+
+    echo "Clearing all secrets..."
+    ghe-config --remove-section secrets.actions || true
+    ghe-config --remove-section secrets.launch || true
+fi
+echo "Clearing all deployment states..."
+sudo rm -rf /data/user/actions/states
+
+echo "Clearing all dump files..."
+sudo rm -rf /data/user/actions/dumps
+
+echo "Clearing all logs and other persisted files..."
+sudo find /data/user/actions -mindepth 1 -maxdepth 1 -type d ! -name "certificates" | xargs sudo rm -rf
+
+echo "Clearing Actions enabled setting..."
+ghe-config --unset app.actions.enabled || true
+
+echo
+echo "Actions has been removed. Run 'ghe-config-apply' to finish disabling Actions."
+echo "To reinitialize Actions, run 'ghe-config app.actions.enabled true && ghe-config-apply'"
+
+exit $exit_code

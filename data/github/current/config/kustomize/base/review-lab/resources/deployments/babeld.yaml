@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: babeld
+    annotations:
+        moda.github.net/latest-image-placeholders-for: "babeld"
+        moda.github.net/inject-otel-env-vars-into-containers: "babeld"
+spec:
+    replicas: 1
+    strategy:
+        rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
+    template:
+        metadata:
+            labels:
+                service: babeld
+            annotations:
+                observability.github.com/splunk_index: prod-babeld
+                fluentbit.io/parser: logfmt
+        spec:
+            containers:
+                - name: babeld
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/babeld:master
+                  imagePullPolicy: IfNotPresent
+                  args: ["./babeld", "--config-file", "/etc/babeld/config.json", "--bind-addr", "0.0.0.0"]
+                  resources:
+                    requests:
+                        cpu: 0.001
+                  ports:
+                    - name: http-git
+                      containerPort: 3033
+                      protocol: TCP
+                    - name: git
+                      containerPort: 3034
+                      protocol: TCP
+                    - name: ssh-git
+                      containerPort: 3035
+                      protocol: TCP
+                    - name: http-svn
+                      containerPort: 3036
+                      protocol: TCP
+                  readinessProbe:
+                    periodSeconds: 11
+                    initialDelaySeconds: 1
+                    tcpSocket:
+                        port: http-git
+                  volumeMounts:
+                    - mountPath: /etc/ssh_host_keys/
+                      name: babeld-host-keys
+                    - mountPath: /etc/babeld/
+                      name: babeld-config
+            restartPolicy: Always
+            volumes:
+                - name: babeld-host-keys
+                  secret:
+                    secretName: babeld-host-keys
+                - name: babeld-config
+                  configMap:
+                    name: babeld-config
+    selector:
+        matchLabels:
+            service: babeld

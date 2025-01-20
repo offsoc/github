@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+RAILS_ROOT=$(cd "$(dirname $0)"/.. && pwd)
+
+if [ -f $RAILS_ROOT/config/ruby-version ]; then
+  CURRENT_RUBY_SHA=$($RAILS_ROOT/config/ruby-version)
+
+  PATH=$RAILS_ROOT/vendor/ruby/$CURRENT_RUBY_SHA/bin:$PATH
+  CURRENT_RUBY_VERSION=$(ruby -e "puts RUBY_VERSION")
+
+  # This is a little bit expensive requiring a traversal and will only find
+  # files owned by the running user (git in this case), but avoid us having to
+  # run the script as root or use sudo. Everything that matters should be opened
+  # by the git user. lsof's exit code is 1 here regardless of whether or not it
+  # finds open files (even when run as root) so I'm ignoring it.
+  LSOF_OUTPUT="$(lsof -n +D $RAILS_ROOT/vendor)" || true
+
+  for dir in $(find $RAILS_ROOT/vendor/gems -mindepth 1 -maxdepth 1 -type d ! -name $CURRENT_RUBY_VERSION); do
+    recently_accessed=$(find $dir -atime -14 -type f -print -quit)
+
+    test -z $recently_accessed && ! echo "$LSOF_OUTPUT" | grep -q $dir && rm -rf $dir
+  done
+
+  for dir in $(find $RAILS_ROOT/vendor/ruby -mindepth 1 -maxdepth 1 -type d ! -name $CURRENT_RUBY_SHA); do
+    recently_accessed=$(find $dir -atime -14 -type f -print -quit)
+
+    test -z $recently_accessed && ! echo "$LSOF_OUTPUT" | grep -q $dir && rm -rf $dir
+  done
+fi
+
+git gc

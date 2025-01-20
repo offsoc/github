@@ -1,0 +1,127 @@
+#!/bin/sh
+
+USAGE='[--only] [--cumulative] [<id>...]'
+LONG_USAGE='Show space used by each fork/remote.
+
+This script should be run in the network.git repository of a network
+that has recently been "git nw-sync"ed.
+
+If <id> is provided, show only forks with a matching numeric id.
+If `--only` is given, do not include objects used by the root fork.
+If `--cumulative` is given, output the total size for all forks
+with the specified ids, assuming that they share objects.
+'
+. "$(dirname "$0")/git-size--lib"
+
+# usage: fork_objects <root> <id>...
+# List the object names of all objects in the forks with the specified
+# <id>s. If <root> is not empty, exclude any objects that are also in
+# the fork with id <root>.
+fork_objects() {
+    local root="$1" ; shift
+
+    local opts="--use-bitmap-index --objects"
+    for id in "$@"
+    do
+	opts="$opts --remotes=$id"
+    done
+    if test -n "$root"
+    then
+	opts="$opts --not --remotes=$root"
+    fi
+    git rev-list $opts | cut -d' ' -f1
+}
+
+# usage: fork_size <root> <id>...
+# Compute the total on-disk size of all objects in the fork with the
+# specified <id>s. If <root> is not empty, exclude any objects that
+# are also in the fork with id <root>.
+fork_size() {
+    fork_objects "$@" | object_size
+}
+
+# List the ids of all of the forks in this network, based on which
+# remote references exist.
+forks() {
+    git for-each-ref --format='%(refname)' refs/remotes |
+    cut -d/ -f3 |
+    sort -u
+}
+
+prettify_bytes() {
+    if test "$bytes" = t; then
+        read bytes; echo $bytes
+    else
+        humanize
+    fi
+}
+
+show() {
+    size=$(
+        case "$root" in
+        ("$1"|'')
+            fork_size "" "$1"
+            ;;
+        (*)
+            fork_size "$root" "$1"
+            ;;
+        esac
+    )
+    printf '%10s: %5s\n' "$1" "$(echo $size | prettify_bytes)"
+}
+
+show_cumulative() {
+    fork_size "" "$@" | prettify_bytes
+}
+
+bytes=
+root=
+cumulative=
+while test $# -gt 0; do
+    case "$1" in
+    --only)
+        root=$(git nw-root-repo)
+        root=${root%.git}
+        shift
+        ;;
+    --bytes)
+        bytes=t
+        shift
+        ;;
+    --cumulative)
+        cumulative=t
+        shift
+        ;;
+    -*)
+        echo "$LONG_USAGE"
+        exit 1
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
+
+if test "$cumulative" = t; then
+    if test -n "$root"; then
+        echo 2>&1 "--cumulative and --only cannot be used together"
+        exit 1
+    fi
+
+    if test $# = 0; then
+	show_cumulative $(forks)
+    else
+	show_cumulative "$@"
+    fi
+else
+    if test $# = 0; then
+        forks | sort -n |
+        while read fork; do
+            show "$fork"
+        done
+    else
+        for fork in "$@"; do
+            show "$fork"
+        done
+    fi
+fi

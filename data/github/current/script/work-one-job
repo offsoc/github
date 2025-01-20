@@ -1,0 +1,60 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+warn "Loading rails environment..."
+require_relative "../config/environment"
+
+require "resqued/aqueduct_worker_adapter"
+
+def prompt(default)
+  $stdout.puts "Type a queue name to run the next job on that queue.",
+    "Press <enter> to run the next job from #{default.inspect}.",
+    "Type 'quit' to stop or 'list' to see all the available queues."
+  $stdout.print "> "
+  $stdout.flush
+  line = $stdin.readline.strip
+  case line
+  when ""
+    default
+  when "quit"
+    nil
+  when "list"
+    GitHub::Aqueduct::Job.list_queues.sort.each do |q|
+      depth = ApplicationJob.queue_depth(queue: q)
+      puts "  #{q}: #{depth}"
+    end
+    []
+  else
+    line.split(/\s+/)
+  end
+end
+
+default_queues = ARGV.empty? ? :all : ARGV
+
+while queues = prompt(default_queues)
+  if queues == :all
+    queues = GitHub::Aqueduct::Job.list_queues
+  end
+
+  if queues.empty?
+    puts "no queues found. aqueduct-lite may not be running, or no jobs have been enqueued."
+    next
+  end
+
+  puts "waiting for a job on #{queues.size} queues..."
+  job = GitHub.aqueduct_worker_backend.pop(queues, 5, worker_id: "work-one-job")
+  if job.ok? && job.value
+    worker = Resqued::AqueductWorkerAdapter.new(*queues).worker
+    begin
+      worker.start_heartbeat
+      puts "performing #{job.value}"
+      worker.send(:perform, job.value)
+    ensure
+      worker.stop_heartbeat
+    end
+  else
+    puts "no job available"
+  end
+end
+
+# vim:filetype=ruby

@@ -1,0 +1,44 @@
+<%
+column_name = event.column_name
+state_reason = event.state_reason&.downcase
+if local_assigns[:subject_type] == :issue
+  terms = %W(is:issue is:closed archived:false)
+  if state_reason == "not_planned"
+    query = (terms + %W(reason:"not planned")).join(" ")
+    path = issues_path(current_repository.owner, current_repository, q: query)
+    link_id = "np-#{event.id}" %>
+    closed this as <%= link_to "not planned", path, id: link_id, class: "Link--secondary Link--inTextBlock" %>
+    <%= render(Primer::Alpha::Tooltip.new(for_id: link_id, type: :description, text: "Won't fix, can't repro, duplicate, stale")) %>
+  <% else %>
+    closed this as <%= link_to "completed", issues_path(current_repository.owner, current_repository, q: (terms + %W(reason:completed)).join(" ")), class: "Link--secondary Link--inTextBlock" %>
+  <% end %>
+<% else %>
+  <% if event.message == "head_repository_deleted" %>
+    closed this by deleting the head repository
+  <% elsif local_assigns[:subject_type] == :pull_request && event.message == "merged_indirectly" %>
+    closed this pull request by merging all changes
+    <% if event.pull_request&.repository %>
+      into <%= render PullRequests::TimelineEvents::BaseRefComponent.new(pull_request: event.pull_request, repository: event.pull_request.repository) %>
+    <% end %>
+  <% else %>
+    closed this
+  <% end %>
+<% end %>
+<% if event.closer %>
+  <% if event.closer.is_a?(PlatformTypes::ProjectV2) %>
+    by moving to <%= column_name %>
+  <% end %>
+  in
+  <% if event.closer.is_a?(PlatformTypes::ProjectV2) %>
+    <a href="<%= event.closer.resource_path %>" class="Link--primary text-bold" ><%= event.closer.name %></a>
+  <% elsif event.closer.is_a?(PlatformTypes::Commit) %>
+    <code>
+      <% commit_url = event.closer.resource_path.to_s %>
+      <%= link_to closer_reference_text(event), commit_url, data: hovercard_data_attributes_for_commit(commit_url: commit_url) %>
+    </code>
+  <% else %>
+    <%= content_tag(:a, href: event.closer.resource_path, data: hovercard_data_attributes_for_issue_or_pr(event.closer)) do %>
+      <%= closer_reference_text(event) %>
+    <% end %>
+  <% end %>
+<% end %>

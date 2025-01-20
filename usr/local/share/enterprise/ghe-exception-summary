@@ -1,0 +1,35 @@
+#!/bin/bash
+#/ Usage: ghe-exception-summary </var/log/github/exceptions.log>
+set -e
+
+if [ $# -ne 1 ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 1
+fi
+
+file=$1
+
+IFS=$'\n'
+
+apps=$(zcat -f $file | jq '.app' | sort | uniq -c | sort -rn)
+for line in $apps; do
+  app=$(echo $line | awk '{ print $2 }')
+  echo "$line"
+  zcat -f $file | jq "select(.app == $app) | .created_at" | cut -d: -f1 | tr '"' ' ' | uniq -c | awk -Winteractive '$0="      "$0'
+done
+echo
+
+for line in $apps; do
+  app=$(echo $line | awk '{ print $2 }')
+  echo $app
+  rollups=$(zcat -f $file | jq "select(.app == $app) | .rollup" | sort | uniq -c | sort -rn)
+  for rline in $rollups; do
+    num=$(echo $rline | awk '{ print $1 }')
+    rollup=$(echo $rline | awk '{ print $2 }')
+    printf "% 6d  %s\n" $num $(zgrep $rollup $file | head -1 | jq '[.class, .message] | join(" - ")')
+    if [ $num -gt 0 ]; then
+      zgrep $rollup $file | jq .created_at | cut -d: -f1,2 | tr '"' ' ' | uniq -c | awk -Winteractive '$0="        "$0'
+    fi
+  done
+  echo
+done

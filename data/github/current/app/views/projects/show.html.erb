@@ -1,0 +1,451 @@
+<%# erblint:counter DeprecatedComponentsCounter 12 %>
+<%# erblint:counter FlashMigrationCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    project(number: $projectNumber) {
+      id
+      name
+      closed
+      viewerCanUpdate
+      websocket
+
+      resourcePath
+      cardsResourcePath
+      columnsResourcePath
+      fullscreenResourcePath
+      reorderColumnsResourcePath
+      archivedCardsResourcePath
+      activityResourcePath
+      searchQueryForViewer
+
+      migrateResourcePath
+
+      columns(first: $maxColumns) {
+        edges {
+          node {
+            cards(archivedStates: $archivedStates) {
+              totalCount
+            }
+            ...Views::ProjectColumns::ProjectColumn::ProjectColumn
+          }
+        }
+      }
+
+      ...Views::Projects::AddCardsLink::Project
+      ...Views::ProjectColumns::Add::Project
+      ...Views::ProjectColumns::ProjectColumn::Project
+      ...Views::Projects::ColumnNav::Project
+    }
+
+    ...Views::Projects::Panes::AddCards::ProjectOwner
+    ...Views::Projects::Panes::Metadata::ProjectOwner
+    ...Views::Projects::Header::ProjectOwner
+    ...Views::Projects::FullscreenHeader::ProjectOwner
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_owner = Views::Projects::Show::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<%
+  fullscreen = params["fullscreen"].present? && !header_redesign_enabled?
+  page_classes = class_names(
+    "full-width project-page",
+    {
+      "project-full-screen": fullscreen,
+      "js-project-page-mobile": mobile?
+    }
+  )
+  page_info title: project.name,
+            container_xl: true,
+            breadcrumb_object: ar_project,
+            selected_link: :repo_project,
+            skip_pjax_container: true,
+            full_height: true,
+            class: page_classes,
+            footer: false,
+            dashboard_pinnable_item_id: project.id
+%>
+
+<%
+  if project.viewer_can_update?
+    has_columns = project.columns.edges.any?
+    has_cards = project.columns.edges.any? { |edge| edge.node.cards.total_count > 0 }
+    has_query = params[:add_cards_query].present?
+
+    if has_columns && !has_cards && !has_query
+      params[:add_cards_query] = project.search_query_for_viewer || default_card_search_value
+    end
+  end
+%>
+
+<% content_for :header_title do %>
+  <%= primer_octicon(:project) %>
+  <span class="text-bold color-fg-on-emphasis"><%= project.name %></span>
+<% end %>
+
+<% content_for :custom_navigation do %>
+  <%= render partial: "projects/column_nav", locals: { project: project } %>
+<% end %>
+
+<%= render layout: "layouts/projects", locals: { project_owner: project_owner } do %>
+  <template id="project-update-error">
+    <%= render partial: "projects/update_error" %>
+  </template>
+
+  <div class="wants-full-width-container"></div>
+  <div class="js-client-uid" data-uid="<%= SecureRandom.hex(16) %>"></div>
+
+  <div class="d-flex d-sm-none position-fixed bottom-0 width-full border-top color-bg-default p-3 color-shadow-large js-project-small-footer" style="z-index: 35;">
+    <% if enable_drag_by_handle? && project.viewer_can_update? && !project.closed? %>
+      <%= render Primer::ButtonComponent.new(mr: 3, flex: :auto, classes: "js-toggle-project-edit-mode") do %>
+        Reorder cards
+      <% end %>
+    <% end %>
+    <%= render partial: "projects/menu_small", locals: { project_viewer_can_update: project.viewer_can_update?, project_closed: project.closed? } %>
+  </div>
+
+  <div class="position-relative clearfix d-flex flex-column flex-auto overflow-auto js-project-container" data-project-hovercards-enabled>
+    <%= render(Memex::ProjectDeprecationNoticeComponent.new(
+        project: ar_project,
+        data_url: migration_notice_partial_path,
+      ), layout: false)
+    %>
+    <div class="d-sm-flex flex-row flex-shrink-0 flex-justify-between project-header js-project-header <% if !fullscreen %>py-2 py-sm-0 pt-sm-3<% end %> px-2 px-sm-3 pl-lg-3 pr-lg-4" tabindex="-1">
+      <div class="position-absolute project-updated-message color-bg-default">
+        <div class="js-project-updated-message flash text-normal d-none f6 px-4 py-2 rounded-2 text-center hide-sm"></div>
+      </div>
+
+      <% if fullscreen %>
+        <%= render "projects/fullscreen_header", project_owner: project_owner %>
+      <% else %>
+        <%= render "projects/header", project_owner: project_owner %>
+      <% end %>
+
+      <div class="d-sm-flex project-header-controls flex-row flex-items-center f6">
+        <div class="d-flex flex-row pr-sm-4 project-header-search">
+          <div class="subnav-search project-header-subnav-search d-flex d-sm-block ml-0 ml-lg-2">
+            <input type="search" name="card_filter_query" class="form-control subnav-search-input pr-5 flex-auto card-filter-input js-card-filter-input js-navigation-enable" value="<%= params[:card_filter_query] %>" aria-label="Filter cards" placeholder="Filter cards" data-hotkey="<%= local_search_hotkey %>"><%# erblint:disable DataHotkey %>
+            <%= primer_octicon(:search, classes: "subnav-search-icon") %>
+            <button type="button" class="issues-reset-query position-absolute top-0 right-0 mt-2 mr-1 rounded-2 d-block text-center btn-link Link--muted d-none js-card-filter-clear" aria-label="Clear filters">
+              <%= primer_octicon(:x, classes: "issues-reset-query-icon") %>
+            </button>
+
+            <div class="card-filter-autocomplete-dropdown color-bg-default border rounded-2 mt-1 d-none position-absolute overflow-auto color-bg-default hide-sm js-card-filter-suggester js-navigation-container">
+              <div class="f6 color-fg-muted color-bg-subtle text-normal p-2 js-card-filter-suggester-helper-container">
+                Search project for
+                "<span class="color-fg-default text-bold js-card-filter-suggester-helper"></span>"
+                <span class="border rounded-2 px-1">enter ↵</span>
+              </div>
+              <div class="px-2">
+                <h6 class="width-full border-bottom color-bg-default color-fg-muted text-normal py-2 mb-2 js-card-filter-suggestions-header">
+                  <span class="pr-2">Narrow your search</span>
+                </h6>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="assignee:">
+                  <span class="text-bold">
+                    assignee:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    octocat
+                  </span>
+                </div>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="author:">
+                  <span class="text-bold">
+                    author:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    octocat
+                  </span>
+                </div>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="is:">
+                  <span class="text-bold">
+                    is:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    open, merged, closed, draft, issue, pr, note
+                  </span>
+                </div>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="label:">
+                  <span class="text-bold">
+                    label:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    bug, enhancement, "multi word label"
+                  </span>
+                </div>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="linked:">
+                  <span class="text-bold">
+                    linked:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    pr
+                  </span>
+                </div>
+
+                <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="milestone:">
+                  <span class="text-bold">
+                    milestone:
+                  </span>
+                  <span class="autocomplete-text-qualifier color-fg-muted text-normal pr-3">
+                    "multi word milestone"
+                  </span>
+                </div>
+
+                <% if project_owner.is_a?(PlatformTypes::Organization) || project_owner.is_a?(PlatformTypes::User) %>
+                  <div class="color-fg-default border-bottom-0 rounded-2 py-1 px-2 mx-0 mb-1 js-card-filter-suggestion js-navigation-item" data-value="repo:">
+                    <span class="text-bold">
+                      repo:
+                    </span>
+                    <span class="autocomplete-text-qualifier text-normal pr-3">
+                      octocat/repo-name
+                    </span>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          </div>
+
+          <% if enable_drag_by_handle? && project.viewer_can_update? && !project.closed? %>
+            <%= render Primer::ButtonComponent.new(display: [:none, :block], mx: 2, classes: "js-toggle-project-edit-mode") do %>
+              Reorder
+            <% end %>
+          <% end %>
+        </div>
+
+        <% if project.viewer_can_update? && !project.closed? %>
+          <%= render partial: "projects/add_cards_link", locals: { project: project } %>
+        <% end %>
+
+        <% if fullscreen %>
+          <div class="pl-4 hide-sm">
+            <a href="<%= project.resource_path %>" class="d-flex flex-items-center project-header-link Link--primary v-align-middle no-underline no-wrap js-project-fullscreen-link">
+              <%= primer_octicon(:"screen-normal") %> <span class="hide-md ml-1">Exit fullscreen</span>
+            </a>
+          </div>
+        <% elsif !header_redesign_enabled? %>
+          <div class="pl-4 hide-sm">
+            <a href="<%= project.fullscreen_resource_path %>" class=" d-flex flex-items-center Link--primary v-align-middle no-underline no-wrap project-header-link js-project-fullscreen-link">
+              <%= primer_octicon(:"screen-full") %> <span class="hide-md ml-1">Fullscreen</span>
+            </a>
+          </div>
+        <% end %>
+        <div class="pl-4 hide-sm">
+          <%= render Primer::ButtonComponent.new(scheme: :link, vertical_align: :middle, display: :flex, classes: "Link--primary project-header-link no-underline no-wrap js-show-project-menu flex-items-center", "aria-haspopup": "true") do %>
+            <%= primer_octicon(:"three-bars") %> <span class="hide-md ml-1">Menu</span>
+          <% end %>
+        </div>
+      </div>
+    </div>
+
+    <div class="project-columns color-bg-default d-flex flex-auto flex-column clearfix position-relative no-wrap project-touch-scrolling js-project-columns <% if params[:add_cards_query] && project.viewer_can_update? %>push-board-over<% end %>">
+
+      <div class="project-columns-container d-flex flex-auto flex-row p-sm-3 position-relative overflow-hidden">
+        <div class="d-flex flex-auto flex-row width-full <% if enable_dragging?(project) %>js-project-columns-drag-container<% end %> <% if enable_drag_by_handle? %>js-drag-by-handle<% end %> js-project-columns-container js-socket-channel"
+            data-url="<%= project.resource_path %>.json"
+            data-cards-url="<%= project.cards_resource_path %>"
+            data-columns-url="<%= project.columns_resource_path %>"
+            data-channel="<%= live_update_view_channel(project.websocket) %>"
+            data-hpc>
+          <% project.columns.edges.map(&:node).each do |column| %>
+            <%= render partial: "project_columns/project_column", locals: { project: project, project_column: column } %>
+          <% end %>
+
+          <% if project.viewer_can_update? && !project.closed? %>
+            <div class="js-new-project-column-container hide-sm">
+              <template id="add-column">
+                <%= render partial: "project_columns/add", locals: { project: project } %>
+              </template>
+
+              <div class="js-new-column-button pr-3 <%= "d-none" if project.columns.edges.empty? %>">
+                <button data-dialog-id="add-column" class="new-project-column mb-0 col-4 d-inline-block py-6 v-align-top btn-link text-bold color-fg-muted text-center color-bg-default rounded-2 border border-dashed js-project-dialog-button" aria-expanded="false"><%# erblint:disable ButtonHasType %>
+                  <%= primer_octicon(:plus) %> Add column
+                </button>
+              </div>
+            </div>
+          <% end %>
+
+          <%= render Primer::BlankslateComponent.new(
+            title: "This project doesn’t have any columns or cards.",
+            large: true,
+            classes: "ws-normal js-new-column-blankslate",
+            mx: :auto,
+            display: (:none unless project.columns.edges.empty?),
+          ) do %>
+            <% if project.viewer_can_update? && !project.closed? %>
+              <%= render Primer::ButtonComponent.new("data-dialog-id": "add-column", scheme: :primary, classes: "js-project-dialog-button", "aria-expanded": "false") do %>Add a column<% end %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+
+    <%= render partial: "projects/panes/menu", locals: {
+          project_owner: project_owner,
+          project_activity_resource_path: project.activity_resource_path.to_s,
+          show_deprecation_announcement: show_deprecation_announcement,
+          fullscreen: fullscreen
+        }
+    %>
+
+    <%= render partial: "projects/panes/archived_cards", locals: {
+          project_archived_cards_resource_path: project.archived_cards_resource_path.to_s,
+          fullscreen: fullscreen
+        } %>
+
+    <% if project.viewer_can_update? && !project.closed? %>
+      <%= render partial: "projects/panes/add_cards",
+            locals: { project_owner: project_owner, fullscreen: fullscreen } %>
+    <% end %>
+
+    <% unless mobile? %>
+      <%= render partial: "projects/panes/card_details",
+            locals: { project: project } %>
+    <% end %>
+  </div>
+  <%# We use this form to submit column reorders %>
+  <%= form_tag project.reorder_columns_resource_path.to_s,
+    class: "js-reorder-columns-form",
+    method: :put,
+    "data-remote": true do %>
+    <input type="hidden" name="client_uid" class="js-client-uid-field">
+    <input type="hidden" name="column_id">
+    <input type="hidden" name="previous_column_id">
+    <input type="hidden" name="keyboard_move">
+  <% end %>
+
+  <template id="move-card-to-column-dialog">
+    <div class="d-flex flex-column flex-auto overflow-hidden">
+      <div class="Box-header">
+        <h3 class="Box-title js-move-card-to-column-title"
+            data-move-title="Move card to column"
+            data-restore-title="Restore card to column"></h3>
+      </div>
+      <div class="Box-body border-0 rounded-0 m-0 overflow-auto js-move-card-to-column-dialog-body"></div>
+    </div>
+  </template>
+
+  <template id="move-card-to-column-button-template">
+    <%= render Primer::ButtonComponent.new(block: true, mt: 2, classes: "ws-normal js-move-card-to-column-button", "data-close-dialog": "") do %><% end %>
+  </template>
+
+  <%#
+    Common dialog to start the migration process so Safari will render it properly, instead of constraining it to part
+    of the page. See `app/assets/modules/projects.ts` for client-side scripting to launch this dialog from the
+    necessary parts of the Project UI.
+  %>
+  <% if project_migration.present? %>
+    <%= form_tag project.migrate_resource_path.to_s, method: :post do |f| %>
+      <details
+        class="d-inline-block details-reset details-overlay details-overlay-dark js-project-migration-override"
+      >
+        <%= render Primer::ButtonComponent.new(type: :button, tag: :summary, scheme: :primary, position: :fixed, style: "z-index: 4") %>
+        <details-dialog
+            class="anim-fade-in fast Box Box--overlay d-flex flex-column overflow-hidden"><%# erblint:disable A11yDetailsDialogMigration %>
+          <div class="Box-header">
+            <button
+              class="Box-btn-octicon btn-octicon float-right"
+              type="button"
+              aria-label="Close dialog"
+              data-close-dialog
+            >
+              <%= primer_octicon(:x) %>
+            </button>
+            <h3 class="Box-title">Migrate this project again?</h3>
+          </div>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true)) do %>
+            Unexpected bad things will happen if you don’t read this!
+          <% end %>
+          <div class="Box-body overflow-auto">
+            <p> This project already has been migrated to the new GitHub projects.
+            <%
+              memex_url = project_migration.memex_project&.url
+            %>
+            <% if project_migration.completed? && memex_url.present? %>
+              <%= link_to "View it here", memex_url.path, target: "_blank", rel: "noopener noreferrer", class: "Link--inTextBlock" %>.
+            <% end %>
+            </p>
+            <p>If you proceed, the existing migration will be overwritten. Any edits that you have made to the migrated project will be lost.</p>
+            <p>Please type <strong><%= project.name %></strong> to confirm.</p>
+            <p>
+            <input type="text" class="form-control input-block" autofocus required
+                  pattern="<%= case_insensitive_pattern project.name %>"
+                  aria-label="Type in the name of the project to confirm that you want to re-migrate it."
+                  name="verify"
+                  autocomplete="off">
+            </p>
+            <%= render Primer::ButtonComponent.new(
+              type: :submit,
+              block: true,
+              scheme: :danger,
+              "data-close-dialog": "",
+              "data-disable-invalid": ""
+            ) do %>
+              I understand, migrate this project again
+            <% end %>
+          </div>
+        </details-dialog>
+      </details>
+    <% end %>
+  <% end %>
+  <%= render(Primer::Experimental::Dialog.new(
+        title: "Migrate to the new Projects experience",
+        dialog_id: "migrate-project",
+        classes: "project-migration-notice-dialog js-migrate-project-dialog",
+        color: :default,
+        show_header_divider: false,
+        show_footer_divider: false,
+        width: :xlarge,)) do |dialog| %>
+      <% dialog.with_body do %>
+      <div class="migrations-splash-banner position-relative overflow-hidden ml-n3 mr-n3"></div>
+      <%= form_tag project.migrate_resource_path.to_s, method: :post do |f| %>
+        <input type="hidden" name="redirect_back" value="true">
+        <div class="px-3 pt-3 pb-1">
+          <h2 class="mb-2">Migrate to the new Projects experience</h2>
+          <p>The best of both tables and boards, Projects gives you a live canvas to filter, sort, and group issues and pull requests. Tailor them to your needs with custom fields and saved views.</p>
+          <p class="my-2 text-bold">What happens when you migrate this project:</p>
+          <p><%= render(Primer::Beta::Octicon.new(:check, color: :success)) %> Issues, pull requests, notes, and archive will be moved to a new project</p>
+          <p><%= render(Primer::Beta::Octicon.new(:check, color: :success)) %> Title and description will be the same as the old project</p>
+          <p><%= render(Primer::Beta::Octicon.new(:dash, color: :muted)) %> Automation, activity, and triage won’t be migrated</p>
+          <% if show_deprecation_announcement %>
+            <p><%= render(Primer::Beta::Octicon.new(:alert, color: :attention)) %> This classic project will be closed and all future updates should be made on the new project</p>
+          <% else %>
+            <p><%= render(Primer::Beta::Octicon.new(:alert, color: :attention)) %> This classic project will remain available, but future changes won't be synchronized</p>
+          <% end %>
+        </div>
+        <div class="px-3 pb-3 d-flex flex-justify-between">
+          <div>
+              <% if show_deprecation_announcement %>
+                <input type="hidden" name="close_source_project" value="true">
+              <% else %>
+                <select id="close_source_project" name="close_source_project" class="form-select input-block mt-1 mb-2" required>
+                  <option value="true">Close the old project</option>
+                  <option value="false">Keep the old project open</option>
+                </select>
+              <% end %>
+          </div>
+          <div>
+            <%= render Primer::ButtonComponent.new(type: :button, scheme: :default, mr: 2, "data-close-dialog-id": "migrate-project") do %>
+              Cancel
+            <% end %>
+            <% if project_migration.present? %>
+              <%= render Primer::ButtonComponent.new(type: :button, scheme: :primary, "classes": "js-show-migration-override-button") do %>Start Migration<% end %>
+            <% else %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, "data-disable-with": "Starting migration…",) do %>
+                Start Migration
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "projects" %>
+<% end %>

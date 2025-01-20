@@ -1,0 +1,63 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<div
+  class="js-socket-channel js-updatable-content"
+  data-channel="<%= live_update_view_channel(websocket_channel) %>"
+  data-url="<%= pull_request_commits_list_path(repository: pull_request.repository.name, user_id: pull_request.repository.owner_display_login, id: pull_request.number) %>"
+  data-gid="<%= pull_request.global_relay_id %>"
+ >
+
+  <%= rescue_with_timeout_message("Sorry, this commit list is taking too long to generate.") do %>
+    <% simulate_timeout_error_if_param!(GitRPC::Timeout) %>
+
+    <% if show_missing_commits_message? %>
+      <%= render Primer::BlankslateComponent.new(
+        title: "No new commits",
+      ) do %>
+        <p>
+          <%= render PullRequests::BranchLabelComponent.new(repository: pull_request.repository, branch: pull_request.head_ref, prepend_login: true) %> was force-pushed and no longer has any new commits.
+          Pushing new commits will allow the pull request to be re-opened.
+        </p>
+      <% end %>
+    <% end %>
+
+    <% if pull_request.corrupt? %>
+      <%= render Primer::BlankslateComponent.new(
+        icon: "alert",
+        title: "Sorry, commit information is not available for this pull request.",
+      ) do %>
+        <p>The repository may be missing relevant data. Please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> for more information.</p>
+      <% end %>
+    <% end %>
+
+    <% if pull_request.commit_limit_exceeded? %>
+      <%- commit_count = grouped_commits.sum { |_, commit_group| commit_group.size } -%>
+      <%= render(Primer::Beta::Flash.new(scheme: :warning, mb: 2)) do %>
+        This pull request is big! We’re only showing the most recent <%= number_with_delimiter(commit_count) %> commits.
+      <% end %>
+    <% end %>
+    <div class="js-navigation-container js-active-navigation-container">
+      <% grouped_commits.each_with_index do |item, i| %>
+        <% day, commit_group = item[0], item[1] %>
+        <div class="TimelineItem TimelineItem--condensed <% if i == 0 %>pt-0<% else %>pt-2<% end %> pb-2">
+          <div class="TimelineItem-badge">
+            <%= render Primer::Beta::Octicon.new(icon: "git-commit") %>
+          </div>
+          <div class="TimelineItem-body">
+            <h3 class="f5 text-normal color-fg-muted" <%= test_selector("commit-group-title") %>>Commits on <%= day.strftime("%b %-d, %Y") %></h3>
+            <ol class="mt-3 list-style-none Box Box--condensed ml-n6 ml-sm-0 position-relative" <%= test_selector("commit-group") %>>
+              <% commit_group.each do |commit| %>
+                <%= render Commits::ListItemComponent.new(
+                    commit: commit,
+                    pull_request: pull_request,
+                    commit_comment_count: comment_counts_by_oid[commit.oid] || 0,
+                    turbo_frame: "repo-content-turbo-frame",
+                    always_defer_status_loading: always_defer_status_loading?
+                  ) %>
+              <% end %>
+            </ol>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+</div>

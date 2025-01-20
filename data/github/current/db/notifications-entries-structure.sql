@@ -1,0 +1,67 @@
+DROP TABLE IF EXISTS `notification_entries`;
+CREATE TABLE `notification_entries` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `summary_id` bigint unsigned NOT NULL,
+  `list_type` varchar(64) NOT NULL DEFAULT 'Repository',
+  `list_id` bigint unsigned NOT NULL,
+  `thread_key` varchar(80) NOT NULL,
+  `unread` tinyint(1) DEFAULT '1',
+  `reason` varchar(40) DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  `last_read_at` datetime DEFAULT NULL,
+  `owner_id` bigint unsigned DEFAULT NULL,
+  `author_id` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `by_summary` (`user_id`,`summary_id`),
+  UNIQUE KEY `index_notification_entries_for_user_by_thread` (`user_id`,`list_type`,`list_id`,`thread_key`),
+  KEY `by_user` (`user_id`,`reason`),
+  KEY `by_unread_user` (`user_id`,`unread`,`reason`),
+  KEY `index_notification_entries_on_unread_and_updated_at` (`unread`,`updated_at`),
+  KEY `index_notification_entries_on_user_id_and_updated_at` (`user_id`,`updated_at`),
+  KEY `index_notification_entries_for_list_by_thread` (`list_type`,`list_id`,`thread_key`),
+  KEY `index_notification_entries_for_user_by_list` (`user_id`,`list_type`,`list_id`,`reason`),
+  KEY `index_notification_entries_for_user_by_unread_list` (`user_id`,`list_type`,`list_id`,`unread`,`reason`),
+  KEY `user_id_and_unread_and_thread_key_and_list_type_and_list_id` (`user_id`,`unread`,`thread_key`,`list_type`,`list_id`),
+  KEY `user_id_and_unread_and_updated_at` (`user_id`,`unread`,`updated_at`),
+  KEY `user_id_and_unread_and_list_type_and_updated_at` (`user_id`,`unread`,`list_type`,`updated_at`),
+  KEY `user_id_and_list_type_and_updated_at` (`user_id`,`list_type`,`updated_at`),
+  KEY `index_notification_entries_on_updated_at` (`updated_at`),
+  KEY `user_id_and_owner_id_and_updated_at` (`user_id`,`owner_id`,`updated_at`),
+  KEY `user_id_and_author_id_and_updated_at` (`user_id`,`author_id`,`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+DROP TABLE IF EXISTS `saved_notification_entries`;
+CREATE TABLE `saved_notification_entries` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `summary_id` bigint unsigned NOT NULL,
+  `list_type` varchar(64) NOT NULL DEFAULT 'Repository',
+  `list_id` bigint unsigned NOT NULL,
+  `thread_key` varchar(80) NOT NULL,
+  `created_at` datetime NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `index_saved_notification_entries_on_user_list_and_thread` (`user_id`,`list_type`,`list_id`,`thread_key`),
+  KEY `index_saved_notification_entries_on_user_id_and_created_at` (`user_id`,`created_at`),
+  KEY `index_saved_notification_entries_on_user_list_and_created_at` (`user_id`,`list_type`,`list_id`,`created_at`),
+  KEY `index_saved_notification_entries_on_user_id_and_summary_id` (`user_id`,`summary_id`),
+  KEY `index_saved_notification_entries_on_list_and_thread` (`list_id`,`list_type`,`thread_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+DROP TABLE IF EXISTS `spammy_notification_entries`;
+CREATE TABLE `spammy_notification_entries` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `summary_id` bigint unsigned NOT NULL,
+  `list_type` varchar(64) NOT NULL DEFAULT 'Repository',
+  `list_id` bigint unsigned NOT NULL,
+  `thread_key` varchar(80) NOT NULL,
+  `unread` tinyint DEFAULT '1',
+  `reason` varchar(40) DEFAULT NULL,
+  `updated_at` datetime DEFAULT NULL,
+  `last_read_at` datetime DEFAULT NULL,
+  `owner_id` bigint unsigned DEFAULT NULL,
+  `author_id` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_index_on_user_and_list_and_thread` (`user_id`,`list_type`,`list_id`,`thread_key`),
+  KEY `index_on_list_and_thread` (`list_type`,`list_id`,`thread_key`),
+  KEY `index_on_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;

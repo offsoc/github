@@ -1,0 +1,178 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  view = composer
+  expand = params[:pull_request] || params[:expand] || params[:quick_pull]
+  payload = {
+    user_id: current_user&.id,
+    repository_id: @comparison.base_repo&.id,
+    category: "compare_show",
+    data: @comparison.click_tracking_attributes
+  }
+  show_form_hydro_attributes = hydro_click_tracking_attributes("pull_request.user_action", payload.merge(action: "show_pull_request_form"))
+  create_hydro_attributes = hydro_click_tracking_attributes("pull_request.user_action", payload.merge(action: "create_pull_request"))
+%>
+
+<div class="js-details-container Details js-compare-pr <%= 'open Details--on' if expand %>"
+  data-discussion-hovercards-enabled
+  data-issue-and-pr-hovercards-enabled
+  data-hpc>
+
+  <% if emu_contribution_blocked?(current_repository) %>
+    <%= render(Primer::Beta::Flash.new(mb: 3, scheme: :warning)) do %>
+      <%= emu_contribute_block_warning %>
+    <% end %>
+  <% elsif can_interact_with_repo? %>
+    <%= render partial: "pull_requests/tip" if params[:show_onboarding_guide_tip].present? %>
+    <%= render(Primer::Beta::Flash.new(mb: 3, display: :flex, justify_content: :space_between, align_items: :center, classes: "Details-content--shown")) do %>
+      <div>
+        <% if @existing_pulls.any? %>
+          Create another pull request to discuss and review the changes again.
+        <% else %>
+          Discuss and review the changes in this comparison with others.
+        <% end %>
+        <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/articles/using-pull-requests", target: "_blank", classes: "no-wrap Link--inTextBlock")) do %>
+          Learn about pull requests
+        <% end %>
+      </div>
+
+      <%= render(Primer::ButtonComponent.new(scheme: :primary, classes: "js-details-target", "aria-expanded": false , "data-hydro-click": show_form_hydro_attributes["hydro-click"], "data-hydro-click-hmac": show_form_hydro_attributes["hydro-click-hmac"]  )) do %>
+        Create pull request
+      <% end %>
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(mb: 3, scheme: :warning)) do %>
+      <%= interaction_ban_copy(current_repository, current_user, "open a pull request") %>
+    <% end %>
+  <% end %>
+
+  <% issue = view.pull_request.issue %>
+  <%= form_for view.pull_request, :url => create_pull_request_path(view.base_repository.owner, view.base_repository, :base => @comparison.qualified_base_ref.b, :head => @comparison.qualified_head_ref.b, :head_repo => view.head_repository), :html => {:class => "new-pr-form Details-content--hidden"} do |f| %>
+    <%= hidden_field_tag :show_onboarding_guide_tip, params[:show_onboarding_guide_tip] %>
+    <%= render(Primer::Alpha::Layout.new(first_in_source: :main)) do |component| %>
+      <% component.with_main do %>
+        <% if current_user.must_verify_email? %>
+          <%= render :partial => "pull_requests/no_verified_email_message" %>
+        <% else %>
+          <% if can_interact_with_repo? %>
+            <div class="ml-0 pl-0 ml-md-6 pl-md-3 timeline-comment-wrapper timeline-new-comment composer">
+              <div class="d-none d-md-block">
+                <%= timeline_comment_avatar_for(user: current_user) %>
+              </div>
+              <div>
+                <div class="js-slash-command-surface">
+                  <div class="discussion-topic-header p-0 mb-3">
+                    <%= render(Primer::Beta::Heading.new(tag: :h3, font_size: 4, mb: 2, id: "pull_request_title_header").with_content("Add a title")) %>
+                    <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>" class="position-relative">
+                      <%= f.text_field :title,
+                            :class => class_names(
+                              "required title js-session-resumable js-quick-submit FormControl-input FormControl-large",
+                              "valid" => !f.object.title.blank?
+                            ),
+                            :placeholder => 'Title',
+                            "aria-labelledby": "pull_request_title_header",
+                            :autofocus => 'autofocus',
+                            :autocomplete => 'off',
+                            :required => 'required' %>
+                    </text-expander>
+                  </div>
+
+                  <% if view.show_body_errors? %>
+                    <div class="comment-form-error js-comment-form-error" role="alert">Comment <%= view.body_errors %></div>
+                  <% end %>
+                  <%= render(Comments::PreviewableCommentFormComponent.new(
+                    body: view.pull_request.body,
+                    field_name: "pull_request[body]",
+                    textarea_id: "pull_request_body",
+                    required: false,
+                    size: :large,
+                    preview_repository: view.base_repository,
+                    subject: view.pull_request,
+                    current_repository: current_repository,
+                    slash_commands_enabled: slash_commands_enabled?,
+                    slash_commands_surface: SlashCommands::PULL_REQUEST_BODY_SURFACE,
+                    use_fixed_width_font: current_user.use_fixed_width_font?,
+                    copilot_summary_enabled: true,
+                    copilot_text_suggestions_enabled: true,
+                    copilot_text_suggestions_additional_context: [
+                      GhostPilot::CommitTitlesComponent.new(pull_request: view.pull_request),
+                    ],
+                    placeholder: "Add your description here..."
+                  )) do |c| %>
+                    <% c.with_header(tag: :h3, text: "Add a description") %>
+                  <% end %>
+
+                  <%= spamurai_form_signals %>
+
+                  <div class="d-flex flex-justify-end flex-items-center flex-wrap gap-1">
+                    <div class="d-flex flex-items-center mt-1">
+                      <% if PullRequests::Copilot.copilot_for_prs_enabled?(current_copilot_user) %>
+                        <%= render partial: "comments/copilot_summary_banner", locals: {
+                          pull_request: view.pull_request,
+                          copilot_organization: view.pull_request.owner.organization? ? Copilot::Organization.new(view.pull_request.owner) : nil,
+                        } %>
+                      <% end %>
+                    </div>
+
+                    <%# Empty div allows for correct responsive behavior with Copilot PR Summaries UI %>
+                    <div class="flex-auto"></div>
+
+                    <div class="d-flex flex-justify-end">
+                      <%= render PullRequests::MaintainerEditsToggleComponent.new(
+                        pull_request: view.pull_request,
+                        base_repository: view.base_repository,
+                        head_repository: view.head_repository,
+                        include_form: false,
+                      ) %>
+
+                      <%= render partial: "pull_requests/composer_actions", locals: {
+                        create_button_hydro_attributes: create_hydro_attributes,
+                        is_draft: is_draft,
+                      } %>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <%= render Repositories::ContributorFooterComponent.new(repo: current_repository) %>
+            </div>️
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% component.with_sidebar(col_placement: :end, row_placement: :end) do %>
+        <div data-project-hovercards-enabled>
+          <% if issue.modifiable_by?(current_user) %>
+            <% if issue.pull_request %>
+              <%= render "issues/sidebar/new/reviewers", pull: issue.pull_request, deferred_content: true %>
+            <% end %>
+            <%= render "issues/sidebar/new/assignees", issue: issue %>
+            <% if show_labels_ui?(current_repository) %>
+              <%= render "issues/sidebar/new/labels", issue: issue %>
+            <% end %>
+
+            <% if show_projects_ui?(current_repository) %>
+              <%= render "issues/sidebar/new/projects", issue: issue, projects: [] %>
+            <% end %>
+
+            <% if show_milestones_ui?(current_repository) %>
+              <%= render "issues/sidebar/new/milestone", issue: issue %>
+            <% end %>
+
+            <% if show_references_ui?(current_repository) %>
+              <%= render "issues/sidebar/new/references", issue: issue %>
+            <% end %>
+          <% end %>
+
+          <%= render "issues/sidebar/new/contributor_sidebar", view: create_view_model(
+            Community::ContributorSidebarView,
+            issue: issue,
+            current_repository: current_repository,
+          ) %>
+        </div>
+      <% end %>
+    <% end %>
+    <input type="hidden" name="quick_pull" value="<%=h params[:quick_pull] %>">
+  <% end %>
+  <%= render partial: "issues/label_creation_modal", locals: { model: issue } %>
+</div>

@@ -1,0 +1,76 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-webhook-manage [options] [hook_id]
+#/
+#/ Manage webhook status and locate where a hook is configured
+#/
+#/
+#/ OPTIONS:
+#/  -h              Show this message.
+#/  -s              Lookup a webhook's information (target, url, active status)
+#/  -e              Enable a webhook
+#/  -d              Disable a webhook
+
+
+def usage
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+def enable_hook(hook, hook_target)
+  if @hook.active?
+    puts "Hook #{hook.id} already enabled on: #{hook_target}"
+  else
+    puts "Enabling webhook: #{hook.url} on: #{hook_target}"
+    @hook.enable
+  end
+end
+
+def disable_hook(hook, hook_target)
+  if @hook.active?
+    puts "Disabling webhook: #{hook.url} on: #{hook_target}"
+    @hook.disable
+  else
+    puts "Hook #{hook.id} already disabled on: #{hook_target}"
+  end
+end
+
+if ARGV.length == 2
+  require File.expand_path("../../config/environment", __FILE__)
+  @hook = Hook.includes(:installation_target).find_by(id: ARGV[1])
+  if @hook
+    hook_target_type = @hook.installation_target_type
+
+    case @hook.installation_target
+    when Repository
+      @hook_target = @hook.installation_target.nwo
+    when User
+      @hook_target = @hook.installation_target.login
+      hook_target_type = @hook.installation_target.type
+    when Business
+      @hook_target = "Site Admin"
+      hook_target_type = "Global"
+    else
+      puts "Unable to locate a webhook with id #{ARGV[1]}"
+      exit
+    end
+
+    case ARGV[0]
+    when "-e", "--enable"
+      enable_hook(@hook, @hook_target)
+    when "-d", "--disable"
+      disable_hook(@hook, @hook_target)
+    when "-s", "--search"
+      puts JSON.pretty_generate(Api::Serializer.serialize(:simple_hook_hash, @hook))
+    else
+      usage
+    end
+  end
+  unless @hook
+    puts "Unable to locate a webhook with id #{ARGV[1]}"
+    exit
+  end
+else
+  usage
+end
+
+# vim: set syntax=ruby:

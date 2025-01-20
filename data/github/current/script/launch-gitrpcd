@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# Launch gitrpcd with high verbosity, for dev and unit tests.
+#
+# Usage:
+#   launch-gitrpcd [--exec-path=WHERE] [--http-port=PORT] [--git-port=PORT] [--repository-path=PATH]
+#
+# Consume script arguments into `port` and `repository_path` and exported GIT_EXEC_PATH, PATH
+# environment variables.
+#
+http_port=9480
+git_port=19418
+ernicorn_port=10896
+logfile=
+repository_path=$(pwd)/repositories/$(./script/gitrpcd-mode)/dgit1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --git-port=*)
+      git_port="${1#--git-port=}"
+      shift
+      ;;
+    --git-port)
+      git_port="$2"
+      shift 2
+      ;;
+    --exec-path=*)
+      p="${1#--exec-path=}"
+      p="$(cd "$p" && pwd -P)"
+      export GIT_EXEC_PATH="$p"
+      export PATH="$p:$PATH"
+      export EXEC_PATH="$1"
+      shift
+      ;;
+    --exec-path)
+      p="$2"
+      p="$(cd "$p" && pwd -P)"
+      export GIT_EXEC_PATH="$p"
+      export PATH="$p:$PATH"
+      export EXEC_PATH="--exec-path=$2"
+      shift 2
+      ;;
+    --repository-path=*)
+      repository_path="${1#--repository-path=}"
+      shift
+      ;;
+    --repository-path)
+      repository_path="$2"
+      shift 2
+      ;;
+    --http-port=*)
+      http_port="${1#--http-port=}"
+      shift
+      ;;
+    --http-port)
+      http_port="$2"
+      shift 2
+      ;;
+    --ernicorn-port=*)
+      ernicorn_port="${1#--ernicorn-port=}"
+      shift
+      ;;
+    --ernicorn-port)
+      ernicorn_port="$2"
+      shift 2
+      ;;
+    --logfile=*)
+      logfile="${1#--logfile=}"
+      shift
+      ;;
+    --logfile)
+      logfile="$2"
+      shift 2
+      ;;
+    -*)
+      printf >&2 "%s: unexpected option: '%s'" "$0" "$1"
+      exit 1
+      ;;
+    *)
+      printf >&2 "%s: unexpected argument: '%s'" "$0" "$1"
+      exit 1
+      ;;
+  esac
+done
+
+if [ -n "$MULTI_TENANT_ENTERPRISE" ]; then
+  export GITHUB_API_ENDPOINT=http://api.ghe.localhost/internal
+fi
+
+SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+source $SCRIPT_DIR/dx/lib/subproject-containers
+
+gitmon_proxy="$(mktemp --tmpdir=tmp gitrpcd-gitmon-proxy-XXXXXXX.sock)"
+rm ${gitmon_proxy} # Remove the file so that gitrpcd can create a socket here.
+
+mkdir -p $repository_path/{0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f}
+
+start_daemon () {
+  if [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+    SUBPROJECT_VERSION=$(subproject_version "gitrpcd")
+    echo "gitrpcd version $SUBPROJECT_VERSION"
+
+    NAME="gitrpcd-${git_port}"
+
+    # Mount the current dir as tests will delete the $repository_path folder, breaking the mounts
+    # This will break if $repository_path isn't under the current directory
+    start_subproject --name=$NAME -e INITIAL_TIMEOUT=5s \
+    -e TIMEOUT=0s \
+    -e INFORMATIVE_ERRORS=true \
+    -e HTTP_ADDR="127.0.0.1:$http_port" \
+    -e INTERNAL_ADDR="127.0.0.1:$http_port" \
+    -e GIT_HTTP_LISTEN_ADDR="127.0.0.1:$git_port" \
+    -e GITRPCD_NO_TLS=1 \
+    -e GITRPCD_RELEASE=test \
+    -e ERNICORN_ADDR="127.0.0.1:$ernicorn_port" \
+    -e GIT_CONFIG_SYSTEM="$(pwd)/config/gitconfig" \
+    -e REPOSITORY_PATH="$repository_path" \
+    -e GITRPCD_GITMON_PROXY_SOCKET_PATH="/$gitmon_proxy" \
+    -v tmp:/tmp \
+    -v "$(pwd)":"$(pwd)" \
+    "ghcr.io/github/gitrpcd/gitrpcd:$SUBPROJECT_VERSION"
+
+  else
+    export PATH=$(pwd)/vendor/gitrpcd/build:$PATH
+    export PATH=$(pwd)/vendor/gitrpcd/vendor-spokes-receive-pack/bin:$PATH
+
+    BASE_PATH=/ \
+    INITIAL_TIMEOUT=5s \
+    TIMEOUT=0s \
+    INFORMATIVE_ERRORS=true \
+    HTTP_ADDR="127.0.0.1:$http_port" \
+    INTERNAL_ADDR="$HTTP_ADDR" \
+    GIT_HTTP_LISTEN_ADDR="127.0.0.1:$git_port" \
+    GITRPCD_NO_TLS=1 \
+    REPOSITORY_PATH=$repository_path \
+    GITRPCD_GITMON_PROXY_SOCKET_PATH=$gitmon_proxy \
+    GIT_CONFIG_SYSTEM="$(pwd)/config/gitconfig" \
+    ERNICORN_ADDR="127.0.0.1:$ernicorn_port" \
+    GITRPCD_PRERECEIVE_PREFIX=$(pwd)/vendor/gitrpcd/build/githooks \
+    exec "$(pwd)/vendor/gitrpcd/build/gitrpcd"
+  fi
+}
+
+if [ -n "$logfile" ]; then
+  start_daemon &>"$logfile"
+else
+  start_daemon
+fi

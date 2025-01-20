@@ -1,0 +1,363 @@
+#!/bin/bash
+#/
+#/ some library helper functions for nomad
+#/
+fetch_jobs() {
+  local node="${1-}"
+  ghe-nomad-api --node "$node" 'jobs' || {
+    echo 'Failed to query for jobs' >&2
+    exit 1
+  }
+}
+
+fetch_job() {
+  local job=$1
+  local node="${2-}"
+  ghe-nomad-api --node "$node" "job/$job" || {
+    echo "Failed to find nomad job '$job'" >&2
+    exit 1
+  }
+}
+
+fetch_job_allocations() {
+  local job=$1
+  local node="${2-}"
+  # This does not return an invalid status code if $job is not valid
+  ghe-nomad-api --node "$node" "job/$job/allocations" || {
+    echo "Failed to find allocations for nomad job '$job'" >&2
+    exit 1
+  }
+}
+
+fetch_non_batch_jobs() {
+  local node="${1-}"
+  fetch_jobs "$node" | jq --raw-output '.[] | select(.Type | test("[^batch]")).ID'
+}
+
+fetch_unhealthy_tasks() {
+  local job_info expected_task_group_names expected_tasks
+  local job=$1
+  local node="${2-}"
+
+  job_info=$(fetch_job "$job" "$node")
+  expected_task_groups=$(echo "$job_info" | jq '.TaskGroups')
+  expected_task_group_names=$(echo "$expected_task_groups" | jq --raw-output '.[].Name')
+
+  for task_group in $expected_task_group_names; do
+    ghe-nomad-check-job --node "$node" -j "$job" "$task_group" &>/dev/null || {
+      expected_tasks=$(echo "$expected_task_groups" | jq --raw-output ".[] \
+        | select(.Name == \"$task_group\").Tasks[].Name"
+      )
+      for task in $expected_tasks; do
+        echo "$task"
+      done
+    }
+  done
+}
+
+fetch_unhealthy_jobs() {
+  local non_batch_jobs job_info expected_task_groups expected_task_group_names
+  local node="${1-}"
+
+  non_batch_jobs=$(fetch_non_batch_jobs "$node")
+  for job in $non_batch_jobs; do
+    job_info=$(fetch_job "$job" "$node")
+
+    expected_task_groups=$(echo "$job_info" | jq '.TaskGroups')
+    expected_task_group_names=$(echo "$expected_task_groups" | jq --raw-output '.[].Name')
+
+    for task_group in $expected_task_group_names; do
+      ghe-nomad-check-job --node "$node" -j "$job" "$task_group" &>/dev/null || {
+        echo "$job"
+        break
+      }
+    done
+  done
+}
+
+fetch_healthy_jobs() {
+  local all_jobs unhealthy_jobs
+  local node="${1-}"
+  all_jobs=$(fetch_non_batch_jobs "$node")
+  unhealthy_jobs=$(fetch_unhealthy_jobs "$node")
+
+  echo "$all_jobs" "$unhealthy_jobs" | xargs --max-args 1 | sort | uniq --unique
+}
+
+# Shell-quote a single argument, making it safe to pass as part
+# of a snippet that may be eval'd.
+quote_arg() {
+  printf "'"
+  printf "%s" "$1" | sed -e "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# Same as quote_arg, but operate on a list of arguments.
+quote_args() {
+  if [ $# -gt 0 ]; then
+    quote_arg "$1"
+    shift
+    for s in "$@"; do
+      printf " "
+      quote_arg "$s"
+    done
+  fi
+}
+
+# Usage: find_allocation JOB [HOSTNAME] [GROUP]
+#
+# Try to find a container running the specified JOB. If `HOSTNAME` is
+# specified, only consider containers running on the specified host.  Emit a
+# suitable allocation ID. Fail and emit an error message if none can be found.
+# If `GROUP` is specified (useful when there are multiple task groups per job),
+# only consider containers for the given group.
+find_allocation () {
+  local job="$1"
+  local hostname="${2-}"
+  local group="${3-}"
+
+  local jq_query="limit(1; .[] | select(.JobID == \"$job\")"
+  local error_msg="error: could not find a '$job' container"
+  if [ -n "$hostname" ]; then
+    jq_query+=" | select(.NodeName == \"$hostname\")"
+    error_msg+=" on $hostname"
+  fi
+  if [ -n "$group" ]; then
+    jq_query+=" | select(.TaskGroup == \"$group\")"
+    error_msg+=" for group $group"
+  fi
+  jq_query+=" | select(.ClientStatus == \"running\")"
+  jq_query+=" | .ID)"
+
+  local allocation_id
+  allocation_id="$(ghe-nomad-api --node "$hostname" "job/$job/allocations" | jq -r "$jq_query")"
+  if [ -z "$allocation_id" ]; then
+    echo 1>&2 "$error_msg"
+    return 1
+  fi
+  printf "%s\n" "$allocation_id"
+}
+
+# Usage run_in_allocation ALLOCATION_ID COMMAND...
+#
+# Run COMMAND in the container with the specified ALLOCATION_ID.
+run_in_allocation () {
+  local allocation_id=
+  local chdir=
+  local node='localhost'
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --chdir)
+        chdir="$2"
+        shift 2
+        ;;
+      --node)
+        if [ -n "$2" ]; then node="$2"; fi
+        shift 2
+        ;;
+      *)
+        allocation_id="$1"
+	      shift
+        break
+        ;;
+    esac
+  done
+
+  cmd="$(quote_args "$@")"
+  if [ -n "$chdir" ]; then
+    cmd="cd $chdir && {
+      $cmd
+    }"
+  fi
+
+  # `ghe-nomad` (and `nomad` and https://github.com/mitchellh/cli)
+  # have the "feature" that they process a `-h`/`--help` option no
+  # matter where it appears in the command arguments, even in the case
+  # of something like
+  #
+  #     nomad alloc exec "$allocation_id" /bin/bash --help
+  #
+  # In the above example, `nomad`'s help is emitted rather than
+  # `bash`'s. A similar example was breaking our test suite.
+  #
+  # To work around this bug, wrap the command in another layer of
+  # shell interpretation so that `ghe-nomad` doesn't see `--help` as a
+  # separate argument. But we have to do it carefully so that the
+  # individual arguments are recovered when interpreted by the shell
+  # on the remote.
+
+  # unset the http_proxy and https_proxy so that they don't interfere with `nomad alloc exec`
+  # context: https://github.com/github/ghes/issues/2914#issuecomment-1149498946
+  unset http_proxy
+  unset https_proxy
+
+  nomad alloc exec --address "http://$node:4646" "$allocation_id" /bin/bash -c "$cmd"
+}
+
+dispatch_job() {
+
+  declare -A meta_data
+  payload=
+  job_name=
+  while [ $# -gt 0 ]; do
+      case "$1" in
+          -n)
+            job_name=$2
+            shift 2
+            ;;
+          -meta)
+              kvp="$2"
+              meta_data[$(echo "$kvp" | cut -d":" -f1)]=$(echo "$kvp" | cut -d":" -f2)
+              shift 2
+              ;;
+          -)
+              payload=$(cat | base64 -w0)
+              shift
+              ;;
+          *)
+              echo "Invalid argument: $1"
+              echo "Usage \"echo \"payload\" | dispatch_job -n \"jobname\" [-meta \"key:value\"] -\""
+              break
+              ;;
+      esac
+  done
+
+  meta_string=
+  for key in "${!meta_data[@]}"; do
+    if [ -z "$meta_string" ]; then
+     meta_string="\"$key\": \"${meta_data[$key]}\""
+    else
+      meta_string="$meta_string, \"$key\": \"${meta_data[$key]}\""
+    fi
+  done
+
+  if [ -z "$meta_string" ]; then
+    curl_payload=$(jq -n --arg payload "$payload" '{ "Payload": $payload }' )
+  else
+    curl_payload=$(jq -n --arg payload "$payload" --argjson meta_data '{'"$meta_string"'}' '{ "Payload": $payload , "Meta": $meta_data }' )
+  fi
+
+  ghe-nomad-api "job/$job_name/dispatch" -XPOST -d "$curl_payload"
+}
+
+get_alloc_logs() {
+  
+  # required
+  task_name=
+  alloc_id=
+
+  # optional
+  log_type=stdout
+  follow=false
+  offset=0
+  origin=start
+  # this gives raw log output
+  # if you want the frames override
+  plain=true
+
+  while [ $# -gt 0 ]; do
+      case "$1" in
+        -t|--task)
+          task_name=$2
+          shift 2
+          ;;
+        -a|--alloc_id)
+          alloc_id=$2
+          shift 2
+          ;;
+        --type)
+          log_type=$2
+          shift 2
+          ;;
+        --offset)
+          offset=$2
+          shift 2
+          ;;
+        --origin)
+          origin=$2
+          shift 2
+          ;;
+        --plain)
+          plain=$2
+          shift 2
+          ;;
+        *)
+          echo "Invalid argument $1"
+          return 1
+      esac
+    done 
+
+  ghe-nomad-api "client/fs/logs/$alloc_id?task=$task_name&&type=$log_type&&follow=$follow&&offset=$offset&&origin=$origin&&plain=$plain"
+}
+
+# used by github-env and github-mysql
+# waits for a dispatched nomad job to complete
+wait_for_nomad_dispatch_complete() {
+  eval_id=$1
+  timeout=${2:-60}
+  tries=0
+
+  if [ -z "$eval_id" ] ; then 
+    echo "Argument Required: Dispatch Job Evaluation ID" >&2
+    return 1 
+  fi
+
+  while [ "$tries" -lt "$timeout" ]; do
+    status=$(ghe-nomad-api "evaluation/$eval_id")
+    status_code=$(echo "$status" | jq -r .Status)
+    if [ "$status_code" = "complete" ]; then break; fi;
+    if [ "$status_code" = "failed" ]; then 
+      echo "nomad dispatch job failed." >&2
+      return 1; 
+    fi
+    sleep 1
+    tries=$(("$tries"+1))
+  done
+
+  if [ "$tries" -ge "$timeout" ]; then
+    echo "Timed out waiting for evaluatio to start: EvalId=$eval_id" >&2
+    return 1
+  fi
+
+  timeout=$(("$timeout"-"$tries"))
+  tries=0
+  alloc_id="$(ghe-nomad-api "evaluation/$eval_id/allocations" | jq -r .[0].ID)"
+  while [ "$tries" -lt "$timeout" ]; do
+    alloc_status=$(ghe-nomad-api "allocation/$alloc_id")
+    client_status=$(echo "$alloc_status" | jq -r .ClientStatus)
+    if [ "$client_status" = "complete" ]; then break; fi;
+    if [ "$client_status" = "failed" ]; then 
+        echo "nomad dispatch job task failed." >&2
+        nomad alloc logs -stderr "$alloc_id" >&2
+        return 1
+    fi
+    sleep 1
+    tries=$(("$tries"+1))
+  done
+
+  if [ "$tries" -ge "$timeout" ]; then
+    echo "Timed out waiting for allocation to start: EvalId=$eval_id, AllocationId=$alloc_id" >&2
+    return 1
+  fi
+
+  timeout=$(("$timeout"-"$tries"))
+  tries=0
+  while [ "$tries" -lt "$timeout" ]; do
+    alloc_status=$(ghe-nomad-api "allocation/$alloc_id")
+    client_status=$(echo "$alloc_status" | jq -r '.TaskStates | .[].State')
+    if [ "$client_status" = "dead" ]; then break; fi;
+    if [ "$client_status" = "failed" ]; then 
+        echo "nomad dispatch job task failed." >&2
+        nomad alloc logs -stderr "$alloc_id" >&2
+        return 1
+    fi
+    sleep 1
+    tries=$(("$tries"+1))
+  done
+
+  if [ "$tries" -ge "$timeout" ]; then
+    echo "Timed out waiting for allocation to start: EvalId=$eval_id, AllocationId=$alloc_id" >&2
+    return 1
+  fi
+}

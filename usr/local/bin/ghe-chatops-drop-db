@@ -1,0 +1,30 @@
+#!/bin/bash
+#/ Usage: ghe-chatops-drop-db 
+#/ Delete all tables of the ChatOps service.
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" | cut -c 4-
+  exit 2
+fi
+
+echo "Deleting all tables of the ChatOps service..."
+if ghe-config --true app.chatops.msteams.enabled || ghe-config --true app.chatops.slack.enabled; then
+  mysql_username=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+  mysql_password=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+
+  SLACK_GO_SHA="$(cat /data/docker-image-tags/slack_image_tag)"
+  SLACK_IMAGE_TAG="slack:${SLACK_GO_SHA}"
+
+  # chatOps service code expects something like this
+  # "mysql://github:f2f4f41d505bda679a2cdd5e0aa32449013c0668dde46cd147702fafdd7e07b8@localhost:3307/github_enterprise"
+  DATABASE_URL="mysql://$mysql_username:$mysql_password@localhost:3307/github_enterprise"
+  echo "Running docker run command..."
+  slackDBDeleteOutput=$(docker run --network host -e CLEAN_DB_TABLES=false -e GHES=true -e RUN_DB_MIGRATION=false -e DROP_DB=true -e DATABASE_URL="$DATABASE_URL" -e REDIS_URL="redis://127.0.0.1:6380" "$SLACK_IMAGE_TAG")
+  echo "Chatops DB delete operation is completed. Output: $slackDBDeleteOutput"
+else
+  echo "Chatops DB delete operation could not be completed since ChatOps service is not enabled!"
+fi

@@ -1,0 +1,135 @@
+#!/bin/bash
+
+#/ Usage: script/authnd-server <option>
+#/
+#/ Runs the authnd server.
+#/
+#/ Options:
+#/ --dev      Run the authnd server in Development mode
+#/ --test     Run the authnd server in Test mode (currently not supported)
+
+# we need to duplicate this from "environment.sh" for the time being, since that script is
+# not executed before authnd starts up in development mode. In test it does.
+#
+# note that at this point $RAILS_ROOT might not have been yet defined. If so, we default
+# to the current directory.
+#
+# Detect if the current runtime is ENTERPRISE
+RAILS_ROOT_PATH=$([[ "$RAILS_ROOT" != "" ]] && echo "$RAILS_ROOT" || echo "$(pwd)")
+
+SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+AUTHND_VENDOR_PATH="${SCRIPT_DIR}/../vendor/authnd"
+
+if [ ! -f "${AUTHND_VENDOR_PATH}/tmp/ec-prime256v1-priv-key.pem" ]; then
+  echo "Running authnd setup..."
+  ${AUTHND_VENDOR_PATH}/script/setup
+fi
+if [ ! -f "${AUTHND_VENDOR_PATH}/bin/authnd" ]; then
+  echo "Rebuilding authnd..."
+  cd ${AUTHND_VENDOR_PATH} && make api > /dev/null
+fi
+
+source $SCRIPT_DIR/dx/lib/subproject-containers
+
+if [[ "$(cat ${RAILS_ROOT_PATH}/tmp/runtime/current 2>/dev/null)" == "enterprise" ]]
+then
+  export ENTERPRISE=1
+fi
+
+NAME=authnd
+DEFAULT_AUTHND_PORT="8092"
+
+# decides which database to use: dev or test
+if [ $# -gt 0 ]; then
+  case "$1" in
+    --dev)
+      ENV="dev"
+      if [ "$ENTERPRISE" == "1" ]; then
+        echo "authnd will use enterprise development databases"
+        GITHUB_DATABASE="github_enterprise"
+        GITHUB_DATABASE="github_enterprise_authnd"
+      else
+        echo "authnd will use dotcom development databases"
+        GITHUB_DATABASE="github_development"
+        AUTHND_DATABASE="github_development_authnd"
+      fi
+
+      shift ;;
+
+    --test)
+      echo "TEST MODE currently nots supported for authnd"
+      exit 1 ;;
+
+    *)
+      grep ^#/ "$0" | cut -c4-
+      exit 1 ;;
+  esac
+fi
+
+AUTHND_PORT="${AUTHND_PORT:=$DEFAULT_AUTHND_PORT}"
+HTTP_ADDR="127.0.0.1:${AUTHND_PORT}"
+SKIP_AUTHND="${SKIP_AUTHND:=false}"
+
+start_authnd(){
+  cd ${AUTHND_VENDOR_PATH} || exit 1
+  echo "starting service on $HTTP_ADDR"
+
+  AUTHND_PORT=${AUTHND_PORT} \
+    exec script/server --dotcom-path /workspaces/github
+}
+
+start_authnd_docker(){
+  CONTAINER_NAME="${NAME}-${AUTHND_PORT}"
+  SUBPROJECT_VERSION=$(subproject_version "authnd")
+
+  echo "starting service on in \"$CONTAINER_NAME\" container"
+
+  # Run the service.
+  # We need to expose all the variables required in CI too
+  echo "starting subproject"
+  set -x
+  start_subproject --name ${CONTAINER_NAME} \
+    -e HTTP_ADDR=${HTTP_ADDR} \
+    -e AUTHND_PORT=${AUTHND_PORT} \
+    -e CODESPACES=true \
+    -v ${AUTHND_VENDOR_PATH}/tmp:/app/tmp \
+    --entrypoint /app/bin/authnd \
+    "ghcr.io/github/authnd/authnd-focal:$SUBPROJECT_VERSION"
+
+  docker logs --follow ${CONTAINER_NAME} &
+  wait
+}
+
+# prevent authnd from breaking dev for users w/o docker installed
+if [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  start_authnd_docker
+elif [ "$GITHUB_CI" = "1" ] || [ "$GITHUB_USE_DOCKER" = "1" ]; then
+  if [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+    start_authnd_docker
+  else
+    start_authnd
+  fi
+elif [ "$SKIP_AUTHND" = "true" ] || [ "$SKIP_AUTHND" = "1" ]; then
+  echo "authnd has been disabled"
+  while true; do sleep 10000; done
+else
+  if [ ! -x ${AUTHND_VENDOR_PATH}/bin/authnd ]; then
+  cat << EOF
+The authnd server is not built and could not be started, this could lead to:
+ - requests not working as expected in dotcom
+
+In order to address the above problems:
+ - install and start docker - this only used to build authnd, can be stopped afterwards
+ - build authnd: run script/build-subproject authnd
+   - if the above command returns "authnd build <SHA> is up-to-date", then run rm vendor/authnd/.built
+   - feel free to stop docker after this if it's killing your CPU in your machine
+ - test authnd works: run script/authnd-server to check the server is working as expected. If you see a long log message and you don't see this message anymore, then you are done!
+
+This script will block indefinitely in order to avoid breaking bin/server
+
+If you keep seeing this message, please contact #authentication
+EOF
+  fi
+  until [ -x ${AUTHND_VENDOR_PATH}/bin/authnd ]; do sleep 60; done
+  start_authnd
+fi

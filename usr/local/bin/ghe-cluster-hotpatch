@@ -1,0 +1,126 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-hotpatch [options] github-enterprise-x.y.x.hpkg
+#/
+#/ Iterates over all the nodes in the cluster installs the hotpatch
+#/
+#/ OPTIONS:
+#/   -h | --help                  Print help.
+#/   -y | --yes                   Don't ask for confirmation and continue
+#/   -i | --install               Only install the hotpatch on all nodes
+#/   -r | --rollover              Roll over the hotpatch on all nodes
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,yes,install,rollover --options hyir -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -y|--yes)
+      SKIP_CONFIRMATION=1
+      ;;
+    -r|--rollover)
+      SKIP_INSTALL=1
+      ;;
+    -i|--install)
+      SKIP_ROLLOVER=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+PKG_URL=$1
+PKG_PATH="/data/user/tmp/ghe-cluster-upgrade.hpkg"
+GHE_CLUSTER_FILE=${GHE_CLUSTER_FILE:-/etc/github/cluster}
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ -z "$PKG_URL" ]; then
+  echo "Invalid .pkg file or URL." >&2
+  echo >&2
+  usage
+  exit 1
+fi
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+if [ -f $PKG_URL ]; then
+  cp $PKG_URL $PKG_PATH
+elif [[ ! "$PKG_URL" =~ ^https://github-enterprise.s3.amazonaws.com/.*hpkg$ ]]; then
+  echo "The package you are trying to download is not a hotpatch." >&2
+  exit 2
+elif ! curl --silent $PKG_URL -o $PKG_PATH; then
+  echo "Downloading $PKG_URL failed!" >&2
+  exit 3
+fi
+
+if ! ghe-upgrade --verify $PKG_PATH > /dev/null 2>&1; then
+  echo "Package verification failed!" >&2
+  echo "rm -f $PKG_PATH and run the script again." >&2
+  exit 4
+fi
+
+echo "Installing $PKG_URL on all nodes in this cluster."
+
+if [ -z "$SKIP_CONFIRMATION" ]; then
+  read -p "Proceed with installation? [y/N] " -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+# Copy file to all nodes
+hosts=$(ghe-cluster-nodes)
+local_host=$(cat $GHE_CLUSTER_FILE)
+
+set -o pipefail
+for hostname in $hosts; do
+  if [ "$hostname" != "$local_host" ]; then
+    scp $PKG_PATH $hostname:$PKG_PATH
+  fi
+done
+
+# Disable orchestrator auto failover during patch
+if systemctl is-active --quiet orchestrator.service ; then
+  /usr/local/share/enterprise/ghe-orchestrator-client -c disable-global-recoveries > /dev/null
+fi
+
+# We can install packages in parallel
+if [ -z "$SKIP_INSTALL" ]; then
+  ghe-cluster-each -o -- /bin/bash $PKG_PATH -y --install
+fi
+
+# Rollover serially so we do one node at a time
+if [ -z "$SKIP_ROLLOVER" ]; then
+  ghe-cluster-each -s -o -- /bin/bash $PKG_PATH -y --rollover
+fi
+
+# Enable orchestrator failover after patch
+if systemctl is-active --quiet orchestrator.service ; then
+  /usr/local/share/enterprise/ghe-orchestrator-client -c enable-global-recoveries > /dev/null
+fi

@@ -1,0 +1,60 @@
+#!/bin/bash
+# Usage: script/ci/vtcombo-setup
+#
+set -e
+
+CLUSTER_NAMES="issues_pull_requests notifications_deliveries notifications_entries repositories_pushes token_scanning_service lodge permissions billing repositories_actions_checks vt"
+
+for cluster_name in $CLUSTER_NAMES
+do
+	mkdir -p tmp/vtcombo/github_test_${cluster_name}/
+	cp -r "db/vschema/$(echo $cluster_name | sed 's/_/-/g').json" "tmp/vtcombo/github_test_${cluster_name}/vschema.json"
+	sed -i "s/\"sequence\": \"/\"sequence\": \"github_test_vt./"g "tmp/vtcombo/github_test_${cluster_name}/vschema.json"
+done
+
+if [[ ! -z "${TEST_QUEUE_WORKERS}" ]]; then
+	# Generate vschema files for each worker database
+	for i in $(seq 1 ${TEST_QUEUE_WORKERS})
+	do
+		for cluster_name in $CLUSTER_NAMES
+		do
+			mkdir -p tmp/vtcombo/github_test_${cluster_name}${i}/
+			cp -r "db/vschema/$(echo $cluster_name | sed 's/_/-/g').json" "tmp/vtcombo/github_test_${cluster_name}${i}/vschema.json"
+			sed -i "s/\"sequence\": \"/\"sequence\": \"github_test_vt${i}./"g "tmp/vtcombo/github_test_${cluster_name}${i}/vschema.json"
+
+			if [[ "${cluster_name}" == "issues_pull_requests" || "${cluster_name}" == "notifications_deliveries" || "${cluster_name}" == "notifications_entries" || "${cluster_name}" == "repositories_actions_checks" || "${cluster_name}" == "repositories_pushes" ]]; then
+				cat <<EOS >> db/topology
+keyspaces {
+	name: "github_test_${cluster_name}${i}"
+
+  replica_count: 1
+  rdonly_count: -1
+
+	shards {
+		name: "80-"
+	}
+	shards {
+		name: "-80"
+	}
+}
+
+EOS
+			else
+				cat <<EOS >> db/topology
+
+keyspaces {
+	name: "github_test_${cluster_name}${i}"
+
+  replica_count: 1
+  rdonly_count: -1
+
+	shards {
+		name: "0"
+	}
+}
+
+EOS
+			fi
+		done
+	done
+fi

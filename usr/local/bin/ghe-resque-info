@@ -1,0 +1,168 @@
+#!/bin/bash
+#/ Usage: ghe-resque-info [options]
+#/
+#/ When no options are passed this utility displays the distribution of queued
+#/ background jobs across the queues they're contained in along with the jobs
+#/ currently being processed. You can also inspect the jobs that are in a
+#/ particular queue by using additional options.
+#/
+#/ OPTIONS:
+#/   -h | --help                     Show this message.
+#/   -v | --verbose                  Run in verbose mode.
+#/   -q <queue> | --queue <queue>    View jobs in the specified queue.
+#/   -p <queue> | --pause <queue>    Pause specified queue.
+#/   -r <queue> | --resume <queue>   Resume specified queue.
+#/   -l <limit> | --limit <limit>    Only display this many jobs. Used in conjunction with -q.
+#/                                   Defaults to 10.
+#/
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+[ "$(whoami)" = "admin" ] || {
+    exec sudo -u admin "$0" "$@"
+    echo Run this script as the admin user. >&2
+    exit 1
+}
+
+message() {
+  echo " --> ${1}"
+}
+
+display_queue_sizes() {
+  message "Displaying resque job queues at `date +'%Y-%m-%d %T %z %Z'`..."
+  for prefix in resque:queues; do
+    for queue in `ghe-redis-cli --remote -h "$GHE_REDIS_HOST" smembers $prefix`; do
+      ghe-redis-cli --remote -h "$GHE_REDIS_HOST" llen ${prefix::-1}:$queue | awk '{printf "   " $1}'
+      if test $prefix = "resque:queues" && ghe-redis-cli --remote -h "$GHE_REDIS_HOST" sismember resque:paused_queues $queue | grep -q 1; then
+        echo -e " $queue\t[paused]"
+      else
+        echo " $queue"
+      fi
+    done
+  done
+}
+
+display_running_jobs() {
+  local job_found=false
+
+  for prefix in resque; do
+    for worker in $(ghe-redis-cli --remote -h "$GHE_REDIS_HOST" smembers $prefix:workers); do
+      if [ "$(ghe-redis-cli --remote -h "$GHE_REDIS_HOST" type $prefix:worker:$worker)" != "none" ]; then
+        if ! $job_found; then
+          message "Displaying currently running jobs..."
+          job_found=true
+        fi
+        echo -n "    $(ghe-redis-cli --remote -h "$GHE_REDIS_HOST" get $prefix:worker:$worker)"
+        echo " -- $prefix:worker:$worker"
+      fi
+    done
+  done
+
+  if ! $job_found; then
+    message "No jobs running currently."
+  fi
+}
+
+display_jobs_in_queue(){
+  _queue=$1
+  _queue_prefix="resque:queue"
+
+  _queue_size=`ghe-redis-cli --remote -h "$GHE_REDIS_HOST" llen ${_queue_prefix}:${_queue} | awk '{print $1}'`
+  if [ $_queue_size -lt $LIMIT ]; then
+    _limit=$_queue_size
+    message "Displaying all of the jobs in the ${_queue} queue..."
+  else
+    _limit=$LIMIT
+    message "Displaying first ${_limit} jobs in the ${_queue} queue..."
+  fi
+
+  echo
+
+  for (( i=0; i<$_limit; i++ )); do
+    ghe-redis-cli --remote -h "$GHE_REDIS_HOST" lindex ${_queue_prefix}:${_queue} $i
+  done
+}
+
+connectivity_check(){
+  if ! timeout "$TIMEOUT" ghe-redis-cli --remote -h "$GHE_REDIS_HOST" ping >/dev/null 2>&1; then
+    echo "Host $GHE_REDIS_HOST did not respond to redis ping"
+    exit 1
+  fi
+}
+
+PAUSE=0
+RESUME=0
+QUEUE=
+LIMIT=10
+TIMEOUT=10
+GHE_REDIS_HOST="$(ghe-config cluster.redis-master || echo 'localhost')"
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,verbose,pause:,resume:,queue:,limit: --options hvq:l:p:r: -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -p|--pause)
+      PAUSE=1
+      QUEUE=$2
+      shift
+      ;;
+    -r|--resume)
+      RESUME=1
+      QUEUE=$2
+      shift
+      ;;
+    -q|--queue)
+      QUEUE=$2
+      shift
+      ;;
+    -l|--limit)
+      LIMIT=$2
+      shift
+      ;;
+    -v|--verbose)
+      set -x
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+connectivity_check
+
+echo "!!!"
+echo "Most background jobs are now processed by the aqueduct system. To see details of those jobs, see ghe-aqueduct-info"
+echo "!!!"
+
+if [ -z $QUEUE ]; then
+  display_queue_sizes
+  echo
+  display_running_jobs
+  echo
+elif [ $PAUSE -eq 1 ]; then
+  message "Pausing queue $QUEUE..."
+  ghe-redis-cli --remote -h "$GHE_REDIS_HOST" sadd resque:paused_queues $QUEUE >/dev/null
+elif [ $RESUME -eq 1 ]; then
+  message "Resuming queue $QUEUE..."
+  ghe-redis-cli --remote -h "$GHE_REDIS_HOST" srem resque:paused_queues $QUEUE >/dev/null
+else
+  display_jobs_in_queue $QUEUE
+fi
+
+echo
+
+message "Done."

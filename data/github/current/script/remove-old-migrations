@@ -1,0 +1,256 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Removes obsolete migrations files.
+#
+# This command is used to determine which migrations files are no longer
+# necessary in the default branch of github/github, and then remove those
+# files. The GHES release and upgrade processes require that migrations files
+# are kept for two minor versions after being included in a release. For
+# example, for GHES 3.3.x we would support data migration from 3.1.0 or later.
+# That means we'll need all the migrations that were added after the
+# enterprise-3.1 tag was created in the enterprise-3.3 tag. Migrations that
+# were already in the tag at the time of the enterprise-3.1 tag can be deleted.
+#
+# Note: this script considers only versions starting with 2, 3, 4, and 5. There
+# are some enterprise release tags around which we don't want to consider, such
+# as "enterprise-11.10.320" and "enterprise-99.99.0", so we filter those out.
+# We are currently on major version 3, so considering only versions starting
+# with 2, 3, 4, and 5 is good enough for now. This can be adjusted below if at
+# the time when the script is run the major version is 6 or higher.
+#
+# Note: this script doesn't detect migration files which were renamed. If a
+# migration file was renamed, then it will be present in the previous GHES
+# version, but won't be present in the latest GHES version. That's not really a
+# problem since the file will be detected and removed for some following
+# version when the script is executed at a future date.
+
+require "active_record"
+require "active_record/migration"
+require "github/migration_extensions"
+require "optparse"
+
+# This is required for directly calling Rails' `up` method for running migrations
+ActiveRecord::Migration.include(GitHub::MigrationExtensions)
+
+class ObsoleteMigrationsRemoved
+  # Consider only valid versions and versions which have a 0 patch number. So,
+  # "enterprise-2.8.0" would remain, but "enterprise-2.8.1" and "enterprise-2.8.0.gm2"
+  # wouldn't. Also, consider only major versions 2, 3, 4, and 5.
+  VALID_GHES_TAG_REGEX = /\Aenterprise-[2-5]+\.[0-9]+\.0\z/
+
+  # List of paths for files that might have references to removed migrations.
+  # We need to remove those references from these files.
+  FILES_TO_CLEANUP = ["SERVICEOWNERS", "CODEOWNERS", "package_todo.yml"]
+
+  def initialize(dry_run: false, target_version: nil, skip_db_setup: false)
+    if target_version
+      puts "target: '#{target_version}'"
+      raise "Target version not detected in git history!" unless all_versions.include?(target_version)
+    end
+
+    @dry_run = dry_run
+    @target_version = target_version
+    @skip_db_setup = skip_db_setup
+  end
+
+  def dry_run?
+    !!@dry_run
+  end
+
+  def skip_db_setup?
+    !!@skip_db_setup
+  end
+
+  def print_migrations
+    puts "Migrations to be removed:"
+    target_migrations.each do |migration|
+      puts "  #{migration}"
+    end
+  end
+
+  def remove_migrations
+    puts "Removing migrations ..."
+
+    migration_versions = target_migrations.map { |path| version_from_path(path) }
+
+    puts "Exporting new initial structures ..."
+    create_new_initial_structures(migration_versions)
+
+    # Stage each migration file for removal while suppressing output for both
+    # successful removals (--quiet) and unsuccessful removals (--ignore-unmatch)
+    puts "Staging removal of migration files ..."
+    delete_migrations(target_migrations)
+
+    # Delete mentions of removed migrations in FILES_TO_CLEANUP files
+    puts "Removing mentions of migrations filenames in #{FILES_TO_CLEANUP. join ", "} files ..."
+    remove_migration_paths_from_files(target_migrations)
+  end
+
+  def perform
+    puts "Current GHES version: #{current_version}"
+    puts "Obsolete GHES version: #{target_version}"
+
+    if target_migrations.empty?
+      puts "No migrations to remove!"
+      exit 0
+    end
+
+    if dry_run?
+      print_migrations
+    else
+      remove_migrations
+    end
+  end
+
+  def all_versions
+    # List tags which have "enterprise-*" pattern
+    # Each returned tag has a format like "enterprise-2.8.0.gm2"
+    ghes_release_tags = `git for-each-ref 'refs/tags/enterprise-*' --format "%(refname:short)"`.lines.map(&:chomp)
+
+    valid_ghes_minor_tags = ghes_release_tags.select do |ghes_tag|
+      ghes_tag =~ VALID_GHES_TAG_REGEX
+    end
+
+    valid_ghes_minor_tags.sort_by { |ghes_tag| Gem::Version.new(ghes_tag.delete_prefix("enterprise-")) }
+  end
+
+  def files_for_git_commit(committish, path)
+    files = `git ls-tree -r --name-only "#{committish}" #{path}`.lines.map(&:chomp)
+  end
+
+  def version_from_path(path)
+    File.basename(path).gsub(/_.*\z/, "")
+  end
+
+  def target_version
+    return @target_version if @target_version
+
+    ghes_tags = all_versions
+    if ghes_tags.length < 3
+      raise "Not enough valid enterprise versions found, there must be at least three."
+    end
+
+    @target_version = ghes_tags[-3]
+  end
+
+  def current_version
+    all_versions.last
+  end
+
+  def target_migrations
+    return @target_migrations if @target_migrations
+
+    migrations_for_version = files_for_git_commit(target_version, "db/migrate")
+    @target_migrations = migrations_for_version.select { |path| File.file?(path) }
+  end
+
+  def create_new_initial_structures(migration_versions)
+    set_up_databases unless skip_db_setup?
+
+    puts "Running migrations ..."
+
+    # Since we need to run a subset of migrations instead of migrations up to
+    # some version, we directly call the Rails `up` method on a migration
+    # context and use a block to select which migrations from db/migrate/ should
+    # be executed.
+    require File.expand_path("../../config/environment", __FILE__)
+
+    ActiveRecord::MigrationContext.new("db/migrate").migrate do |migration|
+      migration_versions.include?(migration.version.to_s)
+    end
+
+    puts "Exporting new initial structures ..."
+    system("bin/rake --trace -s db:schema:initial:dump")
+
+    puts "Staging new initial structures ..."
+    `git add db/initial_structure/`
+    `git checkout -- db/`
+  end
+
+  def delete_migrations(paths)
+    paths.each do |path|
+      `git rm --quiet --ignore-unmatch "#{path}"`
+    end
+  end
+
+  def remove_lines(path, patterns)
+    lines = File.readlines(path)
+    File.open(path, "w") do |file|
+      lines.each do |line|
+        file.write(line) unless patterns.any? { |pattern| line =~ pattern }
+      end
+    end
+  end
+
+  def remove_migration_paths_from_files(paths)
+    # Removes references to deleted migrations from FILES_TO_CLEANUP.
+    # Removal of a line from a file is done by iterating over all lines and
+    # writing back only those lines which don't match a migration path.
+
+    # Filenames will include the directory part, but SERVICEOWNERS and
+    # CODEOWNERS files don't use those sometimes and instead use a glob
+    # pattern. So, to find those migration filenames, we need to match on the
+    # basename, i.e. without the directory name.
+
+    patterns = paths.map { |path| /#{File.basename(path)}/ }
+    FILES_TO_CLEANUP.each { |path| remove_lines(path, patterns) }
+
+    # Stage updated files
+    `git add #{FILES_TO_CLEANUP.join " "}`
+  end
+
+  private
+
+  def set_up_databases
+    puts "Setting up databases for running migrations ..."
+
+    puts "Dropping databases ..."
+    system("bin/rake --trace -s db:drop")
+
+    puts "Creating databases ... "
+    system("bin/rake --trace -s db:create")
+
+    puts "Loading initial structures ..."
+    system("bin/rake --trace -s db:schema:initial:load")
+  end
+end
+
+options = {}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/remove-old-migrations --target-version [version] --skip-db-setup --dry-run|--list-versions"
+
+  opts.on("--target-version VERSION", "Target a specific GHES version to be obsolete") do |version|
+    options[:target_version] = version
+  end
+
+  opts.on(
+    "--dry-run",
+    "Display target GHES version and migrations to be removed without taking action."
+  ) do
+    options[:dry_run] = true
+  end
+
+  opts.on(
+    "--list-versions",
+    "Display a list of all GHES versions under consideration."
+  ) do
+    task = ObsoleteMigrationsRemoved.new
+    task.all_versions.each { |version| puts version }
+    exit 0
+  end
+
+  opts.on(
+    "--skip-db-setup",
+    "Skip setup of the local databases. This is useful when rerunning this script after a migration failure."
+  ) do
+    options[:skip_db_setup] = true
+  end
+end
+parser.parse!
+
+task = ObsoleteMigrationsRemoved.new(**options)
+task.perform
+
+exit 0

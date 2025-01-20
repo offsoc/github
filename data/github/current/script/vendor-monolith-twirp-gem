@@ -1,0 +1,143 @@
+#!/bin/bash
+#/ Usage: script/vendor-monolith-twirp-gem SERVICE_NAME MODULE_NAME VERSION
+#/
+#/ Download https://octofactory.githubapp.com/artifactory/api/gems/monolith-twirp-gems-releases-local and stick it in vendor/cache.
+#/
+#/ Example:
+#/
+#/     $ ./script/vendor-monolith-twirp-gem common users 1.0.0
+#/
+set -eu
+
+[ $# -ne 3 ] && usage
+
+##
+# Rails Root
+
+: "${root=$(cd $(dirname "$0")/.. && pwd)}"
+
+##
+# Arguments
+service_name=$1
+module_name=$2
+gem_version=$3
+
+##
+# Names
+gem_source_directory=monolith-twirp-gems-releases-local
+gem_slug="monolith-twirp-${service_name}-${module_name}"
+gem_name="${gem_slug}-${gem_version}.gem"
+
+usage() {
+  grep ^#/ <"$0" |cut -c4-
+  exit
+}
+
+check_vpn() {
+  ping -q -c 1 -W 1 octofactory.githubapp.com > /dev/null 2>&1 || {
+    echo "You do not appear to be connected to the GitHub Developer VPN. See:"
+    echo
+    echo "    https://thehub.github.com/engineering/security/developer-vpn-access/"
+    echo
+    exit 1
+  }
+}
+
+check_credentials() {
+  bin/bundle config --parseable | grep -q $gem_source_directory || {
+    echo "Please configure your Octofactory credentials for RubyGems/Bundler."
+    echo
+    echo "  1. Generate your Octofactory token. See:"
+    echo "     https://github.com/github/octofactory/blob/main/docs/usage/access.md#get-a-token"
+    echo
+    echo "  2. Configure bundler with your GitHub username and Octofactory token. Execute:"
+    echo
+    echo "     $ bin/bundle config https://octofactory.githubapp.com/artifactory/api/gems/monolith-twirp-gems-releases-local USERNAME:TOKEN"
+    echo
+    exit 1
+  }
+}
+
+check_gemfile() {
+  grep -q "gem \"$gem_slug\"," "${root}/Gemfile" || {
+    echo "Could not find entry in Gemfile for \"${gem_slug}\""
+    echo
+    echo "Example:"
+    echo
+    echo "    gem \"${gem_slug}\", \"any.version.works\""
+    echo
+    exit 1
+  }
+}
+
+set_credentials() {
+  credentials=$(bin/bundle config --parseable | grep $gem_source_directory | cut -d= -f2)
+}
+
+set_gem_source() {
+  check_credentials
+  set_credentials
+  # Determine gem source, with credentials
+  gem_source=https://${credentials}@octofactory.githubapp.com/artifactory/api/gems/${gem_source_directory}
+}
+
+setup() {
+  check_gemfile
+  check_vpn
+  set_gem_source
+}
+
+# Prerequisite checks and configuration
+setup
+
+##
+# Download gem
+
+gem_tmp="${root}/tmp/gems/${gem_slug}"
+
+mkdir -p "$gem_tmp"
+trap "rm -rf '${gem_tmp}'" EXIT
+
+cd "$gem_tmp"
+gem fetch $gem_slug -v $gem_version -s $gem_source
+
+##
+# Rest of commands from Rails root
+
+cd "$root"
+
+##
+# Update Gemfile
+
+# Bump gem version in Gemfile
+sed -i -e "s/^\([[:space:]]*\)gem ['\"]${gem_slug}['\"],\( *\)['\"][^'\"]*['\"]/\\1gem \"$gem_slug\",\\2\"$gem_version\"/" "$root/Gemfile"
+
+##
+# Update vendor/cache
+
+# Remove any existing matching gem
+git rm vendor/cache/$gem_slug-*.gem 2>/dev/null || true
+
+# Add the new one
+cp "$gem_tmp/$gem_name" "vendor/cache"
+git add -f vendor/cache/$gem_name
+
+##
+# Install
+
+# Update Bundler dependencies
+bin/bundle install
+
+##
+# Git
+
+# Stage changes for commit
+git add vendor/
+git add Gemfile*
+
+##
+# Output
+
+echo "- Don't forget to add ${gem_slug} to ignored.bundler in vendor/licenses/config.yml"
+echo "- Changes have been staged for commit."
+echo "- Please review the changes and commit them."

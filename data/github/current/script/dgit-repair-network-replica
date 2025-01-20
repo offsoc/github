@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/environment", __FILE__)
+require "terminal-table"
+
+GitRPC.timeout = 30.minutes.to_i
+GitHub.load_activerecord
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} nwo dfs-host"
+  exit 1
+end
+
+usage unless ARGV.length == 2
+
+nwo = ARGV[0]
+dfs_host = GitHub::DGit::Util.long_host(ARGV[1])
+
+repo_id, network_id, root_id, is_wiki = GitHub::DGit::Routing::lookup_repo(nwo)
+# is it found?
+unless repo_id && network_id
+  $stderr.puts "#{nwo} not found"
+  exit 1
+end
+
+begin
+  SpokesRepairNetworkReplicaJob.perform_now(network_id, dfs_host)
+rescue GitHub::DGit::ReplicaRepairError => e
+  $stderr.puts "Could not repair #{nwo} on #{dfs_host}: #{e}"
+  exit 1
+end
+
+puts "Finished. Run `spokesctl info #{nwo}` to see the result."

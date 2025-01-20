@@ -1,0 +1,139 @@
+#!/bin/bash
+# ghe-prediagnostics
+#   Gathers basic system information
+#   This script should finish quickly and output ~<1000 characters
+
+if [ ! -f /data/user/common/enterprise.ghl ]; then
+  echo 'eyJsaWNlbnNlIjoibm8gbGljZW5zZSJ9Cg~~' #{"license":"no license"}
+  exit 0
+fi
+
+function format() {
+  #optionally encode to url-safe base64
+  if [ "$1" == "-e" ]; then
+    base64 -w0 | tr -- '+/=' '-_~'
+  else
+    cat
+  fi
+}
+
+# Configuration data
+source /etc/github/enterprise-release
+
+maxpayload=1000 ## Limit JSON to 1000 chars (and add 33% for base 64 encoding) to keep URLs under 2K. See also: PR 14355.
+license=$(ghe-license info | grep reference_number | awk -F ':' '{print $2}' | tr -d ' "')
+metered=$(ghe-license info | grep '"metered"' | awk -F ':' '{print $2}' | tr -d ' "')
+topology=$(ghe-repl-status -r)
+if [ -f /data/user/common/cluster.conf ] && [ "$(ghe-config cluster.ha)" != "true" ]; then
+  topology=cluster
+fi
+github_hostname=$(ghe-config core.github-hostname)
+hostname=$(hostname)
+uuid=$(cat /data/user/common/uuid)
+auth=$(ghe-config core.auth-mode)
+ssl_enabled=$(ghe-config github-ssl.enabled)
+
+# System data
+disk_usage=$(df -ah | grep -E '/$|/data/user$' |awk '{print $6" "$2" "$5}' | paste -sd ' ' -)
+disk_mountopts=$( awk '$3 ~ /^ext/ { split($4,opts,","); if(cnt[opts[1]]++) msg[opts[1]] = msg[opts[1]] ", " $2 ; else msg[opts[1]]=$2 } END { for (opt in msg) { if(ocnt++)printf " "; printf "(%s) %s: %s.", (opt=="rw"?"OK":"WARN"), opt, msg[opt] } ; printf "\n" } ' /proc/mounts )
+num_cpu=$(lscpu | grep '^CPU(s):'| awk '{print $2}')
+loadavg=$(cat /proc/loadavg  | awk '{print $1" "$2" "$3}')
+uptime=$(awk '{print int($1/86400)"days "int($1%86400/3600)":"int(($1%3600)/60)":"int($1%60)}' /proc/uptime)
+mem=$(free -m  | grep '^Mem:' | awk '{print "total/used/free+share/buff/cache: "$2"/"$3"/"$4"+"$5"/"$6"/"$7}')
+net=$(ip -4 -o addr | awk '{print $2" "$4}' | paste -sd ' ' -)
+
+# Services data
+elasticsearch=$(timeout 2 curl -s http://127.0.0.1:9201/_cluster/health | grep -Eo 'green|yellow|red')
+systemctl_degraded=$(systemctl list-units --no-legend --state=activating,failed | wc -l)
+read -r git_online git_offline <<<$(echo 'select sum(case when online = 1 then 1 else 0 end) online,
+                                          sum(case when online = 0 then 1 else 0 end) offline from fileservers' |\
+                                    ghe-dbconsole -y 2>&1 | grep -v "can be insecure" | tail -n 1)
+maint_mode=$(ghe-maintenance --query | head -1 | grep -o '^.* set')
+
+# Cloud service data
+instance_type="Self Hosted"
+instance_location="N/A"
+case "$RELEASE_PLATFORM" in
+  ami)
+    instance_type="$(osqueryi --json "select * from ec2_instance_metadata;" | jq -r .[].instance_type 2>/dev/null)"
+    instance_location="$(osqueryi --json "select * from ec2_instance_metadata;" | jq -r .[].availability_zone 2>/dev/null)"
+    ;;
+  azure)
+    instance_type="$(sudo curl -H Metadata:true --noproxy 169.254.169.254 http://169.254.169.254/metadata/instance/compute?api-version=2018-10-01 2>/dev/null | jq -r .vmSize)"
+    instance_location="$(sudo curl -H Metadata:true --noproxy 169.254.169.254 http://169.254.169.254/metadata/instance/compute?api-version=2018-10-01 2>/dev/null | jq -r .location)"
+    ;;
+  gce)
+    instance_type="$(sudo curl -H Metadata-Flavor:Google --noproxy 169.254.169.254 http://169.254.169.254/computeMetadata/v1/instance/machine-type 2>/dev/null | awk -F '/' '{ print $NF }')"
+    instance_location="$(sudo curl -H Metadata-Flavor:Google --noproxy 169.254.169.254 http://169.254.169.254/computeMetadata/v1/instance/zone 2>/dev/null | awk -F '/' '{ print $NF }')"
+    ;;
+esac
+
+# Feature enablement data
+actions_enabled=$(ghe-config app.actions.enabled)
+packages_enabled=$(ghe-config app.packages.enabled)
+
+#Output JSON with jq
+prediagnostics=$(jq --arg version_v "$RELEASE_VERSION $RELEASE_PLATFORM" \
+   --arg license_v "$license" \
+   --arg metered_v "$metered" \
+   --arg github_hostname_v "$github_hostname" \
+   --arg hostname_v "$hostname" \
+   --arg ssl_enabled_v "$ssl_enabled" \
+   --arg uuid_v "$uuid" \
+   --arg topology_v "$topology" \
+   --arg auth_v "$auth" \
+   --arg disk_usage_v "$disk_usage" \
+   --arg disk_mountopts_v "$disk_mountopts" \
+   --arg num_cpu_v "$num_cpu" \
+   --arg loadavg_v "$loadavg" \
+   --arg uptime_v "$uptime" \
+   --arg mem_v "$mem" \
+   --arg net_v "$net" \
+   --arg es_v "$elasticsearch" \
+   --arg maint_mode_v "$maint_mode" \
+   --arg systemctl_v "$systemctl_degraded" \
+   --arg git_fs_v "online: $git_online offline: $git_offline" \
+   --arg instance_type_v "$instance_type" \
+   --arg instance_location_v "$instance_location" \
+   --arg actions_enabled_v "$actions_enabled" \
+   --arg packages_enabled_v "$packages_enabled" \
+   '.
+      | .["version"]=$version_v
+      | .["license"]=$license_v
+      | .["metered"]=$metered_v
+      | .["github_hostname"]=$github_hostname_v
+      | .["hostname"]=$hostname_v
+      | .["ssl_enabled"]=$ssl_enabled_v
+      | .["uuid"]=$uuid_v
+      | .["topology"]=$topology_v
+      | .["auth"]=$auth_v
+      | .["disk_usage"]=$disk_usage_v
+      | .["disk_mount"]=$disk_mountopts_v
+      | .["num_cpu"]=$num_cpu_v
+      | .["loadavg"]=$loadavg_v
+      | .["uptime"]=$uptime_v
+      | .["mem"]=$mem_v
+      | .["net"]=$net_v
+      | .["maint"]=$maint_mode_v
+      | .["elasticsearch"]=$es_v
+      | .["git_fileservers"]=$git_fs_v
+      | .["systemctl_degraded"]=$systemctl_v
+      | .["instance_type"]=$instance_type_v
+      | .["instance_location"]=$instance_location_v
+      | .["actions_enabled"]=$actions_enabled_v
+      | .["packages_enabled"]=$packages_enabled_v
+   ' <<<'{}'
+)
+
+
+
+if [ $(echo "$prediagnostics" | wc -c) -le "${maxpayload:-1000}" ]; then
+  echo "$prediagnostics" | format $1
+else
+  jq --arg truncated "truncated" \
+     --arg data "$(echo "$prediagnostics" | head --bytes "${maxpayload:-1000}" )" \
+     '.
+      | .["error"]=$truncated
+      | .["data"]=$data
+     ' <<<'{}' | format $1
+fi

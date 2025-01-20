@@ -1,0 +1,255 @@
+<%# erblint:counter DeprecatedComponentsCounter 7 %>
+<% page_info title: "Email settings", class: "page-account" %>
+
+<%
+   view = Settings::EmailsView.new(:user => current_user)
+   visible_emails = current_user.author_emails
+   user_emails = current_user.is_enterprise_managed? ? [view.stealth_email_display] : current_user.emails.user_entered_emails.ordered_by_id
+   test_selector_text = current_user.is_enterprise_managed? ? "emu-profile-email-visible" : "non-emu-primary-email-visible"
+-%>
+
+<% if flash[:prompt_notification_email] %>
+  <%= render layout: "shared/flash_container" do %>
+    <%= form_tag save_notification_emails_path do -%>
+      <p>
+        Your primary email was changed to <strong><%= current_user.primary_user_email %></strong>.
+        Your default notification email address is still set to <strong><%= view.global_notifications_email %></strong>.
+        Would you like to update that as well?
+      </p>
+      <%= hidden_field_tag :redirect_path, "email_settings", :id => nil %>
+      <%= hidden_field_tag :email, current_user.primary_user_email, :id => nil %>
+      <div class="mt-3">
+        <%= render Primer::ButtonComponent.new(type: :submit, variant: :small) do %>Yes, update my notification email<% end %>
+      </div>
+    <% end -%>
+  <% end %>
+<% end %>
+
+<% if flash[:toggle_visibility_notice] %>
+  <%= render layout: "shared/flash_container" do %>
+    <% if current_user.primary_user_email.private? %>
+      Your primary email address is now private. If you previously made your email public, we’ve removed it from your profile.
+    <% else %>
+      Your primary email address is now public. To select which email to display on your profile, visit <a class="Link--inTextBlock" href="<%= settings_user_profile_path %>">profile settings.</a>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if !current_user.dismissed_notice?("show_link_to_org_invite") && Organization.find_by(id: session[:inviting_organization_id])&.org_invite_email_verification_enabled? %>
+  <div class="js-notice">
+    <%= form_tag dismiss_notice_path("show_link_to_org_invite"), "data-remote" => true, :class => "js-notice-dismiss" do %>
+      <%= render Primer::Beta::Flash.new(scheme: :danger, full: true, container: :xl, test_selector: "show-invite-link") do |component| %>
+        Once the email address that received the invitation from <strong><%= Organization.find_by(id: session[:inviting_organization_id]).safe_profile_name %></strong> is added and verified, you will need to <%= link_to("return to the invitation", session[:url_to_return_to_invite], class: "Link--inTextBlock") %> to accept it.
+        <% component.with_action do %>
+          <%= render(Primer::Beta::IconButton.new(icon: :x, scheme: :invisible, type: :submit, "aria-label": "Dismiss")) { "Dismiss" } %>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>
+
+<%= render layout: "settings/settings" do %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Emails<% end %>
+  <% end %>
+
+  <% if !GitHub.single_or_multi_tenant_enterprise? && current_user.feature_enabled?(:actionable_two_factor_security_checkup) %>
+    <% email_related_global_notice = %(verified_emails one_verified_email).include?(current_user.global_notice.name) %>
+    <div class="mb-3">
+      <%= render partial: "settings/securities/inline_security_checkup_notice", locals: { section: "emails", hide_initial_notice: email_related_global_notice } %>
+    </div>
+  <% else %>
+    <% if view.verification_enabled? && current_user.emails.verified.size == 0 %>
+      <p>
+        <% if current_user.must_verify_email? %>
+          <strong>Please verify an email address</strong> to collaborate on GitHub,
+          receive notifications, and help us protect your account.
+        <% else %>
+          You have not verified any email addresses.
+          We recommend you verify at least one email for password reset.
+        <% end %>
+      </p>
+    <% end %>
+  <% end %>
+
+  <ul id="settings-emails" class="Box list-style-none">
+    <% user_emails.each_with_index do |email, i| %>
+      <li class="Box-row" <%= test_selector(test_selector_text) %>>
+        <div class="d-flex flex-justify-between">
+          <div class="d-flex flex-items-center flex-wrap">
+            <h3 class="css-truncate-target h4" style="max-width: 300px"><%= h email %></h3>
+            <%= render partial: "settings/user/email/main_badge", locals: { email: email } %>
+          </div>
+
+          <div class="text-right">
+            <% if !current_user.change_email_enabled? %>
+              <span class="team-label-ldap text-small color-fg-muted"><%= GitHub.auth.name %></span>
+            <% elsif !email.is_a?(String) %>
+              <div class="d-flex flex-justify-end flex-items-center">
+                <%= form_tag user_email_path(email.user, email), method: :delete do %>
+                  <%= render Primer::Beta::IconButton.new(
+                    type: :submit,
+                    scheme: view.deletion_disabled?(email) ? :default : :danger,
+                    aria: { label: view.deletion_tooltip(email) },
+                    data: { confirm: view.deletion_message(email) },
+                    disabled: view.deletion_disabled?(email),
+                    icon: :trash,
+                    size: :small,
+                    px: 2,
+                    ml: 1
+                  )%>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+        <%= render partial: "settings/user/email/badges",
+                  locals: { email: email, view: view } %>
+      </li>
+    <% end %>
+  </ul>
+
+  <% if !current_user.change_email_enabled? %>
+    <p class="help">
+      <%= render(Primer::Beta::Octicon.new(icon: "question", size: :small)) %>
+      Email addresses are managed via your external Identity Provider,
+      please contact your Identity Provider administrator to request changes. Your primary
+      email address is the first one assigned to you in your Identity Provider.
+    </p>
+  <% else %>
+    <%= form_for UserEmail.new, url: user_emails_path(current_user), html: { "aria-labelledby" => "email_label" } do |f| %>
+    <dl class="form-group">
+      <% email_label = current_user.is_first_emu_owner? ? "Update" : "Add" %>
+      <% if current_user.emails.size == 0 %>
+        <dt><label id="email_label" for="email">Add an email address</label></dt>
+      <% else %>
+        <dt><label id="email_label" for="email"><%= email_label %> email address</label></dt>
+      <% end %>
+      <dd>
+        <%= f.text_field :email, id: "email", class: "short", required: true, type: "email", placeholder: "Email address" %>
+        <%= render Primer::ButtonComponent.new(type: :submit) do %><%= email_label %><% end %>
+      </dd>
+    </dl>
+    <% end %>
+    <% if current_user.is_first_emu_owner? %>
+      <p class="help" <%= test_selector("modify-first-admin-email-enabled") %>>
+        <%= render(Primer::Beta::Octicon.new(icon: "info", size: :small)) %>
+        Modifying an email addresses of a first enterprise owner.  The enterprise is managed via external Identity Provider.
+      </p>
+    <% end %>
+  <% end %>
+
+  <% unless current_user.is_enterprise_managed? %>
+    <hr class="bleed-flush">
+
+    <%= form_tag set_primary_user_email_path(current_user), method: :put, "aria-labelledby": "primary_email_select_label" do %>
+      <dl class="form-group">
+        <dt>
+          <label id="primary_email_select_label" for="primary_email_select">Primary email address</label>
+          <p class="mt-2">
+            <% if view.has_emails? && view.primary_email_address_is_public? %>
+              <code><%= view.primary_email_address %></code> will be used for account-related notifications and can be used for password resets.
+            <% elsif view.has_emails? %>
+              Because you have email privacy enabled,
+              <code><%= view.primary_email_address %></code> will be used for account-related notifications as well as password resets. <code><%= view.stealth_email_display %></code> will be used for web-based Git operations, e.g., edits and merges.
+            <% else %>
+              Because you have no emails configured, you won’t receive notifications through
+              email and <code><%= view.user.anonymous_user_email %></code> will be used for web-based
+              Git operations, e.g. edits and merges.
+            <% end %>
+          </p>
+        </dt>
+
+        <dd>
+          <% if current_user.change_email_enabled? %>
+            <select id="primary_email_select" name="id" class="form-select">
+              <%=
+                options_for_select(view.primary_email_select_options, selected: view.primary_email_default_selection)
+              %>
+            </select>
+
+            <%= render Primer::ButtonComponent.new(type: :submit) do %>Save<% end %>
+          <% end %>
+        </dd>
+
+      </dl>
+    <% end %>
+  <% end %>
+
+  <div class="mt-3" <%= "hidden" if view.hide_backup_email_options %>>
+    <hr class="bleed-flush">
+
+    <%= form_tag set_backup_user_email_path(current_user), method: :put, :"aria-labelledby" => "backup_email_select_label" do %>
+    <dl class="form-group">
+      <dt>
+        <label id="backup_email_select_label" for="backup_email_select">Backup email address</label>
+        <p class="mt-2">Your backup <%= GitHub.flavor %> email address will be used as an additional destination for security-relevant account notifications and can also be used for password resets.</p>
+      </dt>
+      <dd>
+        <select id="backup_email_select" name="id" class="form-select">
+          <%=
+            options_for_select(view.backup_email_select_options, selected: view.backup_email_default_selection)
+          %>
+        </select>
+        <%= render Primer::ButtonComponent.new(type: :submit) do %>Save<% end %>
+        <% if view.emails_for_backup.empty? %>
+          <p class="note">Please add <%= view.verification_enabled? ? "a verified " : "an " %>email, in addition to your primary email, in order to choose a backup email address.</p>
+        <% end %>
+      </dd>
+    </dl>
+    <% end %>
+
+    <hr class="bleed-flush">
+
+    <% stealth_email = StealthEmail.new(current_user) %>
+    <% if stealth_email.valid? %>
+      <div class="form-checkbox">
+        <%= form_tag toggle_visibility_user_emails_path(current_user), :method => :put, "data-autosubmit" => true, :"aria-label" => "Keep email address private", :"aria-describedby" => "toggle_visibility_note" do %>
+          <label>
+            <%= check_box_tag "toggle_visibility", false, current_user.emails.with_role("primary").private? %>
+            Keep my email addresses private
+          </label>
+
+          <p id="toggle_visibility_note" class="note">
+            We’ll remove your public profile email and use <strong><%= view.stealth_email_display %></strong> when performing web-based Git operations (e.g. edits and merges) and
+            sending email on your behalf. If you want command line Git operations to use your private email you must
+            <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/setting-your-email-in-git">set your email in Git</a>.
+
+            <p class="pt-2 note">Previously authored commits associated with a public email will remain public.</p>
+          </p>
+
+          <noscript>
+            <p><%= render Primer::ButtonComponent.new(variant: :small, scheme: :primary, type: :submit) do %>Save changes<% end %></p>
+          </noscript>
+        <% end %>
+      </div>
+
+      <% if current_user.emails.with_role("primary").private? %>
+        <div class="form-checkbox">
+          <%= form_tag toggle_email_visibility_warning_user_emails_path(current_user), :method => :put, "data-autosubmit" => true, :"aria-label" => "Block command line pushes that expose email", :"aria-describedby" => "toggle_warning_note" do %>
+            <label>
+              <%= check_box_tag 'toggle_warning', false, current_user.warn_private_email? %>
+              Block command line pushes that expose my email
+            </label>
+
+            <p id="toggle_warning_note" class="note">
+              When you push to GitHub, we’ll check the most recent commit. If the author email on that commit is a private email on your GitHub account, we will block the push and warn you about exposing your private email.
+            </p>
+
+            <noscript>
+              <p><%= render Primer::ButtonComponent.new(variant: :small, scheme: :primary, type: :submit) do %>Save changes<% end %></p>
+            </noscript>
+          <% end %>
+        </div>
+      <% end %>
+    <% end -%>
+  </div>
+
+  <% if GitHub.email_preference_center_enabled? %>
+    <% if feature_enabled_globally_or_for_current_user?(:email_preference_center) %>
+      <%= render(Settings::MarketingEmailSubscriptionsComponent.new(user: current_user)) %>
+    <% else %>
+      <%= render partial: "settings/user/email/preferences" %>
+    <% end %>
+  <% end %>
+<% end %>

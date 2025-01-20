@@ -1,0 +1,188 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<div class="container-xl p-responsive">
+  <%= render(Primer::Beta::Breadcrumbs.new(mt: 6, display: [:none, nil, nil, :block], data: {pjax: true})) do |component| %>
+    <% component.with_item(href: global_advisories_path) do %>GitHub Advisory Database<% end %>
+    <% if view.advisory.unreviewed? %>
+      <% component.with_item(href: global_advisories_path(query: "type:unreviewed")) do %>Unreviewed<% end %>
+    <% else %>
+      <% component.with_item(href: global_advisories_path(query: "type:reviewed")) do %>GitHub Reviewed<% end %>
+    <% end %>
+    <% component.with_item(href: global_advisory_path(view.advisory.ghsa_id)) do %><%= view.advisory.identifier %><% end %>
+    <% component.with_item(href: request.path) do %>Improve security advisory<% end %>
+  <% end %>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h1, mt: 4) do %>
+      <% if view.advisory.summary.present? %>
+        Improve: "<%= view.advisory.summary %>"
+      <% else %>
+        Improve this advisory
+      <% end %>
+    <% end %>
+    <% component.with_description do %>
+      Submitting improvements to this security advisory will create a pull request for the GitHub curation team to review and track.
+    <% end %>
+  <% end %>
+
+  <div class="gutter-lg gutter-condensed clearfix">
+    <change-tracker class="col-12 col-md-9 float-left">
+      <div class="advisory-form border-0 color-bg-default rounded">
+        <turbo-frame id="advisory_improvements_form">
+          <%= form_for view.form_advisory, data: { turbo: true }, html: { "data-target" => "change-tracker.form" }, url: new_global_advisory_improvement_path(view.advisory.ghsa_id), method: :post do |form| %>
+            <div class="mt-0 pb-3">
+              <h4 class="mb-2 h4">Advisory Details</h4>
+              <div class="form-group">
+                <div class="form-group-header"><%= form.label :summary, "Title *" %></div>
+                <%= form.text_field :summary, class: "width-full js-advisory-form-title", required: true, "data-user-populated": view.title_is_user_populated? %>
+              </div>
+
+              <div class="form-group">
+                <div class="form-group-header"><%= form.label form.field_id(:description), "Description *" %></div>
+                <%= render partial: "advisories/comment_form", locals: {
+                  comment_body: form.object.description,
+                  data_preview_url: preview_path,
+                  discussions_enabled: false,
+                  include_comment_form_error: false,
+                  include_hidden_saved_reply_id: false,
+                  templated_content: RepositoryAdvisory.description_template,
+                  textarea_id: form.field_id(:description),
+                  textarea_name: "#{form.object_name}[description]",
+                  placeholder: "Leave a description",
+                  aria_label: "Description body",
+                  required: true
+                } %>
+
+                <div class="text-small color-fg-muted px-2 pb-2 pt-2">
+                  <a
+                    class="color-fg-muted"
+                    href="<%= GitHub.markdown_docs_url %>"
+                    target="_blank"
+                    data-ga-click="Markdown Toolbar, click, help"
+                    >
+                    <%= render(Primer::Beta::Octicon.new(:markdown, vertical_align: :bottom)) %>
+                    Styling with Markdown is supported.
+                  </a>
+                </div>
+                <div class="border-top text-small color-fg-muted p-2">
+                  <%= primer_octicon(:info, mr: 1) %>Remember, contributions to this advisory should follow our <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/github-community-guidelines">GitHub Community Guidelines</a>
+                </div>
+              </div>
+
+              <div class="form-group <%= "errored" if form.object.errors.include?(:vulnerability_references) %>">
+                <div class="form-group-header"><%= form.label :vulnerability_references, "References" %></div>
+                <%= form.text_area(
+                  :vulnerability_references,
+                  class: "width-full",
+                  rows: [3, [form.object.vulnerability_references.size, 10].min].max,
+                  placeholder: "Add references",
+                  value: view.advisory.vulnerability_references.map { |reference| reference.url }.join("\n"),
+                )%>
+                <%= render(Primer::Beta::Text.new(color: form.object.errors.include?(:vulnerability_references) ? :danger : :muted, mt: 1, tag: :p)) { "Separate multiple references on different lines. Each must match the pattern of a URL starting with `http`." } %>
+              </div>
+
+              <div class="form-group">
+                <div class="form-group-header"><%= form.label :source_code_location, "Source Code Location" %></div>
+                <%= form.text_field :source_code_location, class: "width-full", placeholder: "URL" %>
+              </div>
+            </div>
+
+            <div class="form-group pb-3">
+              <h2 class="mb-2 h4">Affected products</h2>
+              <affected-product-list class="d-block" data-action="affected-product-row-delete:affected-product-list#removeRow" data-next-index="<%= view.advisory.vulnerable_version_ranges.size %>">
+                <div class="mb-n1" data-target="affected-product-list.body">
+                  <% view.advisory.vulnerable_version_ranges.each_with_index do |range, index| %>
+                    <%= form.fields_for :vulnerable_version_ranges, range do |vulnerable_version_range_form| %>
+                      <%= render(
+                        "global_advisory_improvements/affected_product_row",
+                        form: vulnerable_version_range_form,
+                        index: index
+                      ) %>
+                    <% end %>
+                  <% end %>
+                </div>
+
+                <template data-target="affected-product-list.rowTemplate">
+                  <%= form.fields_for :vulnerable_version_ranges, VulnerableVersionRange.new do |vulnerable_version_range_form| %>
+                    <%= render(
+                      "global_advisory_improvements/affected_product_row",
+                      form: vulnerable_version_range_form,
+                      index: "{{affected-product-entry-index}}"
+                    ) %>
+                  <% end %>
+                </template>
+
+                <%= render Primer::ButtonComponent.new(type: :button, scheme: :link, data: { action: "click:affected-product-list#addRow" }) do |c| %>
+                  <% c.with_leading_visual_icon(icon: :plus, mr: 1) %>
+                  Add another affected product
+                <% end %>
+              </affected-product-list>
+            </div>
+
+            <div class="pb-3">
+              <%= render(Advisories::SeveritySelectionComponent.new(advisory: view.advisory, form: form, required: false)) %>
+            </div>
+
+            <%= render partial: "advisories/cwe_form", locals: { cwes: view.advisory.cwes, field_name_prefix: "vulnerability" } %>
+
+            <div class="mt-5">
+              <h4 class="h4 mb-1">Suggest improvements</h4>
+              <div>
+                Suggestions are submitted as a pull request to be reviewed by the GitHub Security Curators team.
+              </div>
+              <div class="form-group mt-2">
+                <div class="form-group-header">
+                  <%= label_tag(form.field_id(:justification), "Reason for change *") %>
+                </div>
+                <div class="form-group-body">
+                  <%= text_area_tag(
+                    form.field_name(:justification),
+                    view.justification,
+                    class: "form-control width-full min-height-0",
+                    placeholder: "Provide some supporting evidence for this change, e.g. reference link, code commit, or broader context.",
+                    required: true,
+                    rows: 3,
+                    style: "height: auto;"
+                  ) %>
+                </div>
+              </div>
+              <div class="mt-5">
+                <%= render(Primer::ButtonComponent.new(scheme: :primary, type: :submit, data: { "turbo-frame": "_top" })) { "Submit improvements" } %>
+                <a href="<%= request.path %>">
+                  <%= render(Primer::ButtonComponent.new(scheme: :default, type: :button, ml: 2)) { "Reset form" } %>
+                </a>
+              </div>
+            </div>
+          <% end %>
+        </turbo-frame>
+      </div>
+    </change-tracker>
+    <div class="col-12 col-md-3 float-left mt-md-6">
+      <div>
+        <div class="mb-3">
+          <%= render Primer::Beta::Link.new(href: "#{GitHub.help_url}/code-security/supply-chain-security/managing-vulnerabilities-in-your-projects-dependencies/editing-security-advisories-in-the-github-advisory-database", muted: true) do %>
+            <%= primer_octicon(:book, mr: 2) %> Documentation
+          <% end %>
+        </div>
+        <div class="mb-3">
+          <%= render Primer::Beta::Link.new(href: "#{GitHub.url}/github/advisory-database#contributions", muted: true) do %>
+            <%= primer_octicon(:smiley, mr: 2) %> Contribution Guidelines
+          <% end %>
+        </div>
+        <div class="mb-3">
+          <%= render Primer::Beta::Link.new(href: "#{GitHub.help_url}/code-security/supply-chain-security/managing-vulnerabilities-in-your-projects-dependencies/browsing-security-vulnerabilities-in-the-github-advisory-database", muted: true) do %>
+            <%= primer_octicon(:info, mr: 2) %> About GitHub Advisory Database
+          <% end %>
+        </div>
+        <div class="mb-3">
+          <%= render Primer::Beta::Link.new(href: "#{GitHub.url}/github/advisory-database/discussions/11", muted: true) do %>
+            <%= primer_octicon(:question, mr: 2) %> Give feedback
+          <% end %>
+        </div>
+      </div>
+      <div class="border-top mt-4 pt-4">
+        Improvement suggestions will be submitted as a pull request to be reviewed by the GitHub Security Curators team.
+      </div>
+    </div>
+  </div>
+</div>

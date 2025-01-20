@@ -1,0 +1,82 @@
+#!/bin/bash
+# Wrap consul-cli service register to call Consul's API
+# When registering, this passes through all its args to `consul-cli service register`:
+#   ghe-consul-register mysql --port 3306 ...[other flags for consul-cli]
+# to deregister a service:
+#  ghe-consul-register --deregister mysql
+# Note: Consul service names are intended to match their systemd unit names
+
+set -euo pipefail
+
+cleanup() {
+  local exitcode=$?
+  [[ $exitcode = 0 ]] || \
+    echo "Exiting ghe-consul-register with nonzero status: $exitcode" 2>&1
+
+  # Clear status on exit
+  [[ ${NOTIFY_SOCKET:-} ]] && systemd_notify_status ""
+  exit $exitcode
+}
+
+trap cleanup EXIT
+
+systemd_notify_status() {
+  local ready=""
+  if [[ $1 == "--ready" ]]; then
+    shift
+    ready="READY=1\\n" # literal backslash-n for %b below
+  fi
+
+  msg=$(printf "STATUS=%s\\n%bMAINPID=%d\\n" "$1" "$ready" "$$")
+
+  if [[ ${NOTIFY_SOCKET:-} ]]; then
+    socat - "UNIX-SENDTO:$NOTIFY_SOCKET" <<<"$msg" &
+  else
+    echo -e "NOTIFY_SOCKET isn't set; sd_notify:\\n$msg" >&2
+  fi
+}
+
+register_loop() {
+  echo "Waiting for Consul leader..."
+  systemd_notify_status "waiting for Consul leader"
+  until [[ $(consul-cli status leader  --template '{{ ne . "" }}') = "true" ]]; do
+    sleep 0.2
+  done
+  echo "Consul leader acquired."
+
+  systemd_notify_status "registering service"
+  /usr/bin/consul-cli service register "$@"
+  echo "Registered service '$1' with Consul."
+
+  systemd_notify_status --ready "registered service"
+
+  while :; do
+    systemd_notify_status "waiting for registered service"
+    if ! timeout 5 /usr/local/share/enterprise/consul-wait-for-registration "$1"; then
+      systemd_notify_status "service is missing; re-registering"
+      /usr/bin/consul-cli service register "$@"
+      echo "Service was missing in Consul; re-registered"
+    fi
+    systemd_notify_status "sleeping"
+    sleep 10
+  done
+}
+
+main() {
+  # CONSUL_HTTP_TOKEN is used for ACLs by the `consul` and `consul-cli` commands below
+  CONSUL_HTTP_TOKEN=$(ghe-config secrets.consul.acl-master-token)
+  export CONSUL_HTTP_TOKEN
+
+  if [[ $1 = --deregister ]]; then
+    shift
+    echo "Deregistering Consul service: $1"
+    /usr/bin/consul-cli service deregister "$@"
+  elif [ $# -lt 6 ]; then
+    echo "Not enough args" >&2
+    exit 1
+  else
+    register_loop "$@"
+  fi
+}
+
+main "$@"

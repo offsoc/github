@@ -1,0 +1,250 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# view is an instance of IntegrationInstallations::ShowView %>
+
+<% page_info \
+  title: "Installed GitHub App - #{view.integration.name}",
+  responsive: false,
+  selected_link: :integration_installations,
+  hide_marketplace_retargeting_notice: true,
+  hide_marketplace_pending_installations_notice: true,
+  stafftools: stafftools_user_installation_path(view.installation.target, view.installation)
+%>
+
+<% content = capture do %>
+  <%= render "integration_installations/suspended_installation_alert", view: view %>
+  <%= render "integration_installations/integration_owned_by_spammy_alert", view: view %>
+
+  <div class="d-flex flex-items-center pb-3 mb-3 border-bottom">
+    <div style="background-color: #<%= view.integration.preferred_bgcolor %>" class="CircleBadge CircleBadge--small mr-3 flex-shrink-0">
+      <%= oauth_application_logo(view.integration, 30, class: "CircleBadge-icon", alt: view.integration.name) %>
+    </div>
+    <div>
+      <h2 class="f2 text-normal"><%= view.integration.name %></h2>
+      <div class="text-small color-fg-muted pt-2">
+        <% if view.installed_automatically? %>
+          <span class="mr-3"><%= render(Primer::Beta::Octicon.new(icon: "clock")) %> Installed <%= render Primer::Beta::RelativeTime.new(datetime: view.installed_at, tense: :past) %> by GitHub</span>
+        <% else %>
+          <span class="mr-3"><%= render(Primer::Beta::Octicon.new(icon: "clock")) %> Installed <%= render Primer::Beta::RelativeTime.new(datetime: view.installed_at, tense: :past) %></span>
+        <% end %>
+        <span class="mr-3"><%= primer_octicon(:person) %> Developed by <%= link_to "#{view.integration.display_owner.display_login}", view.integration.display_owner.user_path, class: "Link--inTextBlock" %></span>
+        <% if manages_integration?(user: view.current_user, integration: view.integration) %>
+          <span class="mr-3"><%= primer_octicon(:gear) %> <%= link_to "App settings", gh_settings_app_path(view.integration), class: "Link--inTextBlock" %></span>
+        <% end %>
+        <span class="mr-3"><%= primer_octicon(:"link-external") %> <%= link_to view.integration.url, view.integration.url, class: "Link--inTextBlock" %></span>
+        <% if view.show_more_info? %>
+          <%= render(Primer::Alpha::ActionMenu.new(float: :right)) do |menu| %>
+            <% menu.with_show_button(scheme: :link) { "More info" } %>
+            <% menu.with_item(label: "Privacy policy", href: view.listing.privacy_policy_url) %>
+
+            <% if view.listing.pricing_url? %>
+               <% menu.with_item(label: "Pricing", href: view.listing.pricing_url) %>
+            <% end %>
+            <% if view.listing.documentation_url? %>
+               <% menu.with_item(label: "Documentation", href: view.listing.documentation_url) %>
+            <% end %>
+            <% if view.listing.tos_url? %>
+               <% menu.with_item(label: "Terms of Service", href: view.listing.tos_url) %>
+            <% end %>
+            <% if view.listing.support_url? %>
+               <% menu.with_item(label: "Support", href: view.listing.support_url) %>
+            <% end %>
+            <% if view.listing.status_url? %>
+               <% menu.with_item(label: "Status", href: view.listing.status_url) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <% if view.integration.description? %>
+    <div class="markdown-body">
+      <%= render "integrations/integration_description", :integration => view.integration %>
+    </div>
+  <% end %>
+
+  <% if view.show_features? %>
+    <div class="pt-3">
+      <% view.features.each do |feature| %>
+        <%= render Topics::TagComponent.new(name: feature.name, href: apps_feature_path(feature: feature.slug), title: "Feature: #{feature.name}") %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% access_group_view = IntegrationInstallations::AccessGroupingsView.new(integration_installation: view.installation) %>
+  <%= render Primer::Beta::Subhead.new(spacious: true, mb: 0) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Permissions<% end %>
+  <% end %>
+
+  <% if view.installation.outdated? %>
+    <%= render "integration_installations/review_permissions_update_request_flash_banner", view: view %>
+  <% end %>
+
+  <%= render partial: "integration_installations/requested_permissions_list",
+    locals: {
+      access_group_view: access_group_view,
+      row_class: "Box-row border-bottom px-0"
+    }
+  %>
+
+  <% if !view.business_installation? %>
+    <%= render Primer::Beta::Subhead.new(spacious: true, hide_border: true) do |component| %>
+      <% component.with_heading(tag: :h2) do %>Repository access<% end %>
+    <% end %>
+
+    <%= form_for view.installation, url: gh_update_settings_installation_path(view.installation), method: :put, html: {class: "js-integrations-install-form"} do %>
+      <div class="Box p-4 pb-0 mb-3">
+        <%= hidden_field_tag "target_id", view.target.id %>
+        <%= hidden_field_tag "request_id", view.installation_request.id if view.installation_request? && !view.installation_suggestion? %>
+        <%= hidden_field_tag "integration_fingerprint", view.integration.fingerprint %>
+
+        <% if view.installation_request? %>
+          <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+            <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+              <% if view.installation_suggestion? %>
+                <%= link_to(view.installation_request.integration.name, gh_app_path(view.installation_request.integration, current_user), class: "Link--inTextBlock") %>
+                suggested installation on
+                <%= view.installation_request.request_all_repositories? ? "all repositories" : "the following repositories" %>.
+              <% else %>
+                <%= profile_link(view.installation_request.requester) %>
+                requested installation of this GitHub App
+                <%= time_ago_in_words_js(view.installation_request.created_at) %>
+              <% end %>
+            <% end %>
+          <% else %>
+            <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+              <% if view.installation_suggestion? %>
+                <%= link_to(view.installation_request.integration.name, gh_app_path(view.installation_request.integration, current_user), class: "Link--inTextBlock") %>
+                suggested installation on
+                <%= view.installation_request.request_all_repositories? ? "all repositories" : "the following repositories" %>.
+              <% else %>
+                <%= profile_link(view.installation_request.requester) %>
+                requested installation of this GitHub App
+                <%= time_ago_in_words_js(view.installation_request.created_at) %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <div class="form-group settings-next my-0">
+          <% if !view.repository_installation_required? %>
+            <div class="form-checkbox integrations-install-target my-0">
+              <label for="install_target_none">
+                <%= radio_button_tag "install_target", "none", view.installed_on_no_repositories?, :class => "js-installation-repositories-radio" %>
+                No repositories
+              </label>
+              <p class="note text-small m-0 color-fg-muted">
+                This App does not require access to your repositories.
+              </p>
+            </div>
+          <% end %>
+          <% if view.repository_installation_required? %>
+            <div id="repository-selection"></div>
+            <div class="mt-4"><%= render "integration_installations/select_repositories", view: view.suggestions_view %></div>
+          <% end %>
+        </div>
+
+      </div>
+
+      <% if view.repository_installation_required? %>
+        <% if view.installation_request? %>
+          <%= render Primer::Beta::Button.new(scheme: :primary, float: :left, mr: 2, classes: "js-integrations-install-form-submit", type: :submit) do %>Approve and install<% end %>
+        <% else %>
+          <%= render Primer::Beta::Button.new(scheme: :primary, float: :left, mr: 2, classes: "js-integrations-install-form-submit", disabled: true, type: :submit) do %>Save<% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if view.repository_installation_required? %>
+      <% if view.installation_request? && !view.installation_suggestion? %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Reject request",
+            title: "Are you sure you want to reject this installation request?",
+            button_class: "btn btn-danger"
+        } do %>
+          <div class="Box-body">
+          <p>
+            <%= profile_link(view.installation_request.requester) %>
+            requested installation of <strong><%= view.integration.name %></strong>. Are you sure you want to reject this request?
+            This <strong>won't modify</strong> the current installation
+          </p>
+          <%= button_to('Reject', gh_cancel_app_integration_installation_request_url(view.installation_request, current_user), method: "delete", class: "btn btn-block btn-danger mt-2") %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Button.new(scheme: :secondary, classes: "js-integrations-install-form-cancel", disabled: true, type: :button)) { "Cancel" } %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render Primer::Beta::Subhead.new(spacious: true, hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2, danger: true) do %>Danger zone<% end %>
+  <% end %>
+
+  <div class="Box Box--danger">
+    <% unless view.installation.staff_suspended? %>
+      <% if view.installation.user_suspended? %>
+        <div class="Box-row">
+          <%= button_to "Unsuspend",
+            gh_unsuspend_settings_installation_path(view.installation),
+            method: :delete,
+            form_class: "float-right",
+            class: "btn btn-danger mt-1" %>
+
+          <strong>Unsuspend your installation</strong>
+          <div>
+            This grant the app access to your resources.
+          </div>
+        </div>
+      <% elsif !view.installation.integrator_suspended? %>
+        <div class="Box-row">
+          <%= button_to "Suspend",
+            gh_suspend_settings_installation_path(view.installation),
+            method: :post,
+            form_class: "float-right",
+            class: "btn btn-danger mt-1",
+            "data-confirm": "Are you sure you want to suspend this GitHub App?" %>
+
+          <strong>Suspend your installation</strong>
+          <div>
+            This will block the app access to your resources.
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+
+    <div class="Box-row">
+      <%= button_to "Uninstall",
+        gh_settings_installation_path(view.installation),
+        method: :delete,
+        form_class: "float-right",
+        class: "btn btn-danger mt-1",
+        "data-confirm": "This action cannot be undone. Are you sure you want to uninstall this GitHub App from #{pluralize view.installation.repository_ids.count, "repository"}?" %>
+
+      <strong>Uninstall "<%= view.integration.name %>"</strong>
+      <div>
+        This will remove the app and revoke access to all resources.
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<% if view.business_installation? %>
+  <%= render layout: "businesses/layout",
+    locals: {
+      business: this_business,
+      title: "Installations",
+      container_attributes: "itemscope itemtype='http://schema.org/Business'"
+    } do %>
+    <%= content %>
+  <% end %>
+<% elsif view.organization_installation? %>
+  <%= render layout: "orgs/settings/layout" do %>
+    <%= content %>
+  <% end %>
+<% elsif view.user_installation? %>
+  <%= render layout: "settings/settings" do %>
+    <%= content %>
+  <% end %>
+<% end %>

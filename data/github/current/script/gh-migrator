@@ -1,0 +1,994 @@
+#!/usr/bin/env ruby
+
+require "io/console"
+require "optparse"
+require "ostruct"
+require "pp"
+require "csv"
+require "uri"
+require "simple_uuid"
+require "active_support/core_ext/kernel"
+
+class GitHubMigratorCli
+  include GitHub::Telemetry::Logs::Loggable
+
+  def self.help_message
+    <<-eos
+Usage: #{GitHubMigratorCli.script_name} command [options]
+
+Possible commands are:
+
+  add        - Add a repository or organization and
+              associated records to export.
+  target_url - Designate the new location of a repository
+              that is being migrated
+  export     - Create export archive with exported records.
+  prepare    - Read archive and build reference table.
+  conflicts  - Output conflicts as csv.
+  map        - Map source_url to target_url with optional
+              action (map, rename, map_or_rename, merge).
+  import     - Import records.
+  audit      - Audit imported records.
+  unlock     - Unlock imported repositories.
+  list       - List migrations that are in progress.
+
+Documentation can be found at https://gh.io/AAlr6gr
+eos
+  end
+
+  def help_message; self.class.help_message; end
+
+  def trial_run_tldr
+    "\e[1m*** Do a trial run before importing to your production instance! ***\e[0m"
+  end
+
+  def print_prepare_preamble
+    stdout.puts <<-eos
+
+#{trial_run_tldr}
+
+Because migrations are complex, for example combining existing records with
+incoming records and rewriting links in comment bodies so they still work post
+migration, we highly recommend that you test the migration process on a staging
+server that has been loaded with a backup from your production server.
+
+This approach has several benefits:
+
+1. Doing migration trial-runs against a copy of the data that the migration will
+   eventually be applied to ensures that you've encountered any edge cases ahead
+   of time and have an opportunity to resolve them without the pressure of a
+   production server being down.
+
+2. Working from a backup that you can keep restoring to makes restarting the
+   trial-run process much faster. We even recommend for more complex migrations
+   that the customer take a backup of their staging server between each
+   ghe-migrator step to ensure that you can rewind to that checkpoint quickly.
+
+3. Timing the trial-run will give you an fairly accurate estimate of how long
+   the migration will take in production so you can let your teams know how long
+   they won't be able to access their repositories. This is also helpful with
+   figuring out when to schedule the production migration. If it's only going to
+   take 10 minutes you might do it in the morning, but if it's going to take
+   several hours you may want to do it at night or on a weekend.
+
+Please take the time to read our migration documentation at #{DOCUMENTATION_URL}
+
+#{trial_run_tldr}
+
+eos
+  end
+
+  class ReadOnlyMigrationPath < StandardError; end
+  class GuidRequired < StandardError; end
+  class InvalidThrottleValue < StandardError; end
+  class NoConflicts < StandardError; end
+
+  # Commands that the GitHub::Migrator::Cli supports.
+  VALID_COMMANDS = {
+    "add"        => :add,
+    "target_url" => :target_url,
+    "export"     => :export,
+    "prepare"    => :prepare,
+    "conflicts"  => :conflicts,
+    "map"        => :map,
+    "import"     => :import,
+    "audit"      => :audit,
+    "console"    => :console,
+    "check-path" => :check_path,
+    "unlock"     => :unlock,
+    "list"       => :list,
+    "version"    => :version,
+  } unless const_defined?("VALID_COMMANDS")
+
+  # Url to gh-migrator documentation.
+  DOCUMENTATION_URL = "https://gh.io/AAlr6gr" unless const_defined?("DOCUMENTATION_URL")
+  ENTERPRISE_SUPPORT = "Please contact GitHub Enterprise Support via https://support.github.com.\n" unless const_defined?("ENTERPRISE_SUPPORT")
+
+  # Used in lib/github/migrator/errors.rb
+  def documentation_url
+    DOCUMENTATION_URL
+  end
+
+  # Used in lib/github/migrator/errors.rb
+  def enterprise_support
+    ENTERPRISE_SUPPORT
+  end
+
+  # Public: Public Cli run method that the gh-migrator script uses to
+  # execute a command.
+  #
+  # Errors that might be raised by any command should be caught here in
+  # order to provide actionable feedback to the end user.
+  def self.run(stdout: $stdout)
+    cli = new(stdout: stdout)
+    method = cli.method(cli.command)
+    cli.send(cli.command)
+  rescue ReadOnlyMigrationPath => e
+    feedback  = "You do not have permissions to write to this staging path:\n"
+    feedback += "#{e.message}\n\n"
+    feedback += "Please specify a writable path using -sPATH."
+    abort feedback
+  rescue GuidRequired => e
+    abort "\n-gGUID is required\n#{cli.help}"
+  rescue InvalidThrottleValue => e
+    message  = "\n--t, --throttle value must be a positive integer, "
+    message += "\"#{e.message}\" is not a valid value\n"
+    message += cli.help
+    abort message
+  rescue => error # rubocop:todo Lint/GenericRescue
+    logger.error(:exception => error, "process.command" => cli.command, "gh.migration_tools.gh_migrator.guid" => cli.guid)
+
+    if error.respond_to?(:gh_migrator_cli_message)
+      abort "\n#{error.gh_migrator_cli_message(cli: cli)}"
+    else
+      message  = "\n#{cli ? "The #{cli.command}" : "gh-migrator"} failed to complete. "
+      message += "Log statements have been emitted to container logs.\n\n#{ENTERPRISE_SUPPORT}"
+      abort message
+    end
+  ensure
+    stdout.puts "\nLog statements emitted to container STDOUT and can be found in container logs with log field InstrumentationScope='GitHubMigratorCli'" unless cli.command == :audit || cli.command == :conflicts
+  end
+
+  # Public: The command that ran to start gh-migrator.
+  def self.script_name
+    ENV["GH_MIGRATOR_INVOCATION"] || "gh-migrator"
+  end
+
+  def script_name
+    self.class.script_name
+  end
+
+  def initialize(stdout: $stdout, stderr: $stderr, path_resolver: PathResolver.new, argv: ARGV, quiet_load: false)
+    @command = VALID_COMMANDS[argv.shift]
+    @args = argv.clone
+    @argv = argv
+    @stdout = stdout
+    @stderr = stderr
+    @path_resolver = path_resolver
+    @lock_repository = false
+    @quiet_load = quiet_load
+  end
+
+  # Public: Command being executed. Set in #initialize and used in Cli.run.
+  #
+  # Returns a Symbol.
+  attr_reader :command
+
+  # Public: Args passed to command. Set in #initialize and used in #migrator.
+  #
+  # Returns an Array.
+  attr_reader :args
+
+  # Internal: ARGV, or a test equivalent.
+  attr_reader :argv
+
+  # Public: Accessor for setting and getting help text that can be presented
+  # to the end user in case of a short circuit.
+  #
+  # Returns a String or NilClass.
+  attr_accessor :help
+
+  # Public: Where to write output messages.
+  attr_reader :stdout
+
+  # Public: Where to write warning messages.
+  attr_reader :stderr
+
+  # Public: Something that knows what to do with relative paths.
+  attr_reader :path_resolver
+
+  # Public: If true, don't show "Starting GitHub::Migrator"
+  attr_reader :quiet_load
+
+  URL_REGEX = URI.regexp(%w[http https]) unless const_defined?("URL_REGEX")
+
+  # Public: Add a repository to the migration.
+  def add
+    add_options = {
+      lock_repository: false,
+      exclude_attachments: false,
+      exclude_projects: false,
+    }
+
+    parse_options do |options, _parsed_options|
+      help_banner(options, "#{script_name} add https://github.hostname/org/repo [options]")
+
+      options.on("-iFILENAME", "--input=FILENAME", "Provide a file of URLs to add") do |filename|
+        self.input_file_path = path_resolver.resolve(filename)
+      end
+
+      options.on("-l", "--lock", "Lock the repository to prevent changes") do |_lock|
+        add_options[:lock_repository] = true
+      end
+
+      options.on("--exclude-attachments", "Exclude attachments on issues, comments, etc.") do |_v|
+        add_options[:exclude_attachments] = true
+      end
+
+      options.on("--exclude-projects", "Exclude organization and repository projects.") do |_v|
+        add_options[:exclude_projects] = true
+      end
+    end
+
+    if parsed_options[:guid].nil?
+      parsed_options[:guid] = SimpleUUID::UUID.new.to_guid
+    end
+
+    source_urls = []
+
+    if input_file_path && File.file?(input_file_path)
+      begin
+        source_urls += File.readlines(input_file_path).map(&:chomp)
+      rescue Errno::EACCES
+        warn("Unable to read from #{input_file_path} due to insufficient permissions")
+      end
+    end
+
+    if argv[0] =~ URL_REGEX
+      source_urls << argv.shift
+    end
+
+    if source_urls.any?
+      load_github
+      reset_progress
+
+      cli_events = GitHub::Migrator::CliEvents.new
+      results = ActiveRecord::Base.connected_to(role: :reading) do
+        source_urls.map do |source_url|
+          begin
+            migrator.add_to_export(source_url, add_options, cli_events)
+          rescue GitHub::Migrator::RepositoryRequired,
+                 GitHub::Migrator::ModelForUrl::NotImplemented
+            warn("Unable to add #{source_url} because it is an invalid repository URL")
+          end
+        end
+      end
+
+      final_result = results.compact.last
+
+      print_feedback(final_result, "#{script_name} export -g#{final_result[:guid]}\n")
+    else
+      print_help
+    end
+  end
+
+  # Public: Set a target url for a repository
+  def target_url
+    add_options = {
+      target_url: argv[1],
+    }
+
+    parse_options do |options, _parsed_options|
+      help_banner(options, "#{script_name} target_url https://github.hostname/org/repo https://githubtarget.hostname/org/repo [options]")
+
+      options.on("-u", "--unset", "Clear the migration target URL") do |_lock|
+        add_options[:target_url] = nil
+      end
+    end
+
+    # We don't need to reference a specific migration, so we don't need the user
+    # to specify a GUID
+    parsed_options[:guid] = SimpleUUID::UUID.new.to_guid
+
+    source_url = argv[0] =~ URL_REGEX ? argv.shift : nil
+
+    if source_url
+      load_github
+
+      migrator.set_exported_to_url(source_url, add_options)
+      stdout.puts "Set target url for \`#{source_url}\` to #{add_options[:target_url].inspect}"
+    else
+      print_help
+    end
+  end
+
+  # Public: Export a migration by it's guid.
+  def export
+    parse_options do |options, parsed_options|
+      staging_path_option(options, parsed_options)
+      username_and_password_option(options)
+      help_banner(options, "#{script_name} export -gGUID [options]")
+    end
+    guid_required!
+    get_username_and_password_from_user
+    load_github
+    parsed_options[:actor] = actor
+    parsed_options[:migration_path] = migration_path
+    parsed_options[:archive_export_path] = archive_export_path
+    reset_progress(migrator.total_records_count(:export))
+
+    migrator.on_progress_with_count do |count|
+      increment_and_print_percent_complete("Export", count)
+    end
+
+    results = ActiveRecord::Base.connected_to(role: :reading) { migrator.export! }
+    print_feedback(results, "#{script_name} prepare #{results[:archive_path]} -g#{results[:guid]}\n")
+  end
+
+  # Public: Read a migration archive into target instance and build the
+  # migratable resources data needed to detect conflicts and run an import.
+  def prepare
+    archive_path = nil
+    parse_options do |options, parsed_options|
+      staging_path_option(options, parsed_options)
+
+      help_banner(options, "#{script_name} prepare /path/to/archive.tar.gz [options]")
+    end
+
+    parsed_options[:archive_path] = archive_path = path_resolver.resolve(argv.shift)
+    if parsed_options[:guid].nil?
+      parsed_options[:guid] = SimpleUUID::UUID.new.to_guid
+    end
+
+    if archive_path && File.exist?(archive_path)
+      print_prepare_preamble
+      load_github
+      reset_progress
+      parsed_options[:migration_path] = migration_path
+
+      migrator.on_progress_with_count do |count|
+        increment_and_print_record_count("prepared for import", count)
+      end
+
+      cli_events = GitHub::Migrator::CliEvents.new
+      results = ActiveRecord::Base.connected_to(role: :reading) { migrator.prepare_import(cli_events) }
+
+      recommended_command = if results.delete(:conflicts)
+        "#{script_name} conflicts -g#{results[:guid]} > conflicts.csv\n"
+      else
+        "#{script_name} import #{archive_path} -g#{results[:guid]}\n"
+      end
+
+      print_feedback(results, recommended_command)
+
+      stdout.print "\n#{trial_run_tldr}\n"
+    else
+      print_help
+    end
+  end
+
+  # Public: Output a list of conflicts for a migration to STDOUT.
+  def conflicts
+    parse_options do |options, _parsed_options|
+      help_banner(options, "#{script_name} conflicts -gGUID [options] > conflicts.csv")
+    end
+    guid_required!
+
+    load_github(quiet: true)
+
+    ActiveRecord::Base.connected_to(role: :reading) do
+      if migrator.conflicts?
+        generate_csv(stdout) do |csv|
+          csv << %w[model_name source_url target_url recommended_action notes]
+          migrator.conflicts do |model_type, source_url, target_url, recommended_action, notes|
+            csv << [model_type, source_url, target_url, recommended_action, notes]
+          end
+        end
+      else
+        # The user-facing message goes to stderr because stdout is probably redirected.
+        stderr.puts "No conflicts were found.\n"
+        stderr.puts feedback({ guid: migrator.guid },
+          "#{script_name} import /path/to/archive.tar.gz -g#{migrator.guid}\n")
+      end
+    end
+  end
+
+  # Public: Map a source_url to a target_url with an optional action. Also
+  # supports passing in a mapping file (-i flag) with the following schema
+  # and header: model_name,source_url,target_url,action
+  def map
+    parse_options do |options, _parsed_options|
+      help  = "#{script_name} map source_url target_url [action] -gGUID [options]\n"
+      help += "       #{script_name} map -gGUID -iCSV [options]\n\n"
+      help += "Actions: map, rename, map_or_rename, merge"
+      help_banner(options, help)
+
+      options.on("-iFILENAME", "--input=FILENAME", "Read in mappings from file") do |filename|
+        self.input_file_path = path_resolver.resolve(filename)
+      end
+    end
+    guid_required!
+
+    row_text = nil
+    context = { processed: 0 }
+    tried = 0
+
+    if input_file_path && File.exist?(input_file_path)
+      CSV.foreach(input_file_path).with_index do |row, i|
+        tried += 1
+        process_mapping \
+          context: context,
+          i: i,
+          location: "row #{i + 1}",
+          raw: row.to_csv(row_sep: ""),
+          model_type: row[0],
+          source_url: row[1],
+          target_url: row[2],
+          action: row[3]
+      end
+    end
+
+    if argv.size >= 2
+      tried += 1
+      process_mapping \
+        context: context,
+        raw: argv.join(" "),
+        source_url: argv[0],
+        target_url: argv[1],
+        action: argv[2]
+    end
+
+    if tried > 0
+      if context[:processed] == 0
+        print_feedback({
+          guid: parsed_options[:guid],
+          result: "No records processed.",
+        }, "#{script_name} conflicts -g#{parsed_options[:guid]} > conflicts.csv\n")
+      elsif migrator.conflicts?
+        print_feedback({
+          guid: migrator.guid,
+          result: "#{context[:processed]} record#{'s' if context[:processed] > 1} mapped successfully. Conflicts still exist.",
+        }, "#{script_name} map source_url target_url [action] -g#{migrator.guid}\n")
+      else
+        print_feedback({
+          guid: migrator.guid,
+          result: "#{context[:processed]} records mapped successfully.",
+        }, "#{script_name} import /path/to/archive.tar.gz -g#{migrator.guid}\n")
+      end
+    else
+      print_help
+    end
+  end
+
+  private \
+  def process_mapping(mapping)
+    context = mapping[:context]
+
+    context.update location: mapping[:location] || "map", raw: mapping[:raw]
+
+    model_type = mapping[:model_type]
+    source_url = mapping[:source_url]
+    target_url = mapping[:target_url]
+    action     = mapping[:action].to_s
+
+    if source_url =~ URL_REGEX && target_url =~ URL_REGEX
+      unless context[:inited]
+        load_github
+        context[:inited] = true
+      end
+
+      ActiveRecord::Base.connected_to(role: :reading) do
+        migrator.map(source_url, target_url, action.try(:to_sym), model_type)
+      end
+
+      context[:processed] += 1
+    elsif "#{model_type}#{source_url}#{target_url}#{action}" != "" && mapping[:i] != 0
+      stderr << %Q{#{context[:location]}: ignoring input "#{context[:raw]}"\n}
+    end
+
+  rescue => error # rubocop:todo Lint/GenericRescue
+    # Prints each error to stderr as they happen rather than quitting immediately.
+    #
+    # The types of errors we can expect are:
+    #
+    #  * CannotMapToMissingTarget - tried mapping to a target_url that doesn't exist
+    #  * CannotRenameToExistingModel - tried to rename to a name that is already taken
+    #  * FailedMapping - unsupported mapping action or could not infer model name from url
+    #  * NotImplemented - target_url is not a github recognized url
+    #
+    # Other errors will be immediately re-raised.
+    if error.respond_to?(:gh_migrator_map_warning?) && error.gh_migrator_map_warning?
+      stderr << %Q{#{context[:location]}: couldn't map "#{context[:raw]}": #{error.message}\n}
+    else
+      raise error
+    end
+  end
+
+  # Public: Import records from a migration archive using the prepared
+  # migratable resource from the #prepare and #map steps above.
+  def import
+    archive_path = nil
+    parse_options do |options, parsed_options|
+      options.on("-tINTEGER", "--throttle=INTEGER", "Throttle number of records processed per second") do |per_second|
+        raise InvalidThrottleValue.new(per_second) unless per_second.to_i > 0
+
+        parsed_options[:per_second] = per_second.to_i
+      end
+
+      options.on("--skip-import-errors", "Bypass repository import errors by logging exceptions and continuing import.") do |_v|
+        parsed_options[:skip_import_errors] = true
+      end
+
+      staging_path_option(options, parsed_options)
+      username_and_password_option(options)
+      help_banner(options, "#{script_name} import /path/to/archive.tar.gz -gGUID [options]")
+    end
+    guid_required!
+    parsed_options[:archive_path] = archive_path = path_resolver.resolve(argv.shift)
+    parsed_options[:migration_path] = migration_path
+
+    if archive_path && File.exist?(archive_path)
+      get_username_and_password_from_user
+      load_github
+      parsed_options[:actor] = actor
+      reset_progress(migrator.total_records_count(:import))
+
+      migrator.on_progress_with_count do |count|
+        increment_and_print_percent_complete("Import", count)
+      end
+
+      results = ActiveRecord::Base.connected_to(role: :reading) { migrator.import! }
+
+      print_feedback(results, "#{script_name} audit -g#{results[:guid]}\n")
+    else
+      print_help
+    end
+  end
+
+  # Public: Audit a migration. Supports passing in specific model names
+  # (using a comma separated list) and migratable resource states (also a
+  # comma separated list).
+  def audit
+    model_types = nil
+    states = nil
+
+    parse_options do |options, _parsed_options|
+      help  = "#{script_name} audit [-m model,names] [-s migration,states] -gGUID [options]\n\n"
+      help += "Model names: user, organization, repository, team, milestone, issue,\n"
+      help += "             pull_request, pull_request_review_comment, commit_comment,\n"
+      help += "             issue_comment, issue_event, release\n\n"
+      help += "Migration states: import, map, rename, merge,\n"
+      help += "                  imported, mapped, renamed, merged,\n"
+      help += "                  failed_import, failed_map, failed_rename, failed_merge\n"
+      help += "                  export, exported, failed_export\n\n"
+      help += "Defaults to all models in any state."
+      help_banner(options, help)
+
+      options.on("-mMODEL_NAMES", "--model-names=MODEL_NAMES", "Model names to audit") do |value|
+        model_types = value.split(",")
+      end
+
+      options.on("-sSTATES", "--states=STATES", "Model states to audit") do |value|
+        states = value.split(",").map(&:to_sym)
+      end
+    end
+    guid_required!
+
+    load_github(quiet: true)
+
+    scope = migrator.current_migration.by_model_type(model_types || GitHub::Migrator::MIGRATABLE_MODELS.map(&:model_type))
+    scope = scope.by_states(Array(states)) unless states.nil?
+
+    generate_csv(stdout) do |csv|
+      csv << %w[model_name source_url target_url state]
+
+      scope.find_each do |migratable_resource|
+        model_type = migratable_resource.model_type
+        source_url = migratable_resource.source_url
+        target_url = migratable_resource.target_url
+        state      = migratable_resource.state
+
+        csv << [model_type, source_url, target_url, state]
+      end
+    end
+  end
+
+  # Public: Debugger console.
+  # rubocop:disable Lint/Debugger
+  def console
+    parse_options { |options, parsed_options| }
+    load_github
+    if defined?(binding.pry)
+      guid_required!
+      binding.pry
+    else
+      print_help
+    end
+  end
+  # rubocop:enable Lint/Debugger
+
+  # Public: Expand paths
+  def check_path
+    parse_options {}
+    argv.each_with_index do |arg, i|
+      stdout.puts "[#{i}] #{arg} => #{path_resolver.resolve(arg)}"
+    end
+  end
+
+  # Public: Unlock migrated repositories.
+  def unlock
+    parse_options { |options, parsed_options| }
+    guid_required!
+    load_github
+    unlocked_repositories = migrator.unlock!
+    unlocked_repositories.each do |repository|
+      stdout.puts "Unlocked #{repository.name_with_owner}"
+    end
+  end
+
+  # Public: List migration guids.
+  def list
+    load_github
+    stdout.puts "The following migration guids are in use:\n",
+      MigratableResource.distinct.pluck(:guid).map { |guid| "  #{guid}" }
+  end
+
+  # Public: Show the version of gh-migrator and github.
+  def version
+    load_github quiet: true
+    stdout.puts <<VERSION
+github #{GitHub.current_sha[0, 7]}
+  supports schema versions #{GitHub::Migrator::SchemaVersion::VERSIONS.join(", ")}
+VERSION
+  end
+
+  # Internal: The guid for the migration. See GitHub::Migrator::Cli#migrator.
+  # for more details.
+  #
+  # Returns a String.
+  attr_accessor :guid
+
+  private
+
+  # Internal: Options hash parsed from command line arguments (ARGV) by
+  # the #parse_options method.
+  #
+  # Returns a Hash.
+  attr_reader :parsed_options
+
+  # Internal: Path setter/getter for input file path needed in Cli#map.
+  #
+  # Returns a String or NilClass.
+  attr_accessor :input_file_path
+
+  # Internal: Set username and password on options hash.
+  def get_username_and_password_from_user
+    @username ||= begin
+      print "Enter username authorized for migration:  "
+      STDIN.gets.chomp
+    end
+
+    @password ||= begin
+      print "Enter personal access token:  "
+      password = ""
+      while char = STDIN.getch
+        break if char =~ /[\r|\n]/
+        password << char
+        print "*"
+      end
+      print "\n"
+      password
+    end
+
+    true
+  end
+
+  # Internal: Requires necessary app and environment files.
+  def load_github(quiet: false)
+    return if @loaded_github
+    quiet ||= @quiet_load
+    stdout.puts "Starting GitHub::Migrator" unless quiet
+    if quiet
+      # NOTE: we want to suppress any messages for this command, including any warnings thus using this block to wrap loading
+      Kernel::silence_warnings { require_relative "../config/environment" }
+    else
+      require_relative "../config/environment"
+    end
+    @loaded_github = true
+    stdout.puts "" unless quiet
+  end
+
+  # Internal: Parse options and yield block.
+  def parse_options
+    @parsed_options ||= begin
+      parsed_options = {}
+
+      OptionParser.new do |options|
+        yield(options, parsed_options) if block_given?
+
+        options.on("-gGUID", "--guid=GUID", "Set unique migration identifier (auto-generated if omitted)") do |guid|
+          parsed_options[:guid] = guid
+        end
+        if migration_guid = ENV["MIGRATION_GUID"] && ENV["MIGRATION_GUID"] != ""
+          parsed_options[:guid] ||= ENV["MIGRATION_GUID"]
+        end
+
+        options.on_tail("-h", "--help", "Show command help") do
+          stdout.puts options
+          exit
+        end
+
+        help  = options.to_s
+        help += "\nDocumentation can be found at #{DOCUMENTATION_URL}\n"
+        self.help = help
+      end.parse!(argv)
+
+      parsed_options
+    end
+  end
+
+  def staging_path_option(options, parsed_options)
+    options.on("-sPATH", "--staging-path=PATH", "Temporary migration staging path (defaults to /data/user/tmp)") do |path|
+      if File.writable?(path)
+        parsed_options[:staging_path] = path
+      else
+        raise ReadOnlyMigrationPath.new(path)
+      end
+    end
+  end
+
+  def username_and_password_option(options)
+    options.on("-uUSERNAME", "--username=USERNAME", "Username of authorized user") do |username|
+      @username = username
+    end
+
+    options.on("-p", "--pat=TOKEN", "Personal access token of authorized user") do |password|
+      @password = password
+    end
+  end
+
+  # Internal: Set banner on options object.
+  #
+  # options - OptionParser options object.
+  # banner  - String of banner text.
+  def help_banner(options, banner)
+    options.banner = "\nUsage: #{banner}\n\nOptions:"
+  end
+
+  # Internal: Raises GuidRequired if parsed_options does not include a guid
+  # and the environment is not test.
+  def guid_required!
+    if !parsed_options[:guid]
+      raise GuidRequired.new
+    end
+  end
+
+  # Internal: Method for returning feedback to user based on results hash.
+  #
+  # results             - Hash with results from GitHub::Migrator.
+  # recommended_command - String with recommended next command to run.
+  #
+  # Returns a String.
+  def feedback(results, recommended_command = nil)
+    guid         = results.delete(:guid)
+    archive_path = results.delete(:archive_path)
+    result       = results.delete(:result)
+    warnings     = results.delete(:warnings) || []
+
+    if results.any?
+      key_width   = results.keys.group_by(&:size).max.first
+      value_width = results.values.map(&:to_s).group_by(&:size).max.first
+    end
+
+    # Start building message output.
+    output    = "\nMigration GUID: #{guid}\n\n"
+
+    if warnings.any?
+      warnings.each do |warning|
+        output += "*** WARNING: #{warning}\n"
+      end
+      output += "\n"
+    end
+
+    if results.any?
+      output += "Number of records in this migration:\n"
+    end
+    results.each do |key, value|
+      output += "#{key.to_s.ljust(key_width, " ")} | #{value.to_s.rjust(value_width, " ")}\n"
+    end.tap { output += "\n" if results.any? }
+    if result
+      output += "#{result}\n\n"
+    end
+
+    if archive_path
+      output += "Archive saved to:\n"
+      output += "#{archive_path}\n\n"
+      output += "Copy archive to target machine using scp. For example:\n"
+      output += "scp #{archive_path} username@target.github.instance:/tmp\n\n"
+    end
+
+    output += "Documentation can be found at #{DOCUMENTATION_URL}\n\n"
+
+    if recommended_command
+      output += "Recommended next command:\n"
+      output += recommended_command
+    end
+
+    output
+  end
+
+  # Internal: Generate feedback and print it to stdout.
+  def print_feedback(*args)
+    stdout.puts feedback(*args)
+  end
+
+  # Internal: print the help message
+  def print_help
+    stdout.puts help
+  end
+
+  # Internal: Instance of GitHub::Migrator to perform commands on.
+  def migrator
+    @migrator ||= begin
+      migrator = GitHub::Migrator.new(parsed_options)
+      self.guid = migrator.guid
+      logger.info("gh.migration_tools.gh_migrator.migration_path" => migration_path, "gh.migration_tools.gh_migrator.cli_args" => sanitized_args.join(" "), "process.command" => command, "gh.migration_tools.gh_migrator.guid" => guid)
+
+      migrator
+    end
+  end
+
+  # Internal: Authenticate gh-migrator end user.
+  #
+  # Returns nil or raises InvalidUserOrPersonalAccessToken if unable to authenticate.
+  def actor
+    @actor ||= begin
+      creds = Api::RequestCredentials.new(
+        login: @username,
+        password: @password,
+      )
+      creds.initialize_token_from_login_or_password
+      attempt = GitHub::Authentication::Attempt.new(
+        from: :gh_migrator,
+        login: creds.login,
+        password: creds.password,
+        token: creds.token,
+      )
+
+      result = attempt.result
+      raise GitHub::Migrator::InvalidUserOrPersonalAccessToken unless result.success?
+      result.user
+    end
+  end
+
+  # Internal: Is the Rails environment set to "test"?
+  #
+  # Returns a TrueClass or FalseClass.
+  def test?
+    Rails.env == "test"
+  end
+
+  # Internal: Resets total record and records complete counters. Use once
+  # in a command before calling out to GitHub::Migrator.
+  def reset_progress(total = nil)
+    @total_records = total || 0
+    @records_complete = 0
+  end
+
+  # Internal: Increment records complete counter and print progress to cli.
+  def increment_and_print_record_count(action, increment_by = 1)
+    @records_complete += increment_by
+
+    cli_print "#{@records_complete} models #{action}\r"
+  end
+
+  # Internal: Increment records complete counter and print percent complete
+  # progress including progress spinner to cli.
+  def increment_and_print_percent_complete(prefix, increment_by = 1)
+    @records_complete += increment_by
+    percent = [100, ((@records_complete.to_f / @total_records.to_f) * 100).to_i].min
+
+    @spinner_position ||= 0
+    spinner_chars = ["\\", "|", "/", "—"]
+    spinner = spinner_chars[@spinner_position]
+    if @spinner_position == (spinner_chars.length - 1)
+      @spinner_position = 0
+    else
+      @spinner_position += 1
+    end
+
+    cli_print "#{prefix} #{percent}% complete #{spinner}\r"
+  end
+
+  # Internal: Print message to cli unless environment is test.
+  def cli_print(message)
+    return if test?
+
+    print message
+  end
+
+  # Internal: Yields a CSV instance for creating a CSV.
+  #
+  # Like CSV.generate, but it takes a target (a String or IO), rather than building a
+  # string in memory.
+  def generate_csv(io)
+    csv = CSV.new(io)
+    yield csv
+  end
+
+  def sanitized_args
+    sanitized = args.dup
+    sanitized.each_with_index do |arg, i|
+      case arg
+      when "-p"
+        sanitized[i + 1] = "[PASSWORD]"
+      when /\A-p/
+        sanitized[i] = "-p[PASSWORD]"
+      when "--pat"
+        sanitized[i + 1] = "[TOKEN]"
+      when /\A--pat/
+        sanitized[i] = "--pat[TOKEN]"
+      end
+    end
+  end
+
+  # Internal: The directory path where the migration files will be saved
+  # during export, prepare, and import.
+  def migration_path
+    if parsed_options.nil? || parsed_options[:guid].nil?
+      raise "cannot build migration_path from parsed_options without guid"
+    end
+
+    staging_path = parsed_options[:staging_path] || ENV["GH_MIGRATOR_STAGING_DIR"]
+    staging_path ||= File.writable?("/data/user/tmp") ? "/data/user/tmp" : "/tmp"
+
+    File.join(staging_path, parsed_options[:guid])
+  end
+
+  # Internal: The path to the archive being created.
+  #
+  # Returns a Pathname.
+  def archive_export_path
+    "#{migration_path}.tar.gz"
+  end
+
+  class PathResolver
+    def initialize(pwd: ENV["GH_MIGRATOR_PWD"])
+      @pwd = Pathname.new(pwd || Dir.pwd)
+    end
+
+    # My pwd.
+    def pwd
+      @pwd.to_s
+    end
+
+    # Return the full path of `path`, relative to my @pwd.
+    #
+    # If path is empty or nil, return nil.
+    def resolve(path)
+      return nil if path.to_s == ""
+      @pwd.join(path).to_s
+    end
+  end
+end
+
+if $0 == __FILE__
+  lockfile = File.open("/tmp/migrator-lockfile", File::RDWR | File::CREAT, 0644)
+
+  begin
+    if lockfile.flock(File::LOCK_NB | File::LOCK_EX)
+      if GitHubMigratorCli::VALID_COMMANDS[ARGV[0]]
+        GitHubMigratorCli.run
+      else
+        puts GitHubMigratorCli::help_message
+      end
+
+      lockfile.flock(File::LOCK_UN)
+    else
+      puts "unable to lock /tmp/migrator-lockfile\n\n"
+      puts "#{GitHubMigratorCli.script_name} already running, please wait for it to complete before continuing"
+    end
+  ensure
+    File.delete(lockfile) if lockfile.flock(File::LOCK_NB | File::LOCK_EX)
+  end
+end

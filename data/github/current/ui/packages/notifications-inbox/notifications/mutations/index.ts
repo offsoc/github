@@ -1,0 +1,11 @@
+// Notifications
+export {markAllNotifications} from './mark-all-notifications-mutation'
+export {markNotificationAsDone} from './mark-as-done-mutation'
+export {markNotificationAsRead} from './mark-as-read-mutation'
+export {markNotificationAsUnread} from './mark-as-unread-mutation'
+export {markNotificationsAsDone} from './mark-notifications-as-done-mutation'
+export {markNotificationsAsRead} from './mark-notifications-as-read-mutation'
+export {markNotificationsAsUnread} from './mark-notifications-as-unread-mutation'
+export {updateNotificationViewPreference} from './update-notification-view-preference-mutation'
+export {updateSubscription} from './update-subscription-state-mutation'
+export {unsubscribeFromNotifications} from './unsubscribe-from-notifications-mutation'

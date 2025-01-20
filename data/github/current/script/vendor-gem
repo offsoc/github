@@ -1,0 +1,273 @@
+#!/bin/bash
+#/ Usage: script/vendor-gem [-r <rev>] [-n <gem>] [-p <path>] <git-url>
+#/ Build a gem for the given git repository and stick it in vendor/cache. With -r, build
+#/ the gem at the branch, tag, or SHA1 given. With no -r, build the default HEAD.
+#/
+#/ With -p, the gemspec file is seached within the given path. With no -p, the root of the
+#/ repository is used to locate the gemspec file.
+#/
+#/ This command is used in situations where you'd typically use a :git bundler
+#/ source which should not be used in the main github app (even for development gems).
+#/
+#/ Additional Options:
+#/   --ignore-tag-for-version  - Don't use the Git tag to determine the version, instead the version in the gemspec will be combined with the commit SHA.
+#/   --tag-prefix <prefix>     - When parsing the gem version from the Git tag, this prefix will be removed and ideally be left with just the gem version.
+#/                               Example: "-r gem/v1.2.3 --tag-prefix gem/v" will remove "gem/v" from "gem/v1.2.3" and leave "1.2.3" to use as the gem version.
+set -eu
+
+[ $# -eq 0 ] && set -- --help
+
+# set default params
+: "${rev:=}"
+: "${root=$(cd $(dirname "$0")/.. && pwd)}"
+
+: "${gem:=}"
+: "${repo:=}"
+: "${url:=}"
+: "${path:=.}"
+: "${debug:=}"
+: "${ignore_tag_for_version:=}"
+: "${tag_prefix:=}"
+
+while [ $# -gt 0 ]; do
+        case "$1" in
+                -r)
+                        rev=$2
+                        shift 2
+                        ;;
+                -n)
+                        gem=$2
+                        shift 2
+                        ;;
+                -p)
+                        path=$2
+                        shift 2
+                        ;;
+                -h|--help)
+                        grep ^#/ <"$0" |cut -c4-
+                        exit
+                        ;;
+                -d|--debug)
+                        debug=1
+                        shift
+                        ;;
+                --ignore-tag-for-version)
+                        ignore_tag_for_version=1
+                        shift
+                        ;;
+                --tag-prefix)
+                        tag_prefix=$2
+                        shift
+                        ;;
+                *)
+                        url="$1"
+                        shift
+                        ;;
+        esac
+done
+
+if [ -z "$url" ]; then
+    echo "error: no git url given. see $0 --help for usage." 1>&2
+    exit 1
+fi
+
+if [ -n "$debug" ]; then
+    set -x
+fi
+
+repo=$(echo "$url" | sed 's@^\(https://github\.com.*\)\.git$@\1@')
+
+: "${gem:=$(basename "$url" .git)}"
+
+# the RAILS_ROOT directory
+cd "$root"
+
+# Use vendored ruby (for the `gem` command), and prepend project bin to the PATH
+export PATH="$root/vendor/ruby/current/bin:$root/bin:$PATH"
+
+# clone the repo under tmp, clean up on exit
+echo "Cloning $url for gem build"
+mkdir -p "tmp/gems/$gem"
+if [ -z "$debug" ]; then
+    trap "rm -rf tmp/gems/$gem" EXIT
+fi
+
+# Pulled from rbenv:
+# https://github.com/rbenv/rbenv/blob/483e7f9bdf618ad25af6cab566982e1165274d99/libexec/rbenv-which#L18-L28
+remove_from_path() {
+  local path_to_remove="$1"
+  local path_before
+  local result=":${PATH//\~/$HOME}:"
+  while [ "$path_before" != "$result" ]; do
+    path_before="$result"
+    result="${result//:$path_to_remove:/:}"
+  done
+  result="${result%:}"
+  echo "${result#:}"
+}
+
+
+# nokogiri does not have a gemspec, this is used to build it up to allow the rest of the script run
+# as normal
+build_nokogir_gemspec(){(
+  # need to remove github/bin from path to allow bundle to execute in the context of nokogiri
+  # instead of the github application
+  PATH="$(remove_from_path "$root/bin")"
+  bundle install
+  bundle exec rake gem:spec
+)}
+
+# go in and build the gem using the HEAD version, clean up this tmp dir on exit
+echo "Building $gem"
+(
+    cd "tmp/gems/$gem"
+    git init -q
+    git fetch -q -fu "$url" "+refs/*:refs/*"
+    if [ -z "$rev" ]; then
+      if [ $(git rev-parse --verify main 2> /dev/null) ]; then
+        rev=main
+      elif [ $(git rev-parse --verify master 2> /dev/null) ]; then
+        rev=master
+      else
+        git clone "$url" temp_repo
+        pushd temp_repo
+          rev=$(git symbolic-ref refs/remotes/origin/HEAD | cut -d "/" -f 4)
+        popd
+        rm -rf temp_repo
+      fi
+    fi
+    git reset --hard "$rev"
+    git clean -df
+    git submodule update --init
+    git --no-pager log -n 1
+
+    if [ "$gem" = nokogiri ]; then
+      build_nokogir_gemspec
+    fi
+
+    gemspec_path=$( (find "${path}" -name $gem.gemspec; ls -1 *.gemspec) | head -1 )
+    gemspec_dir=$(dirname $gemspec_path)
+    gemspec=$(basename $gemspec_path)
+
+    # The gemspec may be located deeper in
+    pushd $gemspec_dir
+
+    echo "Building $gemspec"
+
+    gemname=$(safe-ruby-quick -e "require 'rubygems'; spec=eval(File.read('$gemspec'), nil, '$gemspec'); print spec.name.to_s")
+    echo $gemname > "$root/tmp/gems/$gem/vendor-gem-name"
+
+    # tag name + number of commits on top of tag + tree sha
+    if [ "${ignore_tag_for_version}" == "1" ]; then
+      GEM_VERSION=""
+    else
+      if [ -n "${tag_prefix}" ]; then
+        GEM_VERSION=$(git describe --tags --exclude "enterprise-*" 2>/dev/null | sed "s|${tag_prefix}||" | sed 's/-/./g' | sed 's/_/./g')
+      else
+        GEM_VERSION=$(git describe --tags --exclude "enterprise-*" 2>/dev/null | sed 's/-/./g' | sed 's/v//' | sed 's/_/./g')
+      fi
+    fi
+
+    # No tags
+    if [ -z "${GEM_VERSION}" ]
+    then
+      gem_version=$(safe-ruby-quick -e "require 'rubygems'; spec=eval(File.read('$gemspec'), nil, '$gemspec'); print spec.version.to_s")
+      commit_sha=$(git show --quiet --format=format:%h $rev)
+      GEM_VERSION="${gem_version}.r${commit_sha}"
+    fi
+
+    if [ -z "${GEM_VERSION}" ]
+    then
+      echo "couldn't determine the gem version from \"$gemspec\""
+      exit 1
+    fi
+
+    export GEM_VERSION
+
+    # build a wrapping gemspec that adds the sha1 version to the gem version
+    # unless the gemspec references the GEM_VERSION environment variable
+    # in which case we assume this is handled explicitly in the gemspec itself
+    if ! grep -q "GEM_VERSION" < $gemspec
+    then
+      cat <<-RUBY > vendor.gemspec
+  require 'rubygems'
+  spec = eval(File.read("$gemspec"), nil, "$gemspec")
+  spec.version = "$GEM_VERSION"
+  spec
+RUBY
+      gem build vendor.gemspec
+    else
+      gem build $gemspec
+    fi
+
+    if [ $(pwd) != "$root/tmp/gems/$gem" ]; then
+      mv $gemname*.gem "$root/tmp/gems/$gem/"
+    fi
+
+    # Back to tmp/gems/$gem
+    popd
+
+    # Bump gem version in Gemfile
+    #
+    # We have to cater for the lowest common featureset of BSD and GNU sed,
+    # which essentially means no extended regex (-E appears to now be in all
+    # relevant versions, but it's not that much harder to be POSIX compliant
+    # and not run the risk. We unfortunately lose a bit of readability due to
+    # the additional backslashes).
+    #
+    # Replace the existing version spec of our gem with the new version,
+    # matching any of the following variants:
+    #  gem "mygem"
+    #  gem "mygem", "<any_version_spec>"
+    #     gem "mygem", "<any_version_spec>", :more => "options"
+    sed -i.bak -e "s/^\([[:space:]]*gem ['\"]${gemname}['\"]\)\(,\([[:space:]]*\)['\"][^'\"]*['\"]\)\{0,1\}/\\1,\\3\"$GEM_VERSION\"/" "$root/Gemfile"
+
+    # If we didn't change the Gemfile, then either the gem reference is missing
+    # or we're vendoring the same version. Warn the user in either case, not
+    # least because it's not obvious that they needed to update the Gemfile
+    # manually before running this script
+    if diff "$root/Gemfile" "$root/Gemfile.bak"
+    then
+        echo "warning: we didn't update the gem version in $root/Gemfile. Have you added an entry for $gemname?"
+    fi
+
+    # Remove the backup created by sed.
+    # While the backup file allows us to run diff, it's also true that not
+    # specifying a backup extension to `-i` above causes BSD sed to temporarily
+    # lose its mind and assume the next switch is the desired extension. This
+    # used to result in files called "Gemfile-e", only created on Macs, but I
+    # think it's clearer to be deliberate about expecting a .bak extension in
+    # every case
+    rm -f "$root/Gemfile.bak"
+)
+[ $? -eq 0 ] || exit 1
+
+# get the gem name determined in the subprocess
+gemname=$(cat "tmp/gems/$gem/vendor-gem-name")
+
+# record old gem ref before deleting
+oldref=$(ls vendor/cache/$gemname-*.gem | grep -o -E -e "g[0-9a-f]{7}" | cut -c 2-)
+
+# remove any existing gems and add the newly built gem
+if [ -n "$gemname" ]; then
+    git rm -f vendor/cache/$gemname*.gem 2>/dev/null || true
+    cp tmp/gems/$gem/$gemname*.gem vendor/cache
+    git add vendor/cache/$gemname*
+fi
+
+# Update Bundler dependencies
+bin/bundle install
+
+# Stage changes for commit
+git add vendor/
+git add Gemfile*
+git add sorbet/rbi/gems/
+
+# write out compare url for review
+if [[ -n "$oldref" ]]; then
+    newref=$(ls vendor/cache/$gemname-*.gem | grep -o -E -e "g[0-9a-f]{7}" | cut -c 2-)
+
+    echo "Visit $repo/compare/$oldref...$newref to compare changes between the previous and newly vendored versions of $gemname"
+fi
+
+echo "Changes have been staged for commit. Please review the changes and commit them."

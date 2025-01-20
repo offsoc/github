@@ -1,0 +1,37 @@
+#!/bin/bash
+#/
+#/ This command is used rotate the column encryption key.
+#/ Optionally <flag name here> can be passed to re-encrypt
+#/ all existing records
+#/
+
+message() {
+  echo "${1}" | ts
+}
+
+message "Generating a new column encryption key"
+
+#Read existing decryption keys
+KEYS=$(ghe-config --get secrets.github.encrypted-column-keying-material)
+
+# Generate a new key
+NEW_KEY=$(head --bytes=32 /dev/urandom | base64)
+
+# Generate command run id
+export GHE_CMD_RUN_ID="$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)"
+
+# Store the appended new key back
+message "Appending the new key to decryption list"
+ghe-config "secrets.github.encrypted-column-keying-material" "$KEYS;$NEW_KEY"
+
+# Apply the config (reboot github service)
+ghe-config-apply
+
+# Store the encryption key
+message "Updating the encryption key"
+ghe-config "secrets.github.encrypted-column-current-encryption-key" "$NEW_KEY"
+
+# Apply the config (reboot github service)
+ghe-config-apply
+
+message "Key rotation complete, the new key will now be used for all future encryptions"

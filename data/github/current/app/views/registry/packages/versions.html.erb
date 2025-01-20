@@ -1,0 +1,169 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# `view` is instance of Registry::Packages::ShowView %>
+
+<%
+  viewer_is_admin = current_repository.adminable_by?(current_user)
+  package_versions_by_id = versions.index_by(&:id)
+  total_download_count_by_id = Registry::PackageVersion.total_download_counts_for_ids(package_versions_by_id.keys)
+  thirty_day_download_counts_by_ids = Registry::PackageVersion.thirty_day_download_counts_for_ids(package_versions_by_id.keys)
+%>
+
+<% page_info(
+    title: %{#{package.name} versions · #{package.repository.name_with_display_owner}},
+    container_xl: true,
+    selected_link: :repo_packages,
+    skip_pjax_container: true
+  )
+%>
+<%= render layout: "layouts/repository_container", locals: { repository: package.repository } do %>
+  <% if viewer_is_admin %>
+    <div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+      <%# Title %>
+      <div class="mb-4 mt-1 clearfix">
+        <%= link_to package.name, package_path %>
+        /
+        <strong>Manage Versions</strong>
+      </div>
+      <div class="container-lg d-flex">
+        <div class="col-3 flex-shrink-0 pr-4">
+          <nav class="menu" aria-label="Organization settings">
+            <%= link_to "Options", package_options_path, class: "menu-item" %>
+            <%= link_to "Manage versions", package_versions_path, class: "menu-item selected"%>
+          </nav>
+
+          <%# Sidebar %>
+          <% if package.can_be_deleted? %>
+            <div class="mt-4">
+              <h4 class="mb-2">Automating deletion</h4>
+              <p class="color-fg-muted">
+                Use GitHub Actions and GitHub's API to manage costs by automating package deletion.
+              </p>
+              <% if GitHub.enterprise? %>
+                <% if GitHub.actions_enabled? %>
+                  <p><a href="<%= "#{GitHub.url}/actions/delete-package-versions" %>">Learn how to use Actions to delete packages</a></p>
+                <% end %>
+              <% else %>
+                <p><a href="<%= "#{GitHub.url}/marketplace/actions/delete-package-versions" %>">See online examples</a></p>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+        <div class="col-9">
+          <div style="margin-top: -3px;" class="d-flex flex-column flex-md-row">
+            <%# main content %>
+            <div class="col-12 mb-4">
+              <%# Versions %>
+              <% if package.deleted? %>
+                <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+                  <% c.with_visual_icon(icon: "package") %>
+
+                  <% c.with_heading(tag: :h2) do %>
+                    <%= "All versions of #{package.original_name || package.name} have been deleted." %>
+                  <% end %>
+
+                  <% c.with_description do %>
+                    You can't install or publish a new package using the same name and version.
+                  <% end %>
+
+                  <% c.with_secondary_action(href: packages_path(current_repository.owner, current_repository)) do %>
+                    View all packages
+                  <% end %>
+                <% end %>
+              <% else %>
+                <%= render Primer::Beta::Subhead.new do |component| %>
+                  <% component.with_heading(tag: :h2) do %>Manage versions<% end %>
+                  <% component.with_actions do %>
+                    <%= render "registry/packages/status_filter" %>
+                  <% end %>
+                <% end %>
+                <% if params.dig(:filters, :versions) == "deleted" %>
+                  <% if versions.reject { |version| version.version == "docker-base-layer" }.any? %>
+                    <% if package.restrict_delete_restore_on_migration? %>
+                        <%= render Primer::Beta::Flash.new(icon: :alert, mb: 4, scheme: :warning) do %>
+                        <span>Some versions cannot be restored due to an ongoing migration. Please try again later</span>
+                        <% end %>
+                    <% end %>
+                    <div class="Box mb-6" id="deleted-versions-list">
+                      <% versions.each do |version| %>
+                        <% unless version.is_docker_base_layer? %>
+                          <%=
+                            render "registry/packages/deleted_version_row",
+                              view: view,
+                              version: version,
+                              package: package,
+                              viewer_is_admin: viewer_is_admin,
+                              total_download_count: total_download_count_by_id[version.id] || 0,
+                              thirty_day_download_count: thirty_day_download_counts_by_ids[version.id] || 0
+                          %>
+                        <% end %>
+                      <% end %>
+                    </div>
+                    <%# Pagination %>
+                    <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+                      <%= will_paginate(versions) %>
+                    </div>
+                  <% else %>
+                    <div class="Box p-4 text-center" id="deleted-versions-empty">
+                      <b>No recoverable package versions were found for <%= package.name %>.</b>
+                    </div>
+                  <% end %>
+                <% else %>
+                    <% if package.restrict_delete_restore_on_migration? %>
+                        <%= render Primer::Beta::Flash.new(icon: :alert, mb: 4, scheme: :warning) do %>
+                        <span>Some versions cannot be deleted due to an ongoing migration. Please try again later</span>
+                        <% end %>
+                    <% end %>
+                  <div class="Box mb-6">
+                    <% versions.each do |version| %>
+                      <% unless package.package_type.downcase == "docker" && version.version == "docker-base-layer" %>
+                        <%=
+                          render "registry/packages/version_row",
+                            view: view,
+                            version: version,
+                            package: package,
+                            viewer_is_admin: viewer_is_admin,
+                            total_download_count: total_download_count_by_id[version.id] || 0,
+                            thirty_day_download_count: thirty_day_download_counts_by_ids[version.id] || 0
+                        %>
+                      <% end %>
+                    <% end %>
+                  </div>
+                  <%# Pagination %>
+                  <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+                    <%= will_paginate(versions) %>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      </div>
+  <% else %>
+    <div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+      <%# Title %>
+      <div class="mb-4 mt-1 clearfix">
+        <%= link_to package.name, package_path %> / <strong>All Versions</strong>
+      </div>
+      <div class="Box mb-6">
+        <% versions.each do |version| %>
+          <% unless package.package_type.downcase == "docker" && version.version == "docker-base-layer" %>
+            <%=
+              render "registry/packages/version_row",
+                view: view,
+                version: version,
+                package: package,
+                viewer_is_admin: viewer_is_admin,
+                total_download_count: total_download_count_by_id[version.id] || 0,
+                thirty_day_download_count: thirty_day_download_counts_by_ids[version.id] || 0
+            %>
+          <% end %>
+        <% end %>
+      </div>
+      <%# Pagination %>
+      <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+        <%= will_paginate(versions) %>
+      </div>
+    </div>
+  <% end %>
+<% end %>

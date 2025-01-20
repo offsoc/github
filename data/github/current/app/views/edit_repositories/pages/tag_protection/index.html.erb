@@ -1,0 +1,236 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<% page_info \
+  container_xl: true,
+  title: "Settings · Tags · #{current_repository.name_with_display_owner}",
+  selected_link: :repo_protected_tags_settings %>
+
+<%= render layout: "edit_repositories/edit" do %>
+  <%= render_react_partial name: "growth-banner-partial", ssr: true, props: {
+    bannerType: "tag_protection_deprecation_header"
+  } %>
+  <%= render Primer::Beta::Subhead.new do |c| %>
+    <% c.with_heading(tag: :h1) do %>
+      Protected tags
+    <% end %>
+
+    <% if current_repository.plan_supports?(:protected_tags) && current_repository.plan_supports?(:protected_branches) &&
+      current_repository.tag_protection_states.where({ enabled: true }).any? %>
+      <%# Offer to import current tag protections to repository rules %>
+      <% c.with_actions do %>
+        <%= render GitHub::DialogComponent.new(title: "Export your tag protection rules into repository rules", variant: :wide, body_overflow_auto: false, dialog_classes: "overflow-hidden") do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+          <% dialog.with_summary do %>
+            <%= render Primer::Beta::Button.new(
+              tag: :summary,
+              float: :right,
+              title: "Import tag protections to rulesets",
+              "aria-label": "Import tag protections to rulesets",
+              "data-sudo-required": true) do
+            %>
+              <%= render(Primer::Beta::Octicon.new(icon: :duplicate)) %>
+              Export to rulesets
+            <% end %>
+          <% end %>
+          <div class="Box-body">
+            <%= form_for 'import_repository_tag_protection_path',
+              url: import_repository_tag_protection_path(current_repository.owner, current_repository),
+              html: { method: :post } do %>
+              <p class="mb-3">
+                Migrate your protected tags to one or more repository rulesets. This will implement the same tag protections
+                you currently have today. Once created, the tag rulesets can take advantage of new ruleset features:
+              </p>
+
+              <ul class="ml-3" style="list-style-position: inside">
+                <li>Requiring status checks to pass</li>
+                <li>Signed commits</li>
+                <li>Requiring linear history</li>
+                <li>and more</li>
+              </ul>
+              <dl class="form-checkbox form-group mb-4">
+                <dt class="mb-3">
+                  <label>
+                    <input type="radio" name="create_rulesets" value="multiple" checked>
+                    Create separate rulesets for creating and deleting protected tags
+                    <p class="note">
+                      Users and Teams with at least Maintainer role will be able to create new protected tags.
+                      Administrators will be able to delete protected tags. This is the same behavior as existing
+                      tag protections.
+                    </p>
+                  </label>
+                </dt>
+                <dt>
+                  <label>
+                    <input type="radio" name="create_rulesets" value="single">
+                    Create one ruleset for all protected tag operations
+                    <p class="note">
+                      Administrators will be able to create and delete protected tags.
+                    </p>
+                  </label>
+                </dt>
+              </dl>
+              <p><%= link_to "Learn more about tag rulesets", RepositoryTagProtectionState::IMPORT_DOCS_URL, class: "Link--inTextBlock" %></p>
+              <% if existing_imports.present?
+                count = existing_imports.count %>
+                <%= render(Primer::Beta::Flash.new(scheme: :warning, full: false, icon: "alert", mb: 4)) {
+                  "#{count} previously exported #{'ruleset'.pluralize(count)} will be overwritten."
+                } %>
+              <% end %>
+              <div class="d-flex flex-justify-end">
+                <%= render Primer::ButtonComponent.new(scheme: :primary, type: :submit) do %>
+                  Export
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if current_repository.tag_protections_availability == :enabled %>
+    <p class="mb-3">Protected tags can only be created or deleted by users with enhanced permissions defined by your organization owners. <%= link_to "Learn more about protected tags", RepositoryTagProtectionState::DOCS_URL, class: "Link--inTextBlock" %>.</p>
+
+    <%= render(Primer::Beta::BorderBox.new) do |component| %>
+      <% if current_repository.tag_protection_states.any? %>
+        <% component.with_header(display: :flex, align_items: :center, justify_content: :space_between) do |h| %>
+          <% h.with_title(tag: :h2) do %>
+            <%= current_repository.tag_protection_states.count %> <%= 'rule'.pluralize(current_repository.tag_protection_states.count) %>
+          <% end %>
+
+          <%= link_to new_repository_tag_protection_path, class: "btn btn-sm" do %>
+            New rule
+          <% end %>
+        <% end %>
+
+        <% current_repository.tag_protection_states.each do |tag_protection| %>
+          <% component.with_row(display: :flex, align_items: :center, justify_content: :space_between) do %>
+            <div>
+              <strong><%= utf8(tag_protection.pattern) %></strong>
+              <p class="text-small color-fg-muted mb-0"><%= render Primer::Beta::RelativeTime.new(datetime: tag_protection.created_at, tense: :past) %></p>
+            </div>
+
+            <%= render GitHub::DialogComponent.new(title: "Delete tag protection rule?") do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+              <% dialog.with_summary do %>
+                <%= render Primer::Beta::IconButton.new(
+                  tag: :summary,
+                  icon: :trash,
+                  scheme: :danger,
+                  float: :right,
+                  mr: 1,
+                  title: "Delete tag protection rule",
+                  "aria-label": "Delete tag protection rule",
+                  "data-sudo-required": true)
+                %>
+              <% end %>
+              <div class="Box-body">
+                <p class="mb-4">
+                  Are you sure you want to delete this tag protection rule? Anyone who can write to this repository will be able to create tags with this pattern.
+                </p>
+
+                <%= button_to "Yes, remove this tag protection rule",
+                  delete_repository_tag_protection_path(current_repository.owner, current_repository, tag_protection_id: tag_protection.id),
+                  :method     => :delete,
+                  :class      => "btn btn-block btn-danger" %>
+              </div>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% else %>
+        <% component.with_body do %>
+          <%= render Primer::Beta::Blankslate.new(test_selector: "protected-tag-blankslate") do |c| %>
+            <% c.with_heading(tag: :h3).with_content("No protected tag rules exist yet") %>
+            <% c.with_secondary_action(href: new_repository_ruleset_path(target: 'tag')).with_content("Go to rulesets to create new tag rules") %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% elsif current_repository.tag_protections_availability == :not_in_plan %>
+    <article class="d-flex my-3" <%= test_selector("upgrade-for-protected-tags") %>>
+      <div>
+        <%= image_tag "icons/marketing/blue/protected_tags.svg", width: 120, height: 120, class: "mr-3", alt: "protected tags" %>
+      </div>
+      <div>
+        <h1 class="h4 mt-2">Protected tags are available to Pro, Team, and Enterprise users</h1>
+        <p class="color-fg-muted">Protected tags can only be created or deleted by users with enhanced permissions defined by your organization owners.</p>
+
+        <% if current_repository.owner == current_user %>
+          <% if current_repository.fork? %>
+            <p class="color-fg-muted">This repository is a fork, and inherits the features of the parent repository. Contact the owner of the root repository to enable protected tags.</p>
+          <% else %>
+            <div class="d-flex flex-items-center">
+              <%= render(Primer::ButtonComponent.new(
+                tag: :a,
+                scheme: :primary,
+                mr: 3,
+                href: plan_upgrade_path,
+                data: {
+                  **feature_gate_upsell_click_attrs(:protected_tags, user: current_user),
+                  **analytics_click_attributes(
+                    category: "Change individual",
+                    action: "click to upgrade",
+                    label: "ref_page:#{request.fullpath};ref_cta:Upgrade;ref_loc:tag protection rules"
+                  )
+                }
+              )) do %>
+                Upgrade
+              <% end %>
+              <a
+                href="<%= RepositoryTagProtectionState::DOCS_URL %>"
+                class="f6"
+                <%= safe_analytics_click_attributes(
+                  category: "Upgrade",
+                  action: "click to learn more",
+                  label: "location: protected tags;text:learn more",
+                ) %>>Learn more about protected tags</a>
+            </div>
+          <% end %>
+        <% elsif show_free_org_gated_feature_message?(current_repository, current_user) %>
+          <div class="d-flex flex-items-center">
+            <%= render(Primer::ButtonComponent.new(
+              tag: :a,
+              scheme: :primary,
+              mr: 3,
+              href: upgrade_path(
+                org: current_repository.owner,
+                plan: "business",
+                target: "organization"
+              ),
+              data: {
+                **feature_gate_upsell_click_attrs(:protected_tags, user: current_user),
+                **analytics_click_attributes(
+                  category: "Change organization",
+                  action: "click to upgrade",
+                  label: "ref_page:#{request.fullpath};ref_cta:Upgrade;ref_loc:tag protection rules"
+                )
+              }
+            )) do %>
+              Upgrade
+            <% end %>
+            <a
+              href="<%= RepositoryTagProtectionState::DOCS_URL %>"
+              class="f6"
+              <%= safe_analytics_click_attributes(
+                category: "Upgrade",
+                action: "click",
+                label: "location: protected tags;text:learn more",
+              ) %>
+            >Learn more about protected tags</a>
+          </div>
+        <% else %>
+          <p class="color-fg-muted">Contact the owner of the repository to enable protected tags.</p>
+        <% end %>
+      </div>
+    </article>
+  <% else %><%# current_repository.tag_protections_availability == :disabled %>
+    <%= render(Primer::Beta::BorderBox.new) do |component| %>
+      <% component.with_body do %>
+        <%= render Primer::Beta::Blankslate.new(test_selector: "protected-tag-blankslate") do |c| %>
+          <% c.with_heading(tag: :h3).with_content("Protected tags have been deprecated") %>
+
+          <% if current_repository.plan_supports?(:protected_branches) %>
+            <% c.with_secondary_action(href: new_repository_ruleset_path(target: 'tag')).with_content("Go to rulesets to create new tag rules") %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

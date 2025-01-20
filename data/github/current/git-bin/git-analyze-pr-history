@@ -1,0 +1,304 @@
+#!/usr/bin/env safe-ruby
+#/ Usage: git-analyze-pr-history [--new|--old] <head-ref> <base-ref>
+#/        git-analyze-pr-history [--new|--old] --pr <pr-number>...
+#/        git-analyze-pr-history [--new|--old] --id <pr-id>...
+#/
+#/ NOTE: This script is meant as an aid for manual analysis of PR
+#/ problems; the performance is not adequate for production use.
+#/
+#/ Retrace the history of a PR using the audit_log.
+#/
+#/   <head-ref>   The full name of the head reference ("refs/pull/<PR>/head"
+#/                can be used)
+#/   <base-ref>   The full name of the base reference
+#/   <pr-number>  The number of a PR in the current repository
+#/   <pr-id>      The DB id of a PR in the current repository
+#/
+#/ If "--old" is specified, use "git-branch-base-old" rather than
+#/ "git-branch-base" to compute the evolution of the PR.
+#/
+#/ The output is one row for each push that was relevant to the PR, in the
+#/ form
+#/
+#/   <head_sha> <base_sha> -> <root_sha> <pending> <all> <actual> <missing> <extra> [NEW | NON-FF | DROPPED <n>]
+#/
+#/ Where:
+#/   <pending> is the number of commits currently on the PR branch that have
+#/       not yet been merged to the base branch.
+#/   <all> is the number of commits that were ever pending.
+#/   <actual> is the number of commits considered to be part of the PR
+#/       after the push.
+#/   <missing> is the number of commits that were once part of the PR but
+#/       no longer are.
+#/   <extra> is the number of commits currently considered to be part of the
+#/       PR that were never pending commits.
+#/   "NON-FF" is displayed if the line corresponds to a non-fast-forward push.
+#/   "DROPPED <n>" indicates that <n> commits were dropped from the PR since the
+#/       previous step.
+
+require "optparse"
+require "set"
+
+$verbosity = 0
+
+ZEROS = ("0" * 40).freeze
+
+HELP_RE = %r{^#/ ?(.*)}
+
+def usage
+  File.open($0, "r") do |f|
+    f.each_line do |line|
+      md = line.match(HELP_RE)
+      puts md[1] if md
+    end
+  end
+end
+
+# Call "git rev-list" with the specified arguments and return an
+# Enumerator over the lines in its output.
+def rev_list(*args)
+  Enumerator.new do |yielder|
+    IO.popen(%w[git rev-list] + args) do |io|
+      io.each do |line|
+        yielder.yield line.chomp
+      end
+    end
+  end
+end
+
+def rev_count(commit1, commit2)
+  return 0 if commit1 == commit2
+  rev_list("--use-bitmap-index", "--count", "#{commit1}..#{commit2}").first.to_i
+end
+
+def non_fast_forward(commit1, commit2)
+  rev_count(commit2, commit1) != 0
+end
+
+def best_merge_base(head_sha, base_sha)
+  cmd = ["git", "best-merge-base", head_sha, base_sha]
+  IO.popen(cmd).read.strip
+end
+
+class PullRequestState
+  attr_reader :head_sha
+  attr_reader :base_sha
+  attr_reader :root_sha
+
+  def initialize(head_sha, base_sha, root_sha)
+    @head_sha = head_sha
+    @base_sha = base_sha
+    @root_sha = root_sha
+  end
+
+  # The commits currently considered part of the PR.
+  def pr_commits
+    @pr_commits ||= Set.new(rev_list("#{root_sha}..#{head_sha}"))
+  end
+
+  # The commits on the PR that have not yet been merged to base.
+  def pending_commits
+    @pending_commits ||= Set.new(rev_list("#{base_sha}..#{head_sha}"))
+  end
+end
+
+class RefChain
+  attr_reader :sha
+  attr_reader :seen
+
+  def initialize(refname)
+    @refname = refname
+    @sha = ZEROS
+    @seen = false
+  end
+
+  def update(old_sha, new_sha, other_seen)
+    @seen = true
+    if other_seen && old_sha != @sha
+      $stderr.puts "Warning: break in chain for #{@refname}: #{old_sha} != #{@sha}"
+    end
+    @sha = new_sha
+  end
+end
+
+# Return an Enumerator that yields [refname, old_sha, new_sha] for
+# each line in "audit_log".
+def iter_audit_log
+  Enumerator.new do |yielder|
+    open("audit_log").each do |line|
+      refname, old_sha, new_sha = line.split(/\s+/, 4)
+      yielder.yield(refname, old_sha, new_sha)
+    end
+  end
+end
+
+def active(base_sha, head_sha)
+  base_sha != ZEROS && head_sha != ZEROS
+end
+
+# Find and return intervals of time in the audit_log history where
+# head_ref and base_ref were both defined. Return an array of arrays
+# of [head_sha, base_sha], one for each interval.
+def read_intervals(head_ref, base_ref)
+  head = RefChain.new(head_ref)
+  base = RefChain.new(base_ref)
+
+  iter_audit_log.lazy.map do |refname, old_sha, new_sha|
+    case refname
+    when head_ref
+      [head.update(old_sha, new_sha, base.seen), base.sha]
+    when base_ref
+      [head.sha, base.update(old_sha, new_sha, head.seen)]
+    end
+  end.reject(&:nil?).chunk do |head_sha, base_sha|
+    active(head_sha, base_sha) || :_separator
+  end.map(&:last).to_a
+end
+
+def report(old_state, new_state, non_ff, direct_commits)
+  suffix = ""
+  missing = "-"
+  extra = "-"
+  if !old_state
+    suffix << " NEW"
+  elsif non_ff
+    suffix << " NON-FF"
+  else
+    missing_commits = direct_commits - new_state.pr_commits
+    if !missing_commits.empty?
+      missing = missing_commits.size
+    end
+    lost_commits = old_state.pr_commits - new_state.pr_commits
+    if !lost_commits.empty?
+      suffix << " DROPPED #{lost_commits.size}"
+    end
+  end
+  extra_commits = new_state.pr_commits - direct_commits
+  if !extra_commits.empty?
+    extra = extra_commits.size
+  end
+  actual = new_state.pr_commits.size
+  pending = new_state.pending_commits.size
+  printf "%-10s %-10s -> %-10s %7d %7d %7d %7s %7s%s\n",
+         new_state.head_sha[0...10],
+         new_state.base_sha[0...10],
+         new_state.root_sha[0...10],
+         pending, direct_commits.size, actual, missing, extra, suffix
+end
+
+def analyze_interval(interval)
+  old_state = nil
+  direct_commits = Set.new
+
+  interval.each do |head_sha, base_sha|
+    if old_state
+      head_non_ff = non_fast_forward(old_state.head_sha, head_sha)
+      base_non_ff = non_fast_forward(old_state.base_sha, base_sha)
+      non_ff = head_non_ff || base_non_ff
+    else
+      non_ff = true
+    end
+
+    if non_ff
+      root_sha = best_merge_base(head_sha, base_sha)
+      direct_commits = Set.new
+    else
+      cmd = ["git", $branch_base, head_sha, base_sha, old_state.root_sha]
+      root_sha = IO.popen(cmd).read.strip
+    end
+    state = PullRequestState.new(head_sha, base_sha, root_sha)
+    direct_commits.merge(state.pending_commits)
+    report(old_state, state, non_ff, direct_commits)
+    old_state = state
+  end
+end
+
+def analyze_branches(head_ref, base_ref)
+  intervals = read_intervals(head_ref, base_ref)
+
+  if intervals.empty?
+    abort "No matching interval found!"
+  end
+
+  steps = intervals.map(&:size).reduce(:+)
+
+  summary = "The active history of the PR is #{steps} steps"
+  if intervals.size > 1
+    summary << " in #{intervals.size} intervals"
+  end
+  puts summary
+  puts
+
+  intervals.each do |interval|
+    printf "%-10s %-10s    %-10s %7s %7s %7s %7s %7s\n",
+           "head_sha1", "base_sha1", "root_sha1", "pending", "all", "actual", "missing", "extra"
+    printf "---------- ----------    ---------- ------- ------- ------- ------- -------\n"
+    analyze_interval(interval)
+    puts
+  end
+  puts
+end
+
+def analyze_pr(pr)
+  head_ref = "refs/pull/#{pr.number}/head"
+  base_ref = "refs/heads/#{pr.base_ref}"
+  puts "Pull request: #{pr.repository.nwo}\##{pr.number}"
+  puts "Head reference: #{head_ref}"
+  puts "Base reference: #{base_ref}"
+  analyze_branches(head_ref, base_ref)
+end
+
+if ARGV.include?("--help")
+  usage
+  exit 0
+end
+
+opts = OptionParser.new
+
+$branch_base = "branch-base"
+argtype = :branches
+
+opts.on("--old") do |_value|
+  $branch_base = "branch-base-old"
+end
+
+opts.on("--verbose", "-v") do |_value|
+  $verbosity += 1
+end
+
+opts.on("--quiet", "-q") do |_value|
+  $verbosity -= 1
+end
+
+opts.on("--id", "--ids") do |_value|
+  argtype = :ids
+end
+
+opts.on("--pr", "--prs") do |_value|
+  argtype = :prs
+end
+
+args = opts.parse(ARGV)
+
+case argtype
+when :branches
+  abort "usage: #{$0} <head-ref> <base-ref>" if args.length != 2
+  head_ref, base_ref = args
+  analyze_branches(head_ref, base_ref)
+when :ids
+  require_relative "../config/environment"
+  git_dir ||= File.absolute_path(`git rev-parse --git-dir`.strip)
+  repo = Repository.with_path(git_dir)
+  args.map(&:to_i).each do |id|
+    pr = PullRequest.find(id)
+    abort "PR with id=#{id} is not in this repository" if repo.id != pr.repository.id
+    analyze_pr(pr)
+  end
+when :prs
+  require_relative "../config/environment"
+  git_dir ||= File.absolute_path(`git rev-parse --git-dir`.strip)
+  repo = Repository.with_path(git_dir)
+  args.map(&:to_i).each do |pr_number|
+    analyze_pr(PullRequest.with_number_and_repo(pr_number, repo))
+  end
+end

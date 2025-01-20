@@ -1,0 +1,1055 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter FlashMigrationCounter 6 %>
+<% page_info title: view.page_title, selected_link: :stafftools_user_security %>
+
+<div class="boxed-group">
+  <h3>Audit log</h3>
+  <div class="boxed-group-inner">
+    <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+      <h4>Search audit log</h4>
+      <p>
+        <%= link_to "Search logs",
+          stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? view.audit_kql_query : view.audit_query), class: "Link--inTextBlock" %>
+          for actions involving <strong>@<%= view.user %></strong>.
+      </p>
+
+      <% if view.show_legacy_log? %>
+        <hr class="bleed-flush">
+
+        <h4>Legacy log</h4>
+        <p>
+          View this account’s
+          <%= link_to "legacy activity log", stafftools_user_log_path(view.user), class: "Link--inTextBlock" %>.
+          This log contains events that occured before the current audit log
+          system was implemented.
+        </p>
+      <% end %>
+    <% else %>
+    <h4>Search audit log</h4>
+      <p><%= stafftools_not_authorized_html %></p>
+    <% end %>
+  </div>
+</div>
+
+<% unless view.user.organization? %>
+  <% if GitHub.auth.two_factor_authentication_enabled? %>
+    <div class="boxed-group">
+      <h3>Two-factor authentication</h3>
+      <div class="boxed-group-inner clearfix">
+        <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :check_otp) %>
+          <ul class="status-check-list">
+            <%= view.two_factor_status %>
+            <%= view.two_factor_recovery_status %>
+            <%= view.two_factor_fallback_status %>
+          </ul>
+
+          <div class="summary">
+            <dl>
+              <dt>2FA mode</dt>
+              <dd><%= view.two_factor_type %></dd>
+            </dl>
+            <% if view.show_two_factor_sms_numbers? %>
+              <% if view.two_factor_sms? %>
+                <dl>
+                  <dt>2FA primary number</dt>
+                  <dd>
+                    <%= view.user.two_factor_sms_number %>
+                    <%= stafftools_button_to "Test", send_test_sms_stafftools_user_two_factor_credential_path(view.user),
+                            method: :put,
+                            class: "btn-link",
+                            form_class: "inline-form" %>
+                  </dd>
+                </dl>
+              <% end %>
+              <dl>
+                <dt>2FA fallback number</dt>
+                <dd>
+                  <%= view.fallback_number %>
+                  <% if view.fallback_number? %>
+                    <%= stafftools_button_to "Test", send_test_sms_stafftools_user_two_factor_credential_path(view.user, backup: 1),
+                            method: :put,
+                            class: "btn-link",
+                            form_class: "inline-form" %>
+                  <% end %>
+                </dd>
+              </dl>
+              <dl>
+                <dt>SMS provider</dt>
+                <dd>
+                  <% if view.sms_provider_set? %>
+                    <%= view.sms_provider.humanize %>
+                  <% else %>
+                    Not set. <%= view.sms_provider.humanize %> will be used
+                    by default.
+                  <% end%>
+                </dd>
+              </dl>
+            <% end %>
+            <dl>
+              <dt>Security keys</dt>
+              <% if view.user.u2f_registrations.security_keys.any? %>
+               <dd class="clear-left pl-4">
+                  <% view.user.u2f_registrations.security_keys.each do |key| %>
+                    <strong><%= key.nickname %></strong> &mdash; registered
+                    <%= time_ago_in_words_js key.created_at %>
+                    <br>
+                  <% end %>
+                </dd>
+              <% else %>
+                <dd>
+                  none
+                </dd>
+              <% end %>
+            </dl>
+          </div>
+
+          <hr class="bleed-flush">
+
+          <% if view.show_two_factor_sms_numbers? %>
+            <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :change_sms_provider) %>
+              <%= form_tag change_sms_provider_stafftools_user_two_factor_credential_path(view.user), method: :post do %>
+                <%= render Primer::Beta::Button.new(
+                  classes: "boxed-action", type: :submit
+                ) do %>
+                  Switch to <%= view.other_sms_provider.humanize %>
+                <% end %>
+                <input type="hidden" name="provider" value="<%= view.other_sms_provider %>">
+              <% end %>
+              <h4>Switch SMS provider</h4>
+              <p>
+                SMS messages will be sent by <strong><%= view.sms_provider.humanize %></strong>
+                for this user. If the user is experiencing deliverability issues,
+                you can try switching their provider to <strong><%= view.other_sms_provider.humanize %></strong>
+                instead.
+              </p>
+            <% else %>
+              <h4>Switch SMS provider</h4>
+              <p><%= stafftools_not_authorized_html %></p>
+            <% end %>
+
+            <hr class="bleed-flush">
+          <% end %>
+
+          <% if view.user.two_factor_authentication_enabled? %>
+            <% unless GitHub.enterprise? %>
+              <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :check_otp) %>
+                <%= form_tag check_otp_stafftools_user_two_factor_credential_path(view.user), method: "put" do %>
+                  <dl class="form-group">
+                    <dt><label for="otp_code">Test 2FA token</label></dt>
+                    <dd>
+                      <input type="text" class="form-control short" name="otp_code" id="otp_code"
+                            placeholder="XXXXXX" pattern="[0-9]{6}" autocomplete="off">
+                      <%= render Primer::Beta::Button.new(type: :submit) do %>Test code<% end %>
+                    </dd>
+                  </dl>
+                <% end %>
+              <% else %>
+                <h4>Test 2FA token</h4>
+                <p><%= stafftools_not_authorized_html %></p>
+              <% end %>
+              <hr class="bleed-flush">
+            <% end %>
+
+            <% if view.is_recovery_request_enabled? %>
+              <% if view.current_2fa_recovery_request.present? %>
+                <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :approve_2fa_removal_request) %>
+                  <%= render layout: "shared/details_dialog", locals: {
+                      button_text: "Approve",
+                      button_class: "btn btn-danger js-two-factor-recovery-review-btn #{'disabled' unless view.recovery_request_ready_for_review?}",
+                      details_class: "boxed-action",
+                      title: "Approve two factor recovery request",
+                    } do %>
+                    <div class="flash flash-warn flash-full" id="two-factor-approval-warning">
+                      <%= view.two_factor_recovery_request_actionable? ? "Please be sure you have reviewed the information provided by the requesting user." : "This request to restore access cannot be completed by the user. Please contact them to address the following issues." %>
+                    </div>
+                    <div class="flash flash-warn flash-full" id="two-factor-approval-email-warning" hidden>
+                      <strong>You must select at least one email address.</strong>
+                    </div>
+                    <div class="Box-body overflow-auto">
+                      <% if view.recovery_request_ready_for_review? %>
+                        <% if view.last_admin_of_orgs.present? %>
+                          <strong><%= view.user.login %></strong> is the last admin of the following organizations which require 2FA:
+                          <% view.last_admin_of_orgs.each do |org| %>
+                            <ul class="boxed-group-list">
+                              <li><%= link_to org.login, stafftools_user_path(org.login) %></li>
+                            </ul>
+                          <% end %>
+                        <% end %>
+                        <% if view.businesses_with_2fa_req.present? %>
+                          <%= view.user.login %> is an owner or billing manager of these enterprises which require 2FA:
+                            <% view.businesses_with_2fa_req.each do |business| %>
+                            <ul class="boxed-group-list">
+                              <li><%= business.owner?(view.user) ? "Owner of" : "Billing manager for" %> <%= link_to business.name, stafftools_enterprise_path(business) %></li>
+                            </ul>
+                          <% end %>
+                        <% end %>
+                      <% else %>
+                        This request is not ready for review. Please review any information the user has provided.
+                      <% end %>
+
+                      <%= form_tag approve_2fa_removal_request_stafftools_user_two_factor_credential_path(view.user), method: :post do %>
+                        <input type="hidden" name="request_id" value="<%= view.current_2fa_recovery_request.id %>">
+                        <% if view.show_two_factor_recovery_email_list? %>
+                          <dl class="form-group" id="js-2fa-recovery-emails-list">
+                            <dt><h4>Which emails would you like to send the approval to?</h4></dt>
+                            <% view.two_factor_recovery_emails.each do |email| %>
+                              <% verified = email.verified? %>
+                              <dd class="mt-1 mb-2">
+                                <input type="checkbox"
+                                       name="emails[]"
+                                       value="<%= email.email %>"
+                                       id="<%= email.email %>"
+                                       aria-checked="<%= verified %>">
+                                <% if email.primary_role? || email.backup_role? %>
+                                  <%= verified ? primer_octicon(:check, color: :success) : primer_octicon(:alert, color: :danger) %>
+                                <% else %>
+                                  <%= verified ? primer_octicon(:question, color: :attention) : primer_octicon(:alert, color: :danger) %>
+                                <% end %>
+                                <label for="<%= email.email %>" ><%= email.email %><% if email.primary_role? %>, primary<% elsif email.backup_role? %>, backup<% end %>, <%= verified ? "verified" : "unverified" %></label>
+                              </dd>
+                            <% end %>
+                          </dl>
+                          <% if view.user.password_reset_with_primary_email_only? %>
+                            <%= primer_octicon(:alert) %> <strong>User only allows password resets to their primary email.</strong>
+                          <% elsif view.user.has_backup_email? %>
+                            <%= primer_octicon(:alert) %> <strong>User only allows password resets to their primary and backup emails.</strong>
+                          <% end %>
+                          <hr>
+                        <% end %>
+
+                        <dl class="form-group">
+                          <dt><label for="two_factor_recovery_approve_reason">Reason for approval</label></dt>
+                          <dd>
+                            <input class="form-control" type="text" name="two_factor_recovery_approve_reason" id="two_factor_recovery_approve_reason"
+                            placeholder="Please provide an explanation for the audit log."
+                            required
+                            <%= "disabled" unless view.two_factor_recovery_request_actionable? %>
+                            autofocus data-1p-ignore>
+                          </dd>
+                        </dl>
+
+                        <%= render Primer::Beta::Button.new(
+                          type: :submit,
+                          scheme: :danger,
+                          block: true,
+                          id: "two-factor-approve-btn",
+                          disabled: !view.two_factor_recovery_request_actionable?
+                        ) do %>
+                          Approve
+                        <% end %>
+                      <% end %>
+                    </div>
+                  <% end %>
+
+                  <%= render layout: "shared/details_dialog", locals: {
+                      button_text: "Decline",
+                      button_class: "btn #{'disabled' if view.current_2fa_recovery_request.review_state == :reviewed_by_staff}",
+                      details_class: "boxed-action",
+                      title: "Decline two factor recovery request",
+                    } do %>
+                    <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                      Please be sure you have reviewed the information provided by the requesting user.
+                    <% end %>
+                    <div class="Box-body overflow-auto">
+                      <%= form_tag decline_2fa_removal_request_stafftools_user_two_factor_credential_path(view.user), method: :post do %>
+                        <input type="hidden" name="request_id" value="<%= view.current_2fa_recovery_request.id %>">
+                        <dl class="form-group">
+                          <dt><label for="two_factor_recovery_decline_reason">Reason for declining</label></dt>
+                          <dd>
+                            <input class="form-control" type="text" name="two_factor_recovery_decline_reason" id="two_factor_recovery_decline_reason"
+                            placeholder="Please provide an explanation for the audit log." required
+                            autofocus
+                            data-1p-ignore>
+                          </dd>
+                        </dl>
+
+                        <%= render Primer::Beta::Button.new(
+                          type: :submit,
+                          scheme: :danger,
+                          block: true,
+                          disabled: !view.recovery_request_ready_for_review?
+                        ) do %>
+                          Decline
+                        <% end %>
+                      <% end %>
+                    </div>
+                  <% end %>
+                  <h4>Review Account Recovery request</h4>
+                  <% review_state = view.current_2fa_recovery_request.review_state %>
+                  <% if review_state == :reviewed_by_staff %>
+                    <p>
+                      <% if view.current_2fa_recovery_request.approved_at.present? %>
+                        Approved <%= time_ago_in_words view.current_2fa_recovery_request.approved_at %> ago by <%= view.current_2fa_recovery_request.reviewer.login %>
+                      <% else %>
+                        Declined <%= time_ago_in_words view.current_2fa_recovery_request.declined_at %> ago by <%= view.current_2fa_recovery_request.reviewer.login %>
+                      <% end %>
+                    </p>
+                  <% elsif review_state == :ready_for_review %>
+                    <p class = "pt-2"><%= view.user.login %> is requesting a review.</p>
+                    <p><%= view.recovery_request_verified_details %> was verified by <%= view.user.login %>.</p>
+                    <% if view.recovery_request_review.present? %>
+                    <p>Manual review required: <%= view.recovery_request_review["review_required"] %></p>
+                      <% if view.recovery_request_review && !view.recovery_request_review["two_factor_account_recovery_id"].nil? %>
+                        Request id: <%= view.recovery_request_review["two_factor_account_recovery_id"] %><br>
+                      <% end %>
+                      <% if GitHub.flipper[:recovery_without_password_flagging].enabled?(view.user) && view.recovery_request_review && !view.recovery_request_review["without_password"].nil? %>
+                        Request type: <%= view.recovery_request_review["without_password"] ? "password reset account recovery (without password)" : "login 2FA account recovery (with password)" %><br>
+                      <% end %>
+                      <% if view.recovery_request_review["review_required"] %>
+                        Review type: "<%= view.recovery_request_review["type"] %>"<br>
+                        Review reason: "<%= view.recovery_request_review["reason"] %>"<br>
+                        Review message: "<%= view.recovery_request_review["message"] %>"<br>
+                      <% end %>
+                    <% else %>
+                      <p> Automated review of this request has not started yet, or this request was completed more than 2w ago (last updated: <%= time_ago_in_words view.current_2fa_recovery_request.updated_at %>).</p>
+                    <% end %>
+                  <% elsif review_state == :evidence_missing %>
+                    <p><%= view.current_2fa_recovery_request.secondary_evidence_method %> was provided by <%= view.user.login %> but has since been removed.</p>
+                  <% else %>
+                    <p><%= view.user.login %> has not completed their recovery request.</p>
+                  <% end %>
+                <% else %>
+                  <h4>Review 2FA Account Recovery Request</h4>
+                  <p><%= stafftools_not_authorized_html %></p>
+                <% end %>
+                <hr class="bleed-flush">
+              <% end %>
+            <% end %>
+
+            <h4>Disable two-factor authentication</h4>
+            <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :destroy) %>
+              <% if view.user.two_factor_auth_can_be_disabled_by_staff? %>
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "disable-2fa-dialog",
+                  header_variant: :large,
+                  width: :large,
+                  title: "Disable 2FA",
+                  form_url: stafftools_user_two_factor_credential_path(view.user),
+                  form_method: :delete
+                )) do |c| %>
+                  <% c.with_show_button(
+                    color: :danger,
+                    classes: "boxed-action",
+                    test_selector: "disable-2fa-button-enabled"
+                  ) do |s| %>
+                    Disable 2FA for <%= view.user %>
+                  <% end %>
+                  <% c.with_body do %>
+                  <p>
+                    2FA provides a much more secure experience for interacting with GitHub, and
+                    we strongly recommend it for every user. Disabling 2FA should only be done
+                    when absolutely necessary.
+                  </p>
+                  <dl class="form-group">
+                    <dt><label for="reason">Reason for disabling</label></dt>
+                    <dd>
+                      <input class="form-control" type="text" name="reason" id="reason"
+                          placeholder="Please provide an explanation for the audit log."
+                          autofocus data-1p-ignore>
+                    </dd>
+                  </dl>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "disable-2fa-dialog" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" }
+                  ) { "Disable 2FA" } %>
+                <% end %>
+
+                <p id="disable-2fa-message">
+                  Be careful &mdash; this will completely disable 2FA for
+                  <strong>@<%= view.user %></strong>.
+                </p>
+                <% if view.user.in_account_2fa_requirement_required_state? %>
+                  <p>
+                    This user has an account-level 2FA requirement. Disabling 2FA for them will not remove the requirement.
+                    The user will have their 2FA configuration cleared, but will not be able to access GitHub features until
+                    they re-configure 2FA.
+                  </p>
+                <% end %>
+              <% else %>
+                <%= render Primer::Beta::Button.new(
+                  type: :button,
+                  scheme: :danger,
+                  classes: "boxed-action",
+                  disabled: true,
+                  test_selector: "disable-2fa-button-disabled"
+                ) do %>
+                  Disable 2FA for <%= view.user %>
+                <% end %>
+                <p id="disable-2fa-message">
+                  At least one organization or enterprise account
+                  <strong>@<%= view.user %></strong> is affiliated with requires two-factor authentication.
+                  To disable 2FA for this user, first remove them from any enterprise accounts or
+                  <%= link_to "orgs that require two-factor authentication",
+                    stafftools_user_organization_memberships_path(view.user), class: "Link--inTextBlock" %>.
+                </p>
+              <% end %>
+            <% else %>
+              <p><%= stafftools_not_authorized_html %></p>
+            <% end %>
+          <% else %>
+            <% if stafftools_action_authorized?(controller: Stafftools::TwoFactorCredentialsController, action: :destroy) %>
+              <%= render Primer::Beta::Button.new(
+                type: :button,
+                scheme: :danger,
+                classes: "boxed-action",
+                disabled: true,
+                test_selector: "disable-2fa-button-disabled"
+              ) do %>
+                Disable 2FA for <%= view.user %>
+              <% end %>
+              <p id="disable-2fa-message">
+                Two-factor authentication isn’t enabled for <%= view.user %>.
+              </p>
+            <% else %>
+              <p><%= stafftools_not_authorized_html %></p>
+            <% end %>
+          <% end %>
+        <% else %>
+          <p><%= stafftools_not_authorized_html %></p> <%# this is the end of conditional set on line 37 %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if view.show_external_identities? %>
+    <div class="boxed-group">
+      <h3>External Identities</h3>
+      <div class="boxed-group-inner">
+        <ul class="boxed-group-list">
+          <% view.get_external_identities.each do |target| %>
+            <li>Linked to <%= link_to target.name, target.is_a?(Business) ? stafftools_enterprise_external_identity_url(target, view.user) : stafftools_user_external_identity_url(target, view.user), class: "Link--inTextBlock" %></li>
+          <% end %>
+        </ul>
+      </div>
+    </div>
+  <% end %>
+
+  <% if GitHub.passkeys_enabled? %>
+    <div class="boxed-group">
+      <h3>Passkeys</h3>
+      <div class="boxed-group-inner clearfix">
+        <% if view.user.u2f_registrations.passkeys.any? %>
+          <table class="stafftools-table">
+            <% view.user.u2f_registrations.passkeys.each do |key| %>
+              <tr>
+                <td>
+                  <%= render(Primer::Alpha::Dialog.new(
+                      title: "Passkey '#{key.nickname}'",
+                      id: "passkey-#{key.id}",
+                      size: :medium_portrait,
+                    )) do |c| %>
+                      <% c.with_show_button(scheme: :link, color: :default, font_weight: :bold) do %>
+                        <%= key.nickname %>
+                      <% end %>
+                      <% c.with_header(show_divider: true) %>
+                      <% c.with_body do %>
+                        <table class="security-history-detail">
+                          <tr>
+                            <th>ID</th>
+                            <td><%= key.id %></td>
+                          </tr>
+                          <tr>
+                            <th>created at</th>
+                            <td><%= key.created_at %></td>
+                          </tr>
+                          <tr>
+                            <th>last used at</th>
+                            <td><%= key.get_last_used_at %></td>
+                          </tr>
+                          <tr>
+                            <th>last updated at</th>
+                            <td><%= key.updated_at %></td>
+                          </tr>
+                          <tr>
+                            <th>synced</th>
+                            <td><%= key.backup_eligibility %></td>
+                          </tr>
+                          <tr>
+                            <th>authenticator type</th>
+                            <td><%= key.platform_authenticator? ? "platform" : "cross-platform" %></td>
+                          </tr>
+                          <tr>
+                            <th>transports</th>
+                            <td><%= (key.transports.nil? || key.transports.empty?) ? "empty" : key.transports %></td>
+                          </tr>
+                        </table>
+                      <% end %>
+                    <% end %>
+                </td>
+                <td>
+                  Synced: <%= key.backup_eligibility %>
+                </td>
+                <td>
+                  Created: <%= time_ago_in_words_js key.created_at %>
+                </td>
+                <td class="float-right">
+                  Last used: <%= time_ago_in_words_js key.get_last_used_at %>
+                </td>
+              </tr>
+            <% end %>
+          </table>
+        <% else %>
+          <p class="unflush">No passkeys found.</p>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+<% end %>
+
+  <% if view.show_external_authentication_attributes? %>
+    <div class="boxed-group">
+      <h3><%= GitHub.auth.name %> authentication</h3>
+      <div class="boxed-group-inner clearfix">
+        <div class="summary">
+          <% view.external_authentication_attributes.each do |name, value| %>
+            <dl>
+              <dt><%= name %></dt>
+              <dd><%= value %></dd>
+            </dl>
+          <% end %>
+        </div>
+        <% if view.show_name_id_edit? %>
+          <hr class="fullbleed">
+          <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn",
+            "button_text": "Edit",
+            "details_class": "boxed-action",
+            title: "Edit NameID",
+          } do %>
+            <%= form_tag stafftools_user_saml_mapping_path(view.user), method: :patch do %>
+              <div class="Box-body overflow-auto">
+                <%= label_tag :name_id, "NameID", class: "mt-3" %>
+                <%= text_field_tag :name_id, view.name_id, class: "form-control input-block mt-1 mb-1", autofocus: true %>
+              </div>
+              <div class="Box-footer">
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  block: true
+                ) do %>Update NameID<% end %>
+              </div>
+            <% end %>
+          <% end %>
+          <h4>Update SAML NameID</h4>
+          <p>Update this user's NameID. This is useful if the NameID has changed in the external authentication provider and the user is no longer able to sign into their GitHub Enterprise account.</p>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if GitHub.stafftools_sessions_enabled? %>
+    <div class="boxed-group flush">
+      <h3>Sessions</h3>
+      <div class="boxed-group-inner">
+        <% if view.sessions?  %>
+          <table class="stafftools-table">
+            <% view.grouped_web_sessions.each do |group_name, sessions| %>
+              <tr class="table-section-heading">
+                <td colspan="3">
+                  <%= group_name.to_s.titleize %> web sessions
+                </td>
+              </tr>
+
+              <% sessions.each do |session| %>
+                <tr>
+                  <td>
+                    <% if session.mobile? %>
+                      <%= primer_octicon(:"device-mobile") %>
+                    <% else %>
+                      <%= primer_octicon(:"device-desktop") %>
+                    <% end %>
+                    <%= render(Primer::Alpha::Dialog.new(
+                      title: "Session #{session.id}",
+                      id: "session-#{session.id}",
+                      size: :medium_portrait,
+                    )) do |c| %>
+                      <% c.with_show_button(scheme: :link, color: :default, font_weight: :bold) do %>
+                        <%= session.session&.ua&.name %>
+                        <%= session.short_os %>
+                      <% end %>
+                      <% c.with_header(show_divider: true) %>
+                      <% c.with_body do %>
+                        <table class="security-history-detail">
+                          <% session.details.each do |key, value| %>
+                            <tr>
+                              <th><%= key %></th>
+                              <td><%= value %></td>
+                            </tr>
+                          <% end %>
+                        </table>
+                      <% end %>
+
+                      <%# kill sudo option is shown if the session is active and sudo in %>
+                      <% if session.active? && session&.sudo? %>
+                        <% c.with_footer do %>
+                          <%= render(Primer::Alpha::Dialog.new(
+                            title: "Kill sudo for session #{session.id}",
+                            id: "kill-sudo-session-#{session.id}",
+                            size: :medium_portrait,
+                          )) do |c| %>
+                            <% c.with_show_button(scheme: :link, color: :default, font_weight: :bold) do %>
+                              Kill sudo
+                            <% end %>
+                            <% c.with_body do %>
+                              Are you sure you want to kill sudo for this session?
+                              Doing so, will make this user re-authenticate themselves
+                              when performing a sensitive action.
+                            <% end %>
+                            <% c.with_footer do%>
+                              <%= render Primer::Beta::Button.new(
+                                data: { "close-dialog-id": "kill-sudo-session-#{session.id}" }
+                              ) do %>
+                                Cancel
+                              <% end%>
+
+                              <%= form_tag stafftools_user_sudo_path(view.user, session.id), method: :delete do %>
+                                <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger) do %>
+                                  Kill sudo
+                                <% end %>
+                              <% end %>
+                            <% end %>
+                          <% end %>
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  </td>
+                  <td>
+                    <%= session.ip %> &ndash;
+                    <%= session.time_zone_name %>
+                  </td>
+                  <td class="float-right">
+                    Created &ndash; <%= time_ago_in_words_js session.created_at %>
+                  </td>
+                </tr>
+              <% end %>
+            <% end %>
+
+            <% if view.mobile_sessions? %>
+              <tr class="table-section-heading">
+                <td colspan="3">
+                  Active mobile sessions
+                </td>
+              </tr>
+              <% view.active_mobile_sessions.each do |mobile_session| %>
+                <tr>
+                  <td>
+                    <%= primer_octicon(:"device-mobile") %>
+                    <%= render(Primer::Alpha::Dialog.new(
+                      title: "Mobile session ##{mobile_session.id}",
+                      id: "mobile-sessions-#{mobile_session.id}",
+                    )) do |c| %>
+                      <% c.with_show_button(scheme: :link, color: :default, font_weight: :bold) do %>
+                        <% if show_device_name?(mobile_session.device_name, mobile_session.device_model) %>
+                          <%= mobile_session.device_name -%>,
+                        <% end %>
+                        <%= mobile_session.device_model %>
+                      <% end %>
+                      <% c.with_header(show_divider: true) %>
+                      <% c.with_body do %>
+                        <table class="security-history-detail">
+                          <% mobile_session.details.each do |key, value| %>
+                            <tr>
+                              <th><%= key %></th>
+                              <td><%= value %></td>
+                            </tr>
+                          <% end %>
+                        </table>
+                      <% end %>
+                    <% end %>
+                  </td>
+                  <td></td>
+                  <td class="float-right">
+                    Registered &ndash;
+                    <local-time datetime="<%= mobile_session.created_at_time %>">
+                      <%= mobile_session.formatted_created_at %>
+                    </local-time>
+                  </td>
+                </tr>
+              <% end%>
+            <% end %>
+          </table>
+        <% else %>
+          <p class="unflush">No sessions found.</p>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+<% if GitHub.lockouts_enabled? %>
+  <div class="boxed-group">
+    <h3>Login lockout</h3>
+    <div class="boxed-group-inner clearfix">
+      <% if stafftools_action_authorized?(
+        controller: Stafftools::Users::LockoutsController,
+        action: :destroy
+      ) %>
+        <% if AuthenticationLimit.at_any?(**AuthenticationLimit.all_data_for_login(view.user.name)) %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "remove-login-lockout-dialog",
+            header_variant: :large,
+            width: :large,
+            title: "Remove lockout",
+            form_url: stafftools_user_lockout_path(view.user),
+            form_method: :delete
+          )) do |c| %>
+            <% c.with_show_button(
+              color: :danger,
+              classes: "boxed-action"
+            ) do |s| %>
+              Remove lockout for <%= view.user %>
+            <% end %>
+            <% c.with_body do %>
+              <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Hold it!" } %>
+              <p>
+                Removing this lockout should only be done after verifying audit log
+                activity for
+                <%= link_to \
+                  view.user,
+                  stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where user == '#{view.user}'" : view.user),
+                  class: "Link--inTextBlock" %>.
+                Please use the audit log to help determine whether there are
+                recurring attempts to brute force the user’s password to compromise
+                this account.
+              </p>
+            <% end %>
+            <% c.with_button(
+              data: { "close-dialog-id": "remove-login-lockout-dialog" }
+            ) { "Cancel" } %>
+            <% c.with_button(
+              type: :submit,
+              scheme: :danger,
+              data: { "disable-with": "" }
+            ) { "Remove lockout" } %>
+          <% end %>
+
+          <h4>Remove login lockout</h4>
+          <p>
+            Lockout for <%= view.user %> will automatically unlock <%= time_ago_in_words_js(view.expiration(AuthenticationLimit.all_data_for_login(view.user.name))) %>.
+            <br>
+            This will remove the lockout for this user and allow them to login.
+          </p>
+          <p>
+          Active Lockouts: <%= AuthenticationLimit.get_active_lockouts(AuthenticationLimit.all_data_for_login(view.user.name)) %>
+          </p>
+        <% else %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            scheme: :danger,
+            classes: "boxed-action",
+            disabled: true
+          ) do %>
+            Remove lockout for <%= view.user %>
+          <% end %>
+          <h4>Remove login lockout</h4>
+          <p>
+            There is no account lockout for <%= view.user %>.
+          </p>
+        <% end %>
+
+        <% if (locked_sessions = view.sessions_with_locked_ip).size > 0 %>
+          <table class="stafftools-table">
+            <% locked_sessions.each do |session| %>
+            <tr>
+              <td>
+                Locked IP expiration for recent sessions
+              </td>
+              <td>
+                <%= link_to(session.ip, stafftools_locked_ip_path(ip_address: session.ip)) if AuthenticationLimit.at_any?(web_ip: session.ip) %>
+                &ndash;
+                <%= session.time_zone_name %>
+              </td>
+              <td class="float-right">
+                <%= time_ago_in_words_js(view.expiration(ip: session.ip)) %>
+              </td>
+            </tr>
+            <% end %>
+          </table>
+        <% end %>
+      <% else %>
+        <h4>Remove login lockout</h4>
+        <p><%= stafftools_not_authorized_html %></p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if view.show_password_randomization? %>
+  <div class="boxed-group">
+    <h3>Password</h3>
+    <div class="boxed-group-inner clearfix">
+      <% if stafftools_action_authorized?(controller: Stafftools::PasswordsController, action: :randomize) %>
+        <%= render(Primer::Experimental::Dialog.new(
+          dialog_id: "randomize-password-dialog",
+          header_variant: :large,
+          width: :large,
+          title: "Randomize password?",
+          form_url: randomize_stafftools_user_password_path(view.user),
+          form_method: :put
+        )) do |c| %>
+          <% c.with_show_button(
+            color: :danger,
+            classes: "boxed-action"
+          ) do |s| %>
+            Randomize password
+          <% end %>
+          <% c.with_body do %>
+            <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Hold it!" } %>
+            <p>
+              This will randomize <%= view.user.login %>’s password, requiring them to
+              reset it to regain access. There’s no going back. Are you sure you want
+              to do this?
+            </p>
+          <% end %>
+          <% c.with_button(
+            data: { "close-dialog-id": "randomize-password-dialog" }
+          ) { "Cancel" } %>
+          <% c.with_button(
+            type: :submit,
+            scheme: :danger,
+            data: { "disable-with": "" }
+          ) { "Randomize password" } %>
+        <% end %>
+
+        <h4>Randomize password</h4>
+        <p>
+          Randomize this user’s password, requiring them to reset it to regain
+          access.  If you want to lock the user completely out of the account,
+          you should suspend the user instead.
+        </p>
+      <% else %>
+        <h4>Randomize Password</h4>
+        <p><%= stafftools_not_authorized_html %></p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if view.show_org_application_policy? %>
+  <div class="boxed-group org-application-policy">
+    <h3>Application Access Policy</h3>
+    <div class="boxed-group-inner clearfix">
+      <h4>Application restrictions</h4>
+      <% if view.org_restricts_oauth_applications? %>
+        <p>
+        Allows only <%= link_to "organization-owned applications", stafftools_user_applications_path(view.user), class: "Link--inTextBlock" %>,
+        full trust GitHub-owned applications, and those approved below.
+        </p>
+        <h5>Approved applications</h5>
+        <%= render partial: "stafftools/users/application_approvals", locals: { applications: view.org_approved_applications } %>
+        <h5>Applications pending approval</h5>
+        <%= render partial: "stafftools/users/application_approvals", locals: { applications: view.org_applications_pending_approval } %>
+        <h5>Denied applications</h5>
+        <%= render partial: "stafftools/users/application_approvals", locals: { applications: view.org_denied_applications } %>
+        <h5>Blocked applications</h5>
+        <%= render partial: "stafftools/users/application_approvals", locals: { applications: view.org_blocked_applications } %>
+      <% else %>
+        <p>Does not restrict applications.</p>
+      <% end %>
+      <h4>Search audit log</h4>
+      <p>
+        <%= link_to "Search logs for Application Access Policy actions",
+              stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? view.application_access_policy_audit_kql_query : view.application_access_policy_audit_query),
+              class: "Link--inTextBlock" %>
+         involving <strong>@<%= view.user %></strong>.
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if view.show_saml_provider? %>
+  <% saml_view = create_view_model Stafftools::Organization::SamlSettingsView, organization: view.user %>
+  <div class="boxed-group" name="saml-settings">
+    <h3>SAML Identity Provider settings</h3>
+    <div class="boxed-group-inner clearfix">
+
+      <% if view.business_sso_configured? %>
+        <div class="flash flash-warn" id="warn-org-uses-business-saml-settings">
+          <%= primer_octicon(:alert) %> This organization belongs to the
+          <strong><%= view.user.business.name %></strong> enterprise, which has SAML
+          single sign-on configured. This organization uses the
+          <%= link_to "enterprise SAML Identity Provider settings",
+            stafftools_enterprise_security_path(view.user.business.slug), class: "Link--inTextBlock" %>.
+          <% if view.show_linked_saml_identity? %>
+            <%= link_to "View linked organization identity",
+              stafftools_enterprise_external_identity_path(view.user.business.slug, view.user.login), class: "Link--inTextBlock" %>
+          <% end %>
+
+          <% if view.user.saml_sso_enabled? %>
+            The organization SAML Identity Provider settings are not in use, but
+            are shown below for reference only.
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if view.user.saml_sso_enabled? %>
+        <h4>Sign on URL</h4>
+        <p><pre><%= view.user.saml_provider.sso_url %></pre></p>
+        <h4>Issuer</h4>
+        <p><pre><%= view.user.saml_provider.issuer %></pre></p>
+        <h4>Public certificate</h4>
+        <p><pre><%= view.user.saml_provider.idp_certificate %></pre></p>
+        <h4>Public certificate validity dates</h4>
+        <%= render Stafftools::SamlProvider::CertificateDatesComponent.new(certificate: view.user.saml_provider.idp_certificate, classes: 'mb-2') %>
+        <h4>Public certificate issuer</h4>
+        <%= render Stafftools::SamlProvider::CertificateIssuerComponent.new(certificate: view.user.saml_provider.idp_certificate, classes: 'mt-2 mb-2') %>
+        <h4>Public certificate subject</h4>
+        <%= render Stafftools::SamlProvider::CertificateSubjectComponent.new(certificate: view.user.saml_provider.idp_certificate, classes: 'mt-2 mb-2') %>
+        <h4>Signature method</h4>
+        <p><pre><%= view.user.saml_provider.signature_method %></pre></p>
+        <h4>Digest method</h4>
+        <p><pre><%= view.user.saml_provider.digest_method %></pre></p>
+        <% unless view.business_sso_configured? %>
+          <hr class="bleed-flush">
+
+          <% if stafftools_action_authorized?(controller: Stafftools::Orgs::SamlProvidersController, action: :destroy) %>
+            <%= render layout: "shared/details_dialog", locals: {
+                button_text: "Disable SAML SSO for #{view.user}",
+                button_class: "btn btn-danger",
+                details_class: "boxed-action",
+                title: "Disable SAML SSO",
+            } do %>
+              <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                Please ensure appropriate authorization has been obtained before disabling SAML SSO.
+              <% end %>
+              <div class="Box-body overflow-auto">
+                <p>
+                  When disabling SAML SSO, the SAML identify provider configuration will be removed,
+                  and will need to be re-entered by an organization owner should SAML wish to be re-enabled.
+                </p>
+                <%= form_tag stafftools_user_saml_provider_path(view.user), method: "delete" do %>
+                  <dl class="form-group">
+                    <dt><label for="reason">Reason for disabling</label></dt>
+                    <dd>
+                      <input class="form-control" type="text" name="reason" id="reason"
+                          placeholder="Please provide an explanation for the audit log."
+                          autofocus data-1p-ignore>
+                    </dd>
+                  </dl>
+                  <div class="Box-footer">
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      scheme: :danger,
+                      block: true
+                    ) do %>
+                      Disable SAML SSO
+                    <% end %>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
+            <h4>Remove SAML Identity Provider</h4>
+            <p>
+              Be careful &mdash; this will completely disable and remove the SAML identify provider configuration for
+              <strong><%= view.user %></strong>.
+            </p>
+          <% else %>
+            <%= render Primer::Beta::Button.new(
+              scheme: :danger,
+              classes: "boxed-action",
+              disabled: true
+            ) do %>Disable SAML SSO<% end %>
+            <h4>Remove SAML Identity Provider</h4>
+            <p><%= stafftools_not_authorized_html %></p>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+
+  <% if !view.business_sso_configured? && view.user.saml_sso_enabled? %>
+    <div class="boxed-group">
+      <h3>SAML members</h3>
+
+      <div class="boxed-group-inner">
+        <ul class="boxed-group-list standalone">
+          <li>
+            <%= link_to pluralize(saml_view.linked_members.count, "linked member"), stafftools_user_external_identities_path(view.user) %>
+          </li>
+
+          <li>
+            <%= link_to pluralize(saml_view.unlinked_members.count, "unlinked member"), stafftools_user_external_identities_path(view.user, scope: "unlinked") %>
+          </li>
+
+          <li>
+            <%= link_to pluralize(view.user.unlinked_external_identities.count, "unlinked identity"), stafftools_user_unlinked_external_identities_path(view.user) %>
+          </li>
+        </ul>
+      </div>
+    </div>
+  <% end %>
+<% end %>
+
+<% if view.show_team_sync_settings? %>
+  <div class="boxed-group">
+    <h3> Team synchronization </h3>
+    <div class="boxed-group-inner clearfix">
+      <% if view.team_sync_enabled? %>
+        <% if view.business_team_sync_enabled? %>
+          <div class="flash flash-warn" id="warn-org-uses-business-team-sync-settings">
+            <%= primer_octicon(:alert) %> This organization belongs to the
+            <strong><%= view.user.business.name %></strong> enterprise, which has Team synchronization enabled. This organization uses the
+            <%= link_to "enterprise Team Synchronization configuration",
+              stafftools_enterprise_security_path(view.user.business.slug),
+              class: "Link--inTextBlock" %>.
+          </div>
+          <% if view.missing_team_sync_integration? %>
+            <div class="flash flash-error" id="warn-org-in-business-with-bad-setup">
+              <%= primer_octicon(:alert) %>
+              Team Sync for organizations that belong to an enterprise requires
+              an integration app that isn't installed on this organization.
+              <% if view.org_with_no_admins? %>
+                However, the app can't be installed because the org doesn't have
+                any admins (possibly due to external provisioning). Please add
+                at least one admin, then re-run the configuration job here.
+              <% else %>
+                This may be a configuration failure, which can be fixed by
+                re-running the configuration job.
+              <% end %>
+            </div>
+            <%= stafftools_button_to(
+              "Re-run configuration for #{view.user}",
+              stafftools_user_team_sync_configurations_path(view.user),
+              method: :post,
+              class: "btn boxed-action",
+            ) %>
+          <% end %>
+        <% else %>
+          Team Sync is enabled for the this organization.
+
+          <div class="Box">
+            <div class="Box-row">
+              <div class="text-small pr-3 d-inline">
+                <strong><%= view.team_sync_provider_type_label %></strong>
+                <code class="color-fg-muted"><%= view.team_sync_provider_id %></code><br>
+              </div>
+            </div>
+          </div>
+
+          <br>Team Sync <strong><%= view.team_sync_forbid_organization_invites? ? "cannot" : "can" %></strong> re-invite past members to this organization that were removed by an organization owner
+        <% end %>
+      <% else %>
+        <% if view.business_team_sync_enabled? %>
+          <div class="flash flash-error" id="warn-org-in-business-with-bad-setup">
+            <%= primer_octicon(:alert) %>
+            Team Sync is enabled for <strong><%= view.user.business.name%></strong>,
+            but not for this member organization. This may be a configuration failure,
+            which can be fixed by re-running the configuration job.
+          </div>
+            <%= stafftools_button_to(
+              "Re-run configuration for #{view.user}",
+              stafftools_user_team_sync_configurations_path(view.user),
+              method: :post,
+              class: "btn boxed-action",
+            ) %>
+        <% else %>
+            Team Sync is not enabled for this organization.
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+<% end %>

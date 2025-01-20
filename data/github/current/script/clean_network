@@ -1,0 +1,65 @@
+#!/usr/bin/env ruby
+
+require "socket"  # For gethostname, of all things
+require "yaml"
+require "fileutils"
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+require "github/routing"
+require "github/sql"
+require "time"
+
+if ARGV.length != 1
+  $stderr.puts "Invalid usage"
+  $stderr.puts "  Usage: #{$0} <network id>"
+  $stderr.puts
+  $stderr.puts "Example: #{$0} 123456"
+  exit(1)
+end
+
+NETWORK = ARGV[0]
+
+partition = ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql(<<-SQL, network_id: NETWORK))
+  SELECT EXISTS(SELECT * FROM repository_networks WHERE id = :network_id)
+SQL
+
+unless partition
+  $stderr.puts "Ruh-roh, Raggy! That network doesn't exist in the database!"
+  exit 1
+end
+
+THIS_FS = Socket.gethostname
+
+GIT_UID = 500
+
+if Process.euid != GIT_UID
+  $stderr.puts "ERROR: This script must be run as the git user.  su - git and try again."
+  exit 1
+end
+
+BASE_NETWORK_PATH = GitHub::Routing.nw_storage_path(network_id: NETWORK)
+
+# check for .moved or .premoved directories only.
+if File.directory?(BASE_NETWORK_PATH + ".moved")
+  # moved path.
+  CLEANUP_PATH = BASE_NETWORK_PATH + ".moved"
+else
+  CLEANUP_PATH = BASE_NETWORK_PATH + ".premove"
+
+  unless File.directory?(CLEANUP_PATH)
+    $stderr.puts "#{CLEANUP_PATH} does not exist on this fileserver.  No cleanup necessary."
+    exit 0
+  end
+end
+
+print "Pruning stale network directory #{CLEANUP_PATH}..."
+system("rm -rf #{CLEANUP_PATH}")
+if $?.exitstatus != 0
+  puts " FAILED"
+  $stderr.puts "Prune failed"
+  exit 1
+end
+
+puts " done."
+
+exit 0

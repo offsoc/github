@@ -1,0 +1,185 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info(title: "#{feature_flag.name} | Announce changes", selected_link: :features) %>
+
+<% content_for :pagehead_path do %>
+  / <a href="<%= devtools_feature_flags_path %>">Feature Flags</a>
+  / <a href="<%= devtools_feature_flag_path(feature_flag) %>"><%= feature_flag.name %></a>
+  / <strong>Announce Changes</strong>
+<% end %>
+
+<% if params[:issue_link] %>
+  <%= render(Primer::Beta::Flash.new(dismissable: true, mb: 5)) do %>
+    A job has been started in the background. Track your announcement progress using <a class="Link--inTextBlock" href="<%= params[:issue_link]%>">this issue</a>.
+  <% end %>
+<% end %>
+
+<% if feature_flag.big_feature? || feature_flag.show_big_feature_warning? %>
+  <div class="Box Box--condensed mb-5" <%= test_selector("announce_changes_big_feature") %>>
+    <div class="Box-header d-flex flex-items-center">
+      <h3 class="Box-title flex-auto">Disable for Big Features</h3>
+    </div>
+
+    <div class="Box-row">
+      <p>This flag is a big feature or has a lot of enabled actors.</p>
+      <p>We have disabled this announcement functionality for big actors to reduce DB queries and to avoid potential issues with mass communication.</p>
+    </div>
+  </div>
+<% elsif feature_flag.github_enabled? %>
+  <div class="Box Box--condensed mb-5" <%= test_selector("announce_changes_form") %>>
+    <div class="Box-header d-flex flex-items-center">
+      <h3 class="Box-title flex-auto">Communicate breaking changes for this internally shipped flag</h3>
+    </div>
+
+    <div class="Box-row">
+      <p>This flag is enabled for only GitHub, GitHub Repos, GitHub Teams, and GitHub employees.</p>
+      <p>To make breaking changes easier, this form will automatically create an issue for all repositories for which this flag is enabled, team posts for all GitHub teams, and send Slack DMs via Hubot to all employees.</p>
+      <p>This form will not be available if this flag is enabled outside of GitHub, except if this flag is enabled on Microsoft/Integrations Repositories.</p>
+      <p>This flag will not notify Microsoft/Integrations Repos. Please notify them manually.</p>
+    </div>
+
+    <div class="Box-row">
+      <p><strong>Pro Tips!</strong></p>
+      <ol class="ml-3">
+        <li>Introduce yourself and what team/project you are working on</li>
+        <li>Mention what is changing and give a brief explanation why (Links to Issues are great here!)</li>
+        <li>Give them a Slack channel in which to reach out, or a primary GitHub Issue they can refer to</li>
+        <li>Explicitly state actions they need to take (try to automatically migrate if you can!)</li>
+        <li>Explicitly state if any repository files will change</li>
+      </ol>
+    </div>
+
+    <% if feature_flag.private_github_repos.present? %>
+      <div class="Box-row" <%= test_selector("announce_changes_automated") %>>
+        <%= form_tag devtools_feature_flag_announce_changes_path(feature_flag) do %>
+          <div class="form-group">
+            <div class="form-group-header">
+              <%= label_tag "staff_ship_issue_title", "Issue Title" %>
+            </div>
+            <div class="form-group-body">
+              <%=
+                text_field_tag "feature_flag[issue_title]", "Breaking changes for #{feature_flag.name}",
+                  placeholder: "Issue Title",
+                  id: "staff_ship_issue_title",
+                  class: "mt-2 input-block form-control",
+                  required: "required"
+              %>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="form-group-header">
+              <%= label_tag "staff_ship_issue_body", "Issue Body" %>
+            </div>
+            <div class="form-group-body">
+              <%= render(Comments::PreviewableCommentFormComponent.new(
+                  textarea_id: "staff_ship_issue_body",
+                  field_name: "feature_flag[issue_body]",
+                  placeholder: "Issue body",
+                  subject: IssueComment.new
+                )) %>
+            </div>
+          </div>
+
+            <div class="form-group">
+            <div class="form-group-body">
+              <label>
+                <%= check_box_tag "feature_flag[issue_agreement_notify]", "1", false, required: "required", id: "staff_ship_issue_agreement_1" %>
+                I acknowledge I will:
+                <ul class="ml-4 mt-2">
+                  <% if feature_flag.private_github_repos.any? %>
+                    <li>
+                      <strong>create issues on <%= feature_flag.private_github_repos.size %> private GitHub <%= "Repository".pluralize(feature_flag.private_github_repos.size) %></strong>
+                      <ul class="ml-3">
+                        <% feature_flag.private_github_repos.each do |repo| %>
+                          <li>
+                            <%= link_to repo.nwo, repo %>
+                            <% if repo.public? %>
+                              <%= render(Primer::Beta::Label.new(
+                                title: "#{repo.name} is a public repo. Be careful",
+                                scheme: :orange,
+                                tag: :span,
+                              )) do %>
+                                Public
+                              <% end %>
+                            <% end %>
+                          </li>
+                        <% end %>
+                      </ul>
+                    </li>
+                  <% end %>
+
+                  <% if feature_flag.github_teams.any? %>
+                    <li>
+                      <strong>create team posts on <%= feature_flag.github_teams.size %> GitHub <%= "Team".pluralize(feature_flag.github_teams.size) %></strong>
+                      <ul class="ml-3">
+                        <% feature_flag.github_teams.each do |team| %>
+                          <li><%= link_to team.name, team, class: "Link--inTextBlock" %></li>
+                        <% end %>
+                      </ul>
+                    </li>
+                  <% end %>
+
+                  <% if feature_flag.github_employees.any? %>
+                    <li>
+                      <strong>send Slack DMs to <%= feature_flag.github_employees.size %> <%= "Hubber".pluralize(feature_flag.github_employees.size) %></strong>
+                      <ul class="ml-3">
+                        <% feature_flag.github_employees.each do |user| %>
+                          <li><%= link_to user.login, user, class: "Link--inTextBlock" %></li>
+                        <% end %>
+                      </ul>
+                    </li>
+                  <% end %>
+                </ul>
+              </label>
+            </div>
+          </div>
+
+          <% if (ineligible_repos = feature_flag.non_github_repos + feature_flag.public_github_repos).present? %>
+            <div class="form-group">
+              <div class="form-group-body">
+                <label>
+                  <%= check_box_tag "feature_flag[issue_agreement_not_notify]", "1", false, required: "required", id: "staff_ship_issue_agreement_2" %>
+                  I acknowledge I will <strong>NOT</strong> create issues on the following repos and will have to work with these repos manually:
+                </label>
+                <ul class="ml-4 mt-2">
+                <% ineligible_repos.each do |repo| %>
+                  <li>
+                    <%= link_to repo.nwo, repo %>
+                    <% if repo.public? %>
+                      <%= render(Primer::Beta::Label.new(
+                        title: "#{repo.name} is a public repo. Be careful",
+                        scheme: :orange,
+                        tag: :span,
+                      )) do %>
+                        Public
+                      <% end %>
+                    <% end %>
+                  </li>
+                <% end %>
+                </ul>
+              </div>
+            </div>
+          <% end %>
+
+          <%= submit_tag "Create Issues", class: "btn btn-primary" %>
+        <% end %>
+      </div>
+    <% else %>
+      <div class="Box-row" <%= test_selector("announce_changes_manual") %>>
+        <p>While this feature is enabled on only GitHub properties, we have no GitHub repositories on which we can create issues. Please add a GitHub Repo or manually notify your users.</p>
+      </div>
+    <% end %>
+  </div>
+<% else %>
+  <div class="Box Box--condensed mb-5" <%= test_selector("cant_announce_changes") %>>
+    <div class="Box-header d-flex flex-items-center">
+      <h3 class="Box-title flex-auto">Cannot communicate breaking changes for this flag</h3>
+    </div>
+
+    <div class="Box-row">
+      <p>This flag is enabled for more than GitHub, GitHub/Microsoft Repos, GitHub Teams, and GitHub employees.</p>
+      <p>As this flag is enabled outside of the company, we cannot make announcements using this feature.</p>
+    </div>
+  </div>
+<% end %>

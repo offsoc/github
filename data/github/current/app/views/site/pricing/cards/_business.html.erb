@@ -1,0 +1,136 @@
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+
+<%
+  account = locals[:account]
+  context = locals[:context]
+  current_plan = account&.plan
+  move_work = locals[:move_work] || false
+  show_features = locals[:show_features] || false
+  bottom_up_menu = locals[:bottom_up_menu] || false
+  monthly_only = locals[:monthly_only] || false
+%>
+
+<div class="col-lg-4 mb-3 mb-lg-0">
+  <div class="height-full position-relative rounded-3 px-2 pt-5 pb-2 js-pricing-plan" data-min-seats="5" data-max-seats="10" <%= test_selector(GitHub::Plan.business) %>>
+    <p class="position-absolute left-0 right-0 h5 text-center text-uppercase color-text-white js-recommended-plan-caption" hidden style="top:6px;">Most popular</p>
+    <div class="d-md-flex flex-column flex-justify-between height-full rounded-3 color-shadow-extra-large color-bg-default">
+      <div class="px-3 pt-4 pb-3">
+        <h2 class="mb-2 h5-mktg">Team</h2>
+        <p class="color-fg-muted lh-condensed">Advanced collaboration for <br>individuals and organizations</p>
+        <%= render Pricing::PriceTagComponent.new(plan: GitHub::Plan.business, render_mode: :plan_card, monthly_only: monthly_only) %>
+
+        <div class="mt-2">
+          <% if logged_in? %>
+            <% if !Billing::EnterpriseCloudTrial.new(account).active? %>
+              <% if current_plan.business_plus? %>
+                <%= render Billing::Settings::DowngradeDialogComponent.new(organization: account, current_plan: current_plan, new_plan: GitHub::Plan.business, dialog_button_style: :comparison_button) %>
+              <% elsif current_user.billing_manageable_per_repo_orgs.any? && !move_work.present? %>
+                <details class="select-menu details-reset details-overlay js-dialog-close-on-focusout">
+                  <summary
+                    class="<%= context == "pricing" ? "d-block btn-mktg Link--outlineOffset" : "btn btn-block btn-primary select-menu-button select-menu-button-large" %>"
+                    <%= test_selector "plan-input-#{GitHub::Plan.business}" %>
+                  >
+                    Continue with Team <%= render(Primer::Beta::Octicon.new(:"chevron-down", size: :small)) if context == "pricing" %>
+                  </summary>
+                  <%#
+                      With a bottom-up menu, for correct positioning the child list should remain relative to the
+                      details menu, rather than attempting to style the details-menu relative to the parent.
+                      To do this we must also move border styling to the child list and ensure that any overflow is visible.
+                  %>
+                  <details-menu class="select-menu-modal position-absolute py-2 <%= "border-0 overflow-visible" if bottom_up_menu %>" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                    <div class="select-menu-list <%= "position-absolute width-full border rounded-2 color-shadow-medium" if bottom_up_menu %>" style="<%= "bottom: 60px;" if bottom_up_menu %>" >
+                      <%= render(Primer::Alpha::ActionList.new(
+                        role: :menu,
+                        scheme: :full,
+                        show_dividers: true
+                      )) do |component|
+                        current_user.billing_manageable_per_repo_orgs.each do |org|
+                          component.with_item(
+                            label: org.safe_profile_name,
+                            href: upgrade_path(org: org, target: "organization", plan: GitHub::Plan.business, "ref_page": request.fullpath, "ref_cta": url_encode("<org-name>"), "ref_loc": url_encode("cards"), "pricing_exp": true),
+                            mx: 2,
+                            content_arguments: {
+                              classes: "js-pricing-upgrade-path",
+                              data: {
+                                **analytics_click_attributes(
+                                  category: "Change organization",
+                                  action: "click to upgrade to Team",
+                                  label: "ref_page:#{request.fullpath};ref_cta:<org-name>;ref_loc:cards",
+                                ),
+                              },
+                            },
+                          ) do |item|
+                            item.with_leading_visual_content do
+                              avatar_for(org, 20)
+                            end
+                          end
+                        end
+                        component.with_item(
+                          label: "Create organization",
+                          href: new_organization_path(plan: GitHub::Plan.business, "ref_page": request.fullpath, "ref_cta": url_encode("Create organization"), "ref_loc": url_encode("cards"), "pricing_exp": true),
+                          mx: 2,
+                          content_arguments: {
+                            classes: "js-pricing-upgrade-path",
+                            data: {
+                              **analytics_click_attributes(
+                                category: "Create organization",
+                                action: "click to set up organization",
+                                label: "ref_page:#{request.fullpath};ref_cta:Create organization;ref_loc:cards"
+                              ),
+                              **hydro_click_tracking_attributes(
+                                "create_org.click",
+                                location: :CONTINUE_WITH_TEAM_DROPDOWN,
+                              ),
+                            },
+                          },
+                        ) do |item|
+                          item.with_leading_visual_icon(icon: :plus)
+                        end
+                      end %>
+                    </div>
+                  </details-menu>
+                </details>
+              <% elsif !emu? %>
+                <%= render Site::ButtonComponent.new(
+                  text: "Continue with Team",
+                  url: new_organization_path(plan: GitHub::Plan.business, "ref_page": request.fullpath, "ref_cta": url_encode("Continue with Team"), "ref_loc": url_encode("cards"), "pricing_exp": true),
+                  classes: context == "pricing" ? "d-block js-pricing-upgrade-path" : "btn btn-block btn-primary js-pricing-upgrade-path",
+                  data: {
+                    **hydro_click_tracking_attributes("create_org.click", location: :CONTINUE_WITH_TEAM_BUTTON),
+                  },
+                  test_selector: "plan-input-#{GitHub::Plan.business}"
+                ) %>
+              <% end %>
+            <% end %>
+          <% else %>
+            <%= render Site::ButtonComponent.new(
+              text: "Continue with Team",
+              url: signup_path(source: "pricing-card-team", plan: GitHub::Plan.business, setup_organization: true, "ref_page": request.fullpath, "ref_cta": url_encode("Continue with Team"), "ref_loc": url_encode("cards"), "pricing_exp": true),
+              classes: "d-block btn-mktg js-pricing-upgrade-path",
+              analytics: {
+                category: "Sign up",
+                action: "click to sign up for account",
+                label: "ref_page:#{request.fullpath};ref_cta:Continue with Team;ref_loc:cards"
+              },
+              data: {
+                **hydro_click_tracking_attributes("create_org.click", location: :CONTINUE_WITH_TEAM_BUTTON),
+              },
+              test_selector: "plan-input-#{GitHub::Plan.business}"
+            ) %>
+          <% end %>
+
+          <p class="d-lg-none py-3 js-yearly-cost">
+            <span class="color-fg-accent f4">*</span>
+            <% cache "site_pricing_business_discount_notice", expires_in: 1.day do %>
+              <%= render Pricing::AnnualDiscountNoticeComponent.new(plan: GitHub::Plan.business) %>
+            <% end %>
+          </p>
+        </div>
+      </div>
+
+      <% if show_features %>
+        <%= render 'site/pricing/plan_features/business' %>
+      <% end %>
+    </div>
+  </div>
+</div>

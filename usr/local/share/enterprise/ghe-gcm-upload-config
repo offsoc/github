@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# ghe-gcm-upload-config is a helper script that wraps `curl` POST requests to GHES-Manage topology config API
+# in order to push cluster.conf to Consul
+
+set -euo pipefail
+
+check_consul() {
+  if [ "$(nc -z localhost 8500; echo $?)" != "0" ]; then
+    echo "Consul is not available yet, skipping cluster config upload to Consul" >&2
+    return 1
+  fi
+}
+
+upload_via_cli(){
+  EXIT_CODE=0
+  gh es configure --auto >/dev/null || EXIT_CODE=$?
+  if [ $EXIT_CODE -ne 0 ]; then
+    echo "Failed to configure gh es cli" >&2
+    return 1
+  fi
+  res=$(gh es topologyconfig set -c /data/user/common/cluster.conf --json) || EXIT_CODE=$?
+  if [ $EXIT_CODE -eq 0 ]; then
+    echo "Topology configuration is successfully updated in GHES-Manage GCM via gh es cli"
+    return 0
+  else
+    error_inf=$(echo "$res" | jq -r '.description.error')
+    echo "error updating topology config in GHES-Manage GCM via gh es cli: $error_inf" >&2
+    return 1
+  fi
+}
+
+EXIT_CODE=0
+
+check_consul || EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+  exit 0 # skip this step if consul is not available yet, but don't fail
+fi
+
+upload_via_cli || EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ]; then
+  exit 0
+else
+  echo "Failed to update topology config via cli, falling back to direct request to API" >&2
+fi
+
+response=$(curl --request "POST" \
+  --header "Content-Type: application/json" \
+  --data "{\"config\": $(cat /data/user/common/cluster.conf | jq -Rsa .)}" \
+  --user internal_api_key:$(ghe-config secrets.ghes-manage.internal-api-key) \
+  --connect-timeout 5 \
+  -sS \
+  --retry 10 \
+  --retry-delay 1 \
+  --retry-connrefused \
+  --write-out "%{http_code}" \
+  127.0.0.1:9401/v1/topologyconfig)
+
+response_code=${response:${#response}-3}
+response_body=${response%???}
+
+critical_errors=()
+warnings=()
+
+if [[ $response_code -eq 200 ]]; then
+  echo "Topology configuration is successfully updated in GHES-Manage GCM via Manage API"
+elif [[ $response_code -eq 422 ]]; then
+  echo "Topology configuration update failed in GHES-Manage GCM" >&2
+
+  if [[ $(echo "$response_body" | jq -r '.error.details | type') == "array" ]]; then
+    critical_errors=$(echo "$response_body" | jq -r '.error.details[] | select(.level == "critical") | .message')
+    warnings=$(echo "$response_body" | jq -r '.error.details[] | select(.level == "warning") | .message')
+  fi
+
+  if [[ -n "$critical_errors" ]]; then
+    while read -r error; do
+      echo "CRITICAL: $error" >&2
+    done <<< "$critical_errors"
+  fi
+
+  if [[ -n "$warnings" ]]; then
+    while read -r warning; do
+      echo "WARNING: $warning" >&2
+    done <<< "$warnings"
+  fi
+
+  if [[ -n "$critical_errors" ]]; then
+    exit 1
+  fi
+else
+  response_body=${response%???}
+  echo "Topology configuration update failed with response code $response_code" >&2
+  echo "Response body: $response_body" >&2
+  exit 1
+fi

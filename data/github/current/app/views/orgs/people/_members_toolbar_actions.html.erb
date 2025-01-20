@@ -1,0 +1,106 @@
+<%# `view` is an instance of Orgs::People::ToolbarActionsView %>
+<label for="select-all-checkbox" class="table-list-header-meta py-1 <% if view.selected_members.any? %>sr-only<% end %>">
+  <span <%= test_selector('members-toolbar-multi-invite-disabled')%>>Members</span>
+</label>
+<% if view.selected_members.any? %>
+  <% pluralized_members = "#{pluralize view.selected_members.count, "member", "members"}" %>
+  <% destroy_url = org_destroy_people_dialog_path(view.organization, redirect_to_path: org_people_path(view.organization)) %>
+  <%= render(Primer::Alpha::ActionMenu.new(test_selector: "members-toolbar-drop-down")) do |menu| %>
+    <% menu.with_show_button(size: :small, mr: 3) { |button|
+      button.with_trailing_action_icon(icon: :"triangle-down"); "#{pluralized_members} selected"
+    } %>
+
+    <% if view.show_role_switcher? %>
+      <% menu.with_item(
+        tag: :button,
+        id: "change_role_button",
+        content_arguments: { "data-show-dialog-id": "change-role-dialog" }
+      ) do %>
+        Change role
+      <% end %>
+    <% end %>
+
+    <% if view.show_hide_membership_button? %>
+      <% menu.with_item(
+        tag: :button,
+        href: org_set_people_visibility_path(view.organization),
+        form_arguments: {
+          method: :put,
+          inputs: [
+            { name: "member_ids", value: view.selected_member_ids, type: "hidden" },
+            {name: "conceal", value: "1", type: "hidden"}
+          ]
+        },
+        "data-ga-click": "Orgs, hide membership, location:member list bulk; text:Hide membership",
+      ) do %>
+        Hide membership<%= "s" unless view.selected_members.size == 1 %>
+      <% end %>
+    <% end %>
+
+    <% if view.organization.allow_conversion_to_outside_collaborator?(actor: current_user) %>
+      <% menu.with_item(
+        tag: :button,
+        scheme: :danger,
+        "data-ga-click": "Orgs, convert member to #{outside_collaborators_verbiage(view.organization).singularize}, location:member list bulk; text:Convert to #{outside_collaborators_verbiage(view.organization).singularize}",
+        content_arguments: { "data-show-dialog-id": "convert-to-outside-collaborator-dialog" }
+      ) do %>
+        Convert to <%= outside_collaborators_verbiage(view.organization).singularize %>
+      <% end %>
+    <% end %>
+
+    <% if view.show_remove_button? %>
+      <% member_ids = view.selected_member_ids.split(',') %>
+      <% member_ids.each { |id| destroy_url += "&member_ids[]=#{id}" } %>
+      <% menu.with_item(
+        tag: :button,
+        scheme: :danger,
+        content_arguments: { "data-show-dialog-id": "remove-from-org-dialog"}
+      ) do %>
+        Remove from organization
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.show_role_switcher? %>
+    <%= render Primer::Alpha::Dialog.new(
+      title: "Change the role of #{pluralize view.selected_members.size, "member"}?",
+      id: "change-role-dialog") do |dialog| %>
+      <% dialog.with_body do %>
+        <%= render partial: "orgs/people/change_role_dialog", locals: {
+            members: view.selected_members,
+            member_ids: view.selected_member_ids,
+            view: view
+          } %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.organization.allow_conversion_to_outside_collaborator?(actor: current_user) %>
+    <%= render Primer::Alpha::Dialog.new(
+      id: "convert-to-outside-collaborator-dialog",
+      size: :large,
+      title: "Convert #{pluralize view.selected_members.size, "member"} to outside #{"collaborator".pluralize(view.selected_members.size)}?") do %>
+      <%= render :partial => "orgs/people/convert_to_outside_collaborator_dialog", locals: {
+        members: view.selected_members,
+        member_ids: view.selected_member_ids,
+        bulk: true
+      } %>
+    <% end %>
+  <% end %>
+
+  <% if view.show_remove_button? %>
+    <%= render(Primer::Alpha::Dialog.new(
+      id: "remove-from-org-dialog",
+      size: :large,
+      title: "Remove #{pluralize view.selected_members.size, "member"} from the organization?")) do |dialog| %>
+      <% dialog.with_body do %>
+        <include-fragment
+          class="my-3"
+          aria-label="Loading..."
+          src="<%= destroy_url %>">
+          <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+        </include-fragment>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,171 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "codeowners"
+require "find"
+
+workdir = File.expand_path("../..", __FILE__)
+
+# Initial values for user-controllable flags
+
+roots = []
+show_owners = nil
+show_co_owners = false
+show_unowned = false
+
+# Option parsing
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/codeowners-ls-files [options] @github/team-reviewers [...]"
+
+  # Docs: https://thehub.github.com/engineering/development-and-ops/dotcom/serviceowners/serviceowners-usage/
+  # Please update these if adding/changing/removing options!
+
+  opts.on(
+    "-r", "--root DIR",
+    "Limit results to specific subdirectories",
+    "May be given multiple times.",
+    "Defaults to #{workdir}."
+  ) do |dir|
+    roots << File.expand_path(dir, workdir)
+  end
+
+  opts.on(
+    "-o", "--[no-]show-owners",
+    "Display all teams that own listed files",
+    "Defaults to false for a single team, true for multiple."
+  ) do |opt|
+    show_owners = opt
+  end
+
+  opts.on(
+    "-c", "--show-co-owners",
+    "Display other teams that share ownership of listed files"
+  ) do
+    show_co_owners = true
+  end
+
+  opts.on(
+    "-u", "--show-unowned",
+    "Display files that have no owner"
+  ) do
+    show_unowned = true
+  end
+
+  opts.on("-h", "--help", "Prints this message") do
+    puts opts
+    exit
+  end
+end
+parser.parse!
+
+# Finish initializing flag state
+
+cared_about = Set.new ARGV
+roots << workdir if roots.empty?
+show_owners = cared_about.size > 1 if show_owners.nil?
+
+# Verify that the flag state is consistent
+
+if cared_about.empty? && !show_unowned
+  warn "You must specify at least one team or --show-unowned.\n\n"
+  warn parser
+  exit 1
+end
+
+if show_owners && show_co_owners
+  warn "You may only specify one of --show-owners and --show-co-owners.\n\n"
+  warn parser
+  exit 1
+end
+
+# Load CODEOWNERS
+ENV["CODEOWNERS"] ||= "CODEOWNERS"
+codeowners_file = File.join(workdir, ENV["CODEOWNERS"])
+codeowners = Codeowners::File.new(File.read(codeowners_file))
+
+rules = codeowners.rules
+
+# Warn if any requested teams don't occur in the file
+
+never_seen = cared_about.dup
+rules.each { |r| never_seen -= r.owners.map(&:identifier) }
+
+if never_seen.any?
+  warn "These teams never appear in any CODEOWNERS rule:"
+  warn "  #{never_seen.to_a.join(", ")}\n\n"
+end
+
+# If show_unowned is disabled, discard rules that don't involve the requested
+# teams. Die if this leaves you with no rules left to match against.
+
+unless show_unowned
+  rules.filter! do |r|
+    r.owners.any? { |o| cared_about.include? o.identifier }
+  end
+
+  if rules.empty?
+    warn "No rules matched any teams you listed."
+    exit 1
+  end
+end
+
+excluded = Set.new(
+  %w{.git node_modules tmp log repositories}.map { |dirname| File.join(workdir, dirname) },
+)
+
+roots.each do |root|
+  # Recursively descend within each root directory.
+
+  Find.find(root) do |path|
+    if FileTest.directory?(path)
+      # Directory
+      # Prune the descent if this directory should be excluded. Otherwise, ignore.
+
+      if excluded.include?(path)
+        Find.prune
+      else
+        nil
+      end
+    else
+      # File
+      relative_path = path.slice(workdir.length + 1..path.length) if path.start_with? workdir
+
+      # Locate the ownership rule that applies to this path. Determine if the filter
+      # criteria (teams cared_about, unowned files) are satisfied.
+      match = rules.find { |rule| rule.pattern.match?(relative_path) }
+      match_ok = if show_unowned
+        # Include unmatched files, and those that are owned by at least one team
+        # we care about.
+        match.nil? || (cared_about.any? && match.owners.any? { |owner| cared_about.include?(owner.identifier) })
+      else
+        # Rules that don't involve teams we care about have been removed, so any
+        # match at all is good.
+        !match.nil?
+      end
+
+      if match_ok
+        case
+        when match.nil? && show_unowned
+          # Unowned file.
+          puts relative_path
+        when !match.nil? && show_owners
+          # File owned by team we care about; show all owners.
+          puts "#{relative_path}\t#{match.owners.map(&:identifier).join(", ")}"
+        when !match.nil? && show_co_owners
+          # File owned by team we care about; show any owners not in our filter set.
+          co_owners = Set.new(match.owners.map(&:identifier)) - cared_about
+          if co_owners.empty?
+            puts relative_path
+          else
+            puts "#{relative_path}\t#{co_owners.to_a.join(", ")}"
+          end
+        when !match.nil?
+          # File owned by team we care about; show only path.
+          puts relative_path
+        end
+      end
+    end
+  end
+end

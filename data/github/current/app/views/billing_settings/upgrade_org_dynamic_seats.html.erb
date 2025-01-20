@@ -1,0 +1,230 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info title: page_title %>
+
+<div class="container-lg p-responsive mt-4">
+  <%= render partial: "settings/header", locals: {
+    current_context: target,
+    hide_profile_link: true,
+    hide_context_switcher: true,
+  } %>
+</div>
+
+<div class="my-5">
+  <div class="container-lg p-responsive">
+    <div class="border-bottom pb-3 mb-5">
+      <h1 class="d-inline-block f1 text-normal" <%= test_selector("billing-upgrade-header") %>>
+        <%= page_title %>
+      </h1>
+    </div>
+
+    <synchronous-payment>
+      <%= form_tag view.billing_action_path(current_user),
+          :class               => "js-braintree-encrypt",
+          :id                  => "upgrade_organization",
+          :method              => view.form_method(current_user),
+          "data-action" => "submit:synchronous-payment#collectPayment",
+          "data-braintree-key" => GitHub.braintree_client_side_encryption_key do %>
+
+        <%= hidden_field_tag 'plan', view.plan.name, id: nil %>
+        <%= hidden_field_tag 'account', target, id: nil, class: "js-account-name" %>
+        <%= hidden_field_tag "return_to", return_to, id: nil %>
+
+        <div class="d-md-flex gutter-md">
+          <div class="col-md-7" <%= test_selector("duration-summary") %>>
+            <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "How often do you want to be billed?", icon: :clock)) do |component| %>
+              <% component.with_body do %>
+                <%= render partial: "billing_settings/billing_cycle", locals: { account: target, selected_duration: selected_duration } %>
+                <% if selected_duration == "year" %>
+                  <div class="mt-3 d-flex flex-row">
+                    <%= render(Primer::Beta::Octicon.new(:"tag", size: :small, color: :accent, pt: 1)) %>
+                    <p class="f6 ml-2 col-md-8"> <%= render Pricing::AnnualDiscountNoticeComponent.new(plan: view.plan) %></p>
+                  </div>
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <%# Start: Seats %>
+            <div class="position-relative pl-5 pb-5">
+              <div class="position-absolute top-0 bottom-0 border-left color-border-default left-0 mt-1 ml-1">
+                <span class="position-absolute top-0 left-0 color-bg-default p-3 mt-n1 ml-n3"></span>
+                <span class="position-relative mt-2 ml-n2">
+                  <%= render(Primer::Beta::Octicon.new(icon: :people, color: :muted)) %>
+                </span>
+              </div>
+
+              <h2 class="h3">How many seats do you want to include?</h2>
+
+              <%= render(Billing::Settings::Upgrade::StepperComponent.new(
+                  test_selector: "org-upgrade-stepper",
+                  type: :plan_upgrade,
+                  seats: params[:seats] || view.current_seats,
+                  min: view.current_seats,
+                  max: view.seat_limit_for_upgrades,
+                  current_url: upgrade_path(request.params),
+                  form: "upgrade_organization",
+                  min_error_message: "You need at least #{pluralize(view.current_seats, 'seat')} to support your #{pluralize(view.current_seats, 'existing member')}.",
+                  max_error_message: "Please contact us at https://github.com/enterprise/contact for pricing and purchasing information.",
+                )) do |stepper| %>
+                <% stepper.with_remove_seat_control(
+                  data: analytics_click_attributes(
+                    category: "Account Upgrade",
+                    action: "click to decrease seats number",
+                    label: "ref_cta:decrease seats number;ref_loc:account_upgrade"
+                  )
+                ) %>
+                <% stepper.with_input(
+                  data: analytics_click_attributes(
+                    category: "Account Upgrade",
+                    action: "click on seats input",
+                    label: "ref_cta:seats input;ref_loc:account_upgrade"
+                  )
+                ) %>
+                <% stepper.with_add_seat_control(
+                  data: analytics_click_attributes(
+                    category: "Account Upgrade",
+                    action: "click to increase seats number",
+                    label: "ref_cta:increase seats number;ref_loc:account_upgrade"
+                  )
+                ) %>
+              <% end %>
+
+              <%
+                seats_summary = "On #{branded_plan_name(view.plan)}, each seat costs #{casual_currency(view.plan_unit_price)} per #{view.duration}.
+                Your organization is currently "
+                seats_url = link_to('using ' + pluralize(view.current_seats, 'seat'), org_people_path(view.account), class: "Link--inTextBlock")
+              %>
+
+              <% if view.pending_non_manager_invitations_count(view.account) > 0 || view.account.private_repo_invitee_ids.any? || view.account.collaborators_on_private_repositories_without_invitations.any? %>
+                <p><%= safe_join [seats_summary, seats_url] %>, including:</p>
+                <ul class="ml-4">
+                  <% if view.pending_non_manager_invitations_count(view.account) > 0 %>
+                    <li>
+                      <% if view.use_pending_invitations_link_instead_of_dialog?(view.account) %>
+                        <%# Rendering a dialog with too many pending invitations is slow, so link to the actual page when there are a lot %>
+                        <a class="Link--inTextBlock" href="<%= org_pending_invitations_path(view.account) %>"><%= pluralize(view.pending_non_manager_invitations_count(view.account), "pending member invitation") %></a>.
+                      <% else %>
+                        <%= render layout: "shared/details_dialog", locals: {
+                          button_class: "btn-link",
+                          button_text: pluralize(view.pending_non_manager_invitations_count(view.account), "pending member invitation"),
+                          details_class: "f5",
+                          title: "Pending invitations"} do %>
+                            <%= render partial: "orgs/invitations/pending_invitations_list", locals: {
+                            invitations: view.account.pending_non_manager_invitations
+                            } %>
+                        <% end %>
+                      <% end %>
+                    </li>
+                  <% end %>
+                  <% if view.account.private_repo_invitee_ids.any? %>
+                    <li>
+                      <%= pluralize view.account.private_repo_invitee_ids.size, "pending private repository invitation" %>
+                    </li>
+                  <% end %>
+                  <% if view.account.collaborators_on_private_repositories_without_invitations.any? %>
+                    <li>
+                      <%= pluralize view.account.collaborators_on_private_repositories_without_invitations.size, outside_collaborators_verbiage(view.account).singularize %>
+                    </li>
+                  <% end %>
+                </ul>
+              <% else %>
+                <p><%= safe_join [seats_summary, seats_url] %>.</p>
+              <% end %>
+            </div>
+
+            <% if view.paid_subscription_items.any? || view.account.data_packs > 0 %>
+              <%# Start: Other services %>
+              <div class="position-relative pl-5 pb-5">
+                <div class="position-absolute top-0 bottom-0 border-left color-border-default left-0 mt-1 ml-1">
+                  <span class="position-absolute top-0 left-0 color-bg-default p-3 mt-n1 ml-n3"></span>
+                  <span class="position-relative mt-2 ml-n2">
+                    <%= render(Primer::Beta::Octicon.new(icon: :checklist, color: :muted)) %>
+                  </span>
+                </div>
+
+                <h2 class="h3">Review your organization's other costs</h2>
+
+                <div class="Box my-3">
+                  <ul>
+                    <% view.paid_subscription_items.each do |item| %>
+                      <li class="Box-row">
+                        <div class="d-flex flex-justify-between">
+                          <strong><%= item.listing.name %> (<%= item.subscribable.name %>)</strong>
+                          <span class="ml-3">
+                            <%= item.price(duration: view.duration).format %>&nbsp;/&nbsp;<%= view.duration %>
+                          </span>
+                        </div>
+                      </li>
+                    <% end %>
+                    <% if view.account.data_packs > 0 %>
+                      <li class="Box-row">
+                        <div class="d-flex flex-justify-between">
+                          <strong><%= pluralize view.account.data_packs, "Git LFS data pack" %></strong>
+                          <%= view.account.data_pack_price.format(:no_cents_if_whole => false) %>
+                        </div>
+                      </li>
+                    <% end %>
+                  </ul>
+                </div>
+              </div>
+            <% end %>
+
+            <%= render "billing_settings/billing_info_dynamic_seats", view: view, target: target,
+              payment_flow_loaded_from: "UPGRADE", return_to: return_to %>
+          </div>
+
+          <div class='col-md-5'>
+            <%= render partial: "billing_settings/order_preview_dynamic_seats", locals: { view: view } %>
+
+            <% if view.show_org_upgrade_call_to_action_button? %>
+              <div class="js-awaiting-payment <%= "border-top py-3 mt-2" if data_collection_enabled %>" <%= "hidden" if view.needs_valid_payment_method? %> data-toggle-plan-upgrade-visibility="<%= !data_collection_enabled %>">
+                <%= render(Primer::ButtonComponent.new(
+                  classes: "btn btn-large btn-primary btn-block",
+                  type: :submit,
+                  data: {
+                    target: "synchronous-payment.buttonElement"
+                  }
+                )) do %>
+                  <span data-target="synchronous-payment.buttonCTA">
+                    <%= view.call_to_action_text %>
+                  </span>
+                  <span data-target="synchronous-payment.loadingStatus" class="AnimatedEllipsis"></span>
+                <% end %>
+
+                <p class="f6 color-fg-muted mt-3">By clicking &ldquo;<%= view.call_to_action_text %>&rdquo;, you agree to our
+                  <a class="Link--inTextBlock js-tos-link" href="<%= site_terms_path %>" target="_blank" rel="noopener">Terms of Service</a>
+                  <a href="<%= site_corp_terms_path %>" target="_blank" rel="noopener" class="Link--inTextBlock js-corp-tos-link d-none">Corporate Terms of Service</a> and
+                  <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener">Privacy Statement</a><span data-wording="on behalf of" class="js-company-name-text"></span>. We'll occasionally send you account-related emails.
+                </p>
+              </div>
+            <% end %>
+
+            <aside class="my-5">
+              <span class="f00-light text-mono color-fg-accent">&#8220;</span>
+              <figure class="mx-0 mt-n4">
+                <blockquote class="f4 color-fg-muted mb-3">
+                  CI/CD with GitHub Actions allows us to build, test, and deploy right from GitHub. We’ve reduced build time from 80 to 10 minutes.
+                </blockquote>
+                <figcaption class="d-flex flex-items-center">
+                  <span class="mr-3">
+                    <%= render(Primer::Beta::Avatar.new(src: image_path("modules/marketing/testimonial-pinterest-jon-parise.jpg"), size: 40, alt: "Jon Parise")) %>
+                  </span>
+                  <div class="lh-condensed">
+                    <strong class="d-block h4">Jon Parise</strong>
+                    <span class="f6 color-fg-muted">Engineering Architect at Pinterest</span>
+                  </div>
+                </figcaption>
+              </figure>
+            </aside>
+          </div>
+
+        </div>
+      <% end %>
+    </synchronous-payment>
+    <%# /form %>
+
+  </div>
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "billing" %>
+<% end %>

@@ -1,0 +1,81 @@
+#!/bin/bash
+#/ Usage: build-vitess
+#/ Build an app local version of Vitess from https://github.com/github/vitess-gh
+
+# Note that the github/vitess repository is a deployment repository and that our fork is
+# located at github/vitess-gh.
+
+set -e
+
+# change into root project dir
+cd "$(dirname "$0")/.."
+RAILS_ROOT="$(pwd -P)"
+
+VITESS_SHA=$(cat config/vitess-version)
+VITESS_SHA_ABBREV="${VITESS_SHA:0:10}"
+
+if [ -n "$BOOTSTRAP_NUKE_FROM_ORBIT" ]; then
+  rm -rf "vendor/vitess"
+fi
+
+# resolve vendor/vitess symlink (if any)
+installdir="vendor/vitess"
+mkdir -p $installdir
+cd $installdir
+
+check_vitess() {
+  if [ ! -x "./bin/vtcombo" ]; then
+    echo "Building Vitess $VITESS_SHA, which is missing"
+
+    return 1
+  fi
+
+  current_binary_sha=$(./bin/vtcombo --version 2> /dev/null | grep -Po "Git revision \K[a-f0-9]*")
+
+  if [[ ! "$current_binary_sha" =~ ^$VITESS_SHA_ABBREV* ]]; then
+    # binary is there but not the correct version.
+    echo "Building Vitess $VITESS_SHA, since the current binary is not the correct version ($current_binary_sha)"
+    return 1
+  fi
+
+  return 0
+}
+
+build_vitess() {
+  # just check if the .git dir is there, if not, get the files we want.
+  if [ ! -d "./.git" ] ; then
+    git init .
+  fi
+
+  git fetch --depth=1 https://github.com/github/vitess-gh.git $VITESS_SHA
+
+  echo "Building Vitess at $VITESS_SHA_ABBREV..."
+
+  START_TIME="$(date +%s)"
+
+  git reset --hard $VITESS_SHA
+
+  git clean -fdx > /dev/null
+
+  go mod download
+
+  make
+
+  echo "Built Vitess in $(($(date +%s) - $START_TIME)) seconds."
+}
+
+if check_vitess; then
+  echo "Vitess build $VITESS_SHA_ABBREV is up-to-date."
+elif [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+     [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+     "${RAILS_ROOT}/script/subproject-prebuild" -d $installdir -v $VITESS_SHA download vitess &&
+     check_vitess; then
+  echo "Vitess build $VITESS_SHA_ABBREV is up-to-date."
+else
+  build_vitess
+
+  if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    # Never fail the build on a failed upload.
+    "${RAILS_ROOT}/script/subproject-prebuild" -d $installdir -v $VITESS_SHA upload vitess || true
+  fi
+fi

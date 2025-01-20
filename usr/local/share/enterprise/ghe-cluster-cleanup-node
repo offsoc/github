@@ -1,0 +1,39 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-cleanup-node <uuid>
+#/
+#/ Remove Spokes, Storage and Pages servers from the database.
+#/
+set -e
+uuid=$1
+
+GHE_CLUSTER_FILE=${GHE_CLUSTER_FILE:-/etc/github/cluster}
+if [ ! -f "$GHE_CLUSTER_FILE" ] || [ -z "$(cat "$GHE_CLUSTER_FILE")" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+proceed() {
+  echo "$(basename "$0") should only be used when requested by the GitHub Enterprise Support team. Incorrect use could cause damage or data loss."
+  read -p "Proceed with running $(basename "$0")? [y/N] " -r
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+}
+
+if [ -z "$uuid" ]; then
+  echo "Node UUID required."
+  exit 2
+fi
+
+proceed
+
+ghe-spokesctl server set evacuating git-server-"$uuid" 'Removing replica' || true
+# Need to manually set git-server node to offline in order to properly destroy 
+/usr/local/share/enterprise/github-mysql "UPDATE fileservers SET online = 0 WHERE host = 'git-server-$uuid';" || true
+ghe-spokesctl server destroy git-server-"$uuid" || true
+
+ghe-storage destroy-host storage-server-"$uuid" --force || true
+ghe-dpages offline pages-server-"$uuid" || true
+ghe-dpages remove pages-server-"$uuid" || true
+
+ghe-aqueduct delete_queue --queue maint_git-server-"$uuid" --force || true

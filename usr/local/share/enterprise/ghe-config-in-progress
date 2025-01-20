@@ -1,0 +1,42 @@
+#!/bin/bash
+#/ Usage: ghe-config-in-progress [-h]
+#/
+#/ Checks whether there is a config operation in progress. Exits with status code 0 and prints "true"
+#/ to STDOUT if there is a ghe-config-apply in progress.  Exits with status code 3 and prints "false" if
+#/ there is no ghe-config-apply in progress.
+#/
+#/ GHE_CONFIG_LOCKFILE - environment variable to specify the path to the lockfile.
+#/                        Default: /var/run/ghe-config.pid
+#/
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" | cut -c 4-
+  exit 2
+fi
+
+GHE_CONFIG_LOCKFILE="${GHE_CONFIG_LOCKFILE:-/var/run/ghe-config.pid}"
+
+exit_not_running() {
+  echo "false"
+  exit 3
+}
+
+exit_running() {
+  echo "true"
+  exit 0
+}
+
+[ "$(whoami)" = "root" ] || [ -n "$ENTERPRISE_MOCK" ] || {
+  exec sudo -u root GHE_CONFIG_LOCKFILE="$GHE_CONFIG_LOCKFILE" "$0" "$@"
+  exit 1
+}
+
+[ -f "$GHE_CONFIG_LOCKFILE" ] || exit_not_running
+pid="$(cat "$GHE_CONFIG_LOCKFILE" 2>/dev/null)"
+[ -z "$pid" ] && exit_not_running
+kill -0 "$pid" && exit_running
+exit_not_running

@@ -1,0 +1,128 @@
+#!/bin/bash
+#/ Usage: start_span description [name]
+#/   description: human reaable explanation of what is being instrumented. The
+#/                Otel Span name will be set to this value unless "name" is
+#/                provided.
+#/   name: explicitly set the Otel Span name
+#/
+#/ The code being instrumented must be closed with a call to "end_span".
+#/
+#/ For example:
+#/
+#/ start_span "Sleeping between echoes" "sleep"
+#/   echo "hello world!"
+#/   sleep 1
+#/   echo "all done!"
+#/ end_span
+
+export OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-'ghes-config-apply'}
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-'http://127.0.0.1:4318/v1/traces'}
+
+generate_id()
+{
+  # local length=$1
+
+  local N B C='89ab'
+
+  for (( N=0; N < $1; ++N ))
+  do
+    B=$(( $RANDOM%256 ))
+
+    case $N in
+      6)
+        printf '4%x' $(( B%$1 ))
+        ;;
+      8)
+        printf '%c%x' ${C:$RANDOM%${#C}:1} $(( B%$1 ))
+        ;;
+      3 | 5 | 7 | 9)
+        # Add dashes '%02x-'
+        printf '%02x' $B
+        ;;
+      *)
+        printf '%02x' $B
+        ;;
+    esac
+  done
+
+  echo
+}
+
+declare -ag span_ids
+declare -ag span_parent_ids
+declare -ag span_names
+declare -ag span_descriptions
+declare -ag span_start_times
+declare -ag span_attributes
+declare -ig span_idx
+
+start_span(){
+  # we're using set -u, so have to use the following style to avoid "unbound variable" error
+  if [[ -z "${span_idx:-}" ]]; then
+    span_idx=0
+    span_parent_ids[$span_idx]="${GHE_CONFIG_APPLY_SPAN_ID:-}"
+    if [[ -n "${GHE_CONFIG_APPLY_RUN_ID:-}" ]]; then
+      id_kv="ghe_config_apply_run_id=$GHE_CONFIG_APPLY_RUN_ID"
+      if [[ -z "${GHE_CONFIG_APPLY_SPAN_ATTRIBUTES:-}" ]]; then
+        span_attributes[$span_idx]="$id_kv"
+      else
+        span_attributes[$span_idx]="${GHE_CONFIG_APPLY_SPAN_ATTRIBUTES},$id_kv"
+      fi
+    fi
+  else
+    span_idx=$((span_idx+1))
+    span_parent_ids[$span_idx]="${span_ids[span_idx-1]}"
+    if [[ -n "${GHE_CONFIG_APPLY_RUN_ID:-}" ]]; then
+    current_depth=$(echo "${span_attributes[span_idx-1]}" | grep -oP "(?<=depth=)[0-9]{1}(?=)")
+      new_depth=$((current_depth+1))
+      attrs=$(echo "${span_attributes[span_idx-1]}" | sed -r "s/depth=([0-9]{1})/depth=$new_depth/")
+      span_attributes[$span_idx]="${attrs}"
+    fi
+  fi
+  span_ids[$span_idx]="$(generate_id 8)"
+  # initially set Span name to $1 (the description)
+  span_names[$span_idx]="${1:-unknown}"
+  # now set description to this value (since it might be set to the default at this point)
+  attrs="${span_attributes[$span_idx]},description=${span_names[$span_idx]}"
+  span_attributes[$span_idx]="${attrs}"
+  # finally override the Otel Span name if provided
+  if [ -n "$2" ]; then
+    span_names[$span_idx]="${2}"
+  fi
+  span_descriptions[$span_idx]="${2}"
+  span_start_times[$span_idx]=$(date +%s.%N)
+}
+
+end_span(){
+  trace_id=${GHE_CONFIG_APPLY_TRACE_ID:-$(generate_id 16)}
+  local end_time=$(date +%s.%N)
+  attributes="${span_attributes[$span_idx]}"
+  if [ -z "$attributes" ]; then
+    attributes="traceid=$trace_id"
+  else
+    attributes="$attributes,traceid=$trace_id"
+  fi
+
+  if ghe-config --true config-apply.instrumentation.enabled; then
+    /usr/bin/otel-cli span \
+      --name "${span_names[$span_idx]}"                           \
+      --verbose                                                   \
+      --force-trace-id "$trace_id"                                \
+      --force-span-id "${span_ids[$span_idx]}"                    \
+      --force-parent-span-id ${span_parent_ids[$span_idx]}        \
+      --start "${span_start_times[$span_idx]}"                    \
+      --end "$end_time"                                           \
+      --attrs "$attributes,language=bash"                         \
+      --kind "internal"
+  fi
+
+  unset span_ids[$span_idx]
+  unset span_parent_ids[$span_idx]
+  unset span_names[$span_idx]
+  unset span_start_times[$span_idx]
+  unset span_attributes[$span_idx]
+  span_idx=$((span_idx-1))
+  if [ $span_idx -lt 0 ]; then
+    unset span_idx
+  fi
+}

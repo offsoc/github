@@ -1,0 +1,473 @@
+syntax = "proto3";
+package git_hub.kredz.services.varz;
+
+option go_package = "github.com/github/kredz/services/protobuf/varz";
+
+import "google/protobuf/timestamp.proto";
+
+// VariablesService defines a service which manages variables.
+service VariablesService {
+    // Fetch defines an RPC call to fetch a variable and its value from the datastore.
+    rpc Fetch (FetchRequest) returns (FetchResponse);
+    // Store defines an RPC call to store a variable in the datastore.
+    rpc Store (StoreRequest) returns (StoreResponse);
+    // Update defines an RPC call to update a variable in the datastore.
+    rpc Update (UpdateRequest) returns (UpdateResponse);
+    // Delete defines an RPC call to delete a variable from the datastore.
+    rpc Delete (DeleteRequest) returns (DeleteResponse);
+    // List defines an RPC call to list variables for a given owner.
+    rpc List (ListRequest) returns (ListResponse);
+    // ListByNames defines an RPC call to list repository variables by name for a given repository.
+    rpc ListByNames (ListByNamesRequest) returns (ListByNamesResponse);
+    // ListVariablesForRepository defines an RPC call to list variables for a
+    // given repository and organization.
+    rpc ListVariablesForRepository (ListVariablesForRepositoryRequest) returns (ListVariablesForRepositoryResponse);
+    // DeleteVariablesForOwner defines an RPC call that deletes all of the variables
+    // for a given owner.
+    rpc DeleteVariablesForOwner (DeleteVariablesForOwnerRequest) returns (DeleteVariablesForOwnerResponse);
+    // GetVariableCounts returns the number of variables for each owner id for a given owner type and integration
+    rpc GetVariableCounts (VariableCountsRequest) returns (VariableCountsResponse);
+    // ListByNamesForRepo defines an RPC call to list particular variables in the order they were sent for an owner.
+    rpc ListByNamesForRepo (ListByNamesForRepoRequest) returns (ListByNamesForRepoResponse);
+    // ListOrganizationVariablesForRepository returns the organization variables visible to a given repository
+    rpc ListOrganizationVariablesForRepository (ListOrganizationVariablesForRepositoryRequest) returns (ListOrganizationVariablesForRepositoryResponse);
+    // ListOrganizationVariablesForRepositoryByNames returns the organization variables visible to a given repository from the input names
+    rpc ListOrganizationVariablesForRepositoryByNames (ListOrganizationVariablesForRepositoryByNamesRequest) returns (ListOrganizationVariablesForRepositoryByNamesResponse);
+    // ListVariablesForOwners returns the variables for multiple owners
+    rpc ListVariablesForOwners (ListVariablesForOwnersRequest) returns (ListVariablesForOwnersResponse);
+
+}
+
+// Repository defines a GitHub Repository, identified by an ID or a NWO.
+message Repository {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+}
+
+// User defines a GitHub User, identified by an ID.
+message User {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+}
+
+// Organization defines a GitHub Organization, identified by an ID.
+message Organization {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+}
+
+// Environment defines a GitHub Actions Environment, identified by an ID.
+message Environment {
+  string global_id = 1;
+}
+
+// Error defines an error encountered during processing.
+message Error {
+    // A unique error number associated with the error.
+    int64 error_number = 1;
+    // An error message describing what went wrong.
+    string error_message = 2;
+    // A backtrace indicating the call stack up to where the error was encountered.
+    string backtrace = 3;
+}
+
+// VariableOwner defines the owner the variable. It can be one of a:
+//   - Repository
+//   - User
+//   - Organization
+//   - Environment
+message VariableOwner {
+    oneof owner {
+        // The variable is owned by the single repository.
+        Repository repository = 1;
+        // The variable is owned by one user account and applies to all repositories under account.
+        User user = 2;
+        // The variable is owned by an organization and applies to all repositories under account.
+        Organization organization = 3;
+        // The variable is owned by an environment and applies only to this
+        // environment
+        Environment environment = 4;
+    }
+}
+
+// Variable defines a variable. It has an owner, type, a service, and a value.
+// The owner, type, and service define the variable key for lookups.
+message Variable {
+    // Who owns this? Based on Flipper format, e.g. User;1, Repo;2, Organization;3.
+    VariableOwner owner = 1;
+    // GLobal id of the integration. eg : RmFjdGlvbjox .
+    string integration_global_id = 2;
+    // The variable name, i.e. a unique name to identify it by.
+    string name = 3;
+    // Variable value. This can be a single string or a JSON blob. The client must know how to handle this.
+    bytes value = 4;
+    // The length of the variable.
+    int64 length = 5;
+    // When this record was created
+    google.protobuf.Timestamp created_at = 6;
+    // When this record was updated
+    google.protobuf.Timestamp updated_at = 7;
+    // The visibility of the variable.
+    Visibility visibility = 8;
+    // selected_repositories returns an array of repositories that can use this variable.
+    // This will only be populated when the visibility is
+    // SELECTED_REPOSITORIES.
+    repeated Repository selected_repositories = 9;
+    // selected_repositories_count returns the number of selected repositories than can use this variable
+    // This will only be populated when the visibility is
+    // SELECTED_REPOSITORIES.
+    int64 selected_repositories_count = 10;
+    // Whether the value is truncated or not
+    bool truncated = 11;
+
+}
+
+// Visibility models the visibility of specific variable.
+enum Visibility {
+  // VISIBILITY_OWNER is returned as the default value, meaning that only the
+  // owner that defined this variable should be able to see it.
+  VISIBILITY_OWNER = 0;
+  // VISIBILITY_ALL_REPOS is returned when the visibility is set to all repos.
+  VISIBILITY_ALL_REPOSITORIES = 1;
+  // VISIBILITY_PRIVATE_REPOS is returned when the visibility is set to only
+  // private repos.
+  VISIBILITY_PRIVATE_REPOSITORIES = 2;
+  // VISIBILITY_SELECTED_REPOS is returned when a distinct set of repos should
+  // have a variable.
+  VISIBILITY_SELECTED_REPOSITORIES = 3;
+}
+
+// StoreRequest defines the request when storing or updating a variable.
+message StoreRequest {
+    // The variable to store. Must include the value if it's a new variable.
+    Variable variable = 1;
+}
+
+// StoreResponse defines the response when storing a variable.
+message StoreResponse {
+    // Whether the variable was successfully stored.
+    bool stored = 1;
+
+    // The variable without the value. This is how you identify the variable later on.
+    Variable variable = 2;
+
+    // Any errors encountered.
+    Error error = 3;
+}
+
+// UpdateRequest defines the request when storing or updating a variable.
+message UpdateRequest {
+  // The variable to store.
+  Variable variable = 1;
+
+  // New name of the variable
+  string updated_name = 2;
+}
+
+// UpdateResponse defines the response when storing a variable.
+message UpdateResponse {
+  // Whether the variable was updated.
+  bool updated = 1;
+
+  // The variable. This is how you identify the variable later on.
+  Variable variable = 2;
+
+  // Any errors encountered.
+  Error error = 3;
+}
+
+// FetchRequest defines the request when fetching a variable.
+message FetchRequest {
+    // The repository requesting the variable.
+    Repository repository = 1;
+
+    // The variable to fetch.
+    Variable variable = 2;
+}
+
+// FetchResponse defines the response when fetching a variable.
+message FetchResponse {
+    // The fetched variable with its value populated.
+    Variable variable = 1;
+
+    // Any errors encountered.
+    Error error = 2;
+}
+
+// DeleteRequest defines the request when deleting a variable.
+message DeleteRequest {
+    // The repository deleting the variable.
+    Repository repository = 1;
+
+    // The variable to delete. The value is disregarded.
+    Variable variable = 2;
+}
+
+// DeleteResponse defines the response when deleting a variable.
+message DeleteResponse {
+    // Whether a variable was deleted.
+    bool success = 1;
+
+    // Any errors encountered.
+    Error error = 2;
+}
+
+// ListRequest defines the request when listing variables.
+message ListRequest {
+    // The owner to list variables for.
+    VariableOwner owner = 1;
+
+    // The integration global id of the variables belong to.
+    string integration_global_id = 2;
+
+    // Include the value or not.
+    bool include_value = 3;
+
+    // Include truncated value ot not.
+    bool include_truncated_value = 4;
+
+    // The numbers of variables per call.
+    int64 per_page = 5;
+
+    // The page number of the variables to list.
+    int64 page = 6;
+}
+
+// ListResponse defines the response when listing variables.
+message ListResponse {
+    // Any error that was encountered.
+    Error error = 1;
+
+    // The variables matching the criteria.
+    repeated Variable variables = 2;
+
+    // Total count of variables for the owner.
+    int64 total_count = 3;
+}
+
+// ListByNamesRequest defines the request when listing variables from names.
+message ListByNamesRequest {
+    // The owner to list variables for.
+    VariableOwner owner = 1;
+
+    // The integration global id of the variables belong to.
+    string integration_global_id = 2;
+
+    // Identifiers required to be sent in response
+    repeated string names = 3;
+}
+
+// ListByNamesResponse defines the response when listing variables.
+message ListByNamesResponse {
+    // Any error that was encountered.
+    Error error = 1;
+
+    // The variables matching the criteria.
+    repeated Variable variables = 2;
+}
+
+// ListVariablesForRepositoryRequest defines the request when listing variables
+// specifically for a repository.
+message ListVariablesForRepositoryRequest {
+  // The repository whose variables is being requested with their owner.
+  RepositoryWithOwner repository = 1;
+
+  // The global id of integration the variables belong to.
+  string integration_global_id = 2;
+
+  // Include the value or not.
+  bool include_value = 3;
+
+  // Any environments for the repository
+  repeated VariableOwner environments = 4;
+
+  // If the repository is private or not.
+  bool is_private = 5;
+
+  // Include truncated value
+  bool include_truncated_value = 6;
+
+  // Include all variable names, helpful for batching fetch
+  bool include_remaining_variable_names = 7;
+}
+
+// ListVariablesForRepositoryResponse defines the response when listing
+// variables for a repository.
+message ListVariablesForRepositoryResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // Any variables specifically for the repository.
+  repeated Variable repository_variables = 2;
+
+  // Any variables specifically for the organization.
+  repeated Variable organization_variables = 3;
+
+  // Any variables specifically for the repository's environments.
+  repeated Variable environment_variables = 4;
+
+  // Any variable names specifically for the repository, doesn't include fetched vars
+  repeated string remaining_repo_var_names = 5;
+
+  // Any variable names specifically for the organization, doesn't include fetched vars
+  repeated string remaining_org_var_names = 6;
+}
+
+// ListByNamesForRepoRequest defines request for listing particular vars for repository
+message ListByNamesForRepoRequest {
+  // The repo and its owner to list variables for.
+  RepositoryWithOwner repository = 1;
+  // The integration global id of the variables belong to.
+  string integration_global_id = 2;
+  // If the repository is private or not.
+  bool is_private = 3;
+  // Identifiers required to be sent in response
+  repeated string names = 4;
+}
+
+// ListByNamesForRepoResponse contains the repo/org value of vars in order of request
+message ListByNamesForRepoResponse {
+  // Any error that was encountered.
+  Error error = 1;
+  // Any variables specifically for the repository.
+  repeated Variable repository_variables = 2;
+  // Any variables specifically for the organization scoped to the request repository.
+  repeated Variable organization_variables = 3;
+}
+
+message DeleteVariablesForOwnerRequest {
+  // The owner to delete variables for.
+  VariableOwner owner = 1;
+}
+
+message DeleteVariablesForOwnerResponse {
+  int64 deleted_variables_count = 1;
+}
+
+// An owner id and a count of variables
+message VariableCount {
+  // global id of owner
+  string owner_global_id = 1;
+
+  // number of variables
+  int64 count = 2;
+}
+
+// VariableCountsRequest defines the request for getting variable counts
+// for a list of owners for a single owner type and integration
+message VariableCountsRequest {
+  // Global ids of the owners, up to 100 ids
+  repeated string owner_global_ids = 1;
+
+  // Type of the owners
+  string owner_type = 2;
+
+  // The global id of integration the variables belong to.
+  string integration_global_id = 3;
+}
+
+// VariableCountsResponse contains a list of owner ids and their associated
+// variable count
+message VariableCountsResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // Owner global ids and their associated count
+  repeated VariableCount variable_counts = 2;
+}
+
+// RepositoryWithOwner is a pairing of a repository and its owner.
+message RepositoryWithOwner {
+  // The repository that is being requested.
+  Repository repository = 1;
+
+  // Owner is the owner of the repository, should be a User or Organization
+  VariableOwner owner = 2;
+}
+
+// ListOrganizationVariablesForRepositoryRequest defines the request when listing organization variables for a repository.
+message ListOrganizationVariablesForRepositoryRequest {
+  // The repository whose variables are being requested with their owner.
+  RepositoryWithOwner repository = 1;
+
+  // The global id of integration the variables belong to.
+  string integration_global_id = 2;
+
+  // Include truncated value
+  bool include_truncated_value = 3;
+
+  // If the repository is private or not.
+  bool is_private = 4;
+
+  // The numbers of variables per call.
+  int64 per_page = 5;
+
+  // The page number of the variables to list.
+  int64 page = 6;
+}
+
+// ListOrganizationVariablesForRepositoryByNamesRequest defines the request when listing organization variables for a repository.
+message ListOrganizationVariablesForRepositoryByNamesRequest {
+  // The repository whose variables are being requested with their owner.
+  RepositoryWithOwner repository = 1;
+
+  // The global id of integration the variables belong to.
+  string integration_global_id = 2;
+
+  // If the repository is private or not.
+  bool is_private = 3;
+
+  // Identifiers required to be sent in response
+  repeated string names = 4;
+}
+
+// ListOrganizationVariablesForRepositoryByNamesResponse defines the response when listing organization variables for a repository.
+message ListOrganizationVariablesForRepositoryByNamesResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // The organization variables visible to the repository.
+  repeated Variable organization_variables = 2;
+}
+
+// ListOrganizationVariablesForRepositoryResponse defines the response when listing organization variables for a repository.
+message ListOrganizationVariablesForRepositoryResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // The organization variables visible to the repository.
+  repeated Variable organization_variables = 2;
+
+  // Total count of organization variables visible to the repository.
+  int64 total_count = 3;
+}
+
+// ListVariablesForOwnersRequest defines the request when listing variables for a list of owners
+message ListVariablesForOwnersRequest {
+  // The owners to list variables for
+  repeated VariableOwner owners = 1;
+
+  // The integration global id of the variables belong to.
+  string integration_global_id = 2;
+
+  // Include truncated value
+  bool include_truncated_value = 3;
+
+  // The numbers of variables per call.
+  int64 per_page = 4;
+
+  // The page number of the variables to list.
+  int64 page = 5;
+}
+
+// ListVariablesForOwnersResponse defines the response when listing variables for a list of owners
+message ListVariablesForOwnersResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // The variables for the owners.
+  repeated Variable variables = 2;
+
+  // Total count of variables for the owners.
+  int64 total_count = 3;
+}

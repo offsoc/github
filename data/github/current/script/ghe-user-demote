@@ -1,0 +1,49 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-user-demote <username> [options]
+#/
+#/ This utility demotes the given user from site admin.
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -f, --force        Force demotion if site admin role is
+#/                      externally managed
+
+if ARGV.empty? || ARGV.include?("--help") || ARGV.include?("-h")
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+require_relative "../config/environment"
+
+force_demote = false
+force_demote = true if ARGV.include?("--force") || ARGV.include?("-f")
+
+if GitHub.site_admin_role_managed_externally?
+  puts "The site admin role is managed through your external Identity Provider."
+
+  if GitHub.auth.ldap?
+    puts "To completely demote the user, you must also remove them from your LDAP admin group: #{GitHub.ldap_admin_group}."
+  elsif GitHub.auth.saml?
+    puts "To completely demote the user, they must also be demoted in your SAML Identity Provider."
+  end
+
+  unless force_demote
+    abort "Use the -f flag to override and demote the user anyway."
+  end
+end
+
+username = ARGV.first
+
+unless user = User.find_by_login(username)
+  abort "User not found: #{username}"
+end
+
+unless user.site_admin?
+  abort "User #{username} is not a site admin."
+end
+
+user.revoke_privileged_access "demoted via ghe-user-demote"
+
+puts "User #{username} demoted from site admin. Use ghe-user-promote to reverse this action."
+
+# vim: set syntax=ruby:

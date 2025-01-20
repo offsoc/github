@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run a command in the app's docker environment.
+
+set -e
+
+[ -f /etc/inside-container ] && exec "$@"
+
+tag=$(git hash-object Dockerfile | cut -c1-9)
+
+# auto-bootstrap if the hydro-client-ruby image isn't available
+if [ ! $(which docker) ] || [ -z "$(docker images -q hydro-client-ruby:${tag})" ]; then
+  echo "hydro-client-ruby:${tag} docker image not found, bootstrapping..."
+  script/bootstrap
+fi
+
+appdir=$(cd "$(dirname "$0")/.." && pwd)
+if [ "$(uname -s)" = "Darwin" ]; then
+  # docker for mac runs as the user already, so no file ownership issues
+  exec docker run -t -i --rm -v "$appdir:/hydro-client-ruby" hydro-client-ruby:${tag} "$@"
+else
+  # On linux, where docker runs as root, run insead with the current user as uid
+  # but with "staff" as group so files in /usr/local/bin are still executable.
+  # This is a little weird with an interactive shell in the docker container
+  # when a corresponding user in the container doesn't exist, so only run it
+  # this way for linux.
+  exec docker run -t -i --rm -u "$(id -u):50" -v "$appdir:/hydro-client-ruby" hydro-client-ruby:${tag} "$@"
+fi

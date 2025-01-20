@@ -1,0 +1,50 @@
+#!/usr/bin/env ruby
+# GHE script to select networks that we should restore.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one network_path per line, something like:
+#
+# a/nw/a8/3f/02/100000855
+# a/nw/a8/bc/8d/100000880
+# a/nw/a5/06/81/100000659
+# a/nw/a5/84/6f/100000708
+# a/nw/a5/e0/01/146
+# ...
+#
+# Outputs each network_path that exists in repository_networks or
+# archived_repository_networks.
+#
+# frozen_string_literal: true
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+
+GitHub.load_activerecord
+
+def skip_active_networks?
+  !!ENV["SKIP_ACTIVE_NETWORKS"]
+end
+
+def network_exists?(network_id)
+  ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql("SELECT 1 FROM repository_networks WHERE id=:id LIMIT 1", id: network_id)).present?
+end
+
+def process(network_path)
+  network_id = network_path.split("/").last.to_i
+
+  if network_exists?(network_id)
+    return if skip_active_networks?
+  else
+    # Exit to prevent networks created after the MySQL dump, but before the repo rsync
+    # from being restored. See github/enterprise2#7623
+    return
+  end
+
+  puts network_path
+end
+
+while line = $stdin.gets
+  process(line.chomp)
+end

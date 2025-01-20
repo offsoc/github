@@ -1,0 +1,52 @@
+#!/bin/bash
+
+#/ Usage: script/notifyd-server <option>
+#/
+#/ Runs the notifyd api server.
+#/
+#/ Options:
+#/ --dev      Run the notifyd server in Development mode
+#/ --test     Run the notifyd server in Test mode (default) Detect if the current runtime is ENTERPRISE
+RAILS_ROOT_PATH=$([[ "$RAILS_ROOT" != "" ]] && echo "$RAILS_ROOT" || echo "$(pwd)")
+if [[ "$(cat ${RAILS_ROOT_PATH}/tmp/runtime/current 2>/dev/null)" == "enterprise" ]]
+then
+  export ENTERPRISE=1
+  echo "notifyd does not run on enterprise mode"
+fi
+
+start_notifyd () {
+    script/build-subproject notifyd || exit 1
+    NOTIFYD_BIN="vendor/notifyd/bin/api"
+    until [ -x $NOTIFYD_BIN ]; do
+        sleep 10
+    done
+
+    cd vendor/notifyd || exit 1
+
+    echo "Loading env variables"
+    export $(cat .env |grep -v "\#" | xargs)
+    echo "Loading additional env variables"
+    source ./dotcom-codespaces-development/.env
+    echo $NOTIFYD_API_ADDR
+
+    echo "Migrating notifyd cluster"
+    skeema_profile=development GO111MODULE=on go run -mod=vendor ./cmd/migrate
+
+    ./bin/api
+}
+
+notifyd_dummy_start () {
+    # dummy start notifyd when notifyd is not enabled
+    echo "Notifyd dummy start"
+    while true
+    do
+    sleep 1
+    done
+}
+
+if [[ "${NOTIFYD_ENABLED}" == 1 && -z "${ENTERPRISE}" || ${RAILS_ENV} != "test" ]]; then
+   start_notifyd
+else
+   notifyd_dummy_start
+fi
+

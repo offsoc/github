@@ -1,0 +1,247 @@
+#!/bin/bash
+#/ Usage: ghe-setup-external-mysql -u <username> -p <password> -a <address> -P <port>
+#/
+#/ Setup GHES to use external MySQL database. Note that this assumes database has been
+#/ already restored to an external MySQL host which is correctly configured.
+#/
+#/ OPTIONS:
+#/   -u <username> | --username <username>  External MySQL user
+#/   -p <password> | --password <password>  External MySQL password
+#/   -a <address> | --address  <address>    External MySQL host name or IP
+#/   -P <port> | --port  <port>             External MySQL port
+#/   -h | --help                            Help
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+hostname=$(ghe-config core.github-hostname)
+uuid=$(cat /data/user/common/uuid)
+
+username=
+password=$MYSQL_PWD
+address=
+port=
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long username:,password:,address:,port:,help --options u:p:a:P:h -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -u|--username)
+      username=$2
+      shift
+      ;;
+    -p|--password)
+      password=$2
+      shift
+      ;;
+    -a|--address)
+      address=$2
+      shift
+      ;;
+    -P|--port)
+      port=$2
+      shift
+      ;;
+    --)
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$1" ] || [ -z "$username" ] || [ -z "$password" ] || [ -z "$address" ] || [ -z "$port" ]; then
+  usage
+  exit 2
+fi
+
+message() {
+  echo "${1}" | ts
+}
+
+error_message() {
+  (>&2 echo "${1}") | ts
+}
+
+on_error() {
+  error_message "ghe-setup-external-mysql failed. Please contact support for help."
+}
+
+remove_ghe_config() {
+  if ghe-config $1 > /dev/null ; then
+    ghe-config --unset $1
+  fi
+}
+
+trap on_error ERR
+
+# Check maintenance mode is set
+if ! ghe-maintenance -q > /dev/null ; then
+  error_message "Maintenance mode not set, please set GHES to maintenance mode"
+  exit 2
+fi
+
+# Check connection to external MySQL
+message "Checking connection to MySQL"
+MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise -e 'SELECT 1+1' > /dev/null
+
+# Check github_enterprise database permission for external MySQL user
+message "Checking github_enterprise database permission for $username"
+mysql_user_permission=$(MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise -e "SHOW GRANTS;")
+
+# Azure requires usersnames in the format of `user@server`. These are proxied to the server as `username` requiring us to trim the server component.
+if echo "$username" | grep -q '@'; then
+  mysql_user=$(echo "$username" | cut -d '@' -f1)
+else
+  mysql_user=$username
+fi
+
+grep -q "GRANT ALL PRIVILEGES ON .github_enterprise.\.\* TO .$mysql_user.@" <<< "$mysql_user_permission" || {
+  echo "ERROR: MySQL User: $mysql_user should have ALL privileges on github_enterprise database" >&2
+  exit 1
+}
+
+# Check if active DB replica is used, all required fields are set, and can connect to DB
+replicas=$(ghe-config --get-regexp cluster.*.active-replica-server || true)
+if [ -n "$replicas" ]; then
+  # Loop for more than 1 replica
+  while IFS= read -r replica_server_string; do 
+    if $(echo -n "$replica_server_string" | cut -d" " -f2) = "true"; then
+      hostname=$(echo -n "$replica_server_string" | cut -d'.' -f2)
+      datacenter=$(ghe-config --get-regexp cluster.${hostname}.datacenter | cut -d" " -f2)
+
+      cluster_external_mysql_replica_found=false
+      cluster_external_mysql_list=$(ghe-config --get-regexp cluster-external-mysql.*.datacenter)
+      if [ -n "$cluster_external_mysql_list" ]; then
+        while IFS= read -r cluster_external_mysql; do
+          mysql_datacenter=$(echo -n "$cluster_external_mysql" | cut -d" " -f2)
+          # Match with corresponding datacenter. Ex: cluster-external-mysql.replica-on-offsite-dc.datacenter offsite
+          if [ "$mysql_datacenter" == "$datacenter" ]; then 
+            cluster_external_mysql_replica_found=true
+            # this extracts: replica-on-offsite-dc from cluster-external-mysql.replica-on-offsite-dc.datacenter 
+            replica_name=$(echo -n "$cluster_external_mysql" | cut -d'.' -f2) 
+            if ! ghe-config --exists cluster-external-mysql.${replica_name}.address; then
+              error_message "Please set address for ${replica_name} in cluster.conf"
+              exit 2
+            fi
+            if ! ghe-config --exists cluster-external-mysql.${replica_name}.port; then
+              error_message "Please set port for ${replica_name} in cluster.conf"
+              exit 2
+            fi
+            replica_port=$(ghe-config "cluster-external-mysql.${replica_name}.port")
+            replica_address=$(ghe-config "cluster-external-mysql.${replica_name}.address")
+
+            message "Checking connection to MySQL"
+            MYSQL_PWD="$password" mysql --user "$username" --host="$replica_address" --port="$replica_port" github_enterprise -e 'SELECT 1+1' > /dev/null
+          fi
+        done <<< "$cluster_external_mysql_list"
+      fi
+      if [ "$cluster_external_mysql_replica_found" == "false" ]; then
+        error_message "Please set external read replica endpoint for the ${datacenter} in cluster.conf (start with cluster-external-mysql "endpoint-name")"
+        exit 2
+      fi
+
+    fi
+  done <<< "$replicas"  
+  # done with external replica checks
+fi
+
+# Check if the database has previously been used as an external GHE database
+previously_configured=false
+MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise -e 'DESCRIBE external_database_configuration_log' > /dev/null 2>&1 && previously_configured=true || previously_configured=false
+
+# If previously configured, prompt user to confirm the configuration
+if $previously_configured; then
+  last_config=$(echo "SELECT hostname, server_uuid, configured_at FROM external_database_configuration_log LIMIT 1;" | MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise -N)
+  last_config_hostname=$(echo "$last_config" | awk -F '\t' '{ print $1 }')
+  last_config_uuid=$(echo "$last_config" | awk -F '\t' '{ print $2 }')
+  last_config_datetime=$(echo "$last_config" | awk -F '\t' '{ print $3 }')
+
+  echo "MySQL server '$address' has previously been used as an external GitHub Enterprise database."
+  echo "Last configuration by '$last_config_hostname' (UUID: '$last_config_uuid') at '$last_config_datetime'"
+  echo
+  echo "Configuring multiple GitHub Enterprise installations with a shared database can lead to data integrity issues."
+  echo "Please confirm this database is NOT currently in use before proceeding."
+  echo
+  read -p "Proceed with configuration? [y/N] " -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+# Set configuration settings
+message "Configure external MySQL settings"
+ghe-config mysql.external.enabled true
+ghe-config mysql.external.username "$username"
+ghe-config mysql.external.address "$address"
+ghe-config mysql.external.port "$port"
+ghe-config secrets.external.mysql "$password"
+ghe-config --unset mysql.backup.binary || true
+
+# Unset local mysql password ("|| true" to make it re-runable)
+message "Unset mysql secrets"
+remove_ghe_config secrets.mysql
+
+if [ -f /etc/github/cluster ]; then
+  message "Unset mysql-master"
+  remove_ghe_config cluster.mysql-master
+  # mysql-username is not necessarily set
+  remove_ghe_config cluster.mysql-username
+
+  hosts=$(ghe-config --get-regexp cluster.*.hostname)
+  # unset mysql-server role
+  message "Clear mysql-server roles"
+  for hostname in $hosts; do
+    if ghe-config --true "cluster.$hostname.mysql-server" ; then
+      remove_ghe_config "cluster.$hostname.mysql-server"
+    fi
+  done
+
+fi
+
+message "Disabling binary backups by setting configuration value mysql.backup.binary to false"
+ghe-config mysql.backup.binary false
+
+# Check config and run config apply
+message "Running ghe-config-apply"
+ghe-config-apply
+
+# Check local MySQL is inactive
+message "Verify bundled MySQL is inactive"
+if systemctl is-active mysql > /dev/null ; then
+  error_message "Error: bundled MySQL is still active"
+  exit 2
+fi
+
+# Clean up orchestrator consul kv
+if consul kv get mysql/master/ghe/hostname >/dev/null 2>&1 ; then
+  consul kv delete -recurse mysql/master/ghe >/dev/null || true
+fi
+
+# Create the configuration log table
+echo "
+CREATE TABLE IF NOT EXISTS external_database_configuration_log (
+  hostname varchar(255) NOT NULL,
+  server_uuid varchar(36) NOT NULL,
+  configured_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+" | MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise > /dev/null
+
+# Create the records for this database configuration
+echo "
+INSERT INTO external_database_configuration_log (hostname, server_uuid) VALUES ('$hostname', '$uuid');
+" | MYSQL_PWD="$password" mysql --user "$username" --host="$address" --port="$port" github_enterprise > /dev/null
+
+message "External MySQL setup is done. Please verify and unset maintenance mode, and clean up bundled MySQL directory."

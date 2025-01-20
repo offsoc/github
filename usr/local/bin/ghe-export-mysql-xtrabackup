@@ -1,0 +1,118 @@
+#!/bin/sh
+#/ Usage: ghe-export-mysql-xtrabackup [-h]
+#/
+#/ Export all MySQL data, which includes users, commit comments, pull requests,
+#/ issues, etc. The data is streamed as plain text to STDOUT.
+#/ On a cluster setup the export is run from a mysql replica node in the same DC,
+#/ while for HA & standalone instances it defaults to the primary node.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -l | --local     Generate MySQL backup locally
+#/
+#/ EXAMPLE:
+#/
+#/  Export the MySQL data to a file:
+#/    $ ghe-export-mysql > dump-file
+#/
+#/  Transfer the MySQL data from the current appliance to another:
+#/    $ ghe-export-mysql | ssh -p 122 admin@[hostname] -- ghe-import-mysql
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" | cut -c 4-
+  exit 2
+fi
+
+# Parse parameter
+if [ "$1" = "--local" ] || [ "$1" = "-l" ]; then
+  LOCAL_MYSQL=1
+fi
+
+ssh=
+sudo=sudo
+
+options="--backup --defaults-group=mysql --open-files-limit=1048576 --tmpdir=/data/user/tmp"
+
+
+$sudo mkdir -p /var/log/xtrabackup
+$sudo chown -R admin:admin /var/log/xtrabackup
+
+LOG_FILE=/var/log/xtrabackup/xtrabackup-export.log
+COMMON_LOG_FILE=/data/user/common/xtrabackup-export.log
+
+# Change the log path when running from CI as the BUILD user.
+if [ -f "$COMMON_LOG_FILE" ]; then
+  LOG_FILE=$COMMON_LOG_FILE
+fi
+
+message() {
+  (echo >&2 "${1}")
+}
+
+if [ -f /etc/github/cluster ] && [ -z "$LOCAL_MYSQL" ] ; then
+  # For HA, allow customer to specify a replica to run MySQL backup
+  if [ "$(ghe-config cluster.ha)" = "true" ] && [ -n "$(ghe-config mysql.backup.replica)" ] ; then
+    node=$(ghe-config mysql.backup.replica)
+    if [ -z "$(ghe-config cluster.${node}.hostname)" ] ; then
+      message "Backup node mysql.backup.replica $node does not exist in cluster config！"
+      exit 3
+    fi
+    message "-- Running MySQL Backup from replica: $node"
+    ssh="ssh -p 122 admin@$node -- "
+  else
+    mysql_master="$(ghe-config cluster.mysql-master)"
+    if [ "$(ghe-config cluster.ha)" = "true" ] ; then
+      local_host="$(cat /etc/github/cluster)"
+      if [ "$local_host" != "$mysql_master" ]; then
+        message "-- MySQL Master: $mysql_master"
+        ssh="ssh -p 122 admin@$mysql_master -- "
+      fi
+    else
+      # For cluster use replica node within the same datacenter for backups
+      mysql_master_dc="$(ghe-config cluster.${mysql_master}.datacenter || true)"
+      if [ -z "$mysql_master_dc" ]; then
+        mysql_nodes="$(ghe-cluster-nodes -r mysql)"
+      else
+        mysql_nodes="$(ghe-cluster-nodes -d $mysql_master_dc -r mysql)"
+      fi
+      for node in $mysql_nodes; do
+        # Check if current node is not primary
+        if [ "$node" != "$mysql_master" ]; then
+        message "-- MySQL Master: $mysql_master, Backing up: $node"
+        ssh="ssh -p 122 admin@$node -- "
+        break
+        fi
+      done
+    fi
+  fi
+fi
+
+mysql_version=$(echo "SELECT version();" | $ssh $sudo mysql -s)
+if [ "${mysql_version%%.*}" = "8" ]; then
+  options="${options} --stream=xbstream --compress --extra-lsndir=/tmp/lsndir"
+
+# If incremental backup environment variables are passed when this program is called,
+# perform an incremental backup if INC_BACKUP is set
+if [ "$INC_BACKUP" ]; then
+  # create lsndir or clean it out if it already exists
+  if [ -d /tmp/lsndir ]; then
+    $sudo rm -rf /tmp/lsndir/*
+  else
+    $sudo mkdir -p /tmp/lsndir
+  fi
+# Indicates that this backup is a "full" base one to be used for the incremental backups.
+  if [ "$INC_BACKUP" -eq 0 ]; then
+    options="${options}" 
+  else
+    options="${options} --incremental-lsn=${INC_BACKUP} --parallel=32"
+  fi
+fi
+  $ssh $sudo xtrabackup8 $options 2>$LOG_FILE
+else
+  options="${options} --safe-slave-backup --stream=tar"
+
+  $ssh $sudo xtrabackup $options 2>$LOG_FILE | pigz -f
+fi

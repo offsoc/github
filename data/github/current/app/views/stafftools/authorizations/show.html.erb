@@ -1,0 +1,141 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% page_info title: "Application Authorizations" %>
+
+<% if authorization.integration_application_type? %>
+  <% page_info selected_link: :authorized_github_apps %>
+<% else %>
+  <% page_info selected_link: :authorized_oauth_apps %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(mb: 3, padding: :condensed)) do |component| %>
+  <% component.with_header do %>
+    <div class="Box-title">Application Authorization</div>
+  <% end %>
+
+  <% component.with_body do %>
+    <div class="clearfix summary m-0">
+      <dl>
+        <dt>ID</dt>
+        <dd>
+          <%= authorization.id %>
+          &ndash;
+          <%= stafftools_selected_link_to "Search audit logs",
+            stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where data.oauth_authorization_id == '#{authorization.id}'" : "data.oauth_authorization_id:#{authorization.id}") %>
+        </dd>
+      </dl>
+
+      <dl>
+        <dt>Application</dt>
+        <dd>
+          <% if authorization.integration_application_type? %>
+            <%= link_to application.name, stafftools_user_app_path(application.user, application) %>
+          <% else %>
+            <%= link_to application.name, stafftools_user_application_path(application.user, application) %>
+          <% end %>
+        </dd>
+      </dl>
+
+      <dl>
+        <dt>Created</dt>
+        <dd><%= authorization.created_at %></dd>
+      </dl>
+
+      <dl>
+        <dt>Last access</dt>
+        <dd>
+          <% if authorization.accessed_at %>
+            within <%= distance_of_time_in_words(OauthAuthorization::ACCESS_THROTTLING) %> of <%= authorization.accessed_at %>
+          <% else %>
+            never
+          <% end %>
+        </dd>
+      </dl>
+
+      <% if authorization.oauth_application_authorization? %>
+        <dl>
+          <dt>Scopes</dt>
+          <dd><%= authorization.scopes.try(:any?) ? authorization.scopes.to_sentence : "none" %></dd>
+        </dl>
+
+        <dl>
+          <dt>Access level</dt>
+          <dd><%= descriptions_for_scopes(authorization.scopes).join ", " %></dd>
+        </dl>
+      <% end %>
+
+      <dl>
+        <dt>Public keys</dt>
+        <dd><%= authorization.public_keys.count %></dd>
+      </dl>
+    </div>
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(mb: 3, padding: :condensed)) do |component| %>
+  <% component.with_header do %>
+    <div class="Box-title">Tokens</div>
+  <% end %>
+
+  <% if accesses.any? %>
+    <%= render partial: "stafftools/authorizations/access", collection: accesses, locals: { component: component } %>
+  <% else %>
+    <% component.with_body do %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          No tokens found
+        <% end %>
+
+        <% c.with_description do %>
+          This user doesn't appear to have an tokens for this authorization.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<div class="paginate-container">
+  <%= will_paginate accesses %>
+</div>
+
+<%= render(Primer::Beta::Subhead.new(hide_border: true)) do |component| %>
+  <% component.with_heading(tag: :h3, danger: true) do %>
+    Danger zone
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(border_color: :danger, mb: 3)) do |component| %>
+  <% component.with_row(display: :flex, justify_content: :center) do %>
+    <div class="flex-auto">
+      <strong>Revoke</strong>
+      <div class="text-small color-fg-muted">
+        Revoke access for this application
+      </div>
+    </div>
+
+    <%= render layout: "shared/details_dialog", locals: { button_text: "Revoke", button_class: "btn btn-danger", title: "Revoke access?" } do %>
+      <% form_path = authorization.integration_application_type? ? stafftools_user_app_authorization_path(this_user, application) : stafftools_user_application_authorization_path(this_user, application) %>
+
+      <%= form_tag form_path, method: :delete do %>
+        <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+          <%= render(Primer::Alpha::Banner.new(scheme: :warning, full: true)) do %>
+            Woah there! This action cannot be undone.
+          <% end %>
+        <% else %>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning, full: true)) do %>
+            Woah there! This action cannot be undone.
+          <% end %>
+        <% end %>
+
+        <div class="m-3">
+          <p class="mb-4">
+            <strong><%= application.name %></strong> will no longer
+            have access to <strong>@<%= this_user %></strong>’s data unless
+            the user re-authorizes the app to grant it access.
+          </p>
+
+          <%= render(Primer::ButtonComponent.new(block: true, scheme: :danger, type: :submit)) { "Revoke authorization" } %>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

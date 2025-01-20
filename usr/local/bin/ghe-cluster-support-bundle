@@ -1,0 +1,258 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-support-bundle [options]
+#/
+#/ Iterates over all the nodes in the cluster and grabs the support bundle (in parallel).
+#/
+#/ OPTIONS:
+#/   -h | --help                  Print help.
+#/   -x | --extended              Extended bundle.
+#/   -p | --period                Specify the duration in hours/days to collect logs for support bundle. Eg. '1day', '2hours'
+#/   -l | --num-jobs              Limit number of jobs to run in parallel at once.
+#/   -o | --out                   Write the bundle to stdout.
+#/   -u | --upload                Upload bundle to Enterprise Support.
+#/   -c | --compress              Compress the outer cluster bundle.
+#/   -n | --no-async              Disable backgrounding of psed log sanitization.
+#/   -r <role> | --role <role>    Generate bundles only on hosts that provide a matching role.
+#/   -t <id> | --ticket <id>      Upload bundle to Enterprise Support with a ticket id.
+#/
+# Logs from offline (i.e. reachable and maybe fully operational but not
+# receiving requests) nodes are also collected because an offline node could
+# be a node that needs to be repaired and we may need the logs to troubleshoot it.
+#
+# Proxies ghe-support-bundle so any argument supported by that is also
+# supported by this tool.
+# Some ghe-support-bundle arguments (-h, -u, -t) are handled here instead
+# of being sent to the remote script.
+#
+# The cluster bundle is a tarball that includes individual bundles from each node.
+# It also logs the nodes we fail to collect logs from, if any.
+#
+# The tarball filename looks something like (when not using -o):
+#
+#     /data/user/tmp/github-cluster-support-bundle-20150827154319.tar
+#
+# The bundle (when unpacked) looks something like:
+#
+#    enterprise-cluster-support-bundle/
+#    enterprise-cluster-support-bundle/ghe-aws-app2.tar.gz
+#    enterprise-cluster-support-bundle/ghe-aws-db2.tar.gz
+#    enterprise-cluster-support-bundle/ghe-aws-app1.tar.gz
+#    enterprise-cluster-support-bundle/ghe-aws-db1.failed
+#    enterprise-cluster-support-bundle/ghe-aws-app3.tar.gz
+#    enterprise-cluster-support-bundle/ghe-aws-db3.failed
+#
+# <hostname>.failed files means support bundle collection failed for that node
+# and the stderr output will be included there, if any.
+#
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-support-lib
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+ssh_node(){
+  local ip=$1
+  shift
+
+  # Always SSH as the 'admin' user so that the SSH keys are available
+  sudo -u admin ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+             -oStrictHostKeyChecking=no "admin@$ip" "$@"
+}
+
+cleanup(){
+  kill -9 $(jobs -p) 2> /dev/null || true
+
+  if [ -d $TARBALLS_DIR ]; then
+    rm -rf $TARBALLS_DIR
+  fi
+  if [ -n "$UPLOAD" ] && [ -n "$TARBALL_PATH" ] && [ -z "$MANUAL_UPLOAD" ]; then
+    rm -f "$TARBALL_PATH.gz"
+  fi
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,out,upload,compress,period:,num-jobs:,compress-program:,ticket:,role:,extended,no-async --options houcp:l:I:t:r:x:n -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -o|--out)
+      TARBALL_PATH="-"
+      ;;
+    -u|--upload)
+      UPLOAD=1
+      ;;
+    -c|--compress)
+      COMPRESS=1
+      ;;
+    -t|--ticket)
+      UPLOAD=1
+      TICKET_ID=$2
+      shift
+      ;;
+    -x|--extended)
+      EXTENDED=1
+      ;;
+    -p|--period)
+      PERIOD="$2"
+      shift
+      ;;
+    -l|--num-jobs)
+      NUM_JOBS="$2"
+      shift
+      ;;
+    -n|--no-async)
+      NO_ASYNC=1
+      ;;
+    -I|--compress-program)
+      COMPRESS_PROGRAM="$2"
+      shift
+      ;;
+    -r|--role)
+      export MATCH_ROLE=$2
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+export LC_ALL=en_US.UTF-8
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+# Run the NES cluster health check, will not run if NES is disabled
+/usr/local/bin/ghe-nes-cluster-health-check || true
+
+if [ -n "$UPLOAD" ] && ! check_connectivity; then
+  if ! prompt_manual_upload; then
+    exit
+  fi
+  MANUAL_UPLOAD=1
+fi
+
+TARBALLS_DIR=${TARBALLS_DIR:-"$TMP_DIR/enterprise-cluster-support-bundle"}
+TARBALL_PATH=${TARBALL_PATH:-$(mktemp -p "$TMP_DIR" "$(ghe-config --get core.github-hostname | tr -d '\n' | tr -sc '[:alnum:]' '-')_$(date +%Y%m%d-%H%M)_cluster-bundle-XXXX.tar")}
+
+message "Creating bundle '$TARBALL_PATH'..."
+
+# Cleanup previous invocations in case the trap didn't work
+cleanup
+mkdir -p "$TARBALLS_DIR"
+trap cleanup EXIT
+
+hosts=$(ghe-cluster-nodes)
+hostnames=""
+local_host=$(cat /etc/github/cluster)
+
+# exit if -p value does not include day(s) or hour(s)
+if [ -n "$PERIOD" ] && [[ ! $PERIOD =~ (day|days|hour|hours) ]]; then
+  echo "Unable to parse -p|--period value. If the duration value has space in it please remove it (Eg. -p '8 days' -> -p 8days)." >&2
+  exit 1
+fi
+
+sb_args="-o"
+if [ -n "$EXTENDED" ]; then
+  sb_args="$sb_args -x"
+fi
+
+if [ -n "$PERIOD" ]; then
+  sb_args="$sb_args -p $PERIOD"
+fi
+
+if [ -n "$NUM_JOBS" ]; then
+  sb_args="$sb_args -l $NUM_JOBS"
+fi
+
+if [ -n "$NO_ASYNC" ]; then
+  sb_args="$sb_args -n"
+fi
+
+# pass thru any -I/--compress-program argument to every node
+# TODO: support quotied -I arguments (i.e. "zstd -T0")
+if [ -n "$COMPRESS_PROGRAM" ]; then
+  sb_args="$sb_args -I $COMPRESS_PROGRAM"
+fi
+
+for hostname in $hosts; do
+  echo "$hostname" | grep -q ".hostname" && continue
+  ip=
+  if [ -n "$(ghe-config cluster.$hostname.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv6")
+  elif [ -n "$(ghe-config cluster.$hostname.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv4")
+  fi
+  hostnames="$hostnames $hostname=$ip"
+
+  message "Collecting a support bundle from: $hostname"
+  if [ "$hostname" != "$local_host" ]; then
+    # Background the support bundle collection task
+    (
+      # grab start time
+      start=$(date +%s.%N)
+      ssh_node $ip ghe-support-bundle $sb_args \
+          > $TARBALLS_DIR/$hostname.tar.gz \
+          2> $TARBALLS_DIR/$hostname.errors || {
+
+        message "ERROR: failed to retrieve support bundle from $hostname"
+        # if we failed to collect node bundle, create a .failed
+        # node file including stderr (if any).
+        if [ -f $TARBALLS_DIR/$hostname.errors ]; then
+          mv $TARBALLS_DIR/$hostname.errors $TARBALLS_DIR/$hostname.failed
+        fi
+        touch $TARBALLS_DIR/$hostname.failed
+      }
+      stop=$(date +%s.%N)
+      # use python because bc is not on the appliance
+      duration=$(python3 -c "print($stop - $start)")
+      execution_time=$(printf "%.2f seconds" "$duration")
+      message "Script Execution Time for $hostname: $execution_time"
+    ) &
+  else
+    # grab start time
+    start=$(date +%s.%N)
+    ghe-support-bundle $sb_args > $TARBALLS_DIR/$local_host.tar.gz &
+    stop=$(date +%s.%N)
+    # use python because bc is not on the appliance
+    duration=$(python3 -c "print($stop - $start)")
+    execution_time=$(printf "%.2f seconds" "$duration")
+    message "Script Execution Time for $(hostname): $execution_time"
+  fi
+done
+ghe-cluster-status -j 2>$TARBALLS_DIR/cluster_status.errors >$TARBALLS_DIR/cluster_status.json &
+
+wait
+
+message "Saving support bundle to '$TARBALL_PATH'..."
+nice -n 19 tar --acls -chf $TARBALL_PATH --ignore-failed-read -C "$(dirname $TARBALLS_DIR)" "$(basename $TARBALLS_DIR)"
+
+[ -z "$UPLOAD" ] || {
+  # If COMPRESS is set, compress the tarball
+  if [ -n "$COMPRESS" ]; then
+    message "Compressing cluster support bundle for upload..."
+    gzip $TARBALL_PATH
+    TARBALL_PATH="$TARBALL_PATH.gz"
+    FILE_DESCRIPTION="Cluster Support Bundle.tar.gz"
+  fi
+
+  if [ -z "$MANUAL_UPLOAD" ]; then
+    upload_file ${TICKET_ID:+--ticket="$TICKET_ID"} -d "[$(ghe-config --get core.github-hostname | tr -d '\n')] ${FILE_DESCRIPTION:=Cluster Support Bundle.tar}" "$TARBALL_PATH"
+  else
+    manual_upload_help "$TARBALL_PATH" 1 "$TICKET_ID"
+  fi
+}

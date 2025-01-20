@@ -1,0 +1,62 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+# This script hooks into the https://github.com/github/serviceowners gem
+# to validate changes before they get pushed upstream.
+#
+# There are a few env vars that can be set to control the behavior of this
+# script:
+#
+# SERVICEOWNERS_SKIP - if set to a non-empty value, this script will exit
+# SERVICEOWNERS_SKIP_VALIDATION - if set to a non-empty value, the exhaustive validation
+#                                 of all patterns in SERVICEOWNERS will be skipped
+# SERVICEOWNERS_SKIP_MODIFIED - if set to a non-empty value, only created or deleted
+#                               paths in the push will be validated for serviceowner validity.
+
+require "serviceowners"
+
+runtime_data = { base_ref: "origin/master" }
+
+# If true, skip validating the existing patterns and mappings data. Just
+# validate the changes for the paths in the current push relative to the base.
+if ENV["SERVICEOWNERS_SKIP_VALIDATION"]
+  runtime_data[:validate_patterns] = false
+  runtime_data[:validate_mappings] = false
+  puts "Skipping pattern validation... (SERVICEOWNERS_SKIP_VALIDATION)"
+end
+
+begin
+  runtime_env = Serviceowners::RuntimeEnv.new(runtime_data)
+  main = Serviceowners::Main.new(runtime_env: runtime_env)
+  main.validate_local_changes!
+  main.validate!
+
+  validations = {}
+
+  if runtime_env.validate_patterns? || runtime_env.path_changed?("CODEOWNERS")
+    validations["CODEOWNERS"] = main.to_codeowners(1)
+  end
+  if runtime_env.validate_mappings? || runtime_env.path_changed?("ownership.yaml") || runtime_env.path_changed?("docs/index.yaml")
+    validations["ownership.yaml"] = main.to_ownership.to_yaml.to_s
+    validations["docs/index.yaml"] = main.to_service_links.to_yaml.to_s
+  end
+
+  validations.each do |file, expected_content|
+    if !File.read(file)[expected_content]
+      STDERR.puts <<~EOS
+        Generated file '#{file}' is out of sync with config/service-mappings.yaml and SERVICEOWNERS.
+        Please run bin/generate-service-files.rb to regenerate this data and then commit the results.
+
+        If you need help, please reach out in #eng-maintainership.
+      EOS
+      exit 1
+    end
+  end
+rescue Serviceowners::Error => e
+  STDERR.puts e.message
+  STDERR.puts
+  STDERR.puts "After fixing the above errors, please run bin/generate-service-files.rb to regenerate the CODEOWNERS and ownership.yaml files."
+  STDERR.puts "If you need help, please reach out in #eng-maintainership."
+  exit 1
+end
+puts "Serviceowners validation passed."

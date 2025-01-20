@@ -1,0 +1,151 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    project(number: $projectNumber) {
+      id
+      hasMaxLinkedRepositories
+      linkedRepositoriesSettingsResourcePath
+      closed
+
+      suggestedRepositoriesToLink {
+        id
+        name
+        description
+        isPrivate
+      }
+
+      linkedRepositories {
+        id
+        name
+        description
+        isPrivate
+        isArchived
+        isTemplate
+        isMirror
+        visibility
+        isStackTemplate
+      }
+    }
+
+    ...Views::ProjectSettings::Breadcrumbs::ProjectOwner
+    ...Views::ProjectSettings::Tabs::ProjectOwner
+    ...Views::ProjectSettings::SearchRepositoriesToLink::ProjectOwner
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+
+<% project_owner = Views::ProjectSettings::LinkedRepositories::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<% page_info title: "Linked repositories · Project settings" %>
+
+<%= render partial: "project_settings/breadcrumbs", locals: { project_owner: project_owner } %>
+
+<div class="d-flex flex-column flex-lg-row mt-lg-4">
+  <div class="mb-lg-0 mb-4" role="navigation"><%# erblint:disable GitHub::Accessibility::NavigationHasLabel %>
+    <%= render partial: "project_settings/tabs", locals: { project_owner: project_owner } %>
+  </div>
+
+  <div class="flex-auto">
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>Linked repositories<% end %>
+      <% component.with_actions do %>
+        <% if project.has_max_linked_repositories? || project.closed? %>
+          <%= render Primer::ButtonComponent.new(variant: :small, scheme: :primary, classes: "tooltipped tooltipped-s tooltipped-multiline", "aria-label": project.closed? ? "Link a repository" : "Maximum number of #{ pluralize(Project::MAX_REPOSITORY_LINKS, "repository") } already linked" , disabled: true) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+            Link a repository
+          <% end %>
+        <% else %>
+          <%= render layout: "shared/spacious_details_dialog", locals: {
+            id: "link-repository",
+            button_class: "btn btn-sm btn-primary",
+            button_text: "Link a repository",
+            dialog_class: " ",
+            hide_title: true,
+            title: "Link a repository",
+            ga_click: "Project, link repository, location:project linked repositories; text:Link repository"
+          } do %>
+            <%= render partial: "project_settings/search_repositories_to_link", locals: { project_owner: project_owner, project: project } %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if project.has_max_linked_repositories? && project.linked_repositories.count < Project::MAX_REPOSITORY_LINKS %>
+      <%= render Primer::Beta::Flash.new(mb: 4, classes: "flash-notice", icon: :info) do %>
+        This project has reached its limit of <%= Project::MAX_REPOSITORY_LINKS %> linked <%= "repository".pluralize(Project::MAX_REPOSITORY_LINKS) %>. This includes <%= pluralize(Project::MAX_REPOSITORY_LINKS - project.linked_repositories.count, "repository") %> that you don't have sufficient permissions to view.
+      <% end %>
+    <% end %>
+
+    <p>Get more accurate suggestions and better search results by linking up to <%= Project::MAX_REPOSITORY_LINKS %> repositories to this project.</p>
+
+    <div class="table-list-header table-list-header-next">
+      <div class="table-list-filters d-flex">
+        <span class="table-list-heading ml-0 pl-3 table-list-header-meta flex-auto">
+          <%= primer_octicon(:repo, mr: 1) %>
+          <%= project.linked_repositories.count %> linked <%= "repository".pluralize(project.linked_repositories.count) %>
+        </span>
+      </div>
+    </div>
+
+    <div>
+      <% if project.linked_repositories.any? %>
+        <ul class="table-list table-list-bordered adminable border-0">
+          <% project.linked_repositories.each do |repo| %>
+            <li class="table-list-item js-bulk-actions-item p-3 d-flex flex-items-center border-right border-left border-bottom">
+              <%= form_tag project.linked_repositories_settings_resource_path.to_s, method: :delete, class: "width-full" do %>
+                <div class="d-flex width-full">
+                  <div class="flex-auto min-width-0">
+                    <span class="f4 text-bold color-fg-default">
+                      <%= repo.name %>
+                    </span>
+                    <%= deprecated_repository_label(is_archived: repo.is_archived?, is_template: repo.is_template?, is_mirror: repo.is_mirror?, visibility: repo.visibility, is_private: repo.is_private?, is_stack_template: repo.is_stack_template?, tooltip: true) %>
+                    <div class="text-small color-fg-muted">
+                      <%= repo.description || "No description." %>
+                    </div>
+                  </div>
+                  <div class="flex-shrink-0 ml-2">
+                    <input type="hidden" name="project_repository_link[repository_global_id]" value="<%= repo.id %>">
+                    <input type="hidden" name="project_repository_link[project_global_id]" value="<%= project.id %>">
+                    <%= render Primer::ButtonComponent.new(type: :submit, classes: "flex-self-center", "aria-label": "Delete project repository link", disabled: project.closed?) do %>Unlink<% end %>
+                  </div>
+                </div>
+              <% end %>
+            </li>
+          <% end %>
+        </ul>
+      <% else %>
+        <%= render Primer::Beta::Blankslate.new do |c| %>
+          <% c.with_visual_icon(icon: "project") %>
+
+          <% c.with_heading(tag: :h2) do %>
+            This project doesn’t have any linked repositories yet.
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+
+    <% if !project.has_max_linked_repositories? && project.suggested_repositories_to_link.any? %>
+      <div class="d-flex flex-wrap flex-items-center mt-2">
+        <p class="text-bold mb-0 ml-1 mr-2 color-fg-muted f6">
+          Suggested repositories:
+        </p>
+        <% project.suggested_repositories_to_link.each do |repo| %>
+          <div class="mr-1 mb-1">
+            <%= form_tag project.linked_repositories_settings_resource_path.to_s, method: :post, class: "d-flex" do %>
+              <%= render Primer::ButtonComponent.new(variant: :small) do %>
+                <% if repo.is_private? %>
+                  <%= primer_octicon(:lock, mr: 1) %>
+                <% end %>
+                <%= repo.name %>
+                <input type="hidden" name="project_repository_link[repository_name]" value="<%= repo.name %>">
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+
+  </div>
+
+</div>

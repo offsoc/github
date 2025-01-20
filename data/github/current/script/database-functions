@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Use bt.sh for breaking down where we spend time during the build
+if [ -n "$BT_INIT" ]; then
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/vendor/bt/bt.sh"
+fi
+
+# cache this variable to avoid running uname or which more then necessary
+if [ -z "$MYSQL_PATH" ]; then
+  export MYSQL_PATH="$(which mysql)"
+fi
+
+# cache this variable to avoid querying mysql for this more than once
+if [ -z "$MYSQL_DATADIR" ]; then
+  MYSQL_DATADIR=$($MYSQL_PATH --skip-column-names --silent --user=root --execute="select @@datadir")
+  export MYSQL_DATADIR="${MYSQL_DATADIR%/}"
+fi
+
+# cache this variable to hitting the filesystem more than we have to
+if [ -z "$MYSQL_DATABASES" ]; then
+  # Don't invoke sudo if that would require a password.
+  export MYSQL_DATABASES="$(sudo -Nnv 2>/dev/null && sudo sh -c 'ls -d '${MYSQL_DATADIR}'/*/')"
+fi
+
+database_exists() {
+  # exit early if it's in our in-memory cache
+  if [ -n "$MYSQL_DATABASES" ] && echo "$MYSQL_DATABASES" | grep -q "${MYSQL_DATADIR}/$1"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+create_database() {
+  # don't shell out to mysql if the database already exists
+  database_exists "$1" && return 0
+
+  $MYSQL_PATH -u root -e "CREATE DATABASE IF NOT EXISTS $1"
+}
+
+drop_database() {
+  $MYSQL_PATH -u root -e "DROP DATABASE IF EXISTS $1"
+}
+
+table_exists() {
+  local database=${1}
+  local table=${2}
+
+  # if this file exists: the table has been created so don't shell out to mysql
+  local file_prefix="${MYSQL_DATADIR}/${database}/${table}"
+  [ -f "${file_prefix}.frm" ] && return 0
+
+  if [ "$($MYSQL_PATH -N -s -u root -e \
+        "select count(*) from information_schema.tables where table_schema = '${database}' and table_name = '${table}';")" -eq 1 ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+create_table_if_possible() {
+  local primary_database=$1
+  local database=$2
+  local table=$3
+
+  if table_exists $database $table; then
+    return 0
+  # If the table does not exist in the new database, create it and copy it from
+  # the primary database
+  elif table_exists $primary_database $table; then
+    $MYSQL_PATH -u root -e "CREATE TABLE $database.$table like $primary_database.$table"
+    $MYSQL_PATH -u root -e "INSERT INTO $database.$table SELECT * FROM $primary_database.$table"
+    return 0
+  # If the table doesn't exist in the primary database or the new database
+  # then the table is missing then only bin/setup --force can fix it.
+  else
+    echo "
+    =========================================
+
+    ERROR: The $table table does not exist in the $primary_database
+    database or the $database database.
+
+    This table is required for your dev and test environments to
+    function correctly.
+
+    Please run \`bin/setup --force\` to rebuild your database.
+
+    ========================================="
+    exit 1
+  fi
+}
+
+create_database_and_copy_tables() {
+  desc="create_database_and_copy_tables $2"
+  [ -n "$BT_INIT" ] && bt_start "$desc"
+
+  local source_database=${1}
+  shift
+  local destination_database=${1}
+  shift
+  local tables=(${@})
+
+  create_database $destination_database
+
+  for table in "${tables[@]}"; do
+    create_table_if_possible $source_database $destination_database $table
+  done
+
+  [ -n "$BT_INIT" ] && bt_end "$desc"
+
+  return 0
+}

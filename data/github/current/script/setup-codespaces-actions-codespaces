@@ -1,0 +1,91 @@
+#!/bin/bash
+set -e
+
+# This script sets up the github/actions-codespaces repository for a github/github codespace.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print help message
+help() {
+   echo "Sets up the github/actions-codespaces repository for a github/github codespace."
+   echo
+   echo "Usage: setup-codespaces-actions-codespaces [-b branch] [-d|h] "
+   echo "Options:"
+   echo "-b     Specify the actions-codespaces branch to clone. Default branch if not provided."
+   echo "-d     Before starting, delete the existing actions-codespaces directory in the codespace."
+   echo "-h     Print this help message."
+   echo
+}
+
+# Get the options
+while getopts ":b:hd" opt; do
+   case $opt in
+      h) # display help message
+         help
+         exit;;
+      b) # If a branch was provided, re-set the variable
+         BRANCH=$OPTARG;;
+      d) # Delete the repository if it exists
+         DELETE_REPO=true;;
+     :)
+      echo "Error: Option -$OPTARG requires an argument."
+      exit 1;;
+     \?) # Invalid option
+         echo "Error: Invalid option -$OPTARG"
+         exit 1;;
+   esac
+done
+
+devcontainer_name=$(jq -r '.name' /workspaces/.codespaces/shared/merged_devcontainer.json)
+if [[ "$devcontainer_name" == "Base Dotcom Development" ]]; then
+   echo -e "${RED}⚠️ Actions Setup has been disabled in the Codespace Prebuilds for this container.${NC}"
+   echo -e "${RED} As a result, continuing to run this script will take a while to complete. ${NC}\n"
+   echo -e "We recommend using the ${BLUE}Actions Development${NC} devcontainer configuration for Actions development."
+   echo -e "URL: ${BLUE}https://gh.io/new-gh-actions-codespace${NC}\n\n"
+   echo -e "Press Ctrl+C to exit, or press Enter to continue."
+   read -r
+fi
+
+REPOSITORY_PATH="/workspaces/actions/actions-codespaces"
+REPOSITORY_URL="https://github.com/github/actions-codespaces"
+
+if [ "$DELETE_REPO" = true ]; then
+  echo -e "\n${GREEN}➡️ Deleting the existing repo...\n${NC}"
+  rm -rf $REPOSITORY_PATH
+fi
+
+# Clone the repo
+# A shallow clone will break uses of extensions like GitLens
+# If a branch was supplied, use that branch for the clone.
+if [[ ! -d "$REPOSITORY_PATH/.git" ]]; then
+  CLONE_BRANCH="${BRANCH:-main}"
+  echo -e "\n${GREEN}➡️ Cloning $REPOSITORY_URL at branch $CLONE_BRANCH...\n${NC}"
+  git clone "$REPOSITORY_URL" "$REPOSITORY_PATH" --branch "$CLONE_BRANCH"
+fi
+
+( cd "$REPOSITORY_PATH"; git pull );
+
+if [ -n "$BRANCH" ]; then
+   echo -e " $BRANCH"
+   ( cd "$REPOSITORY_PATH"; git checkout "$BRANCH" );
+   ( cd "$REPOSITORY_PATH"; git pull );
+fi
+
+echo -e ""
+echo -e "${GREEN}🎉🎉 FINISHED! The actions-codespaces repo has been set up! 🎉🎉${NC}"
+echo -e ""
+
+echo "Setting up Actions"
+
+# The following lines alert-on-failure, but we do that from within the actions-codespace repo instead of gh/gh due to the log format
+/workspaces/actions/actions-codespaces/script/setup --scenario "actions-codespaces-vnext" --non-interactive
+/workspaces/actions/actions-codespaces/script/server --scenario "actions-codespaces-vnext"
+
+# Reclaims ~25 GB of space from Actions after Actions setup
+if [ "${CLEAR_ACTIONS:-true}" = "true" ]; then
+  /workspaces/actions/actions-codespaces/script/clear-actions
+fi

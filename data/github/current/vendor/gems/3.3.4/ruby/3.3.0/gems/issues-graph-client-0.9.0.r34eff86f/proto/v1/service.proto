@@ -1,0 +1,328 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "proto/v1";
+option ruby_package = "IssuesGraph::Proto";
+
+message StatusResponse {
+    bool success = 1;
+    string message = 2;
+    bool retryable = 3;
+}
+
+enum QueryType {
+    DEFAULT = 0;
+    FORCE_GRAPH = 1;
+    FORCE_DENORMALIZED = 2;
+}
+
+enum ResponseSourceType {
+    GRAPH = 0;
+    DENORMALIZED = 1;
+}
+
+// needs to be kept in sync with edgeTypes.go
+enum RelationshipType {
+    Undefined = 0;
+    Owns = 1;                   // organization owns repo
+    BelongsTo = 2;              // repo belongs to organization or user
+    Contains = 3;               // repo contains issue
+    LivesIn = 4;                // issue lives in repo
+    Tracks = 5;                 // issue tracks other issue
+    TrackedBy = 6;              // issue is tracked by other issue
+    LabeledBy = 7;              // issue is labeled with label
+    Labels = 8;                 // label is applied to issue
+    Assignee = 9;               // issue is assigned to user
+    AssignedTo = 10;            // user is assigned to issue
+    reserved 11;                // previously used for TimelineEvent relationship type
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Issue Service
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+service IssuesGraph {
+    rpc GetIssue(GetIssueRequest) returns (GetIssueResponse);
+    rpc UpdateIssue(UpdateIssueRequest) returns (StatusResponse);
+    rpc DeleteIssueFromTrackingBlock(DeleteRelationshipRequest) returns (StatusResponse);
+    rpc DeleteTrackingBlockFromIssue(DeleteRelationshipRequest) returns (StatusResponse);
+    // GetItemModifiedAt is inteded only for internal use by integration tests
+    rpc GetItemModifiedAt(GetItemModifiedAtRequest) returns (GetItemModifiedAtResponse);
+}
+
+message GetIssueRequest {
+    Key key = 1;
+    QueryType queryType = 2;
+    int64 actorId = 3;
+}
+
+message GetIssueResponse {
+    Issue issue = 1;
+    repeated TrackingBlock tracking = 3;
+    repeated TrackingBlock trackedBy = 4;
+    QueryType queryType = 5;
+    ResponseSourceType responseSourceType = 6;
+}
+
+message UpdateIssueRequest {
+    Issue issue = 1;
+}
+
+message GetItemModifiedAtRequest {
+    Key key = 1;
+    int64 vertexType = 2;
+}
+
+message GetItemModifiedAtResponse {
+    int64 modifiedAt = 1;
+}
+
+message NewRelationshipsRequest {
+    Issue from = 1;
+    repeated Issue to = 2;
+    RelationshipType type = 3;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Issue Messages
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+message PrimaryKey {
+    string uuid = 1;
+}
+
+message Key {
+    int64 ownerId = 1;
+    int64 itemId = 2;
+    PrimaryKey primaryKey = 3;
+}
+
+// NOTE: lib/models/models.go has a function that converts from the string
+// version of this enum to the int version. If you update this enum, please
+// consider updating `models.MapItemTypeStringToEnum`
+enum ItemType {
+    UNDEFINED = 0;
+    ISSUE = 1;
+    PULL_REQUEST = 2;
+    DRAFT_ISSUE = 3;
+}
+
+message Issue {
+    Key key = 1;
+    string title = 2;
+    string url = 3;
+    string state = 4;
+    string repoName = 5;
+    int64 repoId = 6;
+    string userName = 7;
+    int64 number = 8;
+    repeated Label labels = 9;
+    repeated User assignees = 10;
+    string stateReason = 11;
+    Completion completion = 12;
+    int64 position = 13;
+    int64 timestamp = 14;
+    ItemType itemType = 15;
+}
+
+message Label {
+    Key key = 1;
+    string name = 2;
+    string nameHtml = 3;
+    string url = 4;
+    string color = 5;
+    int64 repoId = 6;
+}
+
+message Completion {
+    Key key = 1;
+    int32 completed = 2;
+    int32 total = 3;
+    int32 percent = 4;
+}
+
+message User {
+    int64 id = 1;
+    string login = 2;
+    string avatarUrl = 3;
+}
+
+message IssueRelationships {
+    repeated Issue relationships = 1;
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Tracking Blocks Service
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+service TrackingBlocks {
+    rpc AddForParent(AddTrackingBlockRequest) returns (AddTrackingBlockResponse);
+    rpc UpdateByKey(UpdateTrackingBlockByKeyRequest) returns (GetTrackingBlockResponse);
+    rpc GetByParent(GetTrackingBlockRequest) returns (GetTrackingBlocksResponse);
+    rpc RemoveTrackingBlock(RemoveTrackingBlockRequest) returns (StatusResponse);
+    rpc ReplaceForParent(ReplaceForParentRequest) returns (ReplaceForParentResponse);
+    rpc UpdateByDiffForParent(UpdateByDiffForParentRequest) returns (UpdateByDiffForParentResponse);
+}
+
+message GetTrackingBlockRequest {
+    Key parent = 1;
+    RelationshipType type = 2;
+    QueryType queryType = 3;
+}
+
+message GetTrackingBlocksResponse {
+    repeated TrackingBlock blocks = 1;
+    ResponseSourceType responseSourceType = 2;
+}
+
+message AddTrackingBlockRequest {
+    Issue parent = 1;
+    RelationshipType type = 2;
+    repeated TrackingBlock blocks = 3;
+}
+
+message ReplaceForParentRequest {
+    Issue parent = 1;
+    RelationshipType type = 2;
+    repeated TrackingBlock blocks = 3;
+    int64 actorId = 4;
+}
+
+message UpdateByDiffForParentRequest {
+    Issue parent = 1;
+    repeated TrackingBlock blocks = 2;
+    int64 actorId = 3;
+}
+
+message AddTrackingBlockResponse {
+    repeated PrimaryKey primaryKeys = 1;
+}
+
+message ReplaceForParentResponse {
+    StatusResponse status = 1;
+}
+
+message UpdateByDiffForParentResponse {
+    repeated PrimaryKey primaryKeys = 1;
+}
+
+message UpdateTrackingBlockByKeyRequest {
+    Key key = 1;
+    RelationshipType type = 2;
+    repeated Issue issuesToAdd = 3;
+    repeated Issue issuesToRemove = 4;
+    repeated Issue issuesToUpdate = 5;
+}
+
+message RemoveTrackingBlockRequest {
+    Key trackingBlock = 1;
+}
+
+message GetTrackingBlockResponse {
+    // TODO: we can remove `success` once dotcom is no longer expecting it
+    bool success = 1;
+    TrackingBlock block = 2;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Tracking Block Messages
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+message TrackingBlock {
+    Key key = 1;
+    int64 order = 2;
+    string name = 3;
+    repeated Issue issues = 4;
+}
+
+message TrackingBlockItem {
+    Key key = 1;
+    int64 order = 2;
+    string name = 3;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Project Completion Service
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+service Projects {
+    rpc UpsertProjectAndRelationships(UpsertProjectAndRelationshipsRequest) returns (UpsertProjectAndRelationshipsResponse);
+    rpc GetProjectItemCompletions(GetProjectItemCompletionsRequest) returns (GetProjectItemCompletionsResponse);
+    rpc DeleteIssueFromProject(DeleteRelationshipRequest) returns (StatusResponse);
+    rpc GetProjectTrackedByItems(GetProjectTrackedByItemsRequest) returns (GetProjectTrackedByItemsResponse);
+}
+
+message UpsertProjectAndRelationshipsRequest {
+    Project from = 1;
+    repeated Issue to = 2;
+    RelationshipType type = 3;
+    User upsertingUser = 4;
+}
+
+message UpsertProjectAndRelationshipsResponse {
+    Key from = 1;
+    repeated Key to = 2;
+}
+
+message GetProjectItemCompletionsRequest {
+    Key key = 1;
+    QueryType queryType = 2;
+    int64 actorId = 3;
+}
+
+message GetProjectItemCompletionsResponse {
+    repeated Completion items = 1;
+    ResponseSourceType responseSourceType = 2;
+}
+
+message DeleteRelationshipRequest {
+    Key from = 1;
+    Key to = 2;
+}
+
+
+message GetProjectTrackedByItemsRequest {
+    Key key = 1;
+    QueryType queryType = 2;
+    int64 actorId = 3;
+}
+
+message GetProjectTrackedByItemsResponse {
+    repeated TrackedByItem items = 1;
+    ResponseSourceType responseSourceType = 2;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////
+//
+// Project Completion Messages
+//
+/////////////////////////////////////////////////////////////////////////////////////
+
+message Project {
+    Key key = 1;
+    int64 creatorId = 2;
+    string title = 3;
+    string description = 4;
+    bool public = 5;
+    int64 number = 9;
+    bool userHidden = 10;
+    string url = 11;
+    repeated Completion completions = 12;
+}
+
+message TrackedByItem {
+    Key key = 1;
+    repeated Issue trackedByItems = 2;
+}

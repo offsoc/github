@@ -1,0 +1,62 @@
+name: Export `tech_stacks` list
+
+on:
+  push:
+    branches:
+    - main
+  workflow_dispatch:
+
+jobs:
+  run:
+    name: Export list of tech_stacks suported by scout
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        path: scout
+
+    - uses: actions/checkout@v3
+      name: Clone repo-analysis-partner
+      with:
+        repository: github-starter-workflows/repo-analysis-partner
+        path: repo-analysis-partner
+        token: ${{ secrets.REPO_SCOPE_PAT }}
+
+    - name: Export `tech_stacks` list
+      run: |
+          cd scout
+          script/export-tech-stacks-list
+
+    - name: Copy exported `tech_stacks.yml` to ../repo-analysis-partner
+      run: |
+          cp scout/tech_stacks.yml repo-analysis-partner/tech_stacks.yml
+
+
+    - name: Push updated `tech_stacks.yml` with latest `tech_stacks` list
+      run: |
+          cd repo-analysis-partner
+          git config --global user.name "Sampark Sharma"
+          git config --global user.email phantsure@github.com
+          git pull origin main
+          git add "tech_stacks.yml" || true
+          git commit -a -m "[Automated] Update tech_stacks list" || true
+          git push origin main || true
+
+    - name: Post to slack on failure
+      if: failure()
+      uses: 8398a7/action-slack@v3.9.1
+      with:
+        status: ${{ job.status }}
+        fields: repo,message,author,action,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Create issue on failure
+      if: failure()
+      uses: imjohnbo/issue-bot@v3.3.0
+      with:
+        assignees: "bishal-pdmsft, anuragc617"
+        title: Failed to push latest tech_stack list
+        body: |
+          Pushing latest tech_stack failed at workflow run - https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        labels: "tech-stack-publish-failure"

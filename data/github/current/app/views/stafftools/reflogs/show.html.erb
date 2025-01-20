@@ -1,0 +1,173 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% view = Stafftools::RepositoryViews::PushlogView.new :entries => @entries %>
+
+<% page_info :title => "#{current_repository.name_with_owner} - Push Log" %>
+
+<div class="boxed-group">
+  <h3>Overview</h3>
+  <div class="boxed-group-inner">
+    <p>
+      <div class="summary">
+        <dl>
+          <dt>Last push (DB)</dt>
+          <dd>
+            <% if current_repository.never_pushed_to? %>
+              No pushes
+            <% else %>
+              <%= current_repository.pushed_at.in_time_zone %>
+            <% end %>
+          </dd>
+        </dl>
+      </div>
+    </p>
+  </div>
+</div>
+
+<div class="boxed-group">
+  <% if params[:ref] %>
+    <h3>
+      <%= link_to 'Push log /', gh_stafftools_repository_reflog_path(current_repository),
+                  'data-pjax' => true, :class => 'boxed-group-breadcrumb' %>
+      <%= params[:ref] %>
+    </h3>
+  <% else %>
+    <h3>Push log</h3>
+  <% end %>
+
+  <div class="boxed-group-inner">
+    <% if @entries.empty? %>
+      <p>No logs found</p>
+    <% else %>
+      <span class="boxed-action">
+        <%= render Primer::Beta::ClipboardCopy.new(classes: "btn btn-sm zeroclipboard-button", value: view.pretty_entries, title: "This version is safe for user consumption", "aria-label": "Copy push log") do %>
+          Copy push log
+        <% end %>
+      </span>
+      <p>
+        Safe copy for user consumption.
+      </p>
+
+      <hr>
+
+      <table id="reflog" class="reflog">
+        <% @entries.each do |entry| %>
+          <tr class="reflog-entry js-details-container Details">
+            <td class="entry">
+              <div class="git-action">
+                <span class="user">
+                  <% if entry.deploy_key? -%>
+                    <%= link_to current_repository.name, gh_stafftools_repository_path(current_repository) %>’s
+                    <%= link_to "deploy key", gh_deploy_keys_stafftools_repository_path(current_repository) %>
+                  <% elsif user = entry.user -%>
+                    <%= link_to avatar_for(user, 16), stafftools_user_path(user) %>
+                    <%= link_to user, stafftools_user_path(user) %>
+                  <% else -%>
+                    <span><%= entry.user_login %></span>
+                  <% end -%>
+                </span>
+
+                <% if entry.multiple_refs? %>
+                  <span class="type"><%= entry.human_type %>ed</span> <%= entry.ref_count %> refs
+                  <span class="hidden-text-expander inline"><button type="button" aria-expanded="false" class="ellipsis-expander js-details-target">&hellip;</button></span>
+                <% else %>
+                  <% target = entry.target %>
+                  <% if target.deleted? %>
+                    deleted
+                  <% else %>
+                    <span class="type"><%= entry.human_type %>ed</span> to
+                    <%= 'create' if target.created? %>
+                  <% end %>
+                  <span class="ref">
+                    <%= link_to target.ref, :ref => target.ref %>
+                  </span>
+                <% end %>
+                <% if via = entry.via %>
+                  via <span class="via"><%= via %></span>
+                <% end %>
+                <% if pull = entry.pull_request %>
+                  for <%= link_to "##{pull.number}", pull_request_path(pull), :title => pull.title, class: "Link--inTextBlock" %>
+                <% end %>
+              </div>
+
+              <% if ip = entry.ip %>
+                <div class="from">
+                  from <span class="ip"><%= ip %></span>
+                  <% if entry.proto %>
+                    over <span class="proto"><%= entry.human_proto %></span>
+                  <% end %>
+                </div>
+              <% end %>
+
+              <% if using = entry.using %>
+                <div class="using">
+                  using <span class="source"><%= using %></span>
+                </div>
+              <% end %>
+
+              <% if entry.ssh_cert? %>
+                <div class="ssh_ca">
+                  SSH CA: <%= entry.ssh_ca_description %>
+                </div>
+                <div class="ssh_ca_owner">
+                  SSH CA Owner: <%= entry.ssh_ca_owner_description %>
+                </div>
+              <% end %>
+
+              <% if size = entry.pack_size %>
+                <div class="added">
+                  added
+                  <span class="size"><%= number_to_human_size size %></span>
+                </div>
+              <% end %>
+
+              <% if server = entry.server %>
+                <div class="server">
+                  server
+                  <span class="hostname"><%= server %></span>
+                </div>
+              <% end %>
+
+              <% if entry.multiple_refs? %>
+                <ul class="reflist">
+                  <% entry.targets.each do |target| %>
+                    <li>
+                      <div class="ref">
+                        <%= link_to target.ref, :ref => target.ref %>
+                      </div>
+                      <div>
+                        <%= render :partial => "stafftools/reflogs/refs",
+                                   :locals => {:target => target} %>
+                      </div>
+                    </li>
+                  <% end %>
+                </ul>
+              <% else %>
+                <div class="refs">
+                  <%= render :partial => "stafftools/reflogs/refs",
+                             :locals => {:target => entry.target} %>
+                </div>
+              <% end %>
+            </td>
+
+          <% if entry.time -%>
+            <td class="time">
+              <% starting_point = entry.time.to_i + 1 %>
+              <%= link_to time_ago_in_words_js(entry.time), {:ref => @ref, :older_than => starting_point} %>
+            </td>
+          <% end -%>
+          </tr>
+        <% end %>
+      </table>
+
+      <div class="paginate-container">
+        <% if @entries.any? %>
+        <div class="pagination">
+          <%= link_to "Newer", {:ref => @ref, :newer_than => @entries.first.time.to_i} %>
+
+          <%= link_to "Older", {:ref => @ref, :older_than => @entries.last.time.to_i} %>
+        </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+</div>

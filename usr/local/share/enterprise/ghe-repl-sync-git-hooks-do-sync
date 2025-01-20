@@ -1,0 +1,34 @@
+#!/bin/bash
+#/ Usage: ghe-repl-sync-git-hooks-do-sync [ASSET PATH]
+set -e
+
+# re-exec as the git user
+if [ $(whoami) != "git" ]; then
+  exec sudo -u git "$0" "$@"
+  exit 1
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+ensure_primary
+
+do_git-hooks_sync() {
+  local replica=$1
+  local asset_path=$2
+
+  scp -q -P 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+    -oStrictHostKeyChecking=no -oLogLevel=quiet \
+    /data/user/git-hooks/.last_git-hooks_sync git@$replica:/data/user/git-hooks/
+
+  # the asset remote directories need to be there for the sync the work.
+  if [ -n "$asset_path" ]; then
+    ssh -p 122 git@$replica mkdir -p /data/user/git-hooks/$(dirname "$asset_path")
+  fi
+  rsync -e 'ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet' -aH --delete \
+        /data/user/git-hooks/$asset_path \
+        git@$replica:/data/user/git-hooks/$asset_path
+}
+
+for host in $(ghe-cluster-nodes --replica --no-cache); do
+  do_git-hooks_sync $host $1
+done

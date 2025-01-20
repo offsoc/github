@@ -1,0 +1,251 @@
+#!/bin/bash
+
+#/ Usage: script/authzd-server <option>
+#/
+#/ Runs the authzd server.
+#/
+#/ Options:
+#/ --dev      Run the authzd server in Development mode
+#/ --test     Run the authzd server in Test mode (default)
+
+# we need to duplicate this from "environment.sh" for the time being, since that script is
+# not executed before authzd starts up in development mode. In test it does.
+#
+# note that at this point $RAILS_ROOT might not have been yet defined. If so, we default
+# to the current directory.
+#
+# Detect if the current runtime is ENTERPRISE
+RAILS_ROOT_PATH=$([[ "$RAILS_ROOT" != "" ]] && echo "$RAILS_ROOT" || echo "$(pwd)")
+
+SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+AUTHZD_VENDOR_PATH="${SCRIPT_DIR}/../vendor/authzd"
+
+source $SCRIPT_DIR/dx/lib/subproject-containers
+
+if [[ "$(cat ${RAILS_ROOT_PATH}/tmp/runtime/current 2>/dev/null)" == "enterprise" ]]
+then
+  export ENTERPRISE=1
+fi
+
+if [[ -f "config/vitess-env-config" ]] && [[ "$(cat config/vitess-env-config)" == "enabled" ]]; then
+  VITESS_ENV_FILE_ENABLED=1
+else
+  VITESS_ENV_FILE_ENABLED=0
+fi
+
+if [[ "$VITESS_ENV_FILE_ENABLED" == "1" || "$VITESS" == "1" ]] && [[ "$SKIP_VITESS" != "1" && "$DISABLE_VITESS" != "1" ]]; then
+  VITESS_ENABLED=1
+elif [[ "$GITHUB_CI" == "1" ]]; then
+  VITESS_ENABLED=1
+else
+  VITESS_ENABLED=0
+fi
+
+
+NAME="authzd"
+ENV="test"
+DEFAULT_AUTHZD_PORT="8081"
+ABILITIES_DATABASE="github_test_abilities"
+COLLAB_DATABASE="github_test_collab"
+CONFIGURATIONS_DATABASE="github_test_configurations"
+GITHUB_DATABASE="github_test"
+IAM_DATABASE="iam_test"
+MEMEX_DATABASE="github_test_memex"
+MIGRATIONS_DATABASE="github_test_migrations"
+PERMISSIONS_DATABASE="github_test_permissions"
+REPOSITORIES_DATABASE="github_test_repositories"
+REPOSITORIES_PUSHES_DATABASE="github_test_repositories_pushes"
+LODGE_DATABASE="github_test_lodge"
+if [ "$VITESS_ENABLED" == "1" ]; then
+  PERMISSIONS_ADDRESS="localhost:15306"
+else
+  PERMISSIONS_ADDRESS="localhost:3306"
+fi
+
+if [ "$ENTERPRISE" == "1" ]; then
+  ABILITIES_DATABASE="github_test"
+  COLLAB_DATABASE="github_test"
+  CONFIGURATIONS_DATABASE="github_test"
+  IAM_DATABASE="github_test"
+  MEMEX_DATABASE="github_test"
+  MIGRATIONS_DATABASE="github_test"
+  PERMISSIONS_DATABASE="github_test"
+  PERMISSIONS_ADDRESS="localhost:3306"
+  REPOSITORIES_DATABASE="github_test"
+  REPOSITORIES_PUSHES_DATABASE="github_test"
+  LODGE_DATABASE="github_test"
+fi
+
+# decides which database to use: dev or test
+if [ $# -gt 0 ]; then
+  case "$1" in
+    --dev)
+      ENV="dev"
+      # use different ports in test and dev to allow to instances of the server running at the same time
+      DEFAULT_AUTHZD_PORT="8091"
+
+      if [ "$ENTERPRISE" == "1" ]; then
+        echo "authzd will use enterprise development databases"
+        ABILITIES_DATABASE="github_enterprise"
+        COLLAB_DATABASE="github_enterprise"
+        CONFIGURATIONS_DATABASE="github_enterprise"
+        GITHUB_DATABASE="github_enterprise"
+        IAM_DATABASE="github_enterprise"
+        MEMEX_DATABASE="github_enterprise"
+        MIGRATIONS_DATABASE="github_enterprise"
+        PERMISSIONS_DATABASE="github_enterprise"
+        REPOSITORIES_DATABASE="github_enterprise"
+        REPOSITORIES_PUSHES_DATABASE="github_enterprise"
+        LODGE_DATABASE="github_enterprise"
+      else
+        echo "authzd will use dotcom development databases"
+        ABILITIES_DATABASE="github_development_abilities"
+        COLLAB_DATABASE="github_development_collab"
+        CONFIGURATIONS_DATABASE="github_development_configurations"
+        GITHUB_DATABASE="github_development"
+        IAM_DATABASE="iam_development"
+        MEMEX_DATABASE="github_development_memex"
+        MIGRATIONS_DATABASE="github_development_migrations"
+        PERMISSIONS_DATABASE="github_development_permissions"
+        REPOSITORIES_DATABASE="github_development_repositories"
+        REPOSITORIES_PUSHES_DATABASE="github_development_repositories_pushes"
+        LODGE_DATABASE="github_development_lodge"
+      fi
+
+      shift ;;
+    --test)
+      # Test is the default, but don't error if we receive it.
+      shift ;;
+    *)
+      grep ^#/ "$0" | cut -c4-
+      exit 1 ;;
+  esac
+fi
+
+if [ "$ENV" == "test" ]; then
+  if [ "$ENTERPRISE" == "1" ]; then
+    echo "authzd will use enterprise test databases"
+  else
+    echo "authzd will use dotcom test databases"
+  fi
+fi
+
+AUTHZD_PORT="${AUTHZD_PORT:=$DEFAULT_AUTHZD_PORT}"
+HTTP_ADDR="127.0.0.1:${AUTHZD_PORT}"
+SKIP_AUTHZD="${SKIP_AUTHZD:=false}"
+AUTHZD_HMAC_KEY_0="authzdhmac"
+AUTHZD_HMAC_KEY_1="authzdhmac1"
+
+DB_RESOLVER_MAX_OPEN_CONNS="${DB_RESOLVER_MAX_OPEN_CONNS:=1}"
+
+start_authzd(){
+  cd "${AUTHZD_VENDOR_PATH}" || exit 1
+
+  DB_RESOLVER_CONFIG="${DB_RESOLVER_CONFIG:=./config/resolver.db.${ENV}.yml}"
+
+  echo "starting service on $HTTP_ADDR"
+  echo "$AUTHZD_CONFIGURATIONS_DATABASE"
+
+  HTTP_ADDR=${HTTP_ADDR} \
+  DB_RESOLVER_CONFIG=${DB_RESOLVER_CONFIG} \
+  AUTHZD_ABILITIES_DATABASE=${AUTHZD_ABILITIES_DATABASE:-${ABILITIES_DATABASE}} \
+  AUTHZD_COLLAB_DATABASE=${AUTHZD_COLLAB_DATABASE:-${COLLAB_DATABASE}} \
+  AUTHZD_CONFIGURATIONS_DATABASE=${AUTHZD_CONFIGURATIONS_DATABASE:-${CONFIGURATIONS_DATABASE}} \
+  AUTHZD_GITHUB_DATABASE=${AUTHZD_GITHUB_DATABASE:-${GITHUB_DATABASE}} \
+  AUTHZD_IAM_DATABASE=${AUTHZD_IAM_DATABASE:-${IAM_DATABASE}} \
+  AUTHZD_MEMEX_DATABASE=${AUTHZD_MEMEX_DATABASE:-${MEMEX_DATABASE}} \
+  AUTHZD_PERMISSIONS_DATABASE=${AUTHZD_PERMISSIONS_DATABASE:-${PERMISSIONS_DATABASE}} \
+  AUTHZD_PERMISSIONS_ADDRESS=${AUTHZD_PERMISSIONS_ADDRESS:-${PERMISSIONS_ADDRESS}} \
+  AUTHZD_REPOSITORIES_DATABASE=${AUTHZD_REPOSITORIES_DATABASE:-${REPOSITORIES_DATABASE}} \
+  AUTHZD_REPOSITORIES_PUSHES_DATABASE=${AUTHZD_REPOSITORIES_PUSHES_DATABASE:-${REPOSITORIES_PUSHES_DATABASE}} \
+  AUTHZD_LODGE_DATABASE=${AUTHZD_LODGE_DATABASE:-${LODGE_DATABASE}} \
+  LOG_DEBUG="true" \
+  DB_RESOLVER_MAX_OPEN_CONNS=${DB_RESOLVER_MAX_OPEN_CONNS} \
+  exec script/server --no-build
+}
+
+start_authzd_docker(){
+  CONTAINER_NAME="${NAME}-${AUTHZD_PORT}"
+  # The docker image uses database.env.yml rather than resolver.db.env.yml
+  DB_RESOLVER_CONFIG="${DB_RESOLVER_CONFIG:=./config/database.${ENV}.yml}"
+
+  SUBPROJECT_VERSION=$(subproject_version "authzd")
+  echo "authzd version $SUBPROJECT_VERSION"
+
+  # Pull out any AUTHZD_* environment variables that are set and create an environment file
+  # This is because test/test_helpers/test_services.rb sets a bunch of AUTHZD_* environment
+  # variables and we need to pass these through to the container.
+  AUTHZD_ENV_FILE=$(mktemp)
+  AUTHZD_ENV_PATTERN="^AUTHZD_.*"
+  if [[ $(env | grep -m 1 -o "$AUTHZD_ENV_PATTERN") ]]; then
+    echo "Found additional AUTHZD environment variables, writing to $AUTHZD_ENV_FILE"
+
+    AUTHZD_ENV_VARS=$(env | grep -o "$AUTHZD_ENV_PATTERN")
+
+    for VAR in $AUTHZD_ENV_VARS; do
+      echo "$VAR" >> $AUTHZD_ENV_FILE
+    done
+  fi
+
+  # Run the service.
+  # We need to expose all the variables required in CI too
+  start_subproject --name ${CONTAINER_NAME} \
+    -e HTTP_ADDR=${HTTP_ADDR} \
+    -e HMAC_KEY_0=${AUTHZD_HMAC_KEY_0} \
+    -e HMAC_KEY_1=${AUTHZD_HMAC_KEY_1} \
+    -e DB_RESOLVER_CONFIG=${DB_RESOLVER_CONFIG} \
+    -e AUTHZD_ABILITIES_DATABASE=${AUTHZD_ABILITIES_DATABASE:-${ABILITIES_DATABASE}} \
+    -e AUTHZD_COLLAB_DATABASE=${AUTHZD_COLLAB_DATABASE:-${COLLAB_DATABASE}} \
+    -e AUTHZD_CONFIGURATIONS_DATABASE=${AUTHZD_CONFIGURATIONS_DATABASE:-${CONFIGURATIONS_DATABASE}} \
+    -e AUTHZD_GITHUB_DATABASE=${AUTHZD_GITHUB_DATABASE:-${GITHUB_DATABASE}} \
+    -e AUTHZD_IAM_DATABASE=${AUTHZD_IAM_DATABASE:-${IAM_DATABASE}} \
+    -e AUTHZD_MEMEX_DATABASE=${AUTHZD_MEMEX_DATABASE:-${MEMEX_DATABASE}} \
+    -e AUTHZD_PERMISSIONS_DATABASE=${AUTHZD_PERMISSIONS_DATABASE:-${PERMISSIONS_DATABASE}} \
+    -e AUTHZD_PERMISSIONS_ADDRESS=${AUTHZD_PERMISSIONS_ADDRESS:-${PERMISSIONS_ADDRESS}} \
+    -e AUTHZD_REPOSITORIES_DATABASE=${AUTHZD_REPOSITORIES_DATABASE:-${REPOSITORIES_DATABASE}} \
+    -e AUTHZD_REPOSITORIES_PUSHES_DATABASE=${AUTHZD_REPOSITORIES_PUSHES_DATABASE:-${REPOSITORIES_PUSHES_DATABASE}} \
+    -e AUTHZD_LODGE_DATABASE=${AUTHZD_LODGE_DATABASE:-${LODGE_DATABASE}} \
+    -e LOG_DEBUG="true" \
+    -e DB_RESOLVER_MAX_OPEN_CONNS=${DB_RESOLVER_MAX_OPEN_CONNS} \
+    --env-file $AUTHZD_ENV_FILE \
+    "ghcr.io/github/authzd/authzd-focal:$SUBPROJECT_VERSION" \
+    /authzd
+
+  docker logs --follow ${CONTAINER_NAME} &
+  wait
+}
+
+# prevent authzd from breaking dev for users w/o docker installed
+if [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  start_authzd_docker
+elif [ "$GITHUB_CI" = "1" ] || [ "$GITHUB_USE_DOCKER" = "1" ]; then
+  if [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+    start_authzd_docker
+  else
+    start_authzd
+  fi
+elif [ "$SKIP_AUTHZD" = "true" ] || [ "$SKIP_AUTHZD" = "1" ]; then
+  echo "authzd has been disabled"
+  while true; do sleep 10000; done
+else
+  if [ ! -x "${AUTHZD_VENDOR_PATH}/bin/authzd" ]; then
+  cat << EOF
+The authzd server is not built and could not be started, this could lead to:
+ - requests not working as expected in dotcom
+ - some tests will fail
+
+In order to address the above problems:
+ - install and start docker - this only used to build authzd, can be stopped afterwards
+ - build authzd: run script/build-subproject authzd
+   - if the above command returns "authzd build <SHA> is up-to-date", then run rm vendor/authzd/.built
+   - feel free to stop docker after this if it's killing your CPU in your machine
+ - test authzd works: run script/authzd-server to check the server is working as expected. If you see a long log message and you don't see this message anymore, then you are done!
+
+This script will block indefinitely in order to avoid breaking bin/server
+
+If you keep seeing this message, please contact #authorization
+EOF
+  fi
+  until [ -x "${AUTHZD_VENDOR_PATH}/bin/authzd" ]; do sleep 60; done
+  start_authzd
+fi

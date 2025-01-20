@@ -1,0 +1,358 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%# erblint:counter FlashMigrationCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+
+<%# `view` is an instance of MarketplacePurchases::OrderPreviewView %>
+
+<%
+  owned_organizations = current_user.owned_organizations.order(:id).preload(:plan_subscription).limit(100)
+%>
+
+<% if view.show_pending_cancellation? %>
+  <p class="mb-3">
+    <%= primer_octicon(:info, color: :muted, mr: 1) %>
+    You have a pending cancellation for this plan, which will take effect on <%= account.next_billing_date.to_formatted_s(:date) %>.
+  </p>
+<% end %>
+
+<% if view.show_current_plan? %>
+  <%= render "marketplace_purchases/current_plan", view: view %>
+<% end %>
+
+<% if view.plan_change? %>
+  <%= render "marketplace_purchases/plan_pricing", view: view %>
+
+  <% if view.prorated_total_price.negative? %>
+    <p class="text-small color-fg-muted d-block">
+      These changes will be applied on <b><%= account.next_billing_date.to_formatted_s :date %></b>.
+    </p>
+  <% elsif !view.invoiced_billing_enabled? && !view.business_trial? %>
+    <%= render "marketplace_purchases/amount_due", view: view %>
+  <% end %>
+<% end %>
+
+<div class="py-3">
+  <div class="clearfix mb-2 pb-3">
+    <%= render(Primer::Beta::Heading.new(tag: :h3, font_size: 4)) { "Billing information" } %>
+    <% if view.show_linking_billing_information? %>
+      <%= render Billing::Settings::BillingInformationLinkingComponent.new(
+        actor: current_user,
+        target: view.account,
+        display_title: false,
+        form_loaded_from: "Marketplace",
+        return_to_path: view.return_to,
+        no_redirect: true,)
+      %>
+    <% else %>
+      <% if view.show_billing_info_edit_button? %>
+        <div class="float-right js-edit-user-personal-profile-wrapper">
+          <%= render(Primer::Beta::Button.new(size: :medium, font_size: 6, classes: "js-edit-user-personal-profile")) do %>
+            Edit
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% unless view.show_linking_billing_information? %>
+    <% if view.collect_billing_info? %>
+      <div class="clearfix text-normal pb-3">
+        Please confirm your billing details to continue. You only need to do this once.
+      </div>
+    <% end %>
+    <div class="clearfix d-sm-flex">
+      <div class="<%= class_names("col-sm-6 mb-sm-0", "mb-3" => !view.has_saved_billing_info?) %>">
+        <div class="d-flex flex-items-center">
+          <div class="pr-2">
+            <img src="<%= view.installation_account.primary_avatar_url(96) %>" alt="" width="48" height="48" class="<%= avatar_class_names(account) %>">
+          </div>
+          <div>
+            <ul class="list-style-none lh-condensed mb-2" style="min-height: 48px;">
+              <li class="text-bold pb-1">
+                <%= view.installation_account.safe_profile_name %>
+              </li>
+              <li class="color-fg-muted text-small">
+                <% case account %>
+                <% when Business %>
+                  Owned by <%= account.safe_profile_name %>
+                <% when Organization %>
+                  Organization
+                <% when User %>
+                  Personal account
+                <% end %>
+              </li>
+            </ul>
+            <div style="mt-n3">
+              <% if view.business_owned? && owned_organizations.any? %>
+                <%= render(Primer::Alpha::ActionMenu.new(select_variant: :single, dynamic_label: true)) do |menu| %>
+                  <% menu.with_show_button(classes: "h6", p: 2, aria: {label: "Switch billing account"}) do |button| %>
+                    <% button.with_trailing_action_icon(icon: "triangle-down") %>
+                    Switch billing account
+                  <% end %>
+                  <% if view.viewer_has_purchased? %>
+                    <% menu.with_avatar_item(
+                      href: marketplace_order_path(
+                        plan_id: view.selected_plan.global_relay_id,
+                        account: current_user.display_login, quantity: view.quantity),
+                        src: current_user.primary_avatar_url,
+                        username: current_user.display_login,
+                        label: current_user.display_login,
+                        description_scheme: :inline, left: 0
+                        ) do |item| %>
+                      <% if view.viewer_on_free_trial? %>
+                        <% item.with_description.with_content("#{pluralize(view.days_left_on_viewer_free_trial, "day")} left on free trial") %>
+                      <% else %>
+                        <% item.with_description.with_content("Already purchased") %>
+                      <% end %>
+                    <% end %>
+                  <% else %>
+                    <% menu.with_avatar_item(href: marketplace_order_path(plan_id: view.selected_plan.global_relay_id, account: current_user.display_login, quantity: view.quantity), src: current_user.primary_avatar_url, username: current_user.display_login, label: current_user.display_login, left: 0) %>
+                  <% end %>
+                  <% owned_organizations.each do |org| %>
+                    <% org_subscription_item = org&.business&.self_serve_payment? ? org&.business.subscription_item_for_marketplace_listing(listing, organization: org) : org.subscription_item_for_marketplace_listing(listing) %>
+                    <% if org_subscription_item.present? && org_subscription_item.subscribable.listing.slug == listing.slug %>
+                      <% days_left_on_org_free_trial = (org_subscription_item.free_trial_ends_on && org_subscription_item.free_trial_ends_on.to_date - GitHub::Billing.today).to_i %>
+                      <% menu.with_avatar_item(
+                        test_selector: "switcher-item-#{org.id}",
+                        href: marketplace_order_path(
+                          plan_id: view.selected_plan.global_relay_id,
+                          account: org.display_login,
+                          quantity: view.quantity
+                        ),
+                        src: org.primary_avatar_url(40),
+                        username: org.safe_profile_name,
+                        label: org.safe_profile_name,
+                        left: 0
+                      ) do |item| %>
+                        <% if view.selected_plan_has_free_trial? && days_left_on_org_free_trial.positive? %>
+                          <% item.with_description.with_content("#{pluralize(days_left_on_org_free_trial, "day")} left on free trial") %>
+                        <% else %>
+                          <% item.with_description.with_content("Already purchased") %>
+                        <% end %>
+                      <% end %>
+                    <% else %>
+                      <% menu.with_avatar_item(
+                      href: marketplace_order_path(
+                        plan_id: view.selected_plan.global_relay_id,
+                        account: org.display_login,
+                        quantity: view.quantity
+                      ),
+                      src: org.primary_avatar_url,
+                      label: org.safe_profile_name,
+                      username: org.safe_profile_name,
+                      left: 0
+                    ) %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      </div>
+      <% if view.prorated_total_price.positive? || view.selected_plan_has_free_trial? %>
+        <% if view.invoiced_billing_enabled? %>
+          <div class="col-sm-6 text-sm-right lh-condensed">
+            <div>To be added to your invoice</div>
+          </div>
+        <% elsif view.business_owned? && (!view.enterprise_owned_self_serve_org? || view.can_purchase_for_enterprise_owned_self_serve_org?) %>
+          <div class="col-sm-6 text-sm-right lh-condensed">
+            <% if view.account_has_valid_payment_method? %>
+              <ul class="list-style-none" <%= test_selector("payment-info") %>>
+                <% if account.payment_method.paypal? %>
+                  <li>PayPal: <%= account.payment_method.paypal_email %></li>
+                <% else %>
+                  <li>
+                    <%= render(Primer::Beta::Octicon.new(icon: "credit-card", color: :muted, height: 16, mr: 0)) %>
+                    <strong><%= account.payment_method.card_type %> <% if account.payment_method.last_four %>ending <%= account.payment_method.last_four %><% end %></strong>
+                  </li>
+                  <li class="color-fg-muted text-small">expires <%= account.payment_method.formatted_expiration_date %></li>
+                <% end %>
+              </ul>
+            <% end %>
+            <%# We don't want to use the modal for EA-owned orgs and instead want to link to the EA billing settings %>
+            <% if view.enterprise_owned_self_serve_org? %>
+              <% if view.selected_plan_paid? && !view.business_trial? %>
+                <%= render(Primer::Beta::Link.new(href: settings_billing_tab_enterprise_path(account, :payment_information, anchor: "payment-method"), font_size: :small, test_selector: "marketplace-ea-billing-link")) do %>
+                  <% if view.account_has_valid_payment_method? %>
+                    Edit...
+                  <% else %>
+                    Add a payment method
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% else %>
+              <%= render Primer::Beta::Dialog.new(classes: "js-marketplace-billing-modal marketplace-billing-modal") do |dialog| %>
+                <% dialog.with_summary do %>
+                  <% if view.account_has_valid_payment_method? %>
+                    Edit...
+                  <% else %>
+                    Add a payment method
+                  <% end %>
+                <% end %>
+                <% dialog.with_body do %>
+                  <include-fragment src="<%= view.billing_modal_path %>">
+                    <% render(Primer::Beta::Spinner.new(size: :small, "aria-label": "Loading...", class: "my-3")) %>
+                  </include-fragment>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+      <% if !view.invoiced_billing_enabled? && view.has_saved_billing_info? %>
+        <div class="col-sm-6 text-sm-right lh-condensed">
+          <%= render Billing::Settings::NameAddressSummaryComponent.new(profile: view.account.trade_screening_record) %>
+        </div>
+      <% end %>
+    </div>
+    <% unless view.can_subscribe_with_current_account? %>
+      <div class="flash flash-warn mt-2 text-small">
+        The plan you have selected can only be purchased by <strong><%= view.selected_plan_account_type_text %></strong>. Please select a different billing account or plan.
+      </div>
+    <% end %>
+  <% end %>
+</div>
+
+<% if !view.business_owned? %>
+  <% unless view.account.org_is_on_standard_tos? %>
+    <div class="js-name-address-collection-wrapper" <%= "hidden" if view.hide_name_address_collection_wrapper? %>>
+      <%= render Billing::Settings::NameAddressFormComponent.new(
+        target: view.account,
+        payment_flow_loaded_from: "MARKETPLACE_PURCHASE",
+        return_to: request.original_url
+      ) %>
+    </div>
+  <% end %>
+  <% if view.account.has_trade_screening_restriction? %>
+    <div class="border-top py-3 js-sdn-screening-error-wrapper">
+      <%= render(Primer::Beta::Flash.new(scheme: view.trade_screening_error_data[:scheme])) do %>
+        <h2 class="h5">
+          <%= render(Primer::Beta::Octicon.new(view.trade_screening_error_data[:icon])) %>
+          You can't proceed with your payment
+        </h2>
+        <div class="ml-5" <%= test_selector("trade-screening-message") %>>
+          <%= view.trade_screening_error_data[:message] %>
+        </div>
+      <% end %>
+    </div>
+  <% elsif view.show_payment_form? %>
+    <div class="border-top py-3 js-payment-methods-wrapper mb-1">
+      <h4 class="mb-3">Payment Method</h4>
+      <%= render Billing::Settings::PaymentMethodFormComponent.new(
+        target: view.account,
+        new_name_address_design: true,
+        signature_view_context: Billing::Zuora::HostedPaymentsPage::MARKETPLACE_SIGNATURE_VIEW_CONTEXT,
+        return_to: view.return_to
+      ) %>
+    </div>
+  <% end %>
+<% end %>
+
+<div class="js-marketplace-form-wrapper border-top">
+  <% if view.invoiced_billing_enabled? && view.selected_plan_paid? %>
+    <%= render(Primer::Beta::Flash.new(mt: 3)) do %>
+      Unfortunately, invoiced customers cannot purchase paid plans on the GitHub Marketplace.
+    <% end %>
+  <% elsif view.enterprise_owned_self_serve_org? && view.business_trial? && view.selected_plan_paid? %>
+    <%= render(Primer::Beta::Flash.new(mt: 3, test_selector: "self-serve-enterprise-owned-org-notice")) do %>
+      GitHub Marketplace paid plans are not available for organizations owned by enterprises during the trial period.
+    <% end %>
+  <% elsif view.enterprise_owned_self_serve_org? && !view.can_purchase_for_enterprise_owned_self_serve_org? %>
+    <%= render(Primer::Beta::Flash.new(mt: 3, test_selector: "self-serve-enterprise-owned-org-notice")) do %>
+      Please contact an enterprise administrator to purchase paid plans for GitHub Marketplace.
+    <% end %>
+  <% elsif is_actor_from_restricted_region(view.account_name) && view.selected_plan_paid? %>
+    <%= render(Primer::Beta::Flash.new(mt: 3)) do %>
+      Customers from certain regions cannot purchase paid plans from GitHub Marketplace.
+    <% end %>
+  <% elsif view.show_order_preview_form? %>
+    <div class="py-3">
+      <%= render partial: "marketplace_purchases/terms_of_service_notice", locals: { listing: listing, btn_text: view.submit_button_text, agreement: agreement } %>
+    </div>
+    <%= form_tag view.form_action_path, method: "post" do %>
+      <%= hidden_field_tag "quantity", view.quantity %>
+      <%= hidden_field_tag "account", view.account_name %>
+      <% if account.business? && account.self_serve_payment? %>
+        <%= hidden_field_tag "installation_account", organization.display_login %>
+      <% end %>
+      <% if listing.can_sign_end_user_agreement?(current_user, agreement: agreement) %>
+        <%= hidden_field_tag "marketplace_listing_id", listing.id %>
+        <%= hidden_field_tag "marketplace_agreement_id", agreement.id %>
+      <% end %>
+
+      <% if view.show_oauth_access_checkbox? %>
+        <div class="mb-2 p-2 color-bg-accent">
+          <p class="text-small py-2">
+            The <%= organization.display_login %> organization has enabled OAuth App Access restrictions.
+            You must grant <%= listing.name %> access to the <%= organization.display_login %>
+            organization’s data before you can begin the installation.
+          </p>
+          <input type="checkbox" name="grant_oap" id="grant_oap" class="js-grant-oap-checkbox">
+          <label for="grant_oap" class="text-small">
+            Grant <%= listing.name %> access to <%= organization.display_login %>’s private data.
+          </label>
+        </div>
+      <% end %>
+      <% if view.already_purchased? %>
+        <button data-disable-with="Updating..." <%if view.update_plan_button_disabled? %>disabled<% end %> type="submit" class="btn btn-primary btn-block py-2 js-marketplace-complete-order" data-octo-click="marketplace-listing_issue_plan_changes_click" data-octo-dimensions="marketplace_listing_id:<%= listing.id %>" data-ga-click="Marketplace listing, issue plan changes, marketplace_id:<%= listing.id %>"><%= view.submit_button_text %></button>
+      <% elsif view.show_already_installed_notice? && !view.purchase_plan_button_disabled? %>
+        <div class="details-reset details-overlay details-overlay-dark">
+          <%= render(Primer::Alpha::Dialog.new(
+            title: "You already have #{listing.name} installed.",
+            size: :medium,
+            position: :center,
+            visually_hide_title: :false)) do |dialog| %>
+            <% dialog.with_show_button(
+              scheme: :primary,
+              block: true,
+              py: 2,
+              test_selector: "already-installed-button",
+            ) do %>
+              <% view.submit_button_text %>
+            <% end %>
+            <% dialog.with_body do %>
+              <p style="padding: 10px 0px 10px 0px !important">It looks like <%= listing.name %> has already been installed on your account. You can view your <a class="Link--inTextBlock" href="<%= listing.configuration_path %>" target="_blank" rel="noopener noreferrer">current installation</a> or continue with setting up this plan.</p>
+              <div class="Box-footer text-right" style="margin: 0px -16px -15px -16px !important;">
+                <a href="<%= listing.configuration_path %>" target="_blank" rel="noopener noreferrer">View Details</a>
+                <%= render Primer::Beta::Button.new(
+                  "data-disable-with": "Loading...",
+                  type: :submit,
+                  scheme: :primary,
+                  ml: 2,
+                  py: 2,
+                  classes: "js-marketplace-complete-order",
+                  "data-octo-click": "marketplace-listing_complete_click",
+                  "data-octo-dimensions": "marketplace_listing_id:#{ listing.id },plan_monthly_price_in_cents:#{ view.total_mp_plans_price.cents }",
+                  "data-ga-click": "Marketplace listing, complete order and begin installation, marketplace_id:#{ listing.id }, #{ view.total_mp_plans_price.cents }"
+                ) do %>
+                  Continue
+                <% end %>
+              </div>
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <button data-disable-with="Loading..." <%if view.purchase_plan_button_disabled? || !view.selected_plan_can_be_installed? || view.disable_button_for_integration_installation? %>disabled<% end %> type="submit" class="btn btn-primary btn-block py-2 js-marketplace-complete-order" data-show-billing-modal="<%= view.submit_button_show_billing_modal? %>" data-octo-click="marketplace-listing_complete_click" data-octo-dimensions="marketplace_listing_id:<%= listing.id %>,plan_monthly_price_in_cents:<%= view.total_mp_plans_price.cents %>" data-ga-click="Marketplace listing, complete order and begin installation, marketplace_id:<%= listing.id %>, <%= view.total_mp_plans_price.cents %>"><%= view.submit_button_text %></button>
+      <% end %>
+    <% end %>
+    <%if view.disable_button_for_integration_installation? %>
+      <p class="mt-2 text-center text-small">
+        Please verify your email to proceed.
+      </p>
+    <% else %>
+      <% if view.selected_plan_can_be_installed? %>
+        <% unless view.already_purchased? %>
+          <p class="mt-2 text-center text-small">
+            Next: Authorize <%= listing.name %> to access your account.
+          </p>
+        <% end %>
+      <% else %>
+        <p class="mt-2 text-center text-small">
+        The selected plan has been retired. To "Complete order and begin installation", you need to select an active plan from the applications listing page.
+        </p>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>

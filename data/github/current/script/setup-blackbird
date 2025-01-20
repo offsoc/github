@@ -1,0 +1,127 @@
+#!/bin/bash
+set -e
+trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+
+cd /workspaces
+
+if  [ ! -d "/workspaces/blackbird-mw" ]; then
+  echo "Cloning blackbird-mw..."
+  git clone git@github.com:github/blackbird-mw.git
+else
+  echo "Skipping blackbird-mw clone..."
+fi
+
+# Log into docker
+if [ -z $PAT ]; then
+  echo "You must set the PAT environment variable to your personal access token!"
+  echo "Do something like:"
+  echo "  export PAT=<your-pat>"
+  echo "and try again."
+  echo "NOTE: You must have the 'packages:read' scope on the PAT!"
+  exit 1
+fi
+
+echo $PAT | docker login -u $GITHUB_USER --password-stdin ghcr.io
+
+export BLACKBIRD_MW_ENV=development
+export BLACKBIRD_MW_SPOKESD_URL=http://github.localhost:28081
+
+# Create the spokesd network
+docker network create spokes-proto_default || true
+
+# Make sure we have the latest main
+docker pull ghcr.io/github/blackbird/blackbird:main
+
+cd blackbird-mw
+./script/bootstrap
+./script/setup
+
+# Create corpuses
+echo "Creating corpuses"
+
+# Add some repositories to the database
+IFS=$'\n\t'
+rm -f /var/lib/mysql-files/repos.csv
+mysql -e "select id, owner_id, owner_login, name, public from github_development_repositories.repositories into outfile '/var/lib/mysql-files/repos.csv'"
+repos=$(cat /var/lib/mysql-files/repos.csv | sed 's/\s\s*/, /g' | sed "s/\([a-zA-Z\-]\+\)/'\1'/g")
+for repo in $repos; do
+  docker-compose exec -T mysql \
+          mysql --user root --database blackbird_development --execute \
+          "INSERT INTO blackbird_repositories (id, owner_id, owner_login, name, is_public) VALUES ($repo)" || true  # ignore failure
+  echo "inserted $repo"
+done
+
+# Wait until admin service starts
+until curl --fail http://localhost:9889/ready; do
+  echo "Admin service not yet started, waiting..."
+  sleep 1
+done
+
+# Wait until query service starts
+until curl --fail http://localhost:9888/ready; do
+  echo "Query service not yet started, waiting..."
+  sleep 1
+done
+
+sleep 5
+
+echo "Services started, configuring..."
+
+curl --fail \
+  --verbose \
+  --header "Content-Type: application/json" \
+  --data '{"corpus": "blue", "serving": true}' \
+  http://localhost:9889/twirp/blackbirdmw.admin.v1.AdminAPI/SetCorpusQueryState
+echo "Created blue corpus ($?)"
+
+curl --fail \
+  --verbose \
+  --max-time 5 \
+  --header "Content-Type: application/json" \
+  --data '{"corpus": "green", "serving": true}' \
+  http://localhost:9889/twirp/blackbirdmw.admin.v1.AdminAPI/SetCorpusQueryState
+echo "Created green corpus ($?)"
+
+until curl --fail http://localhost:9887/ready; do
+  echo "Ingest service not yet started, waiting..."
+  sleep 1
+done
+
+curl --fail \
+  --max-time 5 \
+  --header "Content-Type: application/json" \
+  --data '{"corpus": "blue", "reason": "development env setup"}' \
+  http://localhost:9889/twirp/blackbirdmw.admin.v1.AdminAPI/BackfillCorpus
+
+
+# Wait some additional time for ingest to configure Kafka
+# TODO: make the /ready endpoint succeed only when Kafka is available
+sleep 10
+
+curl --fail \
+  --max-time 5 \
+  --header "Content-Type: application/json" \
+  --data '{"corpus": "blue", "reason": "development env setup"}' \
+  http://localhost:9889/twirp/blackbirdmw.admin.v1.AdminAPI/BackfillCorpus
+
+curl --fail \
+  --verbose \
+  --max-time 5 \
+  --header "Content-Type: application/json" \
+  --data '{"corpus": "blue", "serving": true}' \
+  http://localhost:9889/twirp/blackbirdmw.admin.v1.AdminAPI/SetCorpusQueryState
+echo "Set blue as serving ($?)"
+
+echo "Wait for corpus configuration to settle..."
+
+sleep 60
+
+# Restart blackbird_indexer so it flushes index changes
+docker restart blackbird-mw-blackbird-indexer-1
+docker restart blackbird-mw-blackbird-server-1
+
+echo "OK! You should now be able to query blackbird."
+echo "Try it using:"
+echo "   ./script/check-blackbird-setup"
+
+wait

@@ -1,0 +1,390 @@
+<%
+  page_info title: "Set up your GitHub Enterprise Cloud trial"
+
+  show_captcha = show_captcha?(session, current_user)
+  form_class = show_captcha ? "js-octocaptcha-parent" : ""
+  submit_class = show_captcha ? "js-octocaptcha-form-submit" : ""
+  organization ||= nil
+  organization_id ||= nil
+  company_info ||= {}
+  trade_screening_record_fields ||= {}
+  employee ||= false
+%>
+
+<%= render layout: "signup/container",
+  locals: {
+    title: "Try Enterprise Cloud free for #{pluralize(Billing::EnterpriseCloudTrial.trial_length.in_days.to_i, "day")}",
+    container_class: "container-md",
+  } do %>
+  <div class="mb-4 mb-md-8">
+    <div class="f4 color-fg-muted text-center">
+      <% if emu_enterprise %>
+        Sign up for your
+        <%= link_to "Enterprise Managed Users", "#{GitHub.help_url}/admin/identity-and-access-management/using-enterprise-managed-users-for-iam/about-enterprise-managed-users", class: "Link--inTextBlock" %> account.
+      <% else %>
+        Sign up for your Enterprise Classic account
+      <% end %>
+    </div>
+    <% if show_org_upgrade_not_possible_for_emu_banner %>
+      <%= render Primer::Alpha::Banner.new(
+        scheme: :danger,
+        icon: :stop,
+        dismiss_scheme: :remove,
+        mt: 3,
+        test_selector: "org-upgrade-not-possible-for-emu-banner"
+      ) do %>
+        The <%= organization.display_login %> organization will not be upgraded because existing organizations
+        cannot be added to enterprises with Enterprise Managed Users. We recommend you try
+        <%= link_to "Enterprise Cloud", "#{GitHub.help_url}/admin/overview/about-github-enterprise-cloud", class: "Link--inTextBlock" %> instead.
+      <% end %>
+    <% end %>
+  </div>
+  <div <%= test_selector("new-business-trial-form")%> >
+    <%= form_for business, url: enterprise_trial_accounts_create_path, method: :post, html: {id: "new-enterprise-form", class: form_class, data: { turbo: true } } do |f| %>
+      <div class="width-full">
+        <input
+          type="hidden"
+          id="metered_plan"
+          name="metered_plan"
+          value="<%= metered_trial %>" <%= test_selector("new-business-trial-metered-plan") %>>
+        <input
+          type="hidden"
+          id="business_type"
+          name="business_type"
+          value="<%= business_type %>" <%= test_selector("new-business-trial-business-type") %>>
+        <dl class="form-group required">
+          <dt>
+            <%= label_tag "business[name]", "Enterprise name" %>
+          </dt>
+          <dd>
+            <%= text_field_tag "business[name]",
+              business.name,
+              class: "js-business-name width-full py-1",
+              placeholder: "e.g. Acme, Inc.",
+              autofocus: true,
+              required: true %>
+          </dd>
+        </dl>
+      </div>
+      <div class="width-full">
+        <% current_slug = business&.slug %>
+        <% update_slug_from_name = current_slug.to_s.empty? %>
+        <auto-check src="<%= enterprise_trial_accounts_check_slug_path %>" required>
+          <dl class="form-group required">
+            <dt class="d-flex">
+              <%= label_tag "business[slug]", "Enterprise URL slug" %>
+            </dt>
+            <dd>
+              <%=
+                slug_field_properties = {
+                  placeholder: "e.g. acme-inc.",
+                  required: true,
+                  class: "js-business-slug width-full py-1"
+                }
+                slug_field_properties["data-auto-update"] = true if update_slug_from_name
+                text_field_tag "business[slug]", current_slug, slug_field_properties
+              %>
+              <p class="note">This will be your enterprise profile URL.</p>
+            </dd>
+          </dl>
+          <%= csrf_hidden_input_for enterprise_trial_accounts_check_slug_path %>
+        </auto-check>
+      </div>
+
+      <% if employee %>
+        <% if current_user.feature_enabled?(:enterprise_trials_hide_staff_prompt) %>
+          <%= hidden_field_tag "staff_owned", true %>
+        <% else %>
+          <%= render Primer::Alpha::Banner.new(icon: :"mark-github", test_selector: "enterprise-staff-prompt") do %>
+            <div class="form-checkbox mt-0">
+              <%= check_box_tag "staff_owned", true, true %>
+              <%= label_tag "staff_owned", "Staff owned enterprise?" %>
+            </div>
+            <div class="mt-2">
+              Add your user to the <code>:enterprise_trials_hide_staff_prompt</code> feature flag to hide this banner.
+              This will automatically mark your enterprises as staff owned.
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if emu_enterprise %>
+        <div class="width-full" <%= test_selector("new-business-trial-emu-shortcode") %>>
+          <% current_shortcode = business&.shortcode %>
+          <auto-check src="<%= enterprise_trial_accounts_check_shortcode_path %>" required>
+            <dl class="form-group required">
+              <dt class="d-flex">
+                <%= label_tag "business[shortcode]", "Username shortcode (cannot be edited later)" %>
+              </dt>
+              <dd>
+                <%=
+                  shortcode_field_properties = {
+                    placeholder: "e.g. usc for University of Southern California",
+                    required: true,
+                    class: "js-business-shortcode width-full py-1"
+                  }
+                  text_field_tag "business[shortcode]", current_shortcode, shortcode_field_properties
+                %>
+                <p class="note"><%= link_to "What is a username shortcode?", "#{GitHub.help_url}/admin/identity-and-access-management/understanding-iam-for-enterprises/about-enterprise-managed-users#getting-started-with-enterprise-managed-users" %></p>
+              </dd>
+            </dl>
+            <%= csrf_hidden_input_for enterprise_trial_accounts_check_shortcode_path %>
+          </auto-check>
+        </div>
+      <% end %>
+      <div class="container-lg clearfix">
+        <dl class="form-group required col-6 float-left pr-2">
+          <dt><label class="text-bold" for="industry-select" >Industry</label></dt>
+          <dd>
+            <%= select_tag("company_info[industry]",
+              options_for_select(Businesses::TrialAccountsHelper::INDUSTRY_OPTIONS, company_info[:industry]),
+              { class: "width-full js-enterprise-trial-industry form-control py-1",
+                id: "industry-select",
+                required: true
+              }
+            )%>
+          </dd>
+        </dl>
+        <dl
+          class="form-group js-enterprise-trial-other-industry-field"
+          data-trigger-option-value="Other"
+          hidden>
+          <dt><label class="text-bold" for="other-industry-trial" >Specify your industry</label></dt>
+          <dd>
+            <input
+              class="width-full form-control py-1"
+              name="company_info[other_industry]"
+              id="other-industry-trial"
+              value="<%= company_info[:other_industry] %>">
+          </dd>
+        </dl>
+        <dl class="form-group required col-6 float-left pl-2">
+          <dt><label class="text-bold" for="employees-size-select" >Number of employees</label></dt>
+          <dd>
+            <%= select_tag("company_info[employees_size]",
+              options_for_select(Businesses::TrialAccountsHelper::EMPLOYEE_SIZE, company_info[:employees_size]),
+              { class: "width-full form-control py-1",
+                id: "employees-size-select",
+                required: true
+              }
+            )%>
+          </dd>
+        </dl>
+        <% if emu_enterprise %>
+          <dl class="form-group country-form required">
+            <dt>
+              <label for="account_screening_profile_country_code">Country</label>
+            </dt>
+            <dd>
+              <select
+                id="account_screening_profile_country_code"
+                class="form-select form-control select-country width-full py-1 js-consent-experience-country-select"
+                name="account_screening_profile[country_code]"
+                required
+              >
+                <option value disabled selected>Choose your country</option>
+                <% ::TradeControls::Countries.marketing_targeted_countries.each do |(country_name, country_alpha2, _, _)| %>
+                  <option value="<%= country_alpha2 %>"<%= " selected" if country_alpha2 == trade_screening_record_fields[:country_code] %>><%= country_name %></option>
+                <% end %>
+              </select>
+            </dd>
+          </dl>
+        <% end %>
+      </div>
+
+      <% if show_organization_selection_dropdown %>
+        <%# Show a multi-selection of any org available to the user. Auto select an org if passed in via parameter. %>
+        <div class="width-full">
+          <dl class="form-group">
+            <dt>
+              <label for="organization_id">Organization</label>
+            </dt>
+            <dd>
+              <select
+                id="organization_id"
+                class="form-select form-control width-full py-1 js-enterprise-trial-org-selection"
+                name="organization_id"
+                <%= test_selector("new-business-trial-organization-selection-dropdown") %>
+                <%= safe_analytics_click_attributes(category: "enterprise_trial_account", action: "select_org", label: "location:new_enterprise_trial_account") %>
+              >
+                <option value disabled selected>Choose an existing organization to include in the new Enterprise account</option>
+                <% organizations.each do |org| %>
+                  <option value="<%= org.display_login %>"<%= " selected" if (organization.present? && org.id == organization.id && business.has_sufficient_licenses_for_organization?(organization) && org.active_marketplace_listing_subscription_items.none?) || organization_id.present? %>>
+                    <%= org.name %>
+                  </option>
+                <% end %>
+                <option value>Create without an organization</option>
+              </select>
+            </dd>
+          </dl>
+          <% if organization.present? %>
+            <% if !business.has_sufficient_licenses_for_organization?(organization) %>
+              <%= render(Businesses::TrialAccounts::OrganizationErrorComponent.new(
+                organization: organization,
+                any_organizations: organizations.any?,
+                max_seat_count: maximum_seat_count,
+              )) %>
+            <% end %>
+            <% if organization.active_marketplace_listing_subscription_items.any? %>
+              <%= render(Businesses::TrialAccounts::OrganizationErrorComponent.new(
+                organization: organization,
+                any_organizations: organizations.any?
+              )) %>
+            <% end %>
+          <% end %>
+        </div>
+        <span class="width-full">
+          Note: Billing for any selected organization will be delegated to the enterprise account.
+          <%= link_to "Learn about changes to your billing during trial", "#{GitHub.help_url}/get-started/signing-up-for-github/setting-up-a-trial-of-github-enterprise-cloud#during-the-trial", class: "Link--inTextBlock" %>.
+        </span>
+      <% end %>
+
+      <div class="mt-3 width-full clearfix border-top border-bottom py-3">
+        <% if emu_enterprise %>
+          <div class="f3 text-bold">
+            Admin information
+          </div>
+          <div class="f4 color-fg-muted" >
+            This contact will be the first and only admin account responsible to configure the identity provider
+            to provision user accounts and has unique recovery access in the event of an outage.
+          </div>
+          <div class="f4 mt-4">
+            Your admin username will be: <strong class="fgColor-open js-business-first-admin-name"></strong>
+            <div class="f4 color-fg-muted">
+              You will set the password for this user in the next step.
+            </div>
+          </div>
+        <% else %>
+          <div class="f3 text-bold mb-3">
+            Contact information
+          </div>
+        <% end %>
+        <dl class="form-group required col-6 float-left pr-2">
+          <dt><label class="text-bold" for="full-name-trial" >
+            <%= emu_enterprise ? "Admin" : "Full" %> name</label></dt>
+          <dd>
+            <input
+              class="width-full form-control py-1"
+              name="company_info[full_name]"
+              id="full-name-trial"
+              value="<%= company_info[:full_name] %>"
+              required>
+          </dd>
+        </dl>
+        <auto-check src="<%= enterprise_trial_accounts_check_billing_email_path %>" required>
+          <dl class="form-group required col-6 float-left pl-2">
+            <dt>
+              <%= label_tag "business[billing_email]", emu_enterprise ? "Admin work email" : "Work email" %>
+            </dt>
+            <dd>
+              <%= text_field_tag "business[billing_email]",
+                business.billing_email,
+                class: "width-full py-1",
+                required: true %>
+            </dd>
+          </dl>
+          <%= csrf_hidden_input_for enterprise_trial_accounts_check_billing_email_path %>
+        </auto-check>
+
+        <% unless emu_enterprise %>
+          <dl class="form-group country-form required">
+            <dt>
+              <label for="account_screening_profile_country_code">Country</label>
+            </dt>
+            <dd>
+              <select
+                id="account_screening_profile_country_code"
+                class="form-select form-control select-country width-full py-1 js-consent-experience-country-select"
+                name="account_screening_profile[country_code]"
+                required
+              >
+                <option value disabled selected>Choose your country</option>
+                <% ::TradeControls::Countries.marketing_targeted_countries.each do |(country_name, country_alpha2, _, _)| %>
+                  <option value="<%= country_alpha2 %>"<%= " selected" if country_alpha2 == trade_screening_record_fields[:country_code] %>><%= country_name %></option>
+                <% end %>
+              </select>
+            </dd>
+          </dl>
+        <% end %>
+      </div>
+
+      <div class="my-5 width-full">
+        <% if show_captcha %>
+          <noscript>
+            <p class="flash flash-error">
+              GitHub requires JavaScript enabled during trial enterprise creation, for our captcha.
+              Please enable JavaScript during org creation.
+            </p>
+          </noscript>
+
+          <%= render partial: "shared/octocaptcha", locals: {
+            origin_page: "github_enterprise_trial_create",
+            octocaptcha_timeout: Octocaptcha::HIGHER_BROWSER_LOAD_TIMEOUT
+          } %>
+        <% end %>
+      </div>
+
+      <div class="form-checkbox" aria-live="polite" <%= test_selector("new-trial-features_disabled_warning")%>>
+        <input type="checkbox" class="form-checkbox-details-trigger" id="features_disabled_warning" name="features_disabled_warning" required>
+        <label for="features_disabled_warning" class="text-normal">
+          I understand that
+          <a class="Link--inTextBlock" href="<%= "#{GitHub.help_url}/enterprise-cloud@latest/get-started/signing-up-for-github/setting-up-a-trial-of-github-enterprise-cloud#features-not-included-in-the-trial" %>"
+            target="_blank" rel="noopener noreferrer">
+            certain features
+          </a>
+          are unavailable during the trial experience.
+        </label>
+      </div>
+
+      <% if current_user.feature_enabled? :marketing_forms_api_integration_enterprise_trial %>
+        <div class="form-checkbox" aria-live="polite" <%= test_selector("new-business-trial-business-owned")%>>
+          <input type="checkbox" class="form-checkbox-details-trigger" id="business_owned" name="business_owned" required>
+          <label for="business_owned" class="text-normal">
+            If my organization does not already have a customer agreement for GitHub services, I hereby accept the
+            <a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer Agreement</a>
+            and confirm that I have the authority to do so on behalf of my organization.
+          </label>
+        </div>
+
+        <%= render_react_partial name: "consent-experience", ssr: true, props: {
+          fieldName: :marketing_email_opt_in,
+          countryFieldSelector: ".js-consent-experience-country-select",
+          privacyStatementHref: GitHub.privacy_statement_url,
+          emailSubscriptionSettingsLinkHref: new_settings_link_request_path,
+          exampleFields: ["full name", "company", "email"],
+          labelClass: "text-normal",
+          formControlClass: "form-checkbox mb-0",
+          noticeClass: "color-fg-muted"
+        } %>
+
+        <p>
+          <%= _("If you change your mind, you can %{unsubscribe_link} at any time.", unsubscribe_link: link_to(_("unsubscribe"), settings_email_preferences_path)) %>
+        </p>
+      <% else %>
+        <div class="form-checkbox" aria-live="polite" <%= test_selector("new-business-trial-business-owned")%>>
+          <input type="checkbox" class="form-checkbox-details-trigger" id="business_owned" name="business_owned" required>
+          <label for="business_owned" class="text-normal">
+            If my organization does not already have a customer agreement for GitHub services, I hereby accept the
+            <a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer Agreement</a>
+            and confirm that I have the authority to do so on behalf of my organization. For more information about
+            GitHub's privacy practices, see the
+            <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy Statement</a>.
+          </label>
+        </div>
+      <% end %>
+
+      <%= render(Primer::Beta::Button.new(
+          scheme: :primary,
+          size: :large,
+          block: true,
+          type: :submit,
+          test_selector: "new-business-trial-submit"
+        )) do |_c|
+          "Create your enterprise"
+        end %>
+      <% if emu_enterprise %>
+        <p class="note mt-3 text-center">Next: Set password for admin account</p>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

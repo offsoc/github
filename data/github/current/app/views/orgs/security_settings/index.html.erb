@@ -1,0 +1,552 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%# erblint:counter ButtonComponentMigrationCounter 7 %>
+<%# `view` is an instance of Orgs::SecuritySettings::IndexView %>
+<% page_info responsive: false, title: "Security", selected_link: :organization_security %>
+
+<% two_factor_auth_available = !view.business_emu_configured? %>
+<% members_without_2fa_allowed = view.organization.members_without_2fa_allowed? %>
+
+<%= render layout: "orgs/settings/layout" do %>
+  <div id="" class="settings-next">
+    <%= render(IpAllowlistEntries::Ipv6NoticeComponent.new(
+      owner: this_organization,
+      dismissal_path: dismiss_org_notice_path(
+        this_organization,
+        input: {
+          organizationId: this_organization.id,
+          notice: IpAllowlistEntries::Ipv6NoticeComponent::NOTICE_NAME
+        }
+      ),
+      dismissal_method: "delete",
+    )) %>
+
+    <% if two_factor_auth_available %>
+      <%= render Primer::Beta::Subhead.new do |component| %>
+        <% component.with_heading(tag: :h2) do %>Two-factor authentication<% end %>
+        <% component.with_actions do %>
+        <% end %>
+      <% end %>
+
+      <p>
+        Requiring an additional authentication method adds another level of
+        security for your organization.
+      </p>
+
+      <%= form_tag settings_org_two_factor_enforcement_update_path(view.organization),
+        :class => "mt-3 two-factor-enforcement-form", :method => :put do %>
+
+        <div class="form-checkbox">
+
+          <%= render "orgs/security_settings/two_factor_enforcement_checkbox", view: view %>
+
+          <%= render Primer::Beta::Flash.new(
+            scheme: members_without_2fa_allowed ? :default : :warning,
+            mt: 2
+          ) do %>
+            Members<% if GitHub.billing_enabled? %>, billing managers,<% end %>
+            and <%= outside_collaborators_verbiage(view.organization) %> who do not have
+            two-factor authentication enabled for their personal account
+            <% if members_without_2fa_allowed %>
+              will be asked to enable it when accessing the organization.
+              Requiring two-factor authentication will not remove them from the organization.
+            <% else %>
+              will be removed from the organization and will receive an
+              email notifying them about the change.
+            <% end %>
+            <%= link_to "Learn more.", "#{GitHub.help_url}/articles/configuring-two-factor-authentication", class: "Link--inTextBlock" %><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+          <% end %>
+
+        </div>
+
+        <div class="clearfix">
+          <button type="submit"
+            class="btn js-2fa-save-button ml-3 mr-4"
+            <%= 'disabled' if view.two_factor_requirement_form_disabled? || view.enforcing_two_factor_requirement? %>>
+            Save
+          </button>
+          <% if view.two_factor_requirement_form_disabled? %>
+            <div class="color-fg-muted note d-inline-block pt-1 mt-1 clearfix">
+              <%= primer_octicon(:question) %>
+              <%= view.disabled_form_reason %>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if !members_without_2fa_allowed && view.two_factor_requirement_disabled_and_needs_enforced? %>
+        <%= render layout: "shared/details_dialog", locals: {
+          details_class: "js-confirm-2fa-modal d-none",
+          dialog_class: "overflow-auto",
+          button_text: "Save",
+          button_class: "btn ml-3",
+          title: "Confirm two-factor enforcement",
+          deferred_loading_url: settings_org_security_two_factor_enforcement_confirmation_path(view.organization)
+          } do %>
+          <include-fragment class="my-3" aria-label="Loading..."><%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %></include-fragment>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if view.can_promote_enterprise? %>
+      <% if view.ssh_cas.any? %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2) do %>
+            SSH certificate authorities
+          <% end %>
+        <% end %>
+        <div class="mt-3">
+          <p>
+            This is a list of SSH certificate authorities that have been created for this organization in the past, though use of them is not available with your billing plan.
+            To use these SSH certificate authorities or to add new certificates, upgrade to <a class="Link--inTextBlock" href="<%= GitHub.url %>/enterprise">GitHub Enterprise Cloud</a>. Otherwise, they can be deleted.
+          </p>
+          <ul class="Box border-bottom-0 mb-3">
+            <%= render partial: "ssh_certificate_authorities/listing", collection: view.ssh_cas, as: :ca, locals: {this_owner: view.organization} %>
+          </ul>
+        </div>
+      <% end %>
+      <%= render Primer::Beta::BorderBox.new(border_radius: 2, mt: 7, classes: "color-bg-premium") do |box| %>
+        <% box.with_row do %>
+          <div class="m-3">
+            <h2>Secure your data and people with GitHub Enterprise</h2>
+
+            <%= render Primer::ButtonComponent.new(
+              tag: :a,
+              href: enterprise_trial_accounts_new_path,
+              classes: "btn-premium",
+              my: 3,
+              data: analytics_click_attributes(category: "start_a_free_trial", action: "click_to_set_up_enterprise_trial", label: "ref_page:#{request.fullpath};ref_cta:try_github_enterprise;ref_loc:security_settings;")
+            ) do %>
+              <%= primer_octicon(:rocket, color: :sponsors, mr: 1) %>
+              Try GitHub Enterprise
+            <% end %>
+
+            <div class="my-3 d-flex gutter gutter-lg-spacious">
+              <div class="col-12 col-md-6">
+                 <%= render Organizations::Settings::SecurityEnterpriseTrialBannerComponent.new(
+                  user: view.current_user,
+                  organization: view.organization,
+                  notice_key: "saml_prompt",
+                  feature_name: "SAML single sign-on",
+                  description_text: "SAML single sign-on (SSO) gives GitHub Enterprise accounts a way to control and secure access to organization resources like repositories, issues, and pull requests.",
+                  learn_more_path: "/admin/identity-and-access-management/using-saml-for-enterprise-iam/configuring-saml-single-sign-on-for-your-enterprise") %>
+
+                <%= render Organizations::Settings::SecurityEnterpriseTrialBannerComponent.new(
+                  user: view.current_user,
+                  organization: view.organization,
+                  notice_key: "growth_security_ssh_ghec_trial_banner",
+                  feature_name: "SSH certificate authorities",
+                  description_text: "With an SSH certificate authority, enterprise accounts can provide SSH certificates that members can use to access your resources with Git.",
+                  learn_more_path: "/organizations/managing-git-access-to-your-organizations-repositories/about-ssh-certificate-authorities") %>
+
+                <%= render Organizations::Settings::SecurityEnterpriseTrialBannerComponent.new(
+                  user: view.current_user,
+                  organization: view.organization,
+                  notice_key: "growth_security_ssh_ghec_trial_banner",
+                  feature_name: "Certified for compliance",
+                  description_text: "GitHub Enterprise Cloud is certified for SOC 1 Type 2, SOC 2 Type 2, FedRAMP LiSaaS. Enterprise customers can download these reports, and more, at any time.",
+                  learn_more_path: "/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/accessing-compliance-reports-for-your-organization#about-githubs-compliance-reports") %>
+              </div>
+
+              <div class="col-12 col-md-6">
+                <%= render Organizations::Settings::SecurityEnterpriseTrialBannerComponent.new(
+                  user: view.current_user,
+                  organization: view.organization,
+                  notice_key: "growth_security_ssh_ghec_trial_banner",
+                  feature_name: "Team Synchronization",
+                  description_text: "Enable and disable team synchronization between your identity provider (IdP) and your organizations on GitHub Enterprise accounts.",
+                  learn_more_path: "/organizations/managing-saml-single-sign-on-for-your-organization/managing-team-synchronization-for-your-organization") %>
+
+                <%= render Organizations::Settings::SecurityEnterpriseTrialBannerComponent.new(
+                  user: view.current_user,
+                  organization: view.organization,
+                  notice_key: "growth_security_ip_ghec_trial_banner",
+                  feature_name: "IP allow list",
+                  description_text: "GitHub Enterprise accounts can restrict access to private organization assets by configuring an allow list for specific IP addresses.",
+                  learn_more_path: "/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/managing-allowed-ip-addresses-for-your-organization") %>
+              </div>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% else %>
+      <% if view.organization.business_plus? && !view.business_emu_configured? %>
+        <%= render Primer::Beta::Subhead.new(spacious: two_factor_auth_available, id: "saml-settings") do |component| %>
+          <% component.with_heading(tag: :h2) do %>SAML single sign-on<% end %>
+          <% if view.business_sso_configured? %>
+            <% component.with_actions(classes: "note") do %>
+              <%= primer_octicon(:"shield-lock") %>
+              This has been
+              <%= link_to "required by enterprise administrators", GitHub.business_accounts_help_url, class: "Link--inTextBlock" %>.
+            <% end %>
+          <% end %>
+        <% end %>
+        <%= render "orgs/security_settings/tip", organization: current_organization %>
+        <p>
+          Manage your organization’s membership while adding another level of security with SAML. <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/about-identity-and-access-management-with-saml-single-sign-on">Learn more</a><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+        </p>
+
+        <template id="disable-saml-confirmation">
+          <div class="Box-header"><h3 class="Box-title">Are you sure you want to disable SAML?</h3></div>
+          <div class="Box-body">
+            Disabling SAML authentication for the <%= view.organization.safe_profile_name %> organization will not remove existing members.
+          </div>
+
+          <%= form_tag(settings_org_saml_provider_path(view.organization), method: :delete, class: "Box-footer", "data-turbo": "false") do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>Disable SAML authentication<% end %>
+          <% end %>
+        </template>
+
+        <div class="saml-settings-form" data-warn-unsaved-changes="Changes to your SAML provider settings may not be saved">
+          <%= form_for(:saml, url: settings_org_saml_provider_path(view.organization, anchor: "saml-settings"), method: :put, html: { class: "js-saml-provider-settings-form", novalidate: true, "data-turbo": "false"}) do |f| %>
+            <div class="form-checkbox">
+              <% if view.business_sso_configured? %>
+                <input type="checkbox" checked aria-label="Enable saml" disabled>
+              <% else %>
+                <input id="enable-saml-checkbox" type="checkbox" name="enable-saml-checkbox" class="js-org-enable-saml" <%= "checked" if view.show_saml_settings? %>>
+                <input type="hidden" name="saml-currently-enabled" class="js-org-saml-currently-enabled" value="<%= view.organization_saml_settings_saved? ? 1 : 0 %>">
+              <% end %>
+
+              <label for="enable-saml-checkbox">Enable SAML authentication</label>
+
+              <% if !view.disallow_sso_enforcement? %>
+                <template id="enforce-saml-confirmation" class="d-none">
+                  <div class="Box-header"><h3 class="Box-title">Confirm SAML SSO enforcement</h3></div>
+                  <div class="Box-body overflow-auto">
+                    <p>Requiring SAML SSO will remove all members in the <strong><%= view.organization.safe_profile_name %></strong> organization who have not authenticated via your identity provider.</p>
+                    <p class="color-fg-danger"><strong><%= view.unlinked_members_count %> members will be removed from this organization</strong></p>
+
+                    <% if view.show_unlinked_members? %>
+                      <div class="confirm-removal-list-container">
+                        <ul class="list-style-none">
+                          <% view.unlinked_saml_members.each do |member| %>
+                            <li class="confirm-removal-list-item">
+                              <%= avatar_for(member, 30, :class => 'avatar mr-1') %>
+                              <%= member.safe_profile_name %>
+                              <span class="ml-1 color-fg-muted text-small text-normal"><%= member.display_login %></span>
+                            </li>
+                          <% end %>
+                        </ul>
+                      </div>
+                    <% end %>
+                  </div>
+                  <div class="Box-footer">
+                    <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger, classes: "js-org-saml-confirm-enforce-button") do %>Remove members and require SAML single sign-on<% end %>
+                  </div>
+                </template>
+                <% end %>
+
+              <p class="note <%= "color-fg-muted" if view.business_sso_configured?%>">
+                Enable SAML authentication for your organization through an identity
+                provider like Azure, Okta, OneLogin, Ping Identity or your custom SAML 2.0 provider.
+              </p>
+
+              <div class="js-saml-form-inputs <%= "d-none" unless view.show_saml_settings? %>">
+                <% if view.organization_saml_settings_saved? %>
+                  <div class="Box my-4 color-bg-subtle">
+
+                    <% unless view.business_saml_settings_saved? %>
+                      <div class="border-bottom p-3 d-flex flex-items-center">
+                        <div>
+                          <%= primer_octicon(:"shield-lock", color: :muted, mr: 3) %>
+                        </div>
+                        <p class="note">
+                          <%= link_to "Save your recovery codes", settings_org_saml_provider_recovery_codes_path(view.organization), class: "Link--inTextBlock" %>
+                          in a safe place. If your IdP is unavailable you can use a
+                          recovery code to skip single sign-on and access
+                          the <%= view.organization.safe_profile_name %> organization.
+                        </p>
+                      </div>
+                    <% end %>
+
+                    <div class="p-3 d-flex flex-items-center">
+                      <div>
+                        <%= primer_octicon(:link, color: :muted, mr: 3) %>
+                      </div>
+                      <p class="note">
+                        <% if view.business_sso_configured? %>
+                          The <%= view.organization.safe_profile_name %> organization single sign-on URL through the <%= view.business.name %> enterprise is
+                          <%= link_to business_idm_sso_enterprise_url(view.business), business_idm_sso_enterprise_path(view.business), class: "Link--inTextBlock" %>
+                        <% else %>
+                          The <%= view.organization.safe_profile_name %> organization single sign-on URL is <%= link_to org_idm_sso_url(view.organization), org_idm_sso_path(view.organization), class: "Link--inTextBlock" %>.
+                        <% end %>
+                      </p>
+                    </div>
+
+                  </div>
+                <% end %>
+                <%= hidden_field_tag :show_onboarding_guide_tip, params[:show_onboarding_guide_tip] %>
+                <%= f.text_group "Sign on URL", :sso_url,
+                  value: view.sso_url,
+                  error: view.sso_url_error,
+                  placeholder: "https://yourapp.example.com/apps/appId",
+                  hint: "Members will be forwarded here when signing in to your organization",
+                  type: :url,
+                  autocomplete: :off,
+                  disabled: view.business_saml_settings_saved? %>
+
+                <%= f.text_group "Issuer", :issuer,
+                  value: view.issuer,
+                  error: view.issuer_error,
+                  placeholder: "https://example.com",
+                  hint: "Typically a unique URL generated by your SAML identity provider",
+                  type: :url,
+                  autocomplete: :off,
+                  editable: view.business_saml_settings_saved? %>
+
+                <%= f.text_area_group "Public certificate", :idp_certificate,
+                  for: "saml_idp_certificate",
+                  value: view.idp_certificate,
+                  error: view.idp_certificate_error,
+                  placeholder: "Paste your x509 certificate here",
+                  rows: 20,
+                  cols: 40,
+                  class: "saml-certificate-field",
+                  disabled: view.business_saml_settings_saved? %>
+
+                <p class="note pb-2 mb-2 border-bottom js-details-container Details details-container">
+                  Your SAML provider is using the
+                  <strong class="method-value"><%= view.signature_method_label %></strong>
+                  <%= select_tag "saml[signature_method]", options_for_select(view.saml_signature_method_options.to_a, view.signature_method), :class => "form-select select-sm method-field" %>
+                  <label for="saml_signature_method" class="method-label">Signature Method</label>
+                  and the
+                  <strong class="method-value"><%= view.digest_method_label %></strong>
+                  <%= select_tag "saml[digest_method]", options_for_select(view.saml_digest_method_options.to_a, view.digest_method), :class => "form-select select-sm method-field" %>
+                  <label for="saml_digest_method" class="method-label">Digest Method</label>.
+                  <%= render Primer::ButtonComponent.new(scheme: :link, ml: 1, classes: "js-details-target details-target", "aria-label": "Modify Signature and Digest Methods", "aria-expanded": "true") do %>
+                    <%= primer_octicon(:pencil) %>
+                  <% end %>
+                </p>
+
+                <p class="note">
+                  The assertion consumer service URL is
+                  <% if view.business_sso_configured? %>
+                    <%= link_to "#{enterprise_url(view.business.slug)}/saml/consume", "#{enterprise_path(view.business.slug)}/saml/consume", class: "Link--inTextBlock" %>.
+                  <% else %>
+                    <%= link_to org_idm_saml_consume_url(view.organization), org_idm_saml_consume_url(view.organization), class: "Link--inTextBlock" %>.
+                  <% end %>
+                </p>
+
+                <% unless view.business_saml_settings_saved? %>
+                  <div class="d-flex flex-items-baseline my-5">
+                    <button id="test-saml-settings" name="test_settings" value="1" class="btn js-saml-submit" type="submit">Test SAML configuration</button>
+                    <div class="d-inline-block ml-3">
+                      <% if view.saml_test_failure? %>
+                        <div class="test-status-indicator test-status-indicator-error d-inline-block mr-3 text-center float-left"><%= primer_octicon(:x, mx: :auto) %></div>
+                        <strong>Failed</strong>:
+                        <%= view.saml_test_errors %>
+                      <% elsif view.saml_test_success? %>
+                        <div class="test-status-indicator test-status-indicator-success d-inline-block mr-3 text-center float-left"><%= primer_octicon(:check, mx: :auto) %></div>
+                        <strong>Passed</strong>:
+                        Successfully authenticated your SAML SSO identity
+                      <% else %>
+                        <span class="text-small">Before enabling test your SAML SSO configuration</span>
+                      <% end %>
+                    </div>
+                  </div>
+
+                  <div class="form-checkbox <%= view.disallow_sso_enforcement? ? "saml-enforcement-disabled" : "" %>">
+                    <label>
+                      <%= check_box "saml", "enforced", { class: "js-org-saml-enforce", checked: view.saml_enforced?, disabled: view.disallow_sso_enforcement? } %>
+                      Require SAML SSO authentication for all members of the <%= view.organization.safe_profile_name %> organization.
+                    </label>
+                    <input type="hidden" name="confirm-saml-enforcement" class="js-org-saml-confirm-enforcement-hidden" value="0">
+                    <input type="hidden" name="saml-already-enforced" class="js-org-saml-previously-enforced" value="<%= view.saml_enforced? ? 1 : 0 %>">
+                    <input type="hidden" name="org-has-unlinked-saml-members" class="js-org-has-unlinked-saml-members" value="<%= view.unlinked_saml_members.any? ? 1 : 0 %>">
+                    <span class="note">
+                      Requiring SAML SSO will remove all members (excluding <%= outside_collaborators_verbiage(view.organization) %>) who have not authenticated their accounts. Members will receive an email notifying them about the change. Leaving this option unchecked will allow you to test before requiring.
+                    </span>
+                  </div>
+
+                  <% if view.disallow_sso_enforcement? %>
+                    <div class="mb-3 d-flex flex-items-center">
+                      <div>
+                        <%= primer_octicon(:info, color: :muted, mr: 2) %>
+                      </div>
+                      <p class="note">
+                      You must
+                      <%= link_to "single sign-on", org_idm_sso_path(view.organization, return_to: settings_org_security_path(view.organization), class: "Link--inTextBlock") %>
+                      before you can require SAML SSO for all members of the
+                      <%= view.organization.safe_profile_name %> organization.
+                      </p>
+                    </div>
+                  <% end %>
+                  <hr class="my-4">
+                <% end %>
+              </div>
+            </div>
+            <button id="save-saml-settings" name="save_settings" value="1" class="btn js-saml-submit ml-3" type="submit" <%= "disabled" if view.saml_test_failure? || view.business_sso_configured? %>>Save</button>
+          <% end %>
+        </div>
+
+        <% if view.show_team_sync_settings? %>
+          <%= render "orgs/security_settings/team_sync/settings", view: view %>
+        <% end %>
+      <% end %>
+
+      <% if view.show_ssh_cas? && SshCertificateAuthority.eligible_for_feature?(view.organization) %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2, test_selector: "ssh-cas-heading") do %>
+            SSH certificate authorities
+          <% end %>
+          <% component.with_actions do %>
+            <a href="<%= ssh_certificate_authorities_new_organization_path %>" class="btn btn-sm btn-primary">New CA</a>
+          <% end %>
+        <% end %>
+        <% if view.ssh_cas.any? %>
+          <p>
+            This is a list of SSH certificate authorities associated with this organization.
+          </p>
+          <ul class="Box border-bottom-0 mb-3">
+            <%= render partial: "ssh_certificate_authorities/listing", collection: view.ssh_cas, as: :ca, locals: {this_owner: view.organization} %>
+          </ul>
+
+          <%= form_tag org_security_ssh_certificate_authority_owner_settings_path(view.organization), method: :patch do |f| %>
+            <div class="form-checkbox">
+              <input id="enable_ssh_cert_requirement_checkbox" type="checkbox" name="enable_ssh_cert_requirement" <%= "disabled" if view.organization.ssh_certificate_requirement_policy? %> <%= "checked" if view.organization.ssh_certificate_requirement_enabled? %> >
+
+              <label for="enable_ssh_cert_requirement_checkbox">Require SSH Certificates</label>
+
+              <p class="note color-fg-muted">
+                <% if GitHub.single_business_environment? %>
+                  Require members and collaborators to use SSH certificates when accessing
+                  this organizations's repositories via Git. Members and collaborators will only be able
+                  to use passwords or personal access tokens for Git access if SSH access has been disabled
+                  for the repository. For more information, see
+                  <%= link_to \
+                    "Disabling Git SSH access on GitHub Enterprise Server.",
+                    "#{GitHub.enterprise_admin_help_url}/user-management/managing-repositories-in-your-enterprise/disabling-git-ssh-access-on-your-enterprise#disabling-git-ssh-access-to-a-specific-repository", class: "Link--inTextBlock"
+                    %>
+                  Access by authorized third-party integrations will not be affected.
+                <% else %>
+                  Require members and collaborators to use SSH certificates when accessing
+                  this organizations's repositories via Git. This will disable Git access using personal access tokens.
+                  Access by authorized third-party integrations will not be affected.
+                <% end %>
+              </p>
+              <% if view.organization.ssh_certificate_requirement_policy? %>
+                <p class="note color-fg-muted">
+                  <strong>This requirement is enabled for the <%= view.organization.business.name %> enterprise and cannot be disabled for this organization.</strong>
+                </p>
+              <% end %>
+            </div>
+            <button type="submit" class="btn" <%= "disabled" if view.organization.ssh_certificate_requirement_policy? %>>Save</button>
+          <% end %>
+        <% else %>
+          <p>There are no SSH certificate authorities associated with this organization.</p>
+        <% end %>
+      <% end %>
+
+      <% if view.show_ip_allowlist? %>
+        <% if IpAllowlistEntry.eligible_for_ip_allowlist?(view.organization) %>
+          <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+            <% component.with_heading(tag: :h2, display: :flex, align_items: :center) do %>
+              IP allow list
+              <% if view.business&.idp_based_ip_allowlist_configuration? %>
+                <div class="color-fg-muted note pl-3">
+                  <%= primer_octicon(:"shield-lock") %>
+                  This setting is controlled by your enterprise administrators.
+                </div>
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <p>
+            An IP allow list lets your organization limit access based on the IP address a person is accessing from.
+            <%= link_to \
+              "Learn more",
+              "#{GitHub.help_url}/github/setting-up-and-managing-organizations-and-teams/managing-allowed-ip-addresses-for-your-organization",
+              class: "Link--inTextBlock" %>.<%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+          </p>
+
+          <% if !view.business&.idp_based_ip_allowlist_configuration? %>
+            <div class="mb-3" <%= test_selector("enable_IP_allow_list") %>>
+              <%= form_tag settings_org_security_ip_allowlist_enabled_path(view.organization), method: :patch do |f| %>
+                <div class="form-checkbox">
+                  <input id="enable_ip_allowlist_checkbox" type="checkbox" name="enable_ip_allowlist"
+                    <%= "disabled" if view.organization.ip_allowlist_enabled_policy? %>
+                    <%= "checked" if view.organization.ip_allowlist_enabled? %> >
+                  <label for="enable_ip_allowlist_checkbox">Enable IP allow list</label>
+                  <p class="note color-fg-muted">
+                    Enabling will allow you to restrict access by IP address to resources owned by this organization.
+                  </p>
+                  <% if view.organization.ip_allowlist_enabled_policy? %>
+                    <p class="note color-fg-muted">
+                      <strong>
+                        IP allow list is enabled for the
+                        <strong><%= view.organization.business.name %></strong>
+                        enterprise and cannot be disabled for this organization.
+                      </strong>
+                    </p>
+                  <% end %>
+                </div>
+                <button type="submit" class="btn ml-3"
+                  <%= "disabled" if view.organization.ip_allowlist_enabled_policy? %>>Save</button>
+              <% end %>
+            </div>
+
+            <div class="mb-3">
+              <%= form_tag settings_org_security_ip_allowlist_app_access_enabled_path(view.organization), method: :patch do |f| %>
+                <div class="form-checkbox">
+                  <input id="enable_ip_allowlist_app_access_checkbox" type="checkbox" name="enable_ip_allowlist_app_access"
+                    <%= "disabled" if view.organization.ip_allowlist_app_access_enabled_policy? %>
+                    <%= "checked" if view.organization.ip_allowlist_app_access_enabled? %> >
+                  <label for="enable_ip_allowlist_app_access_checkbox">Enable IP allow list configuration for installed GitHub Apps</label>
+                  <p class="note color-fg-muted">
+                    Enabling will automatically set up IP allow list entries for installed GitHub Apps.
+                    <%= view.installed_app_ip_allowlist_entries_info %>
+                  </p>
+                  <% if view.organization.ip_allowlist_app_access_enabled_policy? %>
+                    <p class="note color-fg-muted">
+                      <strong>
+                        Automatic IP allow list configuration for GitHub Apps is enabled for the
+                        <strong><%= view.organization.business.name %></strong>
+                        enterprise and cannot be disabled for this organization.
+                      </strong>
+                    </p>
+                  <% end %>
+                </div>
+                <button type="submit" class="btn ml-3"
+                  <%= "disabled" if view.organization.ip_allowlist_app_access_enabled_policy? %>>Save</button>
+              <% end %>
+            </div>
+
+            <% if IpAllowlistEntry.eligible_for_ip_allowlist?(view.organization) %>
+              <div class="form-group ml-3">
+                <%= form_tag settings_org_security_path(this_organization), :method => "get",
+                  "data-autosearch-results-container" => "ip-allowlist-entries-list" do %>
+                  <div class="auto-search-group">
+                    <input class="form-control width-full input-contrast auto-search-input js-member-filter-field"
+                      type="text"
+                      name="query"
+                      value="<%= params[:query] %>"
+                      placeholder="Find IP allow list entries…"
+                      aria-label="Find IP allow list entries…"
+                      autocomplete="off"
+                      data-throttled-autosubmit>
+                    <%= render Primer::Beta::Octicon.new(icon: "search") %>
+                    <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+                  </div>
+                <% end %>
+              </div>
+
+              <div id="ip-allowlist-entries-list" class="Box mb-6 ml-3">
+                <%= render "ip_allowlist_entries/list",
+                  owner: this_organization,
+                  new_entry_path: organization_ip_allowlist_entries_path(this_organization),
+                  ip_allowlist_entries: view.ip_allowlist_entries(query: params[:query], page: current_page),
+                  installed_app_ip_allowlist_entries: view.installed_app_ip_allowlist_entries(query: params[:query], page: current_page) %>
+              </div>
+
+              <div class="ml-3">
+                <%= render IpAllowlistChecks::FormComponent.new(
+                  owner_type: :organization,
+                  owner_id: this_organization.id) %>
+              </div>
+            <% end %>
+          <% end %>
+
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,175 @@
+<%# erblint:counter DeprecatedInPrimerCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+
+<% enterprise = params[:enterprise] || GitHub.single_or_multi_tenant_enterprise? -%>
+<section aria-label="Staff Bar" id="serverstats" class="clearfix server-stats <% if site_admin_performance_stats_mode_enabled? %>more-enabled<% end %>">
+  <div class="px-3 clearfix">
+      <% if site_admin? || employee? %>
+        <a class="float-right stafftools-icon tooltipped tooltipped-sw js-site-admin-link" href="<%= admin_url %>" data-hotkey="Shift+A" aria-label="Site admin"><%# erblint:disable DataHotkey, Primer::Accessibility::TooltippedMigration %>
+          <%= primer_octicon(:rocket) %>
+        </a>
+        <% if Rails.env.production? && employee? && site_admin? %>
+          <a class="float-right stafftools-icon tooltipped tooltipped-sw js-spamurai-link" href="<%= Spam::EXTERNAL_SPAMURAI_BASE_URL %>" data-hotkey="Shift+S" aria-label="Spamurai"><%# erblint:disable DataHotkey, Primer::Accessibility::TooltippedMigration %>
+            <%= primer_octicon(:squirrel) %>
+          </a>
+        <% end %>
+      <% elsif GitHub.billing_enabled? && biztools_user? %>
+        <a class="biztools-briefcase tooltipped tooltipped-s js-site-admin-link" href="<%= biztools_url %>" data-hotkey="Shift+B" aria-label="Biztools"><%# erblint:disable DataHotkey, Primer::Accessibility::TooltippedMigration %>
+          <%= primer_octicon(:briefcase) %>
+        </a>
+      <% end %>
+
+      <%= form_tag site_admin_performance_stats_path, method: :patch do %>
+        <input type="hidden" name="enabled" value="<%= !site_admin_performance_stats_mode_enabled? %>">
+        <button type="submit" class="float-right btn-link stats-show-more-stats"
+          aria-label="Show more stats" <%= test_selector "site-admin-stats-ellipsis" %>>
+          <%= primer_octicon(:ellipsis) %>
+        </button>
+      <% end %>
+
+    <ul class="stats js-stats" style="display:none;"></ul>
+
+    <% if GitHub.kubernetes_backend_available? %>
+      <%= form_tag canary_path(toggle: !canary_cookie_enabled?), method: :patch, class: "d-inline ml-1 canary-me #{"enabled" if canary_cookie_enabled?}" do %>
+        <button type="submit" class="btn-link" title="<%= canary_cookie_enabled? ? "Disable" : "Enable" %> canary unicorns"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+          <img src="<%= image_path "modules/logos/canary-logo.png" %>" width="16" height="16" alt="">
+        </button>
+      <% end %>
+    <% end %>
+
+    <p class="m-0 d-inline-block serverstats-branch">
+      <% if Rails.env.development? %>
+        <%= render Primer::Beta::Label.new(scheme: :primary, mr: 3, title: "Label: DEVELOPMENT MODE", color: :inherit) do %>
+          DEVELOPMENT <% if GitHub.multi_tenant_enterprise? %> | MULTI-TENANT <% end %>
+        <% end %>
+      <% end %>
+      <% if GitHub.role == :lab %>
+        <%= render Primer::Beta::Label.new(scheme: :orange, mr: 3, title: "Label: LAB MODE") do %>
+          LAB
+        <% end %>
+      <% end %>
+      <% if enterprise? %>
+        <%= primer_octicon(:"chevron-right") %>
+      <% else %>
+        <%= primer_octicon(:"git-branch") %>
+      <% end %>
+      <span class="current-branch css-truncate expandable">
+        <% ref = GitHub.current_ref.dup.force_encoding("UTF-8").scrub!.presence %>
+        <% master_ref = ref == "master" %>
+        <% unknown_ref = ref == "unknown" %>
+
+        <% current_sha = GitHub.current_sha %>
+        <% short_current_sha = current_sha[0, 7].presence %>
+        <% is_sha_ref = ref == short_current_sha || ref == current_sha %>
+
+        <% good_ref = ref && !unknown_ref && !is_sha_ref %>
+
+        <% display_sha_link = !master_ref && !unknown_ref && short_current_sha &&
+                              Rails.env.production? && !GitHub.enterprise? %>
+        <% sha_link = "/github/github/compare/master...#{current_sha}" %>
+
+        <% displayed_sha = false %>
+        <% displayed_sha_link = false %>
+
+        <span class="current-branch-name css-truncate-target">
+          <% if good_ref %>
+            <%= ref %>
+          <% elsif display_sha_link %>
+            <%= link_to short_current_sha, sha_link %>
+            <% displayed_sha = displayed_sha_link = true %>
+          <% elsif short_current_sha %>
+            <%= short_current_sha %>
+            <% displayed_sha = true %>
+          <% else %>
+            <%= ref %>
+          <% end %>
+        </span>
+        <span class="sha">
+          <% if short_current_sha %>
+            <% if display_sha_link %>
+              <%= link_to short_current_sha, sha_link %>
+            <% else %>
+              <%= short_current_sha %>
+            <% end %>
+          <% end %>
+        </span>
+      </span>
+    </p>
+
+    <% if GitHub.bones_app_available? && controller.respond_to?(:logical_service)%>
+      <p class="mr-1 mb-0 d-inline-block serverstats-bones" <%= test_selector "site-admin-bones-link" %>>
+        <% known_service = controller.logical_service != GitHub::Serviceowners::UNKNOWN_SERVICE %>
+        <% if known_service %>
+          <% path = "/services/#{controller.logical_service.delete_prefix("github/")}" %>
+        <% end %>
+        <a class="js-bones-link" href="https://bones.githubapp.com<%= path %>" target="bones.githubapp.com">
+          <%= emoji_tag Emoji.find_by_alias("bone"), title: "Bones" %>
+        </a>
+      </p>
+    <% end %>
+
+    <% if GitHub.staffbar_service_info_enabled? && controller.respond_to?(:logical_service) %>
+      <div class="m-0 d-inline-block serverstats-service">
+        <% isKnownService = controller.logical_service != GitHub::Serviceowners::UNKNOWN_SERVICE %>
+        <span class="js-catalog-unknown-service" <%= "hidden" if isKnownService %>>
+          <%= emoji_tag Emoji.find_by_alias("cat2"), title: "Service Catalog" %>
+
+          <span class="current-service">
+            unknown
+          </span>
+        </span>
+        <a href="https://catalog.githubapp.com/services/<%= controller.logical_service %>/support"
+           target="catalog.githubapp.com"
+           class="js-catalog-known-service no-underline"
+           <%= "hidden" unless isKnownService %>>
+
+          <%= emoji_tag Emoji.find_by_alias("cat2"), title: "Service Catalog" %>
+
+          <span class="current-service js-catalog-service-name">
+            <%= controller.logical_service %>
+          </span>
+        </a>
+      </div>
+    <% end %>
+
+    <% unless GitHub.enterprise? %>
+      <div class="m-0 d-inline-block">
+        <%= render partial: "stafftools/staffbar/feedback" %>
+      </div>
+    <% end %>
+
+    <% unless enterprise %>
+      <details class="m-0 d-inline-block details-reset details-overlay details-overlay-dark">
+        <summary class="stat-toggle">
+          <span class="rails-version">Rails <%= Rails.version %></span>
+        </summary>
+        <details-dialog style="width: 100%" class="Box Box--overlay d-flex flex-column anim-fade-in fast" aria-label="Rails"><%# erblint:disable A11yDetailsDialogMigration %>
+          <div class="Box-header">
+            <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+              <%= primer_octicon(:x) %>
+            </button>
+            <h3>Rails <%= Rails.version %></h3>
+            <div class="Box-body overflow-auto pb-3">
+              <h4>Middleware</h4>
+              <ul class="list-style-none mb-3">
+                <% Rails.application.middleware.each do |middleware| %>
+                  <li><%= middleware.klass %></li>
+                <% end %>
+              </ul>
+            </div>
+          </div>
+        </details-dialog>
+      </details>
+      <p class="m-0 d-inline-block rails-version">| Ruby <%= RUBY_VERSION %></p>
+      <p class="m-0 d-inline-block rails-version" id="staffbar-react-version"></p>
+    <% end %>
+
+    <%= render Discussions::CopilotSummarizeBannerStaffbarComponent.new(
+      controller_name: controller_name,
+      action_name: action_name,
+      discussion: respond_to?(:current_discussion) ? current_discussion : nil,
+    ) %>
+
+    <ul class="stats js-more-stats" style="display:none;"></ul>
+  </div>
+</section>

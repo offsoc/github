@@ -1,0 +1,57 @@
+#!/bin/bash
+# shellcheck disable=all
+
+# A script that when provided a test filename and test name can
+# delete that test from the given file.
+#
+# The filename provided must be a class filename that exists in
+# github/github and the test name provided must consiste of the
+# ClassName#test_name. This can be found in the flake issues.
+#
+# This script currently only takes a single filename and test
+# name for now.
+#
+# Usage:
+#   script/delete-flake FILE TEST_NAME
+export RAILS_ENV=test
+
+exec bin/safe-ruby -Itest "$0" "$@"
+
+#!ruby
+
+require 'minitest'
+require 'active_support/all'
+
+# Prevents the test from running. This is a hack.
+module Minitest
+  @@installed_at_exit = true
+end
+
+# Find the files and test name. Load the file.
+files, opts = ARGV.partition { |path| File.exist? path }
+ARGV.replace opts
+files.each { |path| load(path) }
+
+ARGV.each do |flake|
+  klass, test_name = flake.split("#")
+
+  klass = klass.constantize
+  method_name = klass.instance_methods.grep(/^#{test_name}_L\d+$/).first
+  if method_name.nil?
+    puts "The '#{flake}' test name was not found in #{files.first}. Are you sure you spelled it correctly or haven't already run the script?"
+    exit!
+  end
+  method = klass.instance_method(method_name)
+  file, start_line = method.source_location
+  source = method.source
+  file_contents = File.readlines(file)
+  line_count = source.count("\n")
+
+  # Find the start, including that line, and the end, including the new
+  # line after `end`.
+  #
+  # Then set those lines to nil (ie delete them).
+  file_contents[start_line - 1, line_count + 1] = [nil] * (line_count + 1)
+
+  File.write(file, file_contents.compact.join)
+end

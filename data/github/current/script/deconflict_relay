@@ -1,0 +1,405 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "open3"
+require "forwardable"
+require "pathname"
+
+# Utilities for resolving merge conflicts in relay files.
+class DeconflictRelay
+  # argv: String[] program arguments
+  # die: callable to terminate the program with optional message
+  def initialize(argv:, die:)
+    unless die.parameters.map(&:first) == [:opt, :opt]
+      fail "die proc should have two optional params (message, status), got #{die.parameters.inspect}"
+    end
+    @die = die
+    parse_options(argv.dup)
+  end
+
+  def parse_options(args)
+    @command = args.shift
+    usage unless command
+    usage("bad arguments: #{ARGV.inspect}") unless args.size.even?
+    opts = args.each_slice(2).to_h
+
+    @relay_binary = File.absolute_path(File.join(__dir__, "..", RELAY_PATH))
+    die "relay-compiler not found at #{relay_binary}" unless File.exist?(relay_binary)
+
+    opt_parsers = {
+      "gen-merge" => method(:parse_paths),
+      "src-merge" => method(:parse_paths),
+      "conclude" => NO_OP
+    }
+
+    on_unrecognized_cmd = ->(cmd) { usage("unrecognized command #{cmd.inspect}") }
+    opt_parsers.fetch(command, &on_unrecognized_cmd).call(opts)
+
+    unless opts.empty?
+      usage("unrecognized arguments: #{opts.inspect}")
+    end
+  end
+
+  def parse_paths(opts)
+    on_missing_arg = ->(arg) { usage "#{arg} is required" }
+    @result_path = File.absolute_path(opts.delete("--result-path", &on_missing_arg))
+    @conflicted_path = File.absolute_path(opts.delete("--conflicted-path", &on_missing_arg))
+    @merge_ancestor_path = File.absolute_path(opts.delete("--merge-ancestor-path", &on_missing_arg))
+    @other_branch_path = File.absolute_path(opts.delete("--other-branch-path", &on_missing_arg))
+    {
+      result: result_path,
+      conflicted: conflicted_path,
+      merge_ancestor: merge_ancestor_path,
+      other_branch: other_branch_path
+    }.each do |name, path|
+      if !File.exist?(path)
+        die "expected #{path} to be a file (#{name}), but no file is there."
+      end
+    end
+  end
+
+  def call
+    case command
+    when "gen-merge", "src-merge"
+      MergeCommand.build(self).call
+    when "conclude"
+      ConcludeCommand.call(self)
+    else
+      fail "huh?"
+    end
+  end
+
+  def die(msg)
+    @die.call(msg)
+  end
+
+  def usage(msg = nil)
+    puts msg if msg
+    script = File.basename($PROGRAM_NAME)
+    die <<~USAGE
+      usage: #{script} <command> [flags]
+
+      available commands:
+        gen-merge - Resolve conflicts for relay-compiler outputs (called by git)
+
+          #{script} gen-merge --merge-ancestor-path <path> \\
+                                     --other-branch-path   <path> \\
+                                     --conflicted-path     <path> \\
+                                     --result-path         <path>
+
+        src-merge - Resolve conflicts for relay-compiler inputs (called by git)
+
+          #{script} src-merge --merge-ancestor-path <path> \\
+                                     --other-branch-path   <path> \\
+                                     --conflicted-path     <path> \\
+                                     --result-path         <path>
+
+        conclude - Finish a manual confict resolution (called by humans)
+
+          #{script} conclude
+
+    USAGE
+  end
+
+  # ANSI escape sequences
+  RESET = "\e[0m"
+  BOLD = "\e[1m"
+  ITALIC = "\e[3m"
+  UNDERLINE = "\e[4m"
+  RED = "\e[31m"
+  GREEN = "\e[32m"
+  YELLOW = "\e[33m"
+  EMPH = BOLD + UNDERLINE
+  ATTN = EMPH + RED
+  CODE = BOLD
+
+  SUCCESS_MESSAGE = <<~🎉🎉🎉
+    You had a merge conflict but I #{GREEN}resolved it automatically#{RESET} 🎉. Happy hacking!
+      %<path>s
+  🎉🎉🎉
+
+  MANUAL_RESOLVE_INSTRUCTIONS = " " + <<~❤️❤️❤️
+    #{EMPH}Don't panic -- you can do this!#{RESET}
+
+      1. Open the #{CODE}.tsx#{RESET} file mentioned above in your editor.
+         Don't worry about any conflicts in #{CODE}__generated__#{RESET} or #{CODE}persisted_graphql_queries.json#{RESET}.
+      2. Find the conflict markers. They look like #{CODE}<<<#{RESET} and #{CODE}===#{RESET}.
+         The text between each conflict marker pair represents a "side" of the conflict.
+      3. Incorporate the changes from both sides, or if one should supersede the other,
+         just delete the side that is not needed. The file should look like it would
+         if the people who wrote each version had been working together.
+         If it's a particularly tricky conflict, try the following:
+           a. Decide which change is bigger or more complicated and stage
+              that version using `git checkout [--ours/--theirs] <patch>`
+           b. Apply the smaller change manually on top of it.
+      4. Once it looks right, delete the conflict markers and save the file.
+      5. Run this command which will conclude the merge for you.
+
+         #{GREEN}#{File.absolute_path($PROGRAM_NAME)} conclude#{RESET}
+
+  ❤️❤️❤️
+
+  # relative to project root
+  RELAY_PATH = "node_modules/.bin/relay-compiler"
+
+  APP_ROOT = Pathname.new(__dir__).ascend do |dir|
+    break dir if File.exist?(File.join(dir, ".git"))
+  end \
+    or fail "Unable to determine app root, are you running inside a git repository?"
+
+  RELAY_GENERATED_PATTERN = Regexp.union(
+    %r{app/assets/.*/__generated__/.*\.ts\z},
+    %r{config/persisted_graphql_queries\.json\z}
+  )
+
+  ATTR_READERS = [
+    :conflicted_path,      # application file path, %P for merge driver
+    :result_path,          # tmp path provided by git, %A for merge driver
+    :other_branch_path,    # tmp path provided by git, %B for merge driver
+    :merge_ancestor_path,  # tmp path provided by git, %O for merge driver
+    :relay_binary,
+    :program_name,
+    :command
+  ]
+  attr_reader(*ATTR_READERS)
+
+  NO_OP = ->(*) {}
+
+  # Regenerate all files from source
+  def run_relay_compiler
+    cmd = [relay_binary, "--repersist"]
+    stdout, stderr, status = Open3.capture3(*cmd)
+    if block_given?
+      yield cmd, status, stdout, stderr
+    elsif !status.success?
+      die "unexpected error running relay compiler: (`#{cmd.inspect}` exit #{status.exitstatus}):\n#{stderr}\n"
+    end
+  end
+
+  def git_add_generated_files
+    changed_files = Git.diff_filter("*")
+    changed_files.each do |file|
+      if RELAY_GENERATED_PATTERN.match?(file)
+        Git.add(file)
+      end
+    end
+  end
+
+  # Git expects us to signal successful completion by storing the
+  # resolved file at the temporary location specified and exiting 0.
+  def store_result
+    FileUtils.cp(conflicted_path, result_path)
+  end
+
+  # Ways to invoke git commands
+  module Git
+    def git(cmd)
+      stdout, stderr, status = Open3.capture3("git", *cmd)
+      unless status.success?
+        die "unexpected error when running #{cmd.inspect}:\n#{stderr}"
+      end
+      stdout
+    end
+
+    def commit
+      puts git(%w[commit --no-edit])
+    end
+
+    def merge_file(result, ancestor, other)
+      cmd = %w[git merge-file -L current -L base -L head --stdout]
+      cmd += [result, ancestor, other]
+      Open3.capture3(*cmd)
+    end
+
+    def add(paths)
+      git(["add", *paths])
+    end
+
+    def diff_filter(types)
+      cmd = %w[diff --name-only --relative --diff-filter]
+      cmd << types
+      git(cmd).lines.map(&:chomp)
+    end
+
+    def unmerged_files
+      diff_filter("U")
+    end
+
+    extend self
+  end
+
+  # Attempt to automatically resolve a conflict by regenerating files
+  # using relay-compiler.
+  module MergeCommand
+    @strategies = []
+
+    def self.build(cli)
+      strategy = choose(cli.conflicted_path)
+      strategy.new(cli)
+    end
+
+    def self.choose(path)
+      @strategies.detect { |strategy| strategy.can_handle_path?(path) } or die(<<~FAILURE_MESSAGE)
+        #{ATTN}I was asked to resolve a file I don't know how to handle:#{RESET}
+
+        #{YELLOW}#{path}#{RESET}
+
+        It's likely that `.gitattributes` and/or `.git/config` are misconfigured somehow.
+      FAILURE_MESSAGE
+    end
+
+    def self.register_strategy(s)
+      @strategies << s
+    end
+
+    # Shared behavior for merge strategies
+    module Strategy
+      DELEGATED = [*ATTR_READERS, :store_result, :run_relay_compiler, :git_add_generated_files, :die]
+
+      def self.included(base)
+        base.extend(Forwardable)
+        base.delegate(DELEGATED => :@cli)
+        MergeCommand.register_strategy(base)
+      end
+
+      def initialize(cli)
+        @cli = cli
+      end
+    end
+
+    # A strategy for resolving relay-compiler-generated files.
+    class Generated
+      include Strategy
+
+      # Handles relay-generated ts and the persisted query JSON file.
+      def self.can_handle_path?(path)
+        RELAY_GENERATED_PATTERN.match?(path)
+      end
+
+      def call
+        run_relay_compiler(&method(:handle_compiler_result))
+        store_result
+        git_add_generated_files
+        puts format(SUCCESS_MESSAGE, path: conflicted_path)
+      end
+
+      # If relay failed, print its stderr and some help text
+      def handle_compiler_result(cmd, status, _stdout, stderr)
+        return if status.success?
+        puts <<~MESSAGE
+          #{ATTN}You have a merge conflict#{RESET} at:
+
+            #{YELLOW}#{conflicted_path}#{RESET}
+
+          I tried my best to fix it but relay-compiler exited with errors!
+
+          `#{BOLD}#{cmd.join(" ")}#{RESET}` returned status #{status.exitstatus} and the following:
+
+          -------------------------------------------------------------------------------
+          #{stderr.chomp}
+          -------------------------------------------------------------------------------
+
+          This probably means you have a conflict in a .tsx source file that needs to be
+          fixed before we can automatically resolve the conflicts in generated files.
+
+        MESSAGE
+
+        die MANUAL_RESOLVE_INSTRUCTIONS
+      end
+    end
+
+    # A strategy for resolving tsx source files used as inputs for relay-compiler.
+    class Source
+      include Strategy
+
+      def self.can_handle_path?(path)
+        path.end_with?(".tsx")
+      end
+
+      def call
+        stdout, stderr, status = Git.merge_file(result_path, merge_ancestor_path, other_branch_path)
+        code = status.exitstatus
+        if code > 0
+          # conflicts found
+          some, conflicts = if code == 1
+            %w[a conflict]
+          else
+            [code.to_s, "conflicts"]
+          end
+          File.binwrite(result_path, stdout)
+          print <<~MESSAGE.chomp
+
+            #{ATTN}You have #{some} merge #{conflicts}#{RESET} at:
+
+              #{YELLOW}#{conflicted_path}#{RESET}
+
+            You will need to resolve the #{conflicts} manually.
+          MESSAGE
+
+          die MANUAL_RESOLVE_INSTRUCTIONS
+        elsif code == 0
+          # no conflict, write out the file and we're done
+          File.binwrite(result_path, stdout)
+          run_relay_compiler
+          git_add_generated_files
+          puts format(SUCCESS_MESSAGE, path: conflicted_path)
+        else
+          die "unexpected result from #{cmd.inspect}:\n #{stderr}"
+        end
+      end
+
+      def handle_compiler_result(cmd, status, _stdout, stderr)
+        return if status.success?
+
+        die <<~FAILURE_MESSAGE
+          #{ATTN}You have a merge conflict#{RESET} at:
+
+            #{YELLOW}#{conflicted_path}#{RESET}
+
+          I tried my best to fix it but relay-compiler exited with errors!
+
+          `#{cmd.join(" ")}` returned status #{status.exitstatus} and the following:
+
+          -------------------------------------------------------------------------------
+          #{stderr.chomp}
+          -------------------------------------------------------------------------------
+        FAILURE_MESSAGE
+      end
+    end
+  end
+
+  # Validate that conflicts in source files are fixed, run relay-compiler and commit the merge.
+  module ConcludeCommand
+    def call(cli)
+      Git.unmerged_files.each do |file|
+        unless conflict_resolved?(file) || generated?(file)
+          cli.die "Sorry, I can't conclude the merge: at least one file still has conflict markers:\n  #{file}"
+        end
+      end
+      cli.run_relay_compiler
+      Git.add(Git.diff_filter("UM"))
+      Git.commit
+      puts "All done ✨"
+    end
+
+    def conflict_resolved?(path)
+      content = File.binread(path)
+      !(content.include?("\n<<<<") || content.include?("\n>>>>"))
+    end
+
+    def generated?(path)
+      RELAY_GENERATED_PATTERN.match?(path)
+    end
+
+    extend self
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  die = lambda do |msg = nil, status = 1|
+    puts msg if msg
+    exit(status)
+  end
+  DeconflictRelay.new(argv: ARGV, die: die).call
+end

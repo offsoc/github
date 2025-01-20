@@ -1,0 +1,169 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info title: "Card fingerprint #{card_fingerprint}", selected_link: :reused_card_fingerprints %>
+
+<%= render layout: "stafftools/stafftools" do %>
+  <%= render(Primer::Beta::Breadcrumbs.new(mb: 3)) do |component| %>
+    <% component.with_item(href: stafftools_reused_card_fingerprints_path) do %>
+      Reused card fingerprints
+    <% end %>
+
+    <% component.with_item(href: lookup_stafftools_reused_card_fingerprints_path(card_fingerprint: card_fingerprint)) do %>
+      <%= card_fingerprint %>
+    <% end %>
+  <% end %>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>
+      Card fingerprint: <%= card_fingerprint %>
+    <% end %>
+
+    <%= component.with_actions do %>
+      <%= link_to 'View in Spamurai', spamurai_link, class: 'btn' %>
+    <% end %>
+  <% end %>
+
+  <% if blocklisted_payment_method %>
+    <%= render(Primer::Beta::BorderBox.new(border_color: :danger, mb: 3)) do |component| %>
+      <% component.with_header(border_color: :danger, bg: :danger) do |h| %>
+        <% h.with_title(tag: :h2, color: :danger) do %>
+          <%= primer_octicon(:alert) %>
+          This card fingerprint has been blocked
+        <% end %>
+      <% end %>
+
+      <% component.with_row(border_color: :danger) do %>
+        <p>
+          This card fingerprint was added to the deny list on <strong><%= I18n.l blocklisted_payment_method.created_at %></strong>.
+        </p>
+
+        <p class="mb-3">
+          When blocking a card fingerprint, all future payments made with that card will be rejected. All customer accounts linked to the card are suspended.
+        </p>
+
+        <%= render Stafftools::Billing::CardFingerprintDialogComponent.new(card_fingerprint:, action: Stafftools::Billing::CardFingerprintDialogComponent::Action::Unblock) %>
+      <% end %>
+    <% end %>
+  <% elsif over_alerting_threshold %>
+    <%= render Primer::Beta::Flash.new(mb: 3, scheme: :warning) do %>
+      This card fingerprint is currently over the alerting threshold. This means that it's being used 5 or more times in the last 30 days.
+    <% end %>
+  <% end %>
+
+  <div class="boxed-group flush">
+    <h3>
+      Payment methods
+    </h3>
+
+    <% has_blocklisted_payment_method = payment_methods.any? { |payment_method| payment_method.blocklisted? }%>
+    <div class="boxed-group-inner seamless">
+      <table class="stafftools-table">
+        <thead>
+          <th class="no-wrap billing-table-cell pr-0">ID</th>
+          <th class="no-wrap billing-table-cell pr-0">Created at</th>
+          <th class="no-wrap billing-table-cell pr-0">Login</th>
+          <th class="no-wrap billing-table-cell pr-0">Customer</th>
+          <th class="no-wrap billing-table-cell pr-0">Payment processor</th>
+          <% if has_blocklisted_payment_method %>
+            <th class="no-wrap billing-table-cell pr-0">Reason</th>
+          <% end %>
+          <th class="no-wrap billing-table-cell pr-0">Notes</th>
+        </thead>
+
+        <tbody>
+          <% payment_methods.each do |payment_method| %>
+            <tr>
+              <td class="no-wrap tiny">
+                <%= payment_method.id%>
+              </td>
+
+              <td class="no-wrap tiny">
+                <%= time_ago_in_words(payment_method.created_at) %> ago
+              </td>
+
+              <td class="no-wrap tiny">
+                <% if payment_method.user %>
+                  <%= link_to payment_method.user.login, stafftools_user_path(payment_method.user) %>
+                <% end %>
+              </td>
+
+              <td class="no-wrap tiny">
+                <%= payment_method.customer.try(:name) %>
+              </td>
+
+              <td class="no-wrap tiny">
+                <%= payment_method.payment_processor_type %>
+              </td>
+
+              <% if has_blocklisted_payment_method %>
+                <td class="tiny">
+                  <%= blocklisted_payment_method&.reason || "N/A" %>
+                </td>
+              <% end %>
+
+              <td class="no-wrap tiny">
+                <% if payment_method.user&.suspended? %>
+                  <%= render(Primer::Beta::IconButton.new(icon: :alert, color: :danger, "aria-label": "User has been suspended")) %>
+                <% elsif payment_method.manually_reviewed? %>
+                  <%= render(
+                    Primer::Beta::IconButton.new(
+                      icon: :verified,
+                      color: :success,
+                      "aria-label": "Payment method manually reviewed by #{payment_method.manually_reviewed_by.login} on #{I18n.l payment_method.manually_reviewed_at}"
+                    )
+                  ) %>
+                <% end %>
+
+                <% unless payment_method.manually_reviewed? || payment_method.user&.suspended? || blocklisted_payment_method.present? %>
+                  <%= form_for(payment_method, url: stafftools_manually_review_payment_method_path(payment_method), method: :patch) do |f| %>
+                    <%= f.button 'Mark as reviewed', class: 'btn btn-sm' %>
+                  <% end %>
+                <% end %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <% unless blocklisted_payment_method %>
+    <hr>
+
+    <%= render(Primer::Beta::BorderBox.new(border_color: :danger)) do |component| %>
+      <% component.with_header(border_color: :danger, bg: :danger) do |h| %>
+        <% h.with_title(tag: :h2, color: :danger) do %>
+          Add this payment fingerprint to the deny list
+        <% end %>
+      <% end %>
+
+      <% component.with_row(border_color: :danger) do %>
+        <p>
+          Adding this payment fingerprint to the deny list will mean the following will occur:
+        </p>
+
+        <ul class="pl-4 mb-4">
+          <li>
+            Prevent future customers from using this card fingerprint as a payment method.
+          </li>
+
+          <li>
+            Suspend and lock billing for all customers already using this card fingerprint.
+          </li>
+        </ul>
+
+        <p>
+          Some things that will need to be manually handled:
+        <p>
+
+        <ul class="pl-4 mb-4">
+          <li>
+            Refunds for any customers that have already been charged.
+          </li>
+        </ul>
+
+
+        <%= render Stafftools::Billing::CardFingerprintDialogComponent.new(card_fingerprint:, action: Stafftools::Billing::CardFingerprintDialogComponent::Action::Block) %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

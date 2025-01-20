@@ -1,0 +1,48 @@
+#!/bin/bash
+# Generates a database dump that also contains the binlog position.
+# WARNING: this will lock all tables on the MySQL host, this will
+# also overwite an existing database_seed file.
+
+set -e
+
+FORCE=$1
+
+OLD_MYSQL_SEED_DIR="/data/user/mysql"
+MYSQL_SEED_DIR="/data/user/common/mysql"
+mkdir -p $MYSQL_SEED_DIR
+if ghe-config --true 'mysql.backup.binary'; then
+  FILE_EXTENSION="tar.gz"
+else
+  FILE_EXTENSION="sql"
+fi
+
+SEED_FILE="$MYSQL_SEED_DIR/database_seed_$(cat /data/user/common/uuid).$FILE_EXTENSION"
+
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+LOCK_FILE="/data/user/common/ghe-mysql-generate-seed.lock"
+[ -n "$LOCKED_GHE_MYSQL_GENERATE_SEED" ] || {
+  export LOCKED_GHE_MYSQL_GENERATE_SEED=1
+  exec lockrun --lockfile="$LOCK_FILE" --wait -- "$0" "$@"
+}
+
+if [ "$FORCE" != "--force" ] && [ -f "$SEED_FILE" ] && /usr/local/share/enterprise/ghe-mysql-dump-check "$SEED_FILE"; then
+  echo $SEED_FILE
+else
+  echo "A new seed file needs to be generated. This could take a while." 1>&2
+  sudo find $MYSQL_SEED_DIR -maxdepth 1 -name "database_seed_*" -delete
+
+  # we used to place seed file under $OLD_MYSQL_SEED_DIR and we want to be sure it is cleaned up
+  sudo find $OLD_MYSQL_SEED_DIR -maxdepth 1 -name "database_seed_*" -delete
+
+  if ghe-config --true 'mysql.backup.binary'; then
+    ghe-export-mysql-xtrabackup --local > ${SEED_FILE}.tmp
+  else
+    sudo mysqldump -u root --all-databases --skip-lock-tables --triggers --routines --events --max_allowed_packet=1024M --single-transaction --master-data=2 | pv -fbrt > ${SEED_FILE}.tmp
+  fi
+
+  mv ${SEED_FILE}.tmp $SEED_FILE
+  echo $SEED_FILE
+fi

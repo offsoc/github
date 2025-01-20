@@ -1,0 +1,145 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<div class="Box mb-4">
+  <div class="Box-header d-flex flex-row flex-items-center gap-2">
+    <div class="p-2 bgColor-default border rounded-2">
+      <%= primer_octicon(:globe, display: :block) %>
+    </div>
+    <div class="flex-1 d-flex flex-row flex-items-center gap-2">
+      <h3 class="text-normal">Enterprise Cloud</h3>
+    </div>
+    <% if view.total_purchased_licenses_with_overages > 0 %>
+      <% if this_business.owner?(current_user) %>
+        <%= render(Primer::ButtonComponent.new(
+          tag: :a,
+          href: people_enterprise_path(this_business),
+          size: :small,
+          test_selector: "view-details-people-link")) { "View details" } %>
+      <% end %>
+      <div class="d-flex flex-row">
+        <%= render Primer::ButtonComponent.new(id: "generating-consumed-csv", size: :small, disabled: true, ml: 2, hidden: true, classes: "js-license-usage-generating") do |c| %>
+          <% c.with_tooltip(text: "Generating consumed licenses CSV") %>
+          <%= render Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom) %>
+        <% end %>
+        <%= form_tag export_enterprise_licensing_path, method: :post, class: "js-license-usage-download-form" do %>
+          <%= hidden_field_tag :export_format, "csv" %>
+          <%= render Billing::DownloadReportComponent.new(id: "download-consumed-csv", size: :small, ml: 2, type: :submit, classes: "js-license-usage-download-btn") %>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+
+  <% unless this_business.metered_plan? %>
+    <% if view.total_purchased_licenses_with_overages > 0 %>
+      <div class="Box-row d-flex flex-items-center color-fg-muted" <%= test_selector("license-overview-totals") %>>
+        <div class="Box-title flex-1 ml-1 pl-6">
+          <div>Total licenses</div>
+          <div class="text-small text-normal">
+            Represents the total number of purchased licenses plus over-allocated amounts (overages).
+            <br>
+            <%= render Primer::Beta::Link.new(href: docs_url("billing/troubleshooting-enterprise-calculation-consumed-licenses"),) do %>
+            Understand how this number is calculated.
+            <% end %>
+          </div>
+        </div>
+        <div class="flex-1 text-right text-small ml-1 pl-6">
+          <div class="d-flex flex-justify-between">
+            <% if view.total_licenses_overage? %>
+              <div class="color-fg-danger">
+                <%= render(Primer::Beta::Octicon.new(icon: "alert")) %> Limit exceeded
+              </div>
+            <% end %>
+            <span class="flex-auto">
+              <strong><%= number_with_delimiter view.total_consumed_licenses %></strong> / <strong><%= number_with_delimiter view.total_purchased_licenses_with_overages %></strong> consumed
+            </span>
+          </div>
+          <%= render(Primer::Beta::ProgressBar.new(mt: 1)) do |component| %>
+            <% if view.total_licenses_overage? %>
+              <% component.with_item(bg: :danger_emphasis, percentage: 100) %>
+            <% else %>
+              <% component.with_item(bg: :accent_emphasis, percentage: view.total_consumed_licenses_percent) %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if view.available_enterprise_licenses > 0 %>
+    <% if this_business.eligible_for_self_serve_payment? && !this_business.downgraded_to_free_plan? && !this_business.dunning? %>
+      <%= render Businesses::Billing::ManageSeatsComponent.new(
+        business: this_business,
+        new_seats: params[:seats]&.to_i,
+        available_enterprise_licenses: view.available_enterprise_licenses,
+        billing_term_ends_on: view.billing_term_ends_on,
+      ) %>
+      <% if this_business.pending_cycle.downgrading? && this_business.seats > this_business.pending_cycle.seats %>
+        <div class="Box-footer py-2 flash-warn rounded-bottom-2">
+          <div class="d-flex my-1 flex-items-baseline">
+            <div class="flex-self-center pr-3">
+              <%= primer_octicon(:clock) %>
+            </div>
+            <div class="flex-auto text-small">
+              <div class="mb-0" <%= test_selector("github-plan-price") %>>
+                Your
+                <%= this_business.pending_cycle.changing_duration? ? "change" : "downgrade" %>
+                to <%= this_business.pending_cycle.plan.display_name.humanize %> plan
+                <% if view.is_pending_cycle_changing_seats? %>
+                  with <%= pluralize this_business.pending_cycle.seats, "seat" %>
+                <% end %>
+                will be effective on
+                <strong><%= this_business.pending_cycle.active_on.strftime("%b %d, %Y") %></strong>.<br>
+                The new price will be
+                <strong><%= view.pending_cycle_new_price.format(no_cents_if_whole: true)  %></strong> / <%= this_business.pending_cycle.plan_duration.downcase %>.
+
+                <%= form_tag business_update_pending_plan_change_path(this_business.slug), class: "inline-form", method: :put do %>
+                  <%= hidden_field_tag :cancel_seats, true %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, mr: 2, font_size: 6, "data-confirm": "Are you sure you want to cancel this pending plan change?") do %>
+                    Cancel
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+            <strong class="flex-self-center"><%= view.pending_cycle_new_price.format(no_cents_if_whole: true) %></strong>
+          </div>
+        </div>
+      <% end %>
+    <% elsif !this_business.metered_plan? %>
+      <div class="Box-row d-flex flex-items-center color-fg-muted" <%= test_selector("license-overview-available") %>>
+        <div class="Box-title flex-1 ml-1 pl-6">
+          <div>Enterprise licenses</div>
+          <div class="text-small text-normal">
+            <%= number_with_delimiter view.available_enterprise_licenses %> <%= "license".pluralize(view.available_enterprise_licenses) %> <%= view.available_enterprise_licenses == 1 ? "is" : "are" %> available, valid until <%= view.billing_term_ends_on %> (includes support and updates).
+          </div>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if view.volume_licensing_enabled? && view.available_volume_licenses_with_overages > 0 %>
+    <div class="Box-row d-flex flex-items-center color-fg-muted">
+      <div class="Box-title flex-1 ml-1 pl-6">
+        <div>Visual Studio subscriptions</div>
+        <div class="text-small text-normal">
+          <%= number_with_delimiter view.available_volume_licenses_with_overages %> <%= "license".pluralize(view.available_volume_licenses_with_overages) %> <%= view.available_volume_licenses_with_overages == 1 ? "is" : "are" %> available, valid until <%= view.billing_term_ends_on %> (includes support and updates).<br>
+          <%= number_with_delimiter view.consumed_volume_licenses %> user <%= "account".pluralize(view.consumed_volume_licenses) %> match Visual Studio subscribers. <%= link_to "Learn more", "#{GitHub.help_url}/enterprise-cloud@latest/billing/managing-licenses-for-visual-studio-subscriptions-with-github-enterprise/setting-up-visual-studio-subscriptions-with-github-enterprise", class: "Link--inTextBlock" %><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <% unless this_business.metered_plan? || this_business.eligible_for_self_serve_payment? %>
+    <% if view.total_purchased_licenses_with_overages > 0 %>
+      <div class="Box-footer d-flex flex-items-center flex-justify-between">
+        <div class="text-small ml-1 pl-6 color-fg-default">
+          <%= link_to "Contact sales", ent_contact_url, class: "Link--inTextBlock" %> to buy more licenses.
+        </div>
+      </div>
+    <% else %>
+      <div class="Box-footer d-flex flex-items-center flex-justify-between border-0">
+        <div class="text-normal ml-1 pl-6 color-fg-default">
+          You don't have any user licenses. <%= link_to "Contact sales", ent_contact_url, class: "Link--inTextBlock" %> to buy.
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+</div>

@@ -1,0 +1,197 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<% page_info responsive: false, title: view.title %>
+
+<%= render layout: "settings/settings" do %>
+  <%= outdated_slack_installation_warning unless ms_teams_feature_flag %>
+  <%= client_outdated_or_not_installed_message if ms_teams_feature_flag %>
+  <%= client_outdated_or_not_installed_message client_app: :msteams, client_workspace_configured: ms_teams_configured if ms_teams_feature_flag %>
+  <%= render partial: "reminders/header", locals: { title: view.heading } %>
+
+  <%= render layout: "shared/details_dialog", locals: {
+    button_text: "Add Slack workspace",
+    title: "Add Slack workspace",
+    button_class: "js-add-slack-workspace-details v-hidden",
+  } do %>
+    <div class="Box-body">
+      <p class="p-3 f5">
+        We have rolled out a new version of the GitHub app in Slack. If you are currently on the old app, please consider switching over to the new app! More info about migration can be found <%= link_to "here.", "https://github.com/integrations/slack/blob/master/README.md#moving-away-from-the-legacy-workspace-app-model-in-slack", class: "Link--inTextBlock" %><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+      <br><br>1. Clicking on 'Add' will configure your Slack workspace with the new GitHub app.
+      <br>2. If you already have the old app in Slack, it will uninstall the legacy app and install the new one.
+      </p>
+    </div>
+    <div class="p-4">
+      <%= button_to "Add workspace",
+        authorize_reminder_slack_workspace_path(view.organization, personal: true),
+        class: "btn btn-primary float-right" %>
+    </div>
+  <% end %>
+
+<%= form_for view.personal_reminder, url: view.form_url, method: :patch, html: { class: "js-reminders-form" }  do |form| %>
+    <% if ms_teams_feature_flag %>
+    <dl class="form-group js-reminders-client-form-group">
+      <dt><%= form.label :chat_client, "Platform" %></dt>
+      <dd>
+        <% if view.available_chat_clients.present? %>
+          <%=
+            render partial: "reminders/form/client_dropdown", locals: {
+              selected_chat_client: view.selected_chat_client,
+              available_chat_clients: view.available_chat_clients,
+              personal: true
+            }
+          %>
+        <% end -%>
+        <div class="error">You must select a Platform</div>
+      </dd>
+    </dl>
+    <% end -%>
+
+    <dl class="form-group js-slack-form-group" <% if ms_teams_feature_flag %>hidden<% end -%> >
+      <dt><%= form.label :reminder_slack_workspace_id, "Slack workspace" %></dt>
+      <dd>
+        <% if view.client_workspaces.where(type: ReminderSlackWorkspace).present? %>
+          <%=
+            render partial: "reminders/form/slack_dropdown", locals: {
+              selected_slack_workspace: view.selected_workspace_for(ReminderSlackWorkspace),
+              slack_workspaces: view.client_workspaces.where(type: ReminderSlackWorkspace),
+              can_add_slack_workspace: true,
+              personal: true,
+            }
+          %>
+        <% else -%>
+          <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :primary, classes: "js-add-slack-workspace") do %>
+            Authorize Slack workspace
+          <% end %>
+        <% end -%>
+        <div class="error">You must select a Slack Workspace</div>
+      </dd>
+    </dl>
+
+    <hr>
+
+    <%= form.fields_for :delivery_time do |delivery_time| %>
+      <dl class="form-group js-day-form-group">
+        <dt><%= delivery_time.label :days, "Days" %></dt>
+        <dd>
+          <%= render partial: "reminders/form/day_select", locals: { selected: view.selected_days, summary_text: view.days_text, allow_blank: true, form: delivery_time } %>
+        </dd>
+      </dl>
+
+      <dl class="form-group js-time-form-group">
+        <dt><%= delivery_time.label :times, "Times" %></dt>
+        <dd class="d-flex">
+          <%= render partial: "reminders/form/time_select", locals: { selected: view.selected_times, allow_blank: true, form: delivery_time } %>
+          <%= render partial: "reminders/form/time_zone_select", locals: { selected: view.personal_reminder.time_zone_name, form: form } %>
+        </dd>
+        <dd class="error">You must select at least one time</dd>
+      </dl>
+    <% end -%>
+
+    <hr>
+
+    <div class="form-checkbox">
+      <%= form.label :include_review_requests, "" do %>
+        <%= form.check_box :include_review_requests %>
+        Review requests assigned to you
+        <p class="note">
+          Receive reminders for reviews waiting on you.
+        </p>
+      <% end -%>
+    </div>
+
+    <div class="form-checkbox">
+      <%= form.label :include_team_review_requests, "" do %>
+        <%= form.check_box :include_team_review_requests %>
+        Review requests assigned to your team
+        <p class="note">
+          Receive reminders for reviews waiting on your team.
+        </p>
+      <% end -%>
+    </div>
+
+    <hr>
+
+    <div class="form-checkbox js-real-time-alert-input">
+      <%= form.check_box :subscribed_to_events?, class: "form-checkbox-details-trigger" %>
+      <%= form.label :subscribed_to_events? do %>
+        Enable real-time alerts
+        <p class="note">
+          Receive immediate Slack messages when certain events happen
+        </p>
+      <% end -%>
+
+      <div class="form-group form-checkbox-details text-normal" style="padding-left: 20px">
+        <input
+          type="hidden"
+          value=""
+          name="personal_reminder[reminder_event_subscriptions][]">
+        <% view.event_types.each do |event_type, text| %>
+          <div class="pt-1  js-reminders-checkbox-container">
+            <%= label_tag "personal_reminder_event_types_#{event_type}", style: "font-weight:normal" do %>
+              <input
+                type="checkbox"
+                class="js-reminders-checkbox-trigger"
+                value="<%= event_type %>"
+                name="personal_reminder[reminder_event_subscriptions][][event_type]"
+                <%= view.selected_event_types.include?(event_type.to_s) ? "checked" : "" %>
+                id="personal_reminder_event_types_<%= event_type %>">
+              <%= text %>
+            <% end -%>
+
+            <% if view.event_type_permits_option?(event_type.to_s) %>
+              <div class="js-reminders-checkbox-details <%= !view.real_time_selected?(event_type.to_s) && "has-removed-contents" %>">
+                <input
+                  type="text"
+                  class="form-control input-hide-webkit-autofill"
+                  placeholder="<%= view.real_time_options_placeholder(event_type.to_s) %>"
+                  value="<%= view.real_time_options(event_type.to_s) %>"
+                  aria-label="Event subscriptions <%= event_type %>"
+                  required
+                  name="personal_reminder[reminder_event_subscriptions][][options]"
+                  id="event_subscriptions_<%= event_type %>_options">
+              </div>
+            <% end -%>
+          </div>
+        <% end -%>
+      </div>
+      <hr>
+    </div>
+
+    <% unless view.personal_reminder.supports_private_repos? %>
+      <div class="note overflow-hidden mb-3">
+        You will only receive notifications from public repositories in this organization because the current plan for <%= link_to view.organization, view.organization.name, class: "Link--inTextBlock" %> does not support reminders for private repositories.
+        <% if !GitHub.enterprise? %>
+          <% if view.organization.adminable_by?(current_user) %>
+            <a
+              href="<%= upgrade_path(
+                plan: GitHub::Plan.business,
+                target: "organization",
+                org: view.organization
+              ) %>"
+              class="btn-link"
+              data-upgrade-link="<%= view.organization.name %>"
+              data-ga-click="Orgs, upgrade to team, location:create repo prompt">
+              Upgrade to Team
+            </a>
+          <% else %>
+            An administrator can upgrade the plan.
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+
+    <input type="submit"
+           <% if view.client_workspaces.present? %>
+            class="btn btn-primary js-reminder-submit-button"
+           <% else %>
+            class="btn" disabled
+           <% end %>
+           value="<% if view.new_record? %>Create<% else %>Update<% end %> reminder">
+  <% end -%>
+
+  <% unless view.new_record? %>
+    <hr>
+    <%= render partial: "reminders/delete_section", locals: { url: personal_reminder_path(view.organization.display_login) } %>
+  <% end %>
+<% end %>

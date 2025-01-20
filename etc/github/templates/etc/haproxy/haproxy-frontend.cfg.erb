@@ -1,0 +1,653 @@
+<% proxy               = config_value("loadbalancer", "proxy-protocol") %>
+<% http_forward        = config_value("loadbalancer", "http-forward") %>
+<% subdomain_isolation = @config["subdomain-isolation"] -%>
+
+global
+  user haproxy
+  group haproxy
+  daemon
+  nbthread <%= haproxy_nbthread %>
+  pidfile /var/run/haproxy.pid
+  log stdout format raw local1
+
+  stats socket /var/run/haproxy/haproxy.sock mode 600 level admin
+
+  maxconn 57268
+  tune.bufsize 65536
+  tune.pipesize 262144
+  tune.ssl.maxrecord 1370
+
+  spread-checks 3
+
+  ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA
+  ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
+  ssl-default-bind-options no-tls-tickets no-sslv3<%=tls_config_options 'haproxy'%>
+
+  h1-case-adjust-file /etc/haproxy/case-adjustments.map
+  h1-accept-payload-with-any-method
+
+##
+# TCP services
+defaults tcp
+  maxconn 1024
+  mode tcp
+  balance leastconn
+
+  # timeouts
+  timeout client 120s
+  timeout connect 10s
+  timeout tunnel 10m
+  timeout tarpit 30s
+
+  # logging
+  log global
+  option tcplog
+
+# ssh://
+frontend ssh_protocol
+  bind :22
+  bind :::22 v6only
+<% if proxy %>
+  bind :23 accept-proxy
+  bind :::23 v6only accept-proxy
+<% end %>
+  default_backend babeld_ssh
+  maxconn 5120
+
+  # Maintenance Mode IP Exception List (by default the ACL allows all IP addresses)
+  acl is_ip_in_exception_list src -f /etc/haproxy/maintenance-ip-exception-list.acl
+  tcp-request content reject if !is_ip_in_exception_list
+
+backend babeld_ssh
+  server <%= proxy_host("babeld", 3035) %> send-proxy
+
+frontend git_protocol
+  bind :9418
+  bind :::9418 v6only
+<% if proxy %>
+  bind :9419 accept-proxy
+  bind :::9419 v6only accept-proxy
+<% end %>
+  default_backend babeld_git
+
+backend babeld_git
+  server <%= proxy_host("babeld", 3034) %> send-proxy
+
+<% ssl = @config["github-ssl"]["enabled"] %>
+<% if ssl %>
+defaults http
+  mode http
+  balance leastconn
+  option redispatch
+
+  # timeouts
+  timeout client 35s # needs to be higher than the tarpit
+  timeout connect 5s
+  timeout server 30s
+  timeout queue 15s
+  timeout tunnel 15s
+  timeout http-keep-alive 15s
+  timeout http-request 15s
+  timeout tarpit 30s
+
+  errorfile 400 /etc/haproxy/errors/github400.http
+  errorfile 403 /etc/haproxy/errors/github403.http
+  errorfile 408 /dev/null # this causes haproxy to close the connection on a 408 rather than sending a error page, helps with Chrome pre-connect related unicorns
+  errorfile 500 /etc/haproxy/errors/github500.http
+  errorfile 502 /etc/haproxy/errors/github502.http
+  errorfile 503 /etc/haproxy/errors/github503.http
+  errorfile 504 /etc/haproxy/errors/github504.http
+
+defaults https
+<% else %>
+defaults http
+<% end %>
+  mode http
+  balance leastconn
+  option redispatch
+
+  # timeouts
+  timeout client 120s # needs to be higher than the tarpit
+  timeout connect 10s
+  timeout server 2m
+  timeout queue 1m
+  timeout tunnel 2m
+  timeout http-keep-alive 10s
+  timeout http-request 15s
+  timeout tarpit 30s
+
+  errorfile 400 /etc/haproxy/errors/github400.http
+  errorfile 403 /etc/haproxy/errors/github403.http
+  errorfile 408 /dev/null # this causes haproxy to close the connection on a 408 rather than sending a error page, helps with Chrome pre-connect related unicorns
+  errorfile 500 /etc/haproxy/errors/github500.http
+  errorfile 502 /etc/haproxy/errors/github502.http
+  errorfile 503 /etc/haproxy/errors/github503.http
+  errorfile 504 /etc/haproxy/errors/github504.http
+
+listen stats
+  bind 127.0.0.1:8086
+  bind ::1:8086 v6only
+  mode http
+  stats uri /
+
+<% if ssl %>
+
+frontend http_protocol
+  # http specific options (don't apply to monitoring)
+  maxconn 1024
+  option forwardfor <%= "if-none" if http_forward %>
+  option http-server-close
+  option httplog
+  option h1-case-adjust-bogus-client
+  log global
+
+  # github.com
+  bind :80 defer-accept
+  bind :::80 v6only defer-accept
+  bind :8080 defer-accept
+  bind :::8080 v6only defer-accept
+
+
+<% if proxy %>
+  bind :81 defer-accept accept-proxy
+  bind :::81 v6only defer-accept accept-proxy
+  bind :8081 defer-accept accept-proxy
+  bind :::8081 v6only defer-accept accept-proxy
+<% end %>
+
+  # use the web unicorn backend if no ACL matches
+  default_backend web_unicorns
+
+  # slowloris attack prevention
+  # * Require HTTP clients to send some sort of data within the timeout
+  acl content_present req_len gt 0
+  tcp-request inspect-delay 10s
+  tcp-request content accept if content_present
+  tcp-request content reject
+
+  acl status_path             path -i /status
+<% if cluster_ha_replica? && !cluster_ha_replica_active? %>
+  use_backend status          if status_path
+<% end %>
+
+  acl acme_challenge          path_beg -i /.well-known/acme-challenge/
+
+<%if packages_enabled? %>
+<%if subdomain_isolation %>
+  acl npm_host                hdr(host) -i npm.<%= @config['github-hostname'] %>
+<% else %>
+  acl npm_path                path_reg -i ^/_registry/npm
+<% end %>
+<% end %>
+
+  # redirect everything but pages, npm (the cli can't do redirects) and ACME (Let's Encrypt) to https
+  redirect scheme https code 301 if !{ ssl_fc } !status_path !acme_challenge <% if packages_enabled? %><% if subdomain_isolation %>!npm_host<% else %>!npm_path<% end %><% end %>
+
+  # explicitly only allow acme-challenge paths with token as word characters 
+  use_backend 403backend if acme_challenge ! { path_reg ^/.well-known/acme-challenge/[\w-]+$ }
+
+  # Route ACME (Let's Encrypt) HTTP challenges to nginx instance for Manage
+  # Nginx will serve static files from `/data/enterprise-manage/current/public/.well-known/acme-challenge/`
+  use_backend enterprise_manage if acme_challenge
+
+<% if packages_enabled? %>
+<% if subdomain_isolation %>
+  # Route NPM cli to a 421 page if they use HTTP and the server is HTTPS enabled
+  # This is because the NPM cli does not follow redirects and accepts all
+  # non-4xx and non-5xx as success messages (e.g. if it gets a 301 it quits
+  # and never actually follows the redirect and reports success to the user
+  use_backend npm_http_error if npm_host
+<% else %>
+  use_backend npm_http_error if npm_path
+<% end %>
+<% end %>
+
+frontend https_protocol
+<% else %>
+frontend http_protocol
+<% end %>
+  # http specific options (don't apply to monitoring)
+  maxconn 40000
+  option forwardfor <%= "if-none" if http_forward %>
+  option http-server-close
+  option httplog
+  option h1-case-adjust-bogus-client
+  http-request set-var(txn.myuri) capture.req.uri if !{ capture.req.uri -i -m sub api_key } !{ capture.req.uri -i -m sub token }
+  log-format "%ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs \"%HM %HP %[var(txn.myuri)]\""
+  log global
+  capture request header Host len 255
+  capture request header X-Forwarded-For len 139
+  capture request header User-Agent len 50
+  http-request capture ssl_fc_protocol len 10
+
+<% if ssl %>
+  <% cert = config_value("github-ssl", "cert").to_s %>
+  # Certificate file checksum: <%= cert.empty? ? "(unconfigured)" : Digest::SHA512.hexdigest(cert.chomp + "\n") %>
+  bind :443 defer-accept ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+  bind :::443 v6only defer-accept ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+
+  bind :8443 defer-accept ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+  bind :::8443 v6only defer-accept ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+<% if proxy %>
+  bind :444 defer-accept accept-proxy ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+  bind :::444 v6only defer-accept accept-proxy ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+
+  bind :8444 defer-accept accept-proxy ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+  bind :::8444 v6only defer-accept accept-proxy ssl alpn h2,http/1.1 curves X25519:P-256 crt /etc/haproxy/ssl.crt+key
+<% end %>
+
+<% else %>
+  bind :80 defer-accept
+  bind :::80 v6only defer-accept
+
+  bind :8080 defer-accept
+  bind :::8080 v6only defer-accept
+<% if proxy %>
+  bind :81 defer-accept accept-proxy
+  bind :::81 v6only defer-accept accept-proxy
+
+  bind :8081 defer-accept accept-proxy
+  bind :::8081 v6only defer-accept accept-proxy
+<% end %>
+<% end %>
+
+  # use the web unicorns backend if no ACL matches
+  default_backend web_unicorns
+
+  http-request set-header X-Real-IP %ci
+  http-request del-header Client-IP
+  http-request del-header X-Forwarded-Host
+  http-request del-header X-Forwarded-Port
+  http-request del-header X-Forwarded-Server
+  http-request del-header X-Forwarded-Ssl
+  http-request del-header X-Forwarded-Scheme
+  <% if ! http_forward %>
+  http-request del-header X-Forwarded-For
+  <% end %>
+
+  # ssl headers
+  http-request set-header X-Forwarded-Proto            https                 if { ssl_fc }
+  http-request set-header X-Forwarded-Proto            http                  if !{ ssl_fc }
+  http-request set-header X-HAProxy-SSL-fc-protocol    %[ssl_fc_protocol]    if { ssl_fc }
+  http-request set-header X-HAProxy-SSL-fc-cipher      %[ssl_fc_cipher]      if { ssl_fc }
+  http-request set-header X-HAProxy-SSL-fc-use-keysize %[ssl_fc_use_keysize] if { ssl_fc }
+
+  # port matchers for management console
+  acl manage_port  dst_port eq 8443
+  acl manage_port  dst_port eq 8080
+  acl manage_port  dst_port eq 8444
+  acl manage_port  dst_port eq 8081
+
+  # Maintenance Mode IP Exception List (by default the ACL allows all IP addresses)
+  acl is_ip_in_exception_list src -f /etc/haproxy/maintenance-ip-exception-list.acl
+  acl is_ip_in_exception_list hdr_ip(X-Forwarded-For) -f /etc/haproxy/maintenance-ip-exception-list.acl
+  use_backend static_maintenance if !is_ip_in_exception_list !manage_port
+
+  # host matchers
+  acl assets_host   hdr_dom(host) -i assets.<%= @config['github-hostname'] %>
+  acl raw_host      hdr_dom(host) -i raw.<%= @config['github-hostname'] %>
+  acl codeload_host hdr_dom(host) -i codeload.<%= @config['github-hostname'] %>
+  acl gist_host     hdr_dom(host) -i gist.<%= @config['github-hostname'] %>
+  #acl api_host     hdr_dom(host) -i api.<%= @config['github-hostname'] %>
+  acl dotcom_host   hdr(host)     -i <%= @config['github-hostname'] %> or <%= @config['github-hostname'] %>:<%= ssl ? 443 : 80 %>
+
+  acl npm_host        hdr(host) -i npm.<%= @config['github-hostname'] %>
+  acl nuget_host      hdr(host) -i nuget.<%= @config['github-hostname'] %>
+  acl maven_host      hdr(host) -i maven.<%= @config['github-hostname'] %>
+  acl rubygems_host   hdr(host) -i rubygems.<%= @config['github-hostname'] %>
+  acl docker_host     hdr(host) -i docker.<%= @config['github-hostname'] %>
+<% if chatops_slack_enabled? %>
+  acl slack_host      hdr(host) -i slack.<%= @config['github-hostname'] %>
+<% end %>
+<% if chatops_msteams_enabled? %>
+  acl msteams_host    hdr(host) -i teams.<%= @config['github-hostname'] %>
+<% end %>
+  acl containers_host  hdr(host) -i containers.<%= @config['github-hostname'] %>
+
+  <% if packages_enabled? && subdomain_isolation %>
+  use_backend packages if npm_host or nuget_host or maven_host or rubygems_host
+  use_backend container_registry_proxy if docker_host
+  <% end %>
+
+  <% if packages_enabled? %>
+    use_backend container_registry if containers_host
+  <% end %>
+
+  # need these for use in http-response, hdr/hdr_dom won't work by that point
+  acl cap_gist_host capture.req.hdr(0) -i gist.<%= @config['github-hostname'] %>
+  acl cap_dotcom_host capture.req.hdr(0) -i <%= @config['github-hostname'] %> or <%= @config['github-hostname'] %>:<%= ssl ? 443 : 80 %>
+
+  acl dotcom_host_admin hdr(host) -i <%= @config['github-hostname'] %>:1337
+
+  acl uploads_host  hdr_dom(host) -i uploads.<%= @config['github-hostname'] %>
+  acl media_host  hdr_dom(host) -i media.<%= @config['github-hostname'] %>
+  acl avatars_host  hdr_dom(host) -i avatars.<%= @config['github-hostname'] %>
+
+  #acl embed_host    hdr_dom(host) -i embed.<%= @config['github-hostname'] %>
+  acl viewscreen_host   hdr_dom(host) -i viewscreen.<%= @config['github-hostname'] %>
+  acl notebooks_host   hdr_dom(host) -i notebooks.<%= @config['github-hostname'] %>
+  acl pages_host   hdr_dom(host) -i pages.<%= @config['github-hostname'] %>
+
+<% if cluster_ha_replica_cache_domain %>
+  acl cache_host   hdr_dom(host) -i <%= cluster_ha_replica_cache_domain %>
+<% end %>
+
+  # user agent matchers
+  acl ua_git hdr_reg(User-Agent) -i ^(git|JGit)/
+
+  # path matchers
+  acl uri_sockets           path_reg -i ^/_sockets/
+  acl dot_git               path_reg -i /(.*)/(.*)\.git/
+  acl dot_git_2             path_reg -i (.*)\.git/(.*)
+  acl slash_gist            path_beg -i /gist
+  acl codeload_url          path_beg -i /_codeload
+  acl raw_url               path_beg -i /raw/
+  acl wiki_raw_url          path_beg -i /wiki-raw/
+  acl gist_raw              path_beg -i /raw/gist/ /gist/raw/ /gist-raw/
+  acl patch_url             path_end -i .patch
+  acl diff_url              path_end -i .diff
+  acl patch_diff_path       path_reg -i ^/(status|raw/([^\/]*)/([^\/]*)/pull/(.*))$
+  acl alambic_url           path_reg -i ^/(github-enterprise-assets|github-enterprise-releases|avatars|download|storage|api/uploads)/(.*)$
+  acl pages_url             path_reg -i ^/pages/
+
+  <% if chatops_slack_enabled? %>
+  acl slack_url             path_reg -i ^/_slack/
+  <% end %>
+  <% if chatops_msteams_enabled? %>
+  acl msteams_url           path_reg -i ^/_msteams/
+  <% end %>
+
+  <% if packages_enabled? && !subdomain_isolation %>
+  acl registry_url          path_reg -i ^/_registry/
+  use_backend packages if registry_url
+  <% if !docker_disabled? %>
+  # Docker running without subdomain isolation needs to reserve the /v2/ path prefix
+
+  acl docker_v2_url         path_beg -i /v2/
+  use_backend packages if docker_v2_url
+  <% end %>
+  <% end %>
+
+  <% if dependabot_enabled? %>
+    acl dependabot_url      path_reg -i ^/_dependabot/(_ping|update_jobs/(.*))$
+    use_backend dependabot_api if dependabot_url
+  <% end %>
+
+  # smarthttp acls
+  ## this acl looks for git request query strings
+  acl query_service query -m reg -i ^service=git-(upload|receive)-pack$
+  ## these two acls are for routing git requests to the babeld_http backend
+  acl uri_service  path_reg -i ^/([^\/]*)/([^\/]*)\.git/info/refs
+  acl uri_git_pack path_reg -i ^/([^\/]*)/([^\/]*)\.git/git-(upload|receive)-pack$
+
+  ## these two are used for determining which git requests need to be rewritten to have a .git
+  acl uri_service_no_dot_git  path_reg -i ^/([^\/]*)/([^\/]*)/info/refs
+  acl uri_git_pack_no_dot_git path_reg -i ^/([^\/]*)/([^\/]*)/git-(upload|receive)-pack$
+
+  # these two are used for Gist specific cases where the Gist is given directly with no owner / gist prefix
+  acl uri_service_gist_no_dot_git  path_reg -i ^/([^\/]*)/info/refs
+  acl uri_git_pack_gist_no_dot_git path_reg -i ^/([^\/]*)/git-(upload|receive)-pack$
+
+  ## these two are for git requests without .git and a '//' which seems to be an issue in some git 1.7.1 clients
+  acl uri_service_no_dot_git_double_slash_1  path_reg -i ^/([^\/]*)/([^\/]*)//info/refs
+  acl uri_git_pack_no_dot_git_double_slash_1 path_reg -i ^/([^\/]*)/([^\/]*)//git-(upload|receive)-pack$
+
+  acl uri_service_no_dot_git_double_slash_2  path_reg -i ^//([^\/]*)/([^\/]*)/info/refs
+  acl uri_git_pack_no_dot_git_double_slash_2 path_reg -i ^//([^\/]*)/([^\/]*)/git-(upload|receive)-pack$
+
+  acl uri_service_no_dot_git_double_slash_3  path_reg -i ^/([^\/]*)//([^\/]*)/info/refs
+  acl uri_git_pack_no_dot_git_double_slash_3 path_reg -i ^/([^\/]*)//([^\/]*)/git-(upload|receive)-pack$
+
+  acl uri_raw path_reg -i ^(\/+[^\/]+)*\/+raw(\/+[^\/]+)*\/*$
+
+  ## these two replaces rewrite git requests to have a .git with a single '/' rather than '//'
+  http-request replace-path ^\/([^\/]*)\/([^\/]*)\/\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_1 query_service
+  http-request replace-path ^\/([^\/]*)\/([^\/]*)\/\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_1
+
+  http-request replace-path ^\/\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_2  query_service
+  http-request replace-path ^\/\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_2
+
+  http-request replace-path ^\/([^\/]*)\/\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_3 query_service
+  http-request replace-path ^\/([^\/]*)\/\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_3
+
+  # Handle requests with directly the `/sha` for Gists
+  http-request replace-path ^/([^\/]*)/(.*)$ /gist/\1/\2 if gist_host uri_service_gist_no_dot_git query_service !slash_gist
+  http-request replace-path ^/([^\/]*)/(.*)$ /gist/\1/\2 if gist_host uri_git_pack_gist_no_dot_git !slash_gist
+
+  # Handle requests with `/owner/sha` and replace with `/gist/sha`
+  http-request replace-path ^/([^\/]*)/([^\/]*)/(.*)$ /gist/\2/\3 if gist_host uri_service_no_dot_git query_service !slash_gist
+  http-request replace-path ^/([^\/]*)/([^\/]*)/(.*)$ /gist/\2/\3 if gist_host uri_git_pack_no_dot_git !slash_gist
+
+  ## these two replacements rewrite git requests to have a .git on the repo name
+  ## this one is last so that it can fix all the above slash based corner cases as well as others
+  http-request replace-path ^\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2.git/\3 if uri_service_no_dot_git query_service !dot_git
+  http-request replace-path ^\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2.git/\3 if uri_git_pack_no_dot_git !dot_git
+
+  # map same-domain /raw/gist requests to the url that codeload requires
+  http-request replace-path ^/raw/gist/(.*) /gist-raw/\1 if gist_raw
+  # legacy gist urls
+  # https://github.com/github/codeload/issues/120#issuecomment-115304959
+  # same-domain
+  http-request replace-path ^/gist/raw/(.*) /gist-raw/\1 if gist_raw
+  # gist host with a /raw/ prefix
+  http-request replace-path ^/raw/(.*) /gist-raw/\1 if gist_host
+
+  # mps and tokens are used to validate Actions storage provider OIDC configuration, they are not always running, but by always setting up the proxy config they can be used temporally to validate OIDC
+  acl path_mps path_beg -i /_services/vsmps
+  use_backend actions_mps if path_mps
+
+  acl path_token path_beg -i /_services/vstoken
+  acl path_token2 path_beg -i /_services/token
+  use_backend actions_token if path_token || path_token2
+  
+<% if actions_ever_enabled? %>
+
+  acl path_pipelines path_beg -i /_services/pipelines
+  use_backend actions_pipelines if path_pipelines
+
+  acl path_artifactcache path_beg -i /_services/artifactcache
+  use_backend actions_artifactcache if path_artifactcache
+
+<% end %>
+
+  # lfs traffic goes to lfs-server
+  acl lfs_api_path    path_beg -i /_lfs
+  acl lfs_repo_path   path_reg -i ^/(.*)/(.*)\.git/info/lfs
+  use_backend lfs_server if lfs_api_path
+  use_backend lfs_server if lfs_repo_path
+
+  # don't serve git over api or assets, use 403 since we cant use errorfile and a 404
+  #use_backend 403backend if api_host ua_git
+  use_backend 403backend if assets_host ua_git
+
+  # reject requests with a too long URI
+  acl url_too_long url_len ge 8192
+  use_backend 414url_too_long if url_too_long
+
+  # smarthttp is allowlisted
+  use_backend babeld_http if uri_service query_service
+  use_backend babeld_http if uri_git_pack
+
+  # dumbhttp and other .git requests fail
+  acl uri_info_refs_no_dot_git url_end -i /info/refs
+  acl uri_info_refs url_end -i .git/info/refs
+
+  acl uri_objects   path_reg -i ^/([^\/]*)/([^\/]*).git/objects.*
+  acl uri_objects_no_dot_git   path_reg -i ^/([^\/]*)/([^\/]*)/objects.*
+
+  use_backend dumbhttp if uri_info_refs or uri_objects !media_host
+  use_backend dumbhttp if uri_info_refs_no_dot_git !dot_git !media_host
+  use_backend dumbhttp if uri_objects_no_dot_git !dot_git ua_git
+
+  # check if enterprise_manage is running behind nginx
+  acl enterprise_manage_nginx_not_ready nbsrv(enterprise_manage) lt 1
+  # check requests to ghes-manage
+  acl ghes_manage_api_request path_beg -i /manage/
+  
+  # setup backup routes if nginx isn't ready for enterprise manage 
+  use_backend enterprise_manage_backup if manage_port enterprise_manage_nginx_not_ready !ghes_manage_api_request
+
+  # route to ghes-manage if request from manage_port and path starts with /manage/ and targets management console ports
+  use_backend ghes_manage if manage_port ghes_manage_api_request
+  
+  # route to enterprise-manage if request from manage_port and nginx is ready
+  use_backend enterprise_manage if manage_port
+
+  # route live update sockets
+  use_backend alive if uri_sockets METH_GET
+
+<% if cluster_ha_replica? && !cluster_ha_replica_active? %>
+  acl status_path             path -i /status
+  use_backend status          if status_path
+<% end %>
+
+  # route domains
+  use_backend web_unicorns    if assets_host
+<% if subdomain_isolation -%>
+  use_backend codeload        if codeload_host or codeload_url or raw_host
+<% else -%>
+  use_backend codeload        if codeload_host or codeload_url or raw_host or wiki_raw_url or gist_raw
+  use_backend web_unicorns    if raw_url patch_diff_path patch_url
+  use_backend web_unicorns    if raw_url patch_diff_path diff_url
+  use_backend codeload        if raw_url
+<% end -%>
+<% if chatops_slack_enabled? %>
+  use_backend slack           if slack_url or slack_host
+<% end %>
+<% if chatops_msteams_enabled? %>
+  use_backend msteams         if msteams_url or msteams_host
+<% end %>
+  use_backend alambic         if uploads_host or media_host or avatars_host or alambic_url<%= " or cache_host" if cluster_ha_replica_cache_domain %>
+  use_backend web_unicorns    if gist_host
+  use_backend pages_lua       if pages_host or pages_url
+  use_backend web_unicorns    if dotcom_host
+  use_backend web_unicorns    if viewscreen_host
+  use_backend web_unicorns    if notebooks_host
+  use_backend 403backend      if dotcom_host_admin
+
+<% if subdomain_isolation -%>
+  # Ensure the X-Frame-Options header is set, even on nginx errors
+  acl has_xfo_header res.hdr(X-Frame-Options) -m found
+  http-response add-header X-Frame-Options DENY if !has_xfo_header cap_gist_host
+  http-response add-header X-Frame-Options DENY if !has_xfo_header cap_dotcom_host
+<% end %>
+
+backend dumbhttp
+  errorfile 403 /etc/haproxy/errors/dumbhttp.http
+  http-request deny if TRUE
+
+backend 403backend
+  errorfile 403 /etc/haproxy/errors/github403.http
+  http-request deny if TRUE
+
+backend 414url_too_long
+  errorfile 403 /etc/haproxy/errors/github414.http
+  http-request deny if TRUE
+
+backend babeld_http
+  timeout connect 10s
+  timeout server 10m
+  server <%= proxy_host("babeld", 3033) %>
+
+backend web_unicorns
+  server <%= proxy_host("github-unicorn", 9100) %>
+
+<% if chatops_slack_enabled? %>
+backend slack
+  http-request replace-path ^/_slack/(.*) /\1
+  server <%= proxy_host("slack", 4001) %>
+<% end %>
+
+<% if chatops_msteams_enabled? %>
+backend msteams
+  http-request replace-path ^/_msteams/(.*) /\1
+  server <%= proxy_host("msteams", 4012) %>
+<% end %>
+
+backend pages_lua
+  server <%= proxy_host("pages_lua", 9100) %>
+
+backend alambic
+  # Based on the alambic timeouts set for haproxy-cluster-proxy and required for large MigrationFile uploads
+  timeout client 3h
+  timeout connect 3h
+  timeout server 3h
+  timeout http-keep-alive 3h
+  timeout http-request 3h
+
+  server <%= proxy_host("alambic", 9100) %>
+
+backend enterprise_manage
+  server <%= proxy_host("enterprise-manage", 9101) %> check
+
+backend ghes_manage
+  http-request replace-path /manage/(.*) /\1
+  http-request add-header X-Proxy-Header external
+  server <%= proxy_host("ghes-manage-gateway", 9401) %> check
+
+backend static_maintenance
+  server <%= proxy_host("static-maintenance", 9199) %>
+
+backend enterprise_manage_backup
+  server localhost /data/enterprise-manage/current/tmp/sockets/unicorn.sock
+
+backend codeload
+  timeout http-request 7200000
+  server <%= proxy_host("codeload", 3050) %>
+
+backend alive
+  # we need to immediately terminate the haproxy<->backend connection if the client<->haproxy connection is terminated
+  option abortonclose
+  # close the client<->haproxy connection when the haproxy<->backend connection closes:
+  option httpclose
+
+  server <%= proxy_host("alive", 3002) %> maxconn 10100 # 100 higher than the configured limit in alive to allow it a chance to disconnect old sessions
+
+backend lfs_server
+  http-request replace-path ^(.*)\.git/info/lfs(.*) \1\2
+  http-request replace-path ^/_lfs/(.*) /\1
+  server <%= proxy_host("lfs-server", 9105) %>
+
+backend status
+  errorfile 503 /etc/haproxy/errors/github503.json.http
+
+backend actions_token
+  http-request replace-path /_services/vstoken/(.*) /\1
+  http-request replace-path /_services/token/(.*) /\1
+  server <%= proxy_host("actions-token", 10002) %>
+backend actions_mps
+  http-request replace-path /_services/vsmps/(.*) /\1
+  server <%= proxy_host("actions-mps", 10001) %>  
+
+<% if actions_ever_enabled? %>
+backend actions_pipelines
+  http-request replace-path /_services/pipelines/(.*) /\1
+  server <%= proxy_host("actions-pipelines", 10003) %>
+
+backend actions_artifactcache
+  http-request replace-path /_services/artifactcache/(.*) /\1
+  server <%= proxy_host("actions-artifactcache", 10007) %>  
+  
+<% end %>
+
+<% if packages_enabled? %>
+backend packages
+  http-request replace-path /_registry/(.*) /\1
+  <% if !docker_disabled? && !subdomain_isolation %>http-request replace-path /v2/(.*) /docker/v2/\1<% end %>
+  server <%= proxy_host("packages", 10012) %>
+  
+backend container_registry
+  server <%= proxy_host("packages-v2-container-registry", 10014) %>
+
+backend container_registry_proxy
+  server <%= proxy_host("packages-v2-container-registry-proxy", 10015) %>
+
+backend npm_http_error
+  http-request deny deny_status 421
+<% end %>
+
+<% if dependabot_enabled? %>
+backend dependabot_api
+http-request replace-path /_dependabot/(.*) /\1
+  server <%= proxy_host("dependabot-api", 4006) %>
+<% end %>

@@ -1,0 +1,181 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info responsive: false, title: "Packages", class: "page-account", selected_link: :packages %>
+  <%= render layout: "settings/settings" do %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Packages permissions<% end %>
+  <% end %>
+  <% if GitHub.flipper[:packages_inherit_access_from_repository_for_user].enabled?(current_user) %>
+    <div class="pt-2 pb-1">
+      <h3 class="text-normal pb-2">Default Package Setting</h3>
+
+      <div class="pt-2 pb-1" id="default-package-setting">
+        <p>
+          <% if GitHub.enterprise? %>
+            This setting will be applied to new Container packages.
+          <% else %>
+            This setting will be applied to new Container, npm, rubygems and NuGet packages.
+          <% end %>
+        </p>
+
+        <%= form_tag settings_packages_path, method: :put, class: "mt-2" do %>
+          <div class="form-checkbox">
+            <label>
+              <%= hidden_field_tag "packages[containers][inherit_access]", "false", id: "packages_containers_inherit_access_hidden" %>
+              <%= check_box_tag "packages[containers][inherit_access]", "true", current_user.packages_can_inherit_access_from_repo?, class: "mr-2" %>
+              Inherit access from source repository
+            </label>
+          </div>
+          <%= render Primer::Beta::Button.new(type: :submit) do %>Save<% end %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="pt-2 pb-1 mt-4">
+    <h3 class="text-normal pb-2">Deleted Packages</h3>
+
+    <% packages_flash.each do |type, message| %>
+      <%= render layout: "shared/flash_container", locals: { type: "error" } do %>
+        <%= sanitize_html(message) %>
+      <% end %>
+    <% end %>
+
+    <div class="pt-2 pb-1" id="deleted-packages">
+      <p class="mb-4">These are packages that have been previously deleted belonging to you. You can restore a package deleted within the last 30 days.</p>
+
+        <div class="clearfix mb-3">
+        <%= form_tag settings_packages_path(anchor: "deleted-packages"),
+          :method => :get,
+          :class => "position-relative",
+          :"data-pjax" => true do %>
+
+        <input class="form-control pl-5 input-block"
+                type="text"
+                name="d_package_name"
+                value="<%= params[:d_package_name] %>"
+                placeholder="Search deleted packages"
+                aria-label="Search deleted packages"
+                autocomplete="off">
+
+        <%= primer_octicon(:search, classes: 'subnav-search-icon') %>
+        <% end %>
+      </div>
+
+      <% if params[:d_package_name].present? %>
+        <div class="mb-3">
+          <a class="issues-reset-query" href="<%= settings_packages_path %>">
+            <%= primer_octicon(:x, classes: "issues-reset-query-icon flex-shrink-0") %>
+            Clear current search query
+          </a>
+        </div>
+      <% end %>
+      <% if deleted_packages.empty? %>
+        <div class="Box p-4 text-center" id="deleted-packages-empty">
+          <b>No recoverable packages were found for <%= current_user.display_login %>.</b>
+        </div>
+      <% else %>
+      <% if any_package_under_migration %>
+        <%= render Primer::Beta::Flash.new(icon: :alert, mb: 4, scheme: :warning) do %>
+          <span>Some packages cannot be restored due to an ongoing migration. Please try again later</span>
+        <% end %>
+      <% end %>
+        <div class="Box" id="deleted-packages-rows">
+          <% deleted_packages.each do |package| %>
+            <% version_count = package.instance_of?(PackageRegistry::PackageMetadata) ? package_version_counts["rms-#{package.id}"] : package_version_counts["registry-packages-#{package.id}"] %>
+            <div class="Box-row">
+            <% if ["docker", "npm", "nuget", "rubygems"].include?(package.package_type) && package.restrict_delete_restore_on_migration? %>
+                <%= render Primer::Beta::Button.new(
+                            type: :button,
+                            disabled: true,
+                            float: :right) do %>Restore<% end %>
+              <% else %>
+                <%= render layout: "shared/details_dialog", locals: {
+                button_text: "Restore",
+                button_class: "btn",
+                details_class: "float-right mt-1",
+                title: "Are you absolutely sure?",
+                } do %>
+                <div class="Box-body overflow-auto">
+                  <p class="mb-3">
+                    This will restore the package <strong><%= package.original_name %></strong>, making it available for pulling. <% unless version_count.zero? %><strong><%= version_count %> <%= "version".pluralize(version_count) %></strong> associated with this package will be restored.<% end %>
+                  </p>
+                  <p class="pt-1">Please type <strong><%= package.original_name %></strong> to confirm:</p>
+                  <% if package.instance_of?(PackageRegistry::PackageMetadata) %>
+                    <%=
+                      form_tag packages_two_restore_path(
+                        user_id: current_user.display_login,
+                        user_type: "users",
+                        name: package.name,
+                        ecosystem: package.package_type,
+                        page: page
+                      ), method: :put do
+                    %>
+                      <%= hidden_field_tag :original_name, package.original_name %>
+                      <p>
+                        <input type="text" class="form-control input-block" autofocus required
+                              autocomplete="off"
+                              pattern="<%= case_insensitive_pattern(package.original_name || package.name) %>"
+                              aria-label="Type in the name of the package to confirm that you want to delete this version."
+                              name="verify">
+                      </p>
+                      <%= render Primer::Beta::Button.new(type: :submit, block: true, scheme: :danger, "data-disable-invalid": "") do %>I understand the consequences, restore this package.<% end %>
+                    <% end %>
+                  <% else %>
+                    <%= form_tag package_restore_path(package.owner, package.repository, package.id, page: page), method: :put do %>
+                      <p>
+                        <input type="text" class="form-control input-block" autofocus required
+                              autocomplete="off"
+                              pattern="<%= case_insensitive_pattern(package.original_name || package.name) %>"
+                              aria-label="Type in the name of the package to confirm that you want to delete this version."
+                              name="verify">
+                      </p>
+                      <%= render Primer::Beta::Button.new(type: :submit, block: true, scheme: :danger, "data-disable-invalid": "") do %>I understand the consequences, restore this package.<% end %>
+                    <% end %>
+                  <% end %>
+                </div>
+                <% end %>
+              <% end %>
+              <div class="listgroup-item-body"><%= package.original_name %></div>
+              <div class="listgroup-item-body color-fg-muted">Deleted <%= time_ago_in_words(package.deleted_at) %> ago</div>
+            </div>
+          <% end %>
+        </div>
+
+        <%
+          limit = Settings::PackagesController::PER_PAGE
+          less_than_full = deleted_packages.size < limit
+        %>
+        <% unless less_than_full && page == 1 %>
+          <div class="d-inline-flex flex-row flex-items-center mt-4" id="deleted-packages-pagination">
+            <%=
+              button_to "Previous",
+                settings_packages_path(anchor: "packages"),
+                {
+                  method: :get,
+                  disabled: page <= 1,
+                  class: "btn mr-1",
+                  params: { page: page - 1 }
+                }
+            %>
+            <%=
+              offset = ((page - 1) * limit)
+
+              over_max_offset = offset + limit > ::Search::Query::max_offset_default
+              full_with_nothing_more = total == deleted_packages.size + offset
+
+              button_to "Next",
+                settings_packages_path(anchor: "packages"),
+                {
+                  method: :get,
+                  disabled: less_than_full || full_with_nothing_more || over_max_offset,
+                  class: "btn ml-1",
+                  params: { page: page + 1 }
+                }
+            %>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% end %>

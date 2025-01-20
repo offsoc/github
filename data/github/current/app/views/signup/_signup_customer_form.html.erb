@@ -1,0 +1,210 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  view = BillingSettings::SignupFormView.new(
+    @user,
+    params[:code],
+    signup_path(plan: params[:plan], setup_organization: params[:setup_organization], plan_duration: params[:plan_duration])
+  )
+  username_error = error_for(@user, :login)
+  email_error = view.email_error
+  password_error = errors_sentence_for(@user, :password)
+  password_confirmation_error = error_for(@user, :password_confirmation)
+%>
+
+<%
+  octocaptcha = Octocaptcha.new(session)
+  show_captcha = octocaptcha.show_captcha?
+  form_class = "setup-form js-signup-form signup-customer-form"
+  show_captcha && form_class += " js-octocaptcha-parent"
+  button_text = if GitHub.enterprise? && enterprise_first_run?
+    "Create admin account"
+  else
+    "Create account"
+  end
+%>
+
+<%= form_for :user, url: view.form_url, html: { autocomplete: "off", id: "signup-form", class: form_class } do |f| -%>
+
+  <% if view.user_errors? %>
+    <%= render Primer::Beta::Flash.new(scheme: :danger, my: 3) do %><%= view.user_error_message %>
+      <% if view.error_requires_sys_admin? %>
+        <p>Your system administrator is required to resolve the issue.</p>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <div class="form-group<%= " errored" if username_error%>">
+    <div class="form-group-header">
+      <label for="user_login" class="required_field form-group-header">Username</label>
+    </div>
+    <div class="form-group-body">
+      <auto-check src="<%= username_check_get_path(suggest_usernames: true) %>" http-method="GET">
+        <%= text_field_tag(
+          view.username_field,
+          params.dig(:user, :login),
+          autocapitalize: "off",
+          data: test_selector_hash("signup-form-username"),
+          class: "width-full js-signup-input",
+          id: "user_login",
+          aria: { describedby: username_error ? "username-error" : "", invalid: username_error.present? || false }
+        ) %>
+      </auto-check>
+      <% if username_error %>
+        <div class="error" id="username-error"> <%= username_error%></div>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="form-group<%= " errored" if email_error%>">
+    <div class="form-group-header">
+      <label for="user_email" class="required_field form-group-header">Email address</label>
+    </div>
+    <div class="form-group-body">
+      <auto-check src="<%= email_check_path %>">
+        <%= email_field_tag(
+          view.email_field,
+          params.dig(:user, :email),
+          autocapitalize: "off",
+          data: test_selector_hash("signup-form-email"),
+          class: "width-full js-signup-input",
+          id: "user_email",
+          aria: { describedby: email_error ? "email-error" : "", invalid: email_error.present? || false },
+        ) %>
+        <%= csrf_hidden_input_for email_check_path %>
+      </auto-check>
+      <% if email_error %>
+        <div class="error" id="email-error"> <%= email_error%></div>
+      <% end %>
+    </div>
+  </div>
+
+  <password-strength
+    minimum-character-count="<%= PasswordStrengthHelper::MINIMUM_VALID_CHARACTERS %>"
+    passphrase-length="<%= User::PASSPHRASE_LENGTH %>"
+    skip-custom-validity="true"
+    error-class="color-fg-danger text-bold"
+    pass-class="color-fg-success"
+  >
+    <div class="form-group mb-2<%= " errored" if password_error%>">
+      <div class="form-group-header">
+        <label for="user_password" class="required_field form-group-header">Password</label>
+      </div>
+      <div class="form-group-body">
+        <%= auto_check_tag(:password) do %>
+          <%= password_field_tag(
+            view.password_field,
+            GitHub.default_password,
+            class: "width-full js-signup-input #{primary_password_field_confirmation_class}",
+            autocomplete: "new-password",
+            data: test_selector_hash("signup-form-password"),
+            passwordrules: User::PASSWORD_RULES,
+            id: "user_password",
+            aria: { describedby: password_error ? "password-error password-hint" : "password-hint", invalid: password_error.present? || false }
+          ) %>
+        <% end %>
+        <% if password_error %>
+          <div class="error" id="password-error"> <%= password_error%></div>
+        <% end %>
+      </div>
+    </div>
+    <p class="note" id="password-hint"><%= password_strength_sentence %></p>
+  </password-strength>
+
+  <% if GitHub.password_confirmation_required? %>
+    <div class="form-group js-form-group<%= " errored" if password_confirmation_error%>">
+      <div class="form-group-header">
+        <label for="user_password_confirmation" class="required_field form-group-header">Confirm your password</label>
+      </div>
+      <div class="form-group-body">
+        <%= password_field_tag(
+          view.password_confirmation_field,
+          GitHub.default_password,
+          class: "width-full js-password-confirm js-signup-input",
+          autocomplete: "new-password",
+          data: test_selector_hash("signup-form-password-confirmation"),
+          id: "user_password_confirmation",
+          "data-error-message": "Password confirmation doesn't match the password",
+          "data-validity-message": "Does not match password",
+          aria: { describedby: password_confirmation_error ? "password-confirmation-error" : "", invalid: password_confirmation_error.present? || false }
+        ) %>
+        <% if password_confirmation_error %>
+          <div class="error" id="password-confirmation-error"> <%= password_confirmation_error%></div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if GitHub.default_password %>
+    <p class="note">
+      <strong>Tip:</strong>
+      The default password for all users in development:
+      <strong><%= GitHub.default_password %></strong>
+    </p>
+  <% end %>
+
+  <input type="hidden" name="source" class="js-signup-source" value="<%= params[:source] || "form-join" %>">
+  <% if params[:ref_page] %><input type="hidden" name="ref_page" value="<%= CGI.unescape(params[:ref_page]) %>"><% end %>
+  <% if params[:ref_cta] %><input type="hidden" name="ref_cta" value="<%= CGI.unescape(params[:ref_cta]) %>"><% end %>
+  <% if params[:ref_loc] %><input type="hidden" name="ref_loc" value="<%= CGI.unescape(params[:ref_loc]) %>"><% end %>
+
+  <%= hidden_field_tag :return_to, return_to if return_to %>
+  <%= hidden_field_tag :redeeming_coupon, true if local_assigns.has_key? :redeeming_coupon %>
+  <%= hidden_field_tag :invitation_token, invitation_token if local_assigns.has_key? :invitation_token %>
+  <%= spamurai_form_signals %>
+
+  <%= hidden_field_tag :trial_acquisition_channel, params[:trial_acquisition_channel] if params[:trial_acquisition_channel] %>
+
+  <% if GitHub.billing_enabled? %>
+    <%= render partial: "signup/marketing_opt_in", locals: { use_divs: true } %>
+  <% end %>
+
+  <% if enterprise? && user_can_create_organizations? %>
+    <div class="form-checkbox setup-organization-next" <%= test_selector("signup-form-setup-org")%>>
+      <input type="hidden" name="plan" value="<%= GitHub::Plan.enterprise %>">
+      <label>
+        <%= check_box_tag 'setup_organization', true, params[:setup_organization] %>
+        Help me set up an organization next
+        <p class="note details">
+          Organizations are separate from personal accounts and are best suited for businesses who need to manage permissions for many employees.<br>
+          <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/about-organizations">Learn more about organizations.</a>
+        </p>
+      </label>
+    </div>
+  <% end %>
+
+  <% if show_captcha %>
+    <%= render partial: "shared/octocaptcha", locals: { origin_page: "github_signup", octocaptcha_timeout: @octocaptcha_timeout, captcha_demo: @captcha_demo } %>
+  <% end %>
+
+  <div class="<%= signup_form_margin "y" %>">
+    <%= render partial: "signup/button", locals: {
+      text: button_text,
+      custom_classes: "js-octocaptcha-form-submit",
+      id: "signup_button",
+      type: "submit",
+      disabled: show_captcha,
+      disabled_with: "Creating account",
+      data_disabled: false,
+      data: {
+        **analytics_click_attributes(
+          category: "Create account",
+          action: "click to create account",
+          label: "ref_page:#{request.fullpath};ref_cta:#{button_text};ref_loc:sign_up_form"
+        ),
+      }.merge(test_selector_hash("signup-form-submit"))
+    } %>
+  </div>
+
+  <% if GitHub.terms_of_service_enabled? %>
+    <p class="<%= signup_form_margin "y" %> f6">
+      By creating an account, you agree to the
+      <a class="Link--inTextBlock" href="<%= site_terms_path %>" target="_blank">Terms of Service</a>.
+      For more information about GitHub's privacy practices, see the
+      <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank">GitHub Privacy Statement</a>.
+      We'll occasionally send you account-related emails.
+    </p>
+  <% end %>
+<% end %>

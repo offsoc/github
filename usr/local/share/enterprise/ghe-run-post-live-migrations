@@ -1,0 +1,68 @@
+#!/bin/bash
+
+##
+# This script is used to run post-upgrade operations after live migrations are ran.
+# This script is called by /usr/local/share/enterprise/lib/configapply/migrations.rb
+##
+
+set -e
+set -x
+export PATH="$PATH:/usr/local/share/enterprise"
+
+. /usr/local/share/enterprise/lib/instrumentation/otel-trace
+
+## Before running any live-upgrade operations, we check a few things:
+
+# 1. If the live-upgrade.working-path is set -> EXIT 0
+# 2. If the live-upgrade-state.json file is present -> EXIT 0
+# 3. If the pre-upgrade status in the live-upgrade-state.json is not complete on the target version -> FAIL, EXIT 1
+
+if [ -z "$(ghe-config live-upgrade.working-path)" ]; then
+    echo "live-upgrade.working-path is not set. Proceed to normal migrations."
+    exit 0
+fi
+
+LIVE_UPGRADE_STATE_FILE="$(ghe-config live-upgrade.working-path)/live-upgrade-state.json"
+CURRENT_APPLIANCE_VERSION=$(ghe-version | grep -Po '\d+\.\d+')
+
+if [ ! -f "$LIVE_UPGRADE_STATE_FILE" ]; then
+    echo "live-upgrade-state.json is not found. This means live migrations have not been run. Proceed to normal migrations."
+    exit 0
+fi
+
+STATE_TARGET_VERSION=$(jq -r '.["ghes_target_version"]' "$LIVE_UPGRADE_STATE_FILE")
+
+# Check we are on the target version
+if [ "$STATE_TARGET_VERSION" == "$CURRENT_APPLIANCE_VERSION" ]; then
+    if jq -e '.["pre_upgrade_status"] != "complete"' "$LIVE_UPGRADE_STATE_FILE" > /dev/null; then
+        echo "Live Migrations Pre-upgrade status is not complete. Please make sure to complete the pre-upgrade operations before upgrading."
+        exit 1
+    else
+        # If we are here, it means that the live-upgrade-state.json is present and the pre-upgrade status is complete.
+        # We can now proceed to run the post-upgrade operations.
+
+        # Execute transitions
+        output=$(ghe-live-migrations --get-transitions)
+
+        # Filter the output to remove timestamp if present
+        first_part="${output%% *}"
+        # Check if the first part contains a ':'
+        if [[ "$first_part" == *:*:* ]]; then
+            # If it matches, remove the first part including the space
+            TRANSITIONS="${output#* }"
+        else
+            TRANSITIONS="$output"
+        fi
+
+        echo "running db:migrate:up_multi for transitions"
+        github-env env ENTERPRISE_SKIP_SCHEMA_CACHE=1 VERSIONS="$TRANSITIONS" bin/rake --trace db:migrate:up_multi 2>&1 || exit 1
+
+        # Execute post-upgrade operations
+        echo "running ghe-live-migrations --post"
+        ghe-live-migrations --post || exit 1
+        echo "Live Migrations post-upgrade operations completed successfully."
+    fi
+else 
+    echo "Live Migrations target version is not the same as the current appliance version. Proceed to normal migrations."
+    exit 0
+fi

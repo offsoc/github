@@ -1,0 +1,89 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  pull_requests = close_issue_references_for(issue_or_pr: issue, limit: 10)
+  reference_location ||= "ISSUE_SIDEBAR"
+  total_pull_requests_count = pull_requests.count
+  number_to_show = 5
+  initial_pull_requests_to_show = pull_requests.take(number_to_show)
+  unauthorized_organizations_ip = cap_filter.unauthorized_resources(current_user&.organizations, only: :ip_allowlist) unless pull_requests.none?
+  # :external_conditional_access_policy does not have to be implemented here because access will be blocked on a controller level by CAP enforcement
+  # current_user when an EMU will always have access to all or none of its organizations
+  unauthorized_organizations_saml = cap_filter.unauthorized_resources(current_user&.organizations, only: :saml) unless pull_requests.none?
+  linked_branches = linked_branches_for(issue: issue)
+%>
+<% if user_feature_enabled?(:copilot_workspace) %>
+  <%= render(Primer::Beta::Button.new(
+    tag: :a,
+    href: "https://copilot-workspace.githubnext.com/#{issue.repository.owner_display_login}/#{issue.repository.name}/issues/#{issue.number}",
+    size: :small,
+    block: true,
+    mb: 2
+  )) do |button|
+    button.with_leading_visual_icon(icon: :copilot)
+    "Open in Workspace"
+  end %>
+<% end %>
+<% if pull_requests.any? %>
+  <p>Successfully merging a pull request may close this issue.</p>
+<% elsif linked_branches.any? %>
+  <p>When branches are created from issues, their pull requests are automatically linked.</p>
+<% else %>
+  <% if BranchIssueReference.creatable_for?(user: current_user, issue: issue, repository: issue.repository) %>
+    <%= render(Primer::ButtonComponent.new(
+      scheme: :link,
+      data: { action: "click:create-branch#openDialog" }
+    )) { "Create a branch" } %>
+    <span class="d-inline-block">for this issue or link a pull request.</span>
+  <% else %>
+    <p>No branches or pull requests</p>
+  <%end %>
+<% end %>
+
+<% if pull_requests.any? %>
+  <% if unauthorized_organizations_ip.any? %>
+    <% targets_for(unauthorized_organizations_ip).each do |restricted_target| %>
+      <div class="pb-1 d-flex" <%= test_selector("ip-allowlist-unauthorized-organizations-list") %>>
+        <div class="pt-1">
+          <%= primer_octicon(:"shield-lock", color: :muted, mr: 1) %>
+        </div>
+        <p class="note m-0">
+          <%= restricted_ip_allowlist_target_hint(restricted_target, text: "to view results") %>
+        </p>
+      </div>
+    <% end %>
+  <% end %>
+  <% if unauthorized_organizations_saml.any? %>
+    <% targets_for(unauthorized_organizations_saml).each do |target| %>
+      <div class="pb-1 d-flex">
+        <div class="pt-1">
+          <%= primer_octicon(:"shield-lock", color: :muted, mr: 1) %>
+        </div>
+        <p class="note m-0">
+          <%= restricted_sso_target_link(target, return_to: source_url, text: "to view results") %>
+        </p>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render Branch::LinkedBranchListComponent.new(linked_branches: linked_branches) %>
+
+<% if pull_requests.any? %>
+  <% initial_pull_requests_to_show.each do |pull_request| %>
+    <%= render "issues/sidebar/show/pull_request_reference", issue: issue, pull_request: pull_request, reference_location: reference_location %>
+  <% end %>
+  <% if total_pull_requests_count > number_to_show %>
+    <div class="Details js-details-container">
+      <div class="Details-content--hidden">
+        <% additional_pull_requests = pull_requests[number_to_show..-1] %>
+        <% additional_pull_requests.each do |pull_request| %>
+          <%= render "issues/sidebar/show/pull_request_reference", issue: issue, pull_request: pull_request, reference_location: reference_location %>
+        <% end %>
+      </div>
+      <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-details-target", "aria-expanded": "false") do %>
+        <span class="Details-content--shown">See more <%= primer_octicon(:"triangle-down") %></span>
+        <span class="Details-content--hidden">See less <%= primer_octicon(:"triangle-up") %></span>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

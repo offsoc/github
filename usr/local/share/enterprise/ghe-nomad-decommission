@@ -1,0 +1,89 @@
+#!/bin/bash
+
+#/ Usage: ghe-nomad-decommission [options]
+#/
+#/ Options:
+#/   -h | --help                       Show this message.
+#/   -d | --datacenter <datacenter>    The datacenter to use. Defaults to the local datacenter.
+#/   -n | --node <node>                The node to decommission. Defaults to the local node.
+
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+# Default argument values
+nomad_self_status=$(nomad node status -self)
+datacenter=$(echo "$nomad_self_status" | grep DC | cut -d= -f2 | xargs)
+node=$(echo "$nomad_self_status" | grep Name | cut -d= -f2 | xargs)
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -d|--datacenter)
+      datacenter=$2
+      shift
+      ;;
+    -n|--node)
+      node=$2
+      shift
+      ;;
+    -*)
+      echo "Error: unexpected flag ${1%%=*}" 1>&2
+      usage 1>&2
+      exit 1
+      ;;
+    *)
+      break;
+      ;;
+  esac
+done
+
+if ! /usr/local/share/enterprise/ghe-call-configrb cluster_dr_enabled?; then
+  echo "Refusing to decommission Nomad due to Cluster HA being disabled"
+  exit 1
+fi
+
+if [ "$node" == "$(nomad node status -self | grep Name | cut -d= -f2 | xargs)" ]; then
+  echo "Refusing to decommission self from self - please run from another node"
+  exit 1
+fi
+
+# Run the cleanup from the cluster delegate
+delegate=$(/usr/local/share/enterprise/ghe-call-configrb ghes_cluster_delegate)
+if [[ "$delegate" != "$node" ]]; then
+  ssh="ssh $delegate"
+fi
+
+echo "Decommissioning node ${node} from datacenter ${datacenter}"
+
+function drain_nomad() {
+  nomad node drain -region $datacenter -enable -force -yes $node
+}
+
+function leave_consul() {
+  echo "Leaving Consul"
+  ssh $node "consul leave"
+  ssh $node "sudo systemctl stop consul"
+  ssh $node "sudo systemctl disable consul"
+  ssh $node "sudo systemctl stop nomad"
+  ssh $node "sudo systemctl disable nomad"
+}
+
+function nomad_cleanup() {
+  # return without doing anything if the node was not a Nomad server
+  if [[ -z "$(nomad server members -region $datacenter | grep $node)" ]]; then
+    echo "Skipping Nomad server leave for non-Nomad server $node"
+    return
+  fi
+  echo "Cleaning up Nomad server $node"
+  $ssh nomad server force-leave -region $datacenter $node.$datacenter
+}
+
+drain_nomad
+leave_consul
+nomad_cleanup

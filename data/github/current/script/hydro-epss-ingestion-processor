@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Want to run this in a dotcom codespace? Dotcom needs to be running (so hydro exists),
+#  start this processor up and then run `EPSSIngestionJob.perform_now` in a console!
+
+require File.expand_path("../../config/environment", __FILE__)
+
+subscribe_to = GitHub::StreamProcessors::AdvisoryDB::EPSSIngestionProcessor::DEFAULT_SUBSCRIBE_TO
+
+# This processor doesn't currently have review lab allocated nodes.
+if ARGV.include?("--review-lab")
+  group_id = "review_lab_submit_advisory_#{GitHub.current_ref.parameterize.underscore}"
+  filter = -> (message) { message.value[:review_lab_ref] == GitHub.current_ref }
+else
+  # In production
+  group_id = GitHub::StreamProcessors::AdvisoryDB::EPSSIngestionProcessor::DEFAULT_GROUP_ID
+  filter = ->(message) { message.value[:review_lab_ref].blank? }
+end
+
+GitHub.logger.info(
+  "code.namespace": "hydro-epss-ingestion-processor",
+  "messaging.source.kind": "topic",
+  "messaging.consumer.id": group_id,
+  "messaging.source.name": subscribe_to.to_s,
+)
+
+# Keep in mind that rescue_from_standard_error changes value in dev/production.
+# Errors will be caught and reported in production, but not in dev/test (see BaseProcessor implementation).
+processor = GitHub::StreamProcessors::AdvisoryDB::EPSSIngestionProcessor.new(
+  group_id: group_id,
+  filter: filter)
+
+consumer = GitHub.hydro_consumer(processor.options)
+GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])

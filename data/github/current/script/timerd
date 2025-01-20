@@ -1,0 +1,77 @@
+#!/usr/bin/env ruby
+#/ Usage: timerd <config>
+#/ Start a cluster aware timer daemon with the given config file.
+#/
+#/ The QUIT signal can be used to shutdown the timer daemon cleanly
+#/ after current work is complete. The TERM and INT signals interrupt a
+#/ currently running interval. The HUP signal causes a clean shutdown
+#/ followed by a re-exec of the timerd process (for reloading config).
+$stderr.sync = true
+require "fcntl"
+require "time"
+
+# show usage message
+if ARGV.delete("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c4-"
+  exit 1
+end
+
+# setup TimerDaemon
+require File.expand_path("../../config/basic", __FILE__)
+require "timer_daemon"
+daemon = TimerDaemon.instance
+daemon.err = GitHub.logger.method(:error)
+
+# bring in config file
+require File.expand_path(ARGV[0], GitHub::AppEnvironment.root)
+$0 = "timerd #{ARGV[0]} (github)"
+
+# kill signal handling
+signal = nil
+%w[QUIT INT TERM HUP].each do |sig|
+  trap sig do
+    signal = sig
+    daemon.shutdown
+    fail sig if %w[INT].include?(sig)
+  end
+end
+
+GitHub.component = :timerd
+
+# start the timer loop
+daemon.run!
+
+# if we make it here, a signal interrupted the loop and we're exiting
+# gracefully. if the signal was HUP, re-exec the timerd command to reload
+# everything. Make sure RUBYLIB isn't set so we build up the new load path.
+if signal == "HUP"
+  GitHub.logger.info("Restart gracefully", { "code.filepath" => "script/timerd", "process.signal" => signal  })
+  # make sure to reap any child processes
+  begin
+    while Process.waitpid(-1, Process::WNOHANG) != nil
+      GitHub.logger.info("Reaped child", { "code.filepath" => "script/timerd", "process.signal" => signal, "process.status" => $? })
+      next
+    end
+  rescue Errno::ECHILD
+  end
+
+  # close all fds on exec so we don't leak
+  (3...(2**16)).each do |fdno|
+    begin
+      if fd = (IO.for_fd(fdno) rescue nil)
+        fd.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
+      end
+    rescue Errno::EBADF
+    end
+  end
+
+  # make sure the new process sets up RUBYLIB from scratch
+  ENV.delete("RUBYLIB")
+
+  # re-exec this process with the same args
+  exec(File.expand_path("../../bin/timerd", __FILE__), *ARGV)
+  abort "re-exec failed"
+else
+  GitHub.logger.info("Exiting successfully", { "code.filepath" => "script/timerd", "process.signal" => signal  })
+  exit 0
+end

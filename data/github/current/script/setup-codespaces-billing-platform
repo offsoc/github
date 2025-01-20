@@ -1,0 +1,82 @@
+#!/bin/bash
+set -e
+
+# This script sets up the github/billing-platform repository for a github/github codespace.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print help message
+help() {
+  echo "Sets up the github/billing-platform repository for a github/github codespace."
+  echo
+  echo "Usage: setup-codespaces-billing-platform [-b branch] [-d|h] "
+  echo "Options:"
+  echo "-b     Specify the billing-platform branch to clone. Defaults to main if not provided."
+  echo "-d     Before starting, delete the existing billing-platform directory in the codespace."
+  echo "-h     Print this help message."
+  echo
+}
+
+# Set the branch as main. If a branch is provided as an argument, it will be set to that when we parse the provided options.
+BRANCH=main
+
+# Get the options
+while getopts ":b:hd" opt; do
+  case $opt in
+    h) # display help message
+      help
+      exit;;
+    b) # If a branch was provided, re-set the variable
+      BRANCH=$OPTARG;;
+    d) # Delete the repository if it exists
+      DELETE_REPO=true;;
+    :)
+    echo "Error: Option -$OPTARG requires an argument."
+    exit 1;;
+    \?) # Invalid option
+      echo "Error: Invalid option -$OPTARG"
+      exit 1;;
+  esac
+done
+
+# If the billing-platform repo already exists and the delete argument hasn't been specified, echo a warning and exit.
+if [[ -d "/workspaces/billing-platform" && -z "$DELETE_REPO" ]]; then
+  echo -e "${RED}The billing-platform directory already exists in this codespace.${NC} \nYou can rerun the setup script with the -d argument to force the deletion of the existing repository."
+  exit 1
+fi
+
+if [ "$DELETE_REPO" = true ]; then
+  echo -e "\n${GREEN}➡️ Deleting the existing billing-platform repo...\n${NC}"
+  rm -rf /workspaces/billing-platform
+fi
+
+echo -e "\n${GREEN}➡️ Cloning billing-platform repo at branch $BRANCH...\n${NC}"
+git clone https://github.com/github/billing-platform.git /workspaces/billing-platform --branch $BRANCH
+
+# Bootstrap billing-platform dependencies
+echo -e "\n${GREEN}➡️ Setting up billing-platform...\n${NC}"
+( cd /workspaces/billing-platform ; script/setup ; script/set-remote )
+
+# Install azure-cli if it's not already installed
+if ! command -v az &> /dev/null
+then
+  echo -e "\n${GREEN}➡️ Installing azure-cli...\n${NC}"
+  curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+fi
+
+echo "=> Enabling billing-platform feature flags"
+bin/toggle-feature-flag enable onboard_volume_self_serve_to_billing_platform
+bin/seed billing_enabled_products --actions=true
+bin/seed billing_orgs_vnext
+
+echo -e ""
+echo -e "${GREEN}💵💵 FINISHED! billing-platform is ready. 💵💵${NC}"
+echo -e ""
+echo -e "You can ${ORANGE}cd /workspaces/billing-platform${NC} and:"
+echo -e ""
+echo -e "${ORANGE}script/consume ${NC} - Consume messages from Dotcom (Dotcom must be started first.)"
+echo -e "${ORANGE}script/produce${NC} - Generate test usage data"

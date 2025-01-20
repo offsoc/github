@@ -1,0 +1,266 @@
+import {Meta} from '@storybook/blocks'
+
+<Meta title="Utilities/ui-commands" name="README" />
+
+# `ui-commands`: Centralized, documented UI Actions that may be bound to keyboard shortcuts
+
+## Core concepts
+
+`ui-commands` is a platform for registering actions (*commands*) that a user can take in a web UI. Some examples of
+these actions include submitting a form, clicking a button, focusing an input, or navigating to a page.
+
+Commands **may** be assigned a default keybinding that allows them to be triggered by a keyboard shortcut. Eventually, users
+will be able to customise these keybindings as they please. In addition, commands can be triggered by other events (like
+clicking a button). So, while the concept of commands and keyboard shortcuts are linked, it is important
+[not to think of commands and keyboard shortcuts as the same thing](https://github.com/github/accessibility/blob/main/docs/coaching-recommendations/keyboard-shortcuts/inaccessible-default-keyboard-shortcuts.md#ask-whether-you-need-a-default-keybinding-in-the-first-place).
+
+Initially, an app moving on to this platform will likely limit the registered commands to those actions that already
+had keyboard shortcuts. However, the long-term goal here should be to register **all** user interface actions as commands -
+even those that will not have keybindings by default. This will allow users to fully customize their experience, creating
+keybindings for the actions they take most frequently in their role.
+
+## Registering commands
+
+Commands are grouped into services, each defined in a single `commands.json` metadata file in a `github-ui` package.
+Commands can be defined at the application level (`/ui/packages/pull-requests/commands.json`, for example) or at the
+component level (`/ui/packages/markdown-editor/commands.json`).
+
+Commands can be referenced and used outside of the package they are located in. For example, Repositories might define
+all their commands in a `repositories` package but still refer to them in a `repositories-settings` package. For now,
+only one commands service may be defined per package.
+
+To get started, create `commands.json` next to your package's `package.json`. The JSON should follow this format:
+
+```jsonc
+// Yes, commands.json files support comments!
+{
+  // required: Unique service ID, hyphen-separated
+  "serviceId": "pull-requests",
+  // required: Publicly visible name, for docs / UI
+  "serviceName": "Pull Requests",
+  "commands": {
+    // Unique command ID, hyphen-separated
+    "request-reviewers": {
+      // required: Publicly visible name, for docs / UI
+      "name": "Request reviewers",
+      // required: Publicly visible description
+      "description": "Open and focus the reviewers picker.",
+      // optional: A default keyboard shortcut to bind to this command
+      "defaultBinding": "q",
+      // optional: Feature flag that gates this command (see 'Feature flagging commands' below)
+      "featureFlag": "memex_table_selection"
+    }
+    // ...
+  }
+}
+```
+
+> **WARNING:**
+> All metadata in the `commands.json` file is user-facing. Do not include any internal information in this file.
+
+If you are using VSCode, the file will be validated automatically in your editor. Otherwise, you can run
+`npm run ui-commands:validate` to check the format. The `defaultBinding` is validated via ESLint to provide detailed
+error messages and autofixes wherever possible.
+
+> **IMPORTANT:**
+> The command metadata must be compiled before the commands can be used by your app. After updating a `commands.json`
+> file, always run `npm run ui-commands:compile` before continuing. This will also happen automatically when a
+> development server is started and/or running in "watch" mode, or when running tests.
+
+### Feature flagging commands
+
+Commands can be feature flagged by providing a flag name to the `featureFlag` property. Feature flags that gate
+commands **must** be added to the list in `lib/github/client_side_feature_flags.rb` so the client
+can read them. Otherwise, the command will always be disabled.
+
+When the flag is off, the command will not be activatable, it will be hidden from the keyboard shortcuts dialog, and any
+corresponding (command-bound components)\[#command-bound-components] will not be rendered.
+
+For testing, feature flags should be mocked using `mockClientEnv` from `@github-ui/client-env/mock`:
+
+```tsx
+beforeEach(() => {
+  mockClientEnv({
+    featureFlags: ['memex_table_selection'],
+  })
+})
+```
+
+### Assigning default keybindings
+
+The `defaultBinding` field of a command defines the default keyboard shortcut to activate that command. Before
+assigning a default keybinding to a command, please review the [accessibility documentation](https://github.com/github/accessibility/blob/main/docs/coaching-recommendations/keyboard-shortcuts/inaccessible-default-keyboard-shortcuts.md#general-guidelines-for-good-keybinding-design-use-your-best-judgment-please)
+and consider whether one is necessary.
+
+Default keybindings are defined using a subset of the [`hotkey`](https://github.com/github/hotkey) string format to
+ensure consistency and cross-platform support:
+
+1. Individual keys in a chord (multiple keys pressed at once) are separated with the `+` character: `Mod+j`
+   * Because `+` is a special character, the key name `Plus` represents this key
+2. Chords or keys in a sequence (pressed quickly one after the other) are separated with spaces: `a b`
+   * Because ` ` is a special character, the key name `Space` represents this key
+3. Available modifier keys are `Mod`, `Alt`, and `Shift`, and must be combined in that order: `Alt+x`, `Mod+Shift+G`, `Mod+Alt+f`, `Mod+Alt+Shift+6`
+   * Note that `Control` and `Meta` are not allowed - instead, use the special cross-platform `Mod` modifier which represents `Command` (`Meta`) on MacOS and `Control` on other operating systems
+4. Key names are case sensitive and match what the [the `KeyboardEvent.key` value](https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_key_values) would be. This means:
+   1. Non-character key names are in PascalCase: `PageUp`, `ArrowLeft`, `F6`
+   2. When `Shift` is a modifier, the key must be 'uppercase' as typed: `Shift+A`, `Alt+Shift+?`, `Shift+&`, `Mod+Shift+X`
+   3. Otherwise, the key must be lowercase: `a`, `/`, `Alt+8`, `Mod+h`
+
+In addition to the specified syntax, accessibility **must** be considered when assigning default keybindings. Please
+refer to the [*Inaccessible default keyboard shortcuts*](https://github.com/github/accessibility/blob/main/docs/coaching-recommendations/keyboard-shortcuts/inaccessible-default-keyboard-shortcuts.md)
+document for a list of which keybindings should be avoided and how to choose a good one. To the extent possible, these
+accessibility guidelines are enforced via ESLint.
+
+### Site-wide commands
+
+Some commands are standardized across GitHub and should not be defined for each individual service. For example,
+`github:submit-form` should always be used for form submission.
+
+Site-wide commands are defined in the `github` service in the `ui-commands` package (`/ui/packages/ui-commands/commands.json`).
+
+## Associating commands with effects
+
+A command is nothing if it doesn't *do* anything when activated. For this, you must bind command events to effects
+within your React application.
+
+Be sure to run `npm run ui-commands:compile` as noted above to update the TypeScript types before continuing.
+
+Commands can either be 'scoped' to a section of the interface or 'global' across the current page:
+
+### Global commands
+
+The [`GlobalCommands`](https://ui.githubapp.com/storybook/?path=/story/recipes-ui-commands-globalcommands--global-commands-example)
+component binds a keydown listener to the `window.document` object when it is mounted, and unbinds the
+command when it is unmounted. This means that the command can be activated as long as the component is rendered,
+regardless of where focus is located -- even outside of the React app boundary.
+
+Global commands are defined with the `GlobalCommands` React component:
+
+```tsx
+<GlobalCommands commands={{'repositories:navigate-to-code': navigateToCode}} />
+```
+
+### Scoped commands
+
+Scoped commands can only be activated when focus is contained in some part of the page. The same scoped
+commands can be declared in multiple places on a page For example, a "Comment on line" command in a pull
+request review UI would be scoped to each line of code so that, when activated, the command appears on the line the
+user is currently focusing.
+
+Scoped commands are bound with the [`ScopedCommands`](https://ui.githubapp.com/storybook/?path=/story/recipes-ui-commands-scopedcommands--scoped-commands-example)
+React component:
+
+```tsx
+<ScopedCommands
+  commands={{
+    'pull-requests:comment-on-line': handleCommentOnLine,
+    'github:open-context-menu': openContextMenu,
+  }}
+>
+  <PullRequestDiffLine />
+</ScopedCommands>
+```
+
+With this declaration, the provided commands can only be activated when focus is on or inside the line. The focus scope
+is based on React synthetic event bubbling, meaning it works even if focus is contained within a [portal](https://react.dev/reference/react-dom/createPortal)
+(e.g., an `ActionMenu` overlay).
+
+### `preventDefault` by default
+
+For keyboard-activated commands, whether provided using `GlobalCommands` or `ScopedCommands`, `preventDefault` and
+`stopPropagation` are always called on the underlying event if a handler is bound. This ensures consistent handling
+of events: we will never accidentally trigger browser behavior at the same time as a command is handled. In cases
+where this should not happen, such as a navigation shortcut to a page the user cannot access, the command should
+simply not be bound. For example:
+
+```tsx
+<GlobalCommands commands={{'projects:navigate-to-settings': isAdmin ? navigateToSettings : undefined}} />
+```
+
+## Command-bound components
+
+At this point you've defined the label and a handler for your command. Since commands represent interface actions,
+you also probably have a button on the page with a similar label and handler. This is redundant - why do you need two
+handlers for the same action? Why not just define a button that triggers your command in the same way the keybinding would?
+
+Three *command-bound components* are provided to solve this problem. They extend standard Primer components but
+automatically derive their labels from the command metadata and dispatch command events when activated.
+
+* `CommandButton`: Extends Primer [`Button`](https://primer.style/react/Button), assigning an `onClick` handler and setting the button text to the command name
+* `CommandIconButton`: Extends Primer [`IconButton`](https://primer.style/react/IconButton), assigning an `onClick` handler and setting the `aria-label` to the command name
+* `CommandActionListItem`: Extends Primer [`ActionList.Item`](https://primer.style/react/ActionList), assigning an `onSelect`
+  handler, setting the item text to the command name, and automatically rendering a keybinding hint as a trailing visual
+
+With these components, you can easily render interactive UI elements without duplication, and you can ensure that
+actions are always handled consistently.
+
+Usage is straightforward: to render a "Submit comment" button, use the `CommandButton` component with a `commandId`:
+
+```diff
+- <Button onClick={submitComment}>Submit comment</Button>
++ <CommandButton commandId="issues:submit-comment" />
+```
+
+`CommandIconButton` works similarly, automatically applying an `aria-label` so you only need to set an icon:
+
+```diff
+- <IconButton aria-label="Copy commit hash" onClick={copyCommitHash} icon={CopyIcon} />
++ <CommandIconButton commandId="commits:copy-hash" icon={CopyIcon} />
+```
+
+`CommandActionListItem` works in [`ActionList`](https://primer.style/react/ActionList) or [`ActionMenu`](https://primer.style/react/ActionMenu) and automatically renders hints for configured keybindings:
+
+```diff
+- <ActionList.Item onSelect={copyAnchorLink}>
+-   Copy anchor link
+-   <ActionList.TrailingVisual>
+-     <CommandKeybindingHint commandId="pull-requests:copy-anchor-link" />
+-   </ActionList.TrailingVisual>
+- </ActionList.Item>
++ <CommandActionListItem commandId="pull-requests:copy-anchor-link" />
+```
+
+## Rendering keybinding hints
+
+To make shortcuts discoverable, it is often useful to render hints in the UI. However, because users will ultimately
+be able to override keybindings, it's critical not to hardcode any keybindings. To solve this problem, the `ui-commands`
+package provides another component: `CommandKeybindingHint`. This component simply accepts a full command ID and renders
+the corresponding keybinding:
+
+```tsx
+<CommandKeybindingHint commandId="issues:comment-and-close" />
+```
+
+If there is no keybinding for the given command, the component will render nothing (`null`).
+
+The display format can be customized with the same props as [`KeyboardKey`](https://ui.githubapp.com/storybook/?path=/story/recipes-keyboardkey--condensed).
+
+Note that this component is often unecessary due to the availability of `CommandActionListItem` as described above.
+
+In rare cases, it may be necessary to build accessible names or descriptions that contain a keybinding hint. While this
+should nearly always be done by referencing a `CommandKeybindingHint` using `aria-labelledby` or `aria-describedby`,
+`getAccessibleKeybindingString` is provided to use when this is not possible (ie, when building plain strings to use
+in `aria-label` or `aria-description`).
+
+## Observability
+
+The `ui-commands` platform provides instrumentation automatically - no additional setup is required.
+
+All command trigger events are automatically published to Hydro as `analytics.v0.BrowserEvent`s under the [`ui-commands`](https://hydro.githubapp.com/hydro_analytics/apps/ui-commands)
+application with the `"command.trigger"` event type. In addition to the [automatically populated details](https://github.com/github/hydro-analytics-client/blob/main/docs/api.md#event-payload) about the browser and page,
+additional context parameters are documented by the `CommandTriggerEvent` type in [`metrics.ts`](./metrics.ts).
+
+### Querying event data
+
+Command events can be queried in the [Data Warehouse](https://data.githubapp.com/sql) as described in the [frontend observability documentation](https://thehub.github.com/epd/engineering/dev-practicals/frontend/observability/browser-events/).
+
+The `command_id` context parameter is the full command ID in `service:command` form, so you can filter for just your
+app's commands with `starts_with`:
+
+```sql
+select * from hive_hydro.hydro.analytics_v0_browser_event
+where app = 'ui-commands'
+  and event = 'command.trigger'
+  and starts_with(context['command_id'], '$YOUR_SERVICE_ID:')
+limit 5
+```

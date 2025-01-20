@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+# ghe-spokesctl is a CLI interface for interacting with spokes
+#
+# Usage:
+#  ghe-spokesctl [flags]
+#  ghe-spokesctl [command]
+#
+# Flags
+#  -h, --help      help for ghe-spokesctl
+#  -v, --verbose   verbose output
+
+. /usr/local/share/enterprise/ghe-nomad-lib
+
+mapfile -t nodes < <(jq -r .webserver_nodes[] /etc/github/configapply.json)
+nodes+=("localhost")
+
+for node in "${nodes[@]}"; do
+  allocation_id="$(find_allocation spokesctl "$node" 2>/dev/null || true)"
+  ret=$?
+  if [[ "$ret" -eq 0 ]]; then
+    break
+  fi
+done
+
+if [[ -z "$allocation_id" ]]; then
+  echo "ghe-spokesctl could not be executed as spokesctl is not running on an expected node"
+  exit 1
+fi
+
+replica_host="git-server-$(cat /data/user/common/uuid)"
+if [[ "$*" =~ -h|--help ]] || [[ "$#" = 0 ]]; then
+    # Show usage.
+    run_in_allocation --node "$node" "$allocation_id" env SPOKESD_NO_TLS_FOR_FILESERVERS=1 SPOKESD_SSH_TYPE=ghes SPOKESD_SSH_LOCAL_REPLICA=$replica_host /spokesctl "$@" 2>&1 | sed "s/spokesctl/ghe-spokesctl/g"
+else
+    run_in_allocation --node "$node" "$allocation_id" env SPOKESD_NO_TLS_FOR_FILESERVERS=1 SPOKESD_SSH_TYPE=ghes SPOKESD_SSH_LOCAL_REPLICA=$replica_host /spokesctl "$@" 2>&1
+fi

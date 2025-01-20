@@ -1,0 +1,114 @@
+<%#
+  Duplicated from comments/edit/write_content partial.
+  TODO deprecate when comments/projects/edit_from partial is removed.
+%>
+<%graphql
+  fragment Comment on Comment {
+    body
+    bodyVersion
+    id
+    subjectId
+
+    ... on RepositoryNode {
+      repository {
+        databaseId
+        name
+        owner { login }
+        slashCommandsEnabled: isFeatureEnabled(name: "slash_commands"),
+      }
+    }
+
+    ... on GistComment {
+      gist {
+        name
+        owner { login }
+      }
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<%
+  if comment.is_a?(Issue::Adapter::IssueAdapter)
+    # TODO issue_timeline: we need to fix this, one possible way is to inject another parameter here for the input name
+    # possible known values "issue", "pull_request", "team_discussion" "organization_discussion" (gists usage is missing)
+    input_name = "issue"
+  elsif comment.is_a?(Issue::Adapter::CommentAdapter) || comment.is_a?(RepositoryAdvisory::Adapter::CommentAdapter)
+    input_name = comment.input_name
+  else
+    comment = Views::Comments::Projects::Edit::WriteContent::Comment.new(comment)
+    input_name = comment.class.type.graphql_name.underscore
+  end
+
+  emoji_suggestions = case comment
+  when PlatformTypes::GistComment
+    # TODO: logic duplicated from Gist#user_param
+    owner = comment.gist.owner&.login || "anonymous"
+    suggestions_user_gist_path(user_id: owner, gist_id: comment.gist.name)
+  else
+    emoji_suggestions_path
+  end
+%>
+
+<% attachment_opts = if comment.is_a?(PlatformTypes::RepositoryNode)
+    {:"data-upload-repository-id" => comment.repository.database_id}
+  elsif comment.is_a?(PlatformTypes::GistComment)
+    {:"data-subject-type" => "Gist", :"data-subject-param" => comment.gist.name}
+  else
+    {}
+  end
+%>
+
+<%= file_attachment_tag(model: "assets", class: "js-upload-markdown-image is-default", input: "fc-#{textarea_id}", **attachment_opts) do |upload_enabled| %>
+  <div class="write-content js-write-bucket <%= "upload-enabled" if upload_enabled %>">
+    <input type="hidden" name="context" value="<%= comment_context %>">
+    <%= spamurai_form_signals %>
+
+    <% unless comment.is_a?(PlatformTypes::GistComment) %>
+      <input type="hidden" name="saved_reply_id" id="<%= textarea_id %>_saved_reply_id" class="js-resettable-field" value="" data-reset-value="">
+    <% end %>
+
+    <%# TODO: Migrate to `input[id]` name %>
+    <input type="hidden" name="<%= input_name %>[id]" value="<%= comment.id %>">
+    <%# TODO: Migrate to `input[bodyVersion]` name %>
+    <input type="hidden" name="<%= input_name %>[bodyVersion]" class="js-body-version" value="<%= comment.body_version %>">
+
+    <% keys = [":", comment.is_a?(PlatformTypes::RepositoryNode) ? "@ #" : nil].compact.join(" ") %>
+    <text-expander keys="<%= keys %>"
+      <% if comment.is_a?(PlatformTypes::RepositoryNode) %>
+        data-issue-url="<%= suggestions_path(user_id: comment.repository.owner.login, repository: comment.repository.name, issue_suggester: "1") %>"
+        data-mention-url="<%= suggestions_path(user_id: comment.repository.owner.login, repository: comment.repository.name, mention_suggester: "1") %>"
+        multiword="#"
+      <% end %>
+      data-emoji-url="<%= emoji_suggestions %>"
+    >
+      <% repo = if comment.is_a?(PlatformTypes::RepositoryNode)
+          {
+            name: comment.repository.name,
+            owner_login: comment.repository.owner.login,
+            slash_commands_enabled?: comment.repository.slash_commands_enabled
+          }
+        else
+          nil
+        end
+      %>
+      <%= render(
+          SlashCommands::SlashCommandExpanderWrapperComponent.new(
+            repository: repo,
+            user: current_user,
+            subject_gid: comment.subject_id || comment.id
+          )
+        ) do %>
+        <%# TODO: Migrate to `input[body]` name %>
+        <textarea name="<%= input_name %>[body]"
+                  id="<%= textarea_id %>"
+                  placeholder="Leave a comment"
+                  aria-label="Comment body"
+                  <% if current_user.paste_url_link_as_plain_text? %>data-paste-url-links-as-plain-text<% end %>
+                  dir="auto"
+                  class="form-control input-contrast comment-form-textarea js-comment-field js-paste-markdown js-task-list-field js-quick-submit js-size-to-fit js-session-resumable <%= "js-saved-reply-shortcut-comment-field" unless comment.is_a?(PlatformTypes::GistComment) %> <%= "input-monospace" if current_user.use_fixed_width_font? %>"
+                  ><%= comment.body %></textarea>
+      <% end %>
+    </text-expander>
+
+    <%= render :partial => "comments/drag_and_drop", :locals => { :asset_types => [:assets, :"repository-files"], file_chooser_id: "fc-#{textarea_id}" }  %>
+  </div>
+<% end %>

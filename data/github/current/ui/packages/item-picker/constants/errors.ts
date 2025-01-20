@@ -1,0 +1,17 @@
+export const ERRORS = {
+  couldNotUpdateAssignees: 'Could not update assignees',
+  couldNotSearchAssignees: 'Could not search assignees',
+  couldNotUpdateLabels: 'Could not update labels',
+  couldNotSearchLabels: 'Could not search labels',
+  couldNotUpdateMilestone: 'Could not update milestone',
+  couldNotSearchMilestones: 'Could not search milestones',
+  couldNotUpdateIssueType: 'Could not update issue type',
+  couldNotSearchRepositories: 'Could not search repositories',
+  couldNotSearchPullRequests: 'Could not search pull requests',
+  couldNotSearchProjects: 'Could not search projects',
+  couldNotSearchBranches: 'Could not search branches',
+  noMatches: 'No matches',
+  noResults: 'No results',
+  couldNotCreateBranch: 'Could not create branch',
+  couldNotCreateLabel: 'Could not create label',
+}

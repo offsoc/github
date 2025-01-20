@@ -1,0 +1,63 @@
+#!/bin/bash
+#/ Usage: ghe-ssh-check-host-keys
+#/
+#/ This utility will check the existing SSH host keys against the list
+#/ of known leaked SSH host keys from GitHub Enterprise packages.
+#/
+#/ OPTIONS:
+#/   -h | --help                Show this message.
+#/
+set -e
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help --options h -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+fingerprint_blocklist="/usr/local/share/enterprise/ghe-ssh-leaked-host-keys-list.txt"
+
+keys="/etc/ssh/ssh_host_dsa_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_rsa_key.pub"
+
+blocklist_found=false
+for key in $keys; do
+  if [ ! -f "$key" ]; then
+    continue
+  fi
+  # Note:  The output format of ssh-keygen changed from jessie to stretch;  the
+  # new -E flag is present because the blocklist is in the old colon-delimited
+  # md5-hashed format.
+  # See https://superuser.com/questions/1088165/get-ssh-key-fingerprint-in-old-hex-format-on-new-version-of-openssh for more info
+  fingerprint=$(ssh-keygen -E md5 -lf "$key" | cut -d ' ' -f 2 | sed 's/^MD5://g')
+  if grep -q "$fingerprint" "$fingerprint_blocklist"; then
+    blocklist_found=true
+  fi
+done
+
+if $blocklist_found; then
+  echo "One or more of your SSH host keys were found in the blocklist."
+  echo "Please reset your host keys using ghe-ssh-roll-host-keys."
+  exit 1
+else
+  echo "The SSH host keys were not found in the SSH host key blocklist."
+  echo "No additional steps are needed/recommended at this time."
+fi

@@ -1,0 +1,125 @@
+<%# locals: (is_small_search_input: false, enable_jump_to: true, hotkey: "s,/") %>
+
+<% view = Site::HeaderView.new(
+      current_user: current_user,
+      current_repository: current_repository,
+      current_organization: current_organization,
+      is_mobile_request: mobile?,
+      current_copilot_user: current_copilot_user,
+      enable_jump_to: enable_jump_to,
+      params: params)
+
+    is_search_page = current_page?(view.unscoped_search_path) || (view.scoped_search_path && current_page?(view.scoped_search_path))
+%>
+
+<% if custom_search_commands_enabled? %>
+  <div hidden class="d-none">
+    <% if view.has_navigation_repository? %>
+      <input type="hidden" class="js-search-commands" value="<%= current_user.navigation_repository.preferred_commands&.data %>">
+    <% end %>
+  </div>
+<% end %>
+
+
+<div class="<%= class_names(
+    "header-search flex-auto position-relative js-site-search",
+    "flex-self-stretch flex-md-self-auto" => responsive?,
+    "mb-3 mb-md-0 mr-0 mr-md-3" => responsive? && !header_redesign_enabled?,
+    "mr-3" => !responsive? && !header_redesign_enabled?,
+    "scoped-search site-scoped-search" => view.search_scoped?,
+    "js-jump-to" => view.jump_to_enabled?,
+    "custom-search-commands-enabled" => custom_search_commands_enabled? && current_user&.has_navigation_repository?
+  ) %>"
+>
+  <div class="position-relative">
+    <%= form_tag view.search_path,
+        :method => :get,
+        :class => "js-site-search-form",
+        :role => "search",
+        "aria-label" => "Site",
+        "data-scope-type" => view.scope&.class&.name,
+        "data-scope-id" => view.scope&.id,
+        "data-scoped-search-url" => view.scoped_search_path,
+        "data-owner-scoped-search-url" => view.owner_scoped_search_path,
+        "data-unscoped-search-url" => view.unscoped_search_path do %>
+      <label class="<%= class_names(
+        "form-control header-search-wrapper input-sm p-0 js-chromeless-input-container",
+        "color-bg-transparent color-fg-muted border-0" => header_redesign_enabled?,
+        "header-search-wrapper-jump-to position-relative d-flex flex-justify-between flex-items-center" => view.jump_to_enabled?,
+      ) %>">
+        <% unless view.jump_to_enabled? %>
+          <% if view.current_repository && params["controller"] == "repository_search" %>
+            <%= link_to view.current_repository.name_with_display_owner, view.current_repository, :class => "header-search-scope truncate-repo-scope no-underline" %>
+          <% elsif view.current_organization %>
+            <%= link_to view.search_scope_badge_text, view.current_organization, :class => "header-search-scope no-underline" %>
+          <% elsif view.current_repository %>
+            <%= link_to view.search_scope_badge_text, view.current_repository, :class => "header-search-scope no-underline" %>
+          <% elsif view.current_topic %>
+            <%= link_to view.search_scope_badge_text, "/topics/#{view.current_topic}", :class => "header-search-scope no-underline" %>
+          <% end %>
+        <% end %>
+        <input type="text"
+          class="<%= class_names(
+            "form-control js-site-search-focus",
+            "input-sm" => is_small_search_input,
+            "header-search-input" => !header_redesign_enabled?,
+            "width-full" => header_redesign_enabled?,
+            "jump-to-field js-jump-to-field" => view.jump_to_enabled?,
+            "js-site-search-field" => view.search_scoped?,
+            "is-clearable" => view.search_scoped? && !view.query,
+            "regular-search-input" => !is_small_search_input && force_compact_header?,
+            "sm-search-input" => is_small_search_input && force_compact_header?
+          ) %>"
+          <%= "data-hotkey=#{hotkey}" if hotkey.present? %>
+          name="q"
+          <%= test_selector "nav-search-input" %>
+          <%# only prefill the value on the search page since query can come from other searches like the issues page %>
+          <% if is_search_page %>
+            value="<%= view.query %>"
+          <% end %>
+          placeholder="<%= view.search_placeholder_text %>"
+          data-unscoped-placeholder="<%= view.unscoped_search_placeholder_text %>"
+          data-scoped-placeholder="<%= view.scoped_search_placeholder_text %>"
+          autocapitalize="off"
+          <% if view.jump_to_enabled? %>
+          role="combobox"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-autocomplete="list"
+          aria-controls="jump-to-results"
+          aria-label="<%= view.search_placeholder_text %>"
+          data-jump-to-suggestions-path="<%= graphql_path("GetSuggestedNavigationDestinations") %>"
+          spellcheck="false"
+          autocomplete="off"
+          <% else %>
+          aria-label="<%= view.search_aria_label_text %>"
+          <% end %>
+        >
+        <% if user_or_global_feature_enabled? :skip_anon_jump_to_suggestions_enabled %>
+          <% if logged_in? %>
+            <%= csrf_hidden_input_for graphql_path("GetSuggestedNavigationDestinations"), class: "js-data-jump-to-suggestions-path-csrf" %>
+          <% end %>
+        <% else %>
+          <%= csrf_hidden_input_for graphql_path("GetSuggestedNavigationDestinations"), class: "js-data-jump-to-suggestions-path-csrf" %>
+        <% end %>
+        <input type="hidden" class="js-site-search-type-field" name="type" <%# The value is plucked from URL params by JS on submit %>>
+        <% if view.jump_to_enabled? %>
+          <% if hotkey.present? %>
+            <%= svg("header/search-key-slash.svg", aria_hidden: true, class: "header-search-key-slash") %>
+          <% end %>
+
+          <div class="Box position-absolute overflow-hidden d-none jump-to-suggestions js-jump-to-suggestions-container">
+            <%= render partial: "jump_to/client_templates", locals: {
+              scoped_search_badge_text: view.jump_to_search_scope_badge_text,
+              scoped_search_badge_aria_label: view.jump_to_search_scope_badge_aria_label,
+              scoped_owner_search_badge_text: view.jump_to_search_owner_scope_badge_text,
+              scoped_owner_search_badge_aria_label: view.jump_to_search_owner_scope_badge_aria_label,
+              global_search_badge_text: view.jump_to_search_global_badge_text,
+              global_search_badge_aria_label: view.jump_to_search_scope_badge_aria_label_global
+            } %>
+          </div>
+        <% end %>
+      </label>
+    <% end %>
+  </div>
+</div>

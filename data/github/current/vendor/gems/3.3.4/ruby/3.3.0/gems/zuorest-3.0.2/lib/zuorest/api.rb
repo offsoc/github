@@ -1,0 +1,44 @@
+require "zuorest/api/account"
+require "zuorest/api/advanced_payment_manager"
+require "zuorest/api/event_triggers"
+require "zuorest/api/invoice"
+require "zuorest/api/payment"
+require "zuorest/api/payment_method_snapshot"
+require "zuorest/api/payment_method"
+require "zuorest/api/subscription"
+require "zuorest/api/refund"
+require "zuorest/api/action"
+require "zuorest/api/contact"
+require "zuorest/api/credit_balance_adjustment"
+require "zuorest/api/invoice_collect"
+require "zuorest/api/product"
+require "zuorest/api/product_rate_plan"
+require "zuorest/api/product_rate_plan_charge"
+require "zuorest/api/usage"
+require "zuorest/api/rsa_signature"
+require "zuorest/api/notification_history"
+require "zuorest/api/import"
+
+module Zuorest::Api
+  include Zuorest::Account
+  include Zuorest::AdvancedPaymentManager
+  include Zuorest::EventTriggers
+  include Zuorest::Invoice
+  include Zuorest::Payment
+  include Zuorest::PaymentMethodSnapshot
+  include Zuorest::PaymentMethod
+  include Zuorest::Refund
+  include Zuorest::Subscription
+  include Zuorest::Action
+  include Zuorest::Contact
+  include Zuorest::CreditBalanceAdjustment
+  include Zuorest::InvoiceCollect
+  include Zuorest::Product
+  include Zuorest::ProductRatePlan
+  include Zuorest::ProductRatePlanCharge
+  include Zuorest::Usage
+  include Zuorest::NotificationHistory
+  include Zuorest::RSASignature
+  include Zuorest::Import
+end
+

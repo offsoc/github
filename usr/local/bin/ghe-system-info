@@ -1,0 +1,79 @@
+#!/bin/bash
+#/ Usage: ghe-system-info [-h]
+#/
+#/ Outputs information on the system in JSON format.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/    $ ghe-system-info
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+uname=$(uname -a)
+bios=$(osqueryi --json "select * from platform_info;" | jq .[])
+memory=$(sed 's/://' /proc/meminfo | awk '{print "    \""$1"\": \""$2" kb\"," }' | sed '$ s/,$//g')
+cpu=$(sed 's/[\t ]*: */:/' /proc/cpuinfo | awk -F: '{print "      \""$1"\": \""$2"\"," }' | sed 's/  "": "",/},/' | sed 's/  "processor"/{\n      "processor"/')
+uptime=$(uptime | sed 's/, *[0-9]* user.*$//' | sed 's/.*up //')
+load=$(uptime | sed 's/.*: //')
+ruby_version=$(rbenv versions | grep -v system | head -n 1 | sed 's/^  //')
+
+if [ -f /etc/github/ec2-ami ]; then
+  virt='EC2'
+else
+  virt=$(virt-what | head -n1 || echo "Unknown")
+  if [ "$virt" = "hyperv" ] && [ -f /proc/xen/capabilities ]; then
+    virt=xen
+  fi
+fi
+
+virt_info=$(lshw -class system 2>/dev/null | sed 's/ *\(.*\): \(.*\)/    "\1": "\2",/' | sed '1d')
+
+case "$(grep -oP 'RELEASE_PLATFORM="\K[^"]*' /etc/github/enterprise-release)" in 
+  ami)
+    virt_info=$(echo -e "$virt_info\\n    \"instance_type\": \"$(osqueryi --json "select * from ec2_instance_metadata;" | jq -r .[].instance_type)\",")
+    virt_info=$(echo -e "$virt_info\\n    \"instance_location\": \"$(osqueryi --json "select * from ec2_instance_metadata;" | jq -r .[].availability_zone)\"")
+    ;;
+  azure)
+    virt_info=$(echo -e "$virt_info\\n    \"instance_type\": \"$(curl -H Metadata:true --noproxy 169.254.169.254 http://169.254.169.254/metadata/instance/compute?api-version=2018-10-01 2>/dev/null | jq -r .vmSize)\",")
+    virt_info=$(echo -e "$virt_info\\n    \"instance_location\": \"$(curl -H Metadata:true --noproxy 169.254.169.254 http://169.254.169.254/metadata/instance/compute?api-version=2018-10-01 2>/dev/null | jq -r .location)\",")
+    ;;
+  gce)
+    virt_info=$(echo -e "$virt_info\\n    \"instance_type\": \"$(curl -H Metadata-Flavor:Google --noproxy 169.254.169.254 http://169.254.169.254/computeMetadata/v1/instance/machine-type 2>/dev/null | awk -F '/' '{ print $NF }')\",")
+    virt_info=$(echo -e "$virt_info\\n    \"instance_location\": \"$(curl -H Metadata-Flavor:Google --noproxy 169.254.169.254 http://169.254.169.254/computeMetadata/v1/instance/zone 2>/dev/null | awk -F '/' '{ print $NF }')\",")
+    ;;
+esac
+  
+cat <<-JSON
+{
+  "uname": "$uname",
+  "virtualization": {
+    "name": "$virt",
+$virt_info
+  },
+  "bios": $bios,
+  "memory": {
+$memory
+  },
+  "cpu": [
+$cpu
+  ],
+  "uptime": "$uptime",
+  "load": "$load",
+  "ruby": "$ruby_version",
+}
+JSON

@@ -1,0 +1,63 @@
+#!/bin/bash
+#/ Usage: git-network-fetch [--quiet] <remote>
+#/ Like git-fetch(1) but specialized for fetching user repositories
+#/ into network repositories. It is different from git-fetch(1) in the following
+#/ ways:
+#/
+#/ - Guarantees only one fetch will be performed at any given time. Prevents
+#/   multiple fetches running in parallel and stomping each other's work.
+#/ - Prunes refs that no longer exist in <remote> before fetching.
+#/ - Always passes --no-tags to git-fetch since the refspec is setup to fetch
+#/   tags under the normal refs/remotes/<remote>/heads/* namespace.
+#/
+#/ This program should *always* be used to fetch into network repositories.
+set -e
+
+# Go into <repo>.git dir before executing any commands. This is necessary to
+# fetch remotes that use relative paths as remote URLs.
+cd "$(git rev-parse --git-dir)"
+export GIT_DIR="$(pwd)"
+
+# separate option args from <remote>
+remote=
+opts=
+while [ $# -gt 0 ]
+do case "$1" in
+    --help)
+        grep ^#/ "$0" |cut -c4-
+        exit 0
+        ;;
+    -*) opts="$opts $1"
+        shift
+        ;;
+     *) remote="$1"
+        shift
+        ;;
+   esac
+done
+
+# make sure we at least have <remote> or bail out
+[ -z "$remote" ] && {
+    echo "$(basename $0): no <remote> specified." 1>&2
+    exit 2
+}
+
+# Obtain a global lock for fetching into the repository. If the lock is already
+# held, lockfile will retry every 1s for up to 10 minutes. Lock files that are
+# older than 10m old are considered stale and the next attempt to gain the lock
+# will succeed.
+if lockfile -1 -r 600 -l 600 fetch.lock
+then trap 'rm -f fetch.lock' 0
+
+     # Prune remote before fetching if it exists. This is more exhaustive than
+     # git fetch --prune and prevents a number of problems with new refs not
+     # being able to replace old refs when there's changes from directories
+     # to normal files or visa versa.
+     git remote prune "$remote"
+
+     # now perform the actual fetch
+     git fetch --no-recurse-submodules --no-tags --prune $opts "$remote"
+
+else echo 1>&2 "error: could not obtain fetch lock"
+     exit 1
+fi

@@ -1,0 +1,36 @@
+#!/usr/bin/env ruby
+#/ Usage: script/graphql --viewer spraints '{ viewer { login } }' | jq .
+
+query_args = []
+variables = {}
+context = {}
+while ARGV.any?
+  case arg = ARGV.shift
+  when "--"
+    query_args += ARGV
+    break
+  when "--help", "-h", "-help"
+    system "cat #{__FILE__} | grep ^#/ | cut -c4-"
+    exit 0
+  when "--viewer"
+    login = ARGV.shift
+    context[:viewer] = -> { User.find_by_login(login) }
+  when /^--(.+)/
+    name, value = $1.split(/=/, 2)
+    value ||= ARGV.shift
+    variables[name] = value
+  else
+    query_args << arg
+  end
+end
+
+require "./config/environment"
+
+unless Rails.env.development?
+  abort "This can only be run in development"
+end
+
+query = query_args.join(" ")
+context.each { |k, v| context[k] = v.call if v.respond_to?(:call) }
+result = Platform.execute(query, target: :internal, variables: variables, context: context)
+puts result.to_json(pretty: true)

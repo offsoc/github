@@ -1,0 +1,101 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter FlashMigrationCounter 2 %>
+<%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+<%# `view` is either an instance of `Branches::OverviewView` or `Branches::PaginatedView` %>
+<% page_info \
+    title: "Branches · #{view.repository.name_with_display_owner}",
+    container_xl: true,
+    selected_link: :repo_branches,
+    dashboard_pinnable_item_id: current_repository.global_relay_id
+%>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle :code %>
+<% end %>
+
+<% new_branch_enabled = logged_in? && current_user_can_push? %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="flash flash-error js-branch-delete-error" role="alert" hidden>
+  An error occurred when attempting to delete the branch <strong class="js-branch-delete-error-name"></strong>. Please try again.
+</div>
+<div class="flash flash-warn js-branch-delete-warning" role="alert" hidden>
+  The branch <strong class="js-branch-delete-warning-name"></strong> could not be found. It may have already been deleted.
+</div>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <branch-filter class="d-block branches <%= "is-search-mode" if view.search_mode? %>">
+    <div class="d-flex flex-justify-between flex-column-reverse flex-md-row">
+      <%= form_tag view.search_path, method: :get,
+          class: "flex-1 mb-4 position-relative",
+          "data-action": "submit:branch-filter#submit",
+          "data-reset-url": request.path do %>
+        <input
+          type="text"
+          name="query"
+          data-target="branch-filter.field"
+          data-action="keyup:branch-filter#resetField input:branch-filter#search"
+          value="<%= view.search_query %>"
+          class="form-control input-contrast subnav-search-input width-full pr-4"
+          placeholder="Search branches…"
+          aria-label="Search branches…">
+        <%= primer_octicon(:search, classes: "subnav-search-icon") %>
+        <button
+          type="button"
+          aria-label="Clear search"
+          data-action="click:branch-filter#reset"
+          class="btn-link Link--muted clear-search position-absolute right-0 p-2"
+          style="top: -3px">
+          <%= primer_octicon(:x) %>
+        </button>
+      <% end %>
+      <div class="d-flex flex-justify-between ml-md-3 ml-0">
+        <%= render partial: "branches/subnav", locals: { selected: view.selected_view } %>
+        <% if new_branch_enabled %>
+          <%= render_react_partial name: "create-branch-button", ssr: false, props: {
+            branchListCacheKey: ref_list_cache_key,
+            repository: Repos::ReactPayload.current_repository_payload(current_repository, current_user_can_push: current_user_can_push?),
+            repositoryParent: if current_repository.fork? && current_repository.parent&.readable_by?(current_user)
+              Repos::ReactPayload.current_repository_payload(current_repository.parent, current_user_can_push: false)
+            else
+              nil
+            end,
+            createUrl: create_branch_path,
+            helpUrl: GitHub.help_url
+          } %>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="position-relative">
+      <div data-target="branch-filter.result">
+        <%= render :partial => view.template_name, :locals => { :view => view } %>
+      </div>
+
+      <div class="loading-overlay">
+        <%= render(Primer::Beta::Spinner.new(size: :large, classes: "spinner")) %>
+      </div>
+    </div>
+
+    <%= render(Primer::Experimental::Dialog.new(
+      dialog_id: "delete-branch-dialog",
+      show_header_divider: true,
+      show_footer_divider: false,
+      header_variant: :large,
+      width: :large,
+      title: "Delete branch"
+    )) do |c| %>
+      <% c.with_body do %>
+        <div class="js-delete-dialog-body"></div>
+      <% end %>
+      <% c.with_button(
+        data: { "close-dialog-id": "delete-branch-dialog" }
+      ) { "Cancel" } %>
+      <% c.with_button(
+        type: :button,
+        scheme: :danger,
+        data: { "submit-dialog-id": "delete-branch-dialog" }
+      ) { "Delete" } %>
+    <% end %>
+  </branch-filter>
+</div>
+<% end %>

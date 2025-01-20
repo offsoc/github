@@ -1,0 +1,375 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info title: this_business.name, selected_link: :business_security %>
+
+<% two_factor_auth_available = !this_business.enterprise_managed_user_enabled? %>
+
+<% if two_factor_auth_available %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Two-factor authentication<% end %>
+  <% end %>
+  <p class="color-fg-muted">
+    <% if this_business.two_factor_requirement_enabled? %>
+      <%= primer_octicon(:lock, mr: 2) %>
+      Two-factor authentication is <strong>required</strong> for all organizations in the enterprise.
+
+      <%= render(Primer::Beta::BorderBox.new(border_color: :danger)) do |box| %>
+        <% box.with_body border_color: :danger do %>
+          <%= render(Primer::Alpha::Dialog.new(
+            size: :large,
+            title: "Disable two-factor authentication",
+            id: "disable-two-factor-auth",
+          )) do |d| %>
+            <% d.with_show_button(
+              float: :right,
+              scheme: :danger,
+              "data-disable-invalid": "",
+              "data-disable-with": "Disable two-factor authentication"
+            ) { "Disable two-factor authentication" } %>
+            <% d.with_header(show_divider: true) do %>
+              Disable the two-factor authentication requirement?
+            <% end %>
+            <% d.with_body do %>
+              <%= render(Primer::Beta::Flash.new(scheme: :warning)) do
+                "Please ensure appropriate authorization has been obtained before disabling
+                the two-factor authentication requirement."
+              end %>
+              <p>
+                If the two-factor authentication requirement is disabled, it will need to be
+                re-enabled by an enterprise owner.
+              </p>
+            <% end %>
+            <% d.with_footer(show_divider: true) do %>
+              <%= render(Primer::Beta::Button.new(
+                data: { "close-dialog-id": "disable-two-factor-auth" }
+              )) { "Cancel" } %>
+              <%= form_with \
+                url: stafftools_enterprise_two_factor_requirement_path(this_business),
+                method: :delete do %>
+                <%= render(Primer::Beta::Button.new(
+                  scheme: :danger,
+                  type: :submit,
+                  "data-disable-invalid": "",
+                  "data-disable-with": "Disabling two-factor authentication..."
+                )) { "Disable two-factor authentication" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <div>
+            <div class="listgroup-item-title">Disable two-factor authentication requirement</div>
+            <div class="listgroup-item-body">
+              This will disable the two-factor authentication requirement for the enterprise.<br>
+              Please be certain.
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= primer_octicon(:x, mr: 2) %>
+      Two-factor authentication is <strong>not required</strong> for all organizations in the enterprise.
+    <% end %>
+  </p>
+<% end %>
+
+<%= render partial: "stafftools/businesses/single_sign_on_settings", locals: {
+  spacious: two_factor_auth_available
+} %>
+
+<% if GitHub.ssh_enabled? %>
+  <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+    <% component.with_heading(tag: :h2) do %>SSH certificate authorities<% end %>
+  <% end %>
+  <p>SSH certificate authentication is<%= " not" unless this_business.ssh_certificate_requirement_enabled? %> required for this enterprise.</p>
+
+  <% cas = this_business.ssh_certificate_authorities.all %>
+  <% if cas.any? %>
+    <div class="Box Box--condensed mt-3">
+      <% cas.each do |ca| %>
+        <div class="Box-row js-details-container Details">
+          <div class="d-flex flex-items-center float-right">
+            <span class="time float-right">Created <%= time_ago_in_words ca.created_at %> ago</span>
+            <%= render(Primer::Alpha::Dialog.new(title: "Delete this certificate authority?", id: "delete-certificate-authority-dialog", size: :medium_portrait)) do |d| %>
+              <% d.with_show_button(scheme: :danger, size: :small, ml: 2) do %>
+                <%= render(Primer::Beta::Octicon.new(icon: :trash, size: :small, color: :danger, aria: { label: "delete-ssh-certificate-authority" })) %>
+              <% end %>
+              <% d.with_header(show_divider: true) %>
+              <% d.with_body(text_align: :left) do %>
+                <%= render(Primer::Beta::Text.new(tag: :p, pt: 3)) do %>
+                Are you sure you want to delete this certificate authority? This action <strong>CANNOT</strong> be undone.
+                <% end %>
+              <% end %>
+              <% d.with_footer do %>
+                <%= render(Primer::Beta::Button.new(type: :button, data: { "close-dialog-id": "delete-certificate-authority-dialog" })) { "Cancel" } %>
+                <%= form_tag stafftools_enterprise_ssh_certificate_authority_path(this_business, ca), method: :delete do %>
+                  <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger)) { "Delete" } %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+          <p><strong>Fingerprint:</strong> <code><%= ca.base64_fingerprint %></code></p>
+          <p class="Details-content--hidden" style="word-break: break-all; width: 500px;">
+            <strong>Key:</strong>
+            <code><%= ca.openssh_public_key %></code>
+            </p>
+          <span class="hidden-text-expander inline"><button type="button" aria-expanded="false" class="ellipsis-expander js-details-target">&hellip;</button></span>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    No SSH certificate authorities have been configured.
+  <% end %>
+<% end%>
+
+<% if GitHub.ip_allowlists_available? %>
+  <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+    <% component.with_heading(tag: :h2) do %>IP allow list<% end %>
+  <% end %>
+
+  <% if this_business.eligible_for_ip_allowlist_configuration? %>
+    <% if this_business.idp_based_ip_allowlist_configuration? %>
+      <p class="color-fg-muted" <%= test_selector "ip-allow-list-enabled" %>>
+        <%= primer_octicon(:check, mr: 2) %>
+        IdP IP allow list is <strong>enabled</strong> for this enterprise.
+      </p>
+      <% if this_business.eligible_for_skip_idp_ip_allowlist_app_access? %>
+        <p class="color-fg-muted" <%= test_selector "skip-idp-ip-allowlist-app-access-enabled" %>>
+          <% if this_business.skip_idp_ip_allowlist_app_access_enabled? %>
+            <%= primer_octicon(:check, mr: 2) %>
+            Skip IdP check for applications is <strong>enabled</strong> for this enterprise.
+          <% else %>
+            <%= primer_octicon(:x, mr: 2) %>
+            Skip IdP check for applications is <strong>disabled</strong> for this enterprise.
+          <% end %>
+        </p>
+      <% end %>
+      <% if this_business.eligible_for_idp_ip_allowlist_for_web_configurable? %>
+        <p class="color-fg-muted" <%= test_selector "idp-ip-allowlist-for-web-enabled" %>>
+          <% if this_business.idp_ip_allowlist_for_web_configurable_enabled? %>
+            <%= primer_octicon(:check, mr: 2) %>
+              IdP IP allowlist for web activity is <strong>enabled</strong> for this enterprise.
+          <% else %>
+            <%= primer_octicon(:x, mr: 2) %>
+              IdP IP allowlist for web activity is <strong>disabled</strong> for this enterprise.
+          <% end %>
+        </p>
+      <% end %>
+    <% elsif this_business.github_based_ip_allowlist_configuration? %>
+      <p class="color-fg-muted" <%= test_selector "ip-allow-list-enabled" %>>
+        <% if this_business.ip_allowlist_enabled? %>
+          <%= primer_octicon(:check, mr: 2) %>
+          GitHub IP allow list is <strong>enabled</strong> for this enterprise.
+        <% else %>
+          <%= primer_octicon(:x, mr: 2) %>
+          GitHub IP allow list is <strong>disabled</strong> for this enterprise.
+        <% end %>
+      </p>
+      <p class="color-fg-muted" <%= test_selector "ip-allow-list-apps-configuration-enabled" %>>
+        <% if this_business.ip_allowlist_app_access_enabled? %>
+          <%= primer_octicon(:check, mr: 2) %>
+          GitHub IP allow list configuration for installed GitHub Apps is <strong>enabled</strong> for this enterprise.
+        <% else %>
+          <%= primer_octicon(:x, mr: 2) %>
+          GitHub IP allow list configuration for installed GitHub Apps is <strong>disabled</strong> for this enterprise.
+        <% end %>
+      </p>
+    <% else %>
+      <p class="color-fg-muted" <%= test_selector "ip-allow-list-apps-configuration-enabled" %>>
+        <%= primer_octicon(:x, mr: 2) %>
+        GitHub IP allow list and IdP IP allow list are both <strong>disabled</strong> for this enterprise.
+      </p>
+    <% end %>
+  <% else %>
+    <p class="color-fg-muted" <%= test_selector "ip-allow-list-enabled" %>>
+      <% if this_business.ip_allowlist_enabled? %>
+        <%= primer_octicon(:check, mr: 2) %>
+        IP allow list is <strong>enabled</strong> for this enterprise.
+      <% else %>
+        <%= primer_octicon(:x, mr: 2) %>
+        IP allow list is <strong>disabled</strong> for this enterprise.
+      <% end %>
+    </p>
+    <p class="color-fg-muted" <%= test_selector "ip-allow-list-apps-configuration-enabled" %>>
+      <% if this_business.ip_allowlist_app_access_enabled? %>
+        <%= primer_octicon(:check, mr: 2) %>
+        IP allow list configuration for installed GitHub Apps is <strong>enabled</strong> for this enterprise.
+      <% else %>
+        <%= primer_octicon(:x, mr: 2) %>
+        IP allow list configuration for installed GitHub Apps is <strong>disabled</strong> for this enterprise.
+      <% end %>
+    </p>
+  <% end %>
+
+  <% if this_business.eligible_for_ip_allowlist_user_level_enforcement? %>
+    <p class="color-fg-muted" <%= test_selector "ip-allow-list-user-level-enforcement-enabled" %>>
+      <% if this_business.ip_allowlist_user_level_enforcement_enabled? %>
+        <%= primer_octicon(:check, mr: 2) %>
+        IP allow list user-level enforcement is <strong>enabled</strong> for this enterprise.
+      <% else %>
+        <%= primer_octicon(:x, mr: 2) %>
+        IP allow list user-level enforcement is <strong>disabled</strong> for this enterprise.
+      <% end %>
+    </p>
+  <% end %>
+
+  <% if this_business.ip_allowlist_enabled? %>
+    <div class="Box Box--danger mt-3 mb-4">
+      <div class="Box-row">
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "disable-ip-allowlist-dialog",
+          title: "Disable IP allow list?",
+        )) do |d| %>
+          <% d.with_show_button(
+            scheme: :danger,
+            float: :right,
+            mt: 1
+          ) { "Disable IP allow list" } %>
+          <%= form_tag stafftools_enterprise_ip_allowlist_enabled_path(this_business), method: :patch do %>
+            <%= render(Primer::Alpha::Dialog::Body.new) do %>
+              <p>
+                If the IP allow list is disabled, it will need to be manually
+                re-enabled by an enterprise owner.
+              </p>
+
+              <input type="hidden" name="enabled" value="false">
+              <dl class="form-group">
+                <dt><label for="reason">Reason for disabling</label></dt>
+                <dd>
+                  <input class="form-control" type="text" name="reason" id="reason"
+                    placeholder="Please provide an explanation for the audit log." autofocus>
+                </dd>
+              </dl>
+            <% end %>
+            <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+              <%= render(Primer::Beta::Button.new(
+                data: { "close-dialog-id": "disable-ip-allowlist-dialog" }
+              )) { "Cancel" } %>
+              <%= render(Primer::Beta::Button.new(
+                type: :submit,
+                scheme: :danger,
+                data: { "disable-with": "" }
+              )) { "Disable IP allow list" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <div class="listgroup-item-title">Disable IP allow list</div>
+        <div class="listgroup-item-body">
+          This will completely disable the IP allow list configured for the
+          enterprise. Please be certain.
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <% if this_business.ip_allowlist_user_level_enforcement_enabled? %>
+    <div class="Box Box--danger mt-3 mb-4">
+      <div class="Box-row">
+        <%= render(Primer::Alpha::Dialog.new(
+          id: "disable-ip-allowlist-user-level-enforcement-dialog",
+          title: "Disable IP allow list user-level enforcement?",
+        )) do |d| %>
+          <% d.with_show_button(
+            scheme: :danger,
+            float: :right,
+            mt: 1
+          ) { "Disable IP allow list user-level enforcement" } %>
+          <%= form_tag stafftools_enterprise_ip_allowlist_user_level_enforcement_enabled_path(this_business), method: :patch do %>
+            <%= render(Primer::Alpha::Dialog::Body.new) do %>
+              <p>
+                If IP allow list user-level enforcement is disabled, it will need to be manually
+                re-enabled by an enterprise owner.
+              </p>
+
+              <input type="hidden" name="enabled" value="false">
+              <dl class="form-group">
+                <dt><label for="reason">Reason for disabling</label></dt>
+                <dd>
+                  <input class="form-control" type="text" name="reason" id="reason"
+                    placeholder="Please provide an explanation for the audit log." autofocus>
+                </dd>
+              </dl>
+            <% end %>
+            <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+              <%= render(Primer::Beta::Button.new(
+                data: { "close-dialog-id": "disable-ip-allowlist-user-level-enforcement-dialog" }
+              )) { "Cancel" } %>
+              <%= render(Primer::Beta::Button.new(
+                type: :submit,
+                scheme: :danger,
+                data: { "disable-with": "" }
+              )) { "Disable IP allow list user-level enforcement" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <div class="listgroup-item-title">Disable IP allow list user-level enforcement</div>
+        <div class="listgroup-item-body">
+          This will disable IP allow list user-level enforcement for the
+          enterprise. Please be certain.
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <% unless this_business.eligible_for_ip_allowlist_configuration? && this_business.idp_based_ip_allowlist_configuration? %>
+    <%= render IpAllowlistChecks::FormComponent.new(
+      owner_type: :enterprise,
+      owner_id: this_business.id) %>
+  <% end %>
+
+  <% if this_business.eligible_for_ip_allowlist_configuration? && this_business.idp_based_ip_allowlist_configuration? %>
+    <p class="text-bold">
+      This enterprise uses an IdP IP allow list, and therefore does not have any GitHub IP allow list entries.
+    </p>
+  <% else %>
+    <%= render Stafftools::SimpleSearchFormComponent.new(
+      query_label: "Search IP allow list entries",
+      form_url: stafftools_enterprise_security_path(this_business),
+      query_placeholder: "Search by IP or description"
+    ) %>
+
+    <% if ip_allowlist_entries.any? %>
+      <div class="Box">
+        <% ip_allowlist_entries.each do |entry| %>
+          <div class="Box-row d-flex flex-items-center">
+            <div class="flex-auto">
+              <p>
+                <strong><%= entry.allow_list_value %></strong>
+                <% if entry.active? %>
+                  <%= render Primer::Beta::Label.new(ml: 2, scheme: :success, title: "Label: Is enabled") do %>
+                    Enabled
+                  <% end %>
+                <% else %>
+                  <%= render Primer::Beta::Label.new(ml: 2, scheme: :secondary, title: "Label: Is disabled") do %>
+                    Disabled
+                  <% end %>
+                <% end%>
+              </p>
+              <p><%= entry.name %></p>
+              <p class="color-fg-muted f6 mb-0">
+                Added
+                <relative-time prefix="" threshold="PT0S" datetime="<%= entry.created_at.utc.iso8601 %>">
+                  <%= entry.created_at.strftime("%b %-d, %Y") %>
+                </relative-time>
+              </p>
+            </div>
+          </div>
+        <% end %>
+      </div>
+      <div class="paginate-container">
+        <%= will_paginate ip_allowlist_entries %>
+      </div>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new do |bs| %>
+        <% bs.with_heading(tag: :h3) do %>
+          No IP allow list entries
+          <% if params[:query].present? %>
+            matching <em><%= params[:query] %></em>
+          <% end %>
+          for this enterprise.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

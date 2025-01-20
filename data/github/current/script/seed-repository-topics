@@ -1,0 +1,81 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Usage
+#
+# To run this script, make sure you use the binary:
+#
+#   script/bootstrap
+#   bin/seed-repository-topics
+#
+# Enjoy!
+
+require_relative "../config/environment"
+require "faker"
+
+unless Rails.env.development? || ENV["STAGING_LAB_ENVIRONMENT"]
+  puts "This can only be run in the development or staging environments!"
+  exit 1
+end
+
+NUMBER_OF_REPOSITORIES = 3
+TOPICS_TO_ASSOCIATE = %w(ruby rails javascript)
+
+puts "==> Importing topics from GitHub Explore"
+
+begin
+  topic_importer = TopicImporter.new
+  topic_names = topic_importer.send(:all_topic_directories).map { |topic_data| topic_data["name"] }
+  topic_importer.import(topic_names: topic_names, dry_run: false)
+rescue GitRPC::ConnectionError
+  warn "Please have your Rails server running before continuing, so that the GitRPC service will " \
+       "be available."
+  exit 1
+end
+
+if topic_importer.errors.any?
+  warn "Error importing topics: #{topic_importer.errors.join(",")}"
+  warn
+  warn "You may need to set up your local Explore repository. Please visit" \
+      "https://github.com/github/explore-development to 0set up Explore locally before continuing."
+  exit 1
+end
+
+users = User.all
+topics = Topic.where(name: TOPICS_TO_ASSOCIATE)
+
+ActiveRecord::Base.transaction do # rubocop:disable GitHub/DoNotCallMethodsOnActiveRecordBase
+  NUMBER_OF_REPOSITORIES.times do
+    owner = users.sample
+    repository_name = "#{Faker::Hipster.words.join("-").parameterize}"
+
+    puts "==> Creating repository #{owner.login}/#{repository_name}"
+
+    repository = Repository.handle_creation(
+      owner,
+      owner,
+      {
+        name: repository_name,
+        description: Faker::Hipster.sentence,
+        public: true,
+        auto_init: true
+      },
+      synchronous: true
+    ).repository
+
+    unless repository.persisted?
+      warn "Repository #{repository_name} failed to save."
+      warn "Errors: #{repository.errors.full_messages.join(',')}"
+      exit 1
+    end
+
+    puts "==> Updating topics for #{owner.login}/#{repository_name}..."
+    RepositoryTopic.replace(repository, topics.map(&:name), user: owner)
+
+    puts "==> Updating topic applied counts"
+    Topic.update_applied_counts(topics.map(&:id))
+  end
+end
+
+puts "==> 🎉 Created #{NUMBER_OF_REPOSITORIES} repositories and associated them to " \
+     "#{TOPICS_TO_ASSOCIATE.count} topics. Enjoy!"

@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -e
+
+CDPATH="" cd -- "$(dirname -- "$(dirname -- "$0")")"
+ruby_dir="$(pwd)"
+
+KAFKA_HOST_NAME=localhost docker-compose up -d elasticsearch-ci
+
+export PATH="$(pwd)/bin:$PATH"
+export ELASTICSEARCH_URL="${ELASTICSEARCH_URL:="http://$(docker-compose port elasticsearch-ci 9200)"}"
+export FORCE_BOOTSTRAP=true
+
+echo "Setting up go environment"
+cd ../..
+. script/goenv
+cd "$ruby_dir"
+
+echo "Setting up ES template..."
+TEMPLATE_PATH=config/elasticsearch/template ../../script/bootstrap-es
+
+echo "Setting up index resolver..."
+../../script/bootstrap-indexresolver
+
+
+function cleanup() {
+    KAFKA_HOST_NAME=localhost docker-compose rm -fsv elasticsearch-ci
+}
+
+trap cleanup INT SIGINT SIGTERM EXIT
+
+bundle install
+
+for testfile in test/**/*_test.rb; do
+  bundle exec ruby "$testfile" "$@"
+done

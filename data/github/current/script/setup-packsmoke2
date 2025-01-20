@@ -1,0 +1,177 @@
+#!/bin/bash
+set -e
+
+cleanup() {
+  export GITHUB_TOKEN=$GITHUB_TOKEN_TMP
+}
+
+export GITHUB_TOKEN_TMP=$GITHUB_TOKEN
+export GITHUB_TOKEN=''
+trap cleanup EXIT
+
+export PAT=ghp_MonalisaTheOctoPatMonalisaTheOctoPat
+gh auth logout -h github.com || true
+gh auth logout -h github.localhost -u monalisa || true
+echo $PAT | gh auth login -h github.localhost --with-token
+
+# Create setup actions
+cd /workspaces/actions-org
+for repo in setup-node setup-dotnet setup-ruby setup-java; do
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://github.localhost/actions/$repo)
+  if [ $STATUS -eq 200 ]; then
+    echo "*** $repo already exists ***"
+  else
+    echo "*** Creating actions repo $repo ***"
+    gh repo create actions/$repo --public
+    cd $repo
+    git push -u http://monalisa:$PAT@github.localhost/actions/$repo.git main
+    cd ..
+  fi
+done
+
+sudo chmod 777 /opt # This may be necessary for setup-ruby to work
+
+cd /workspaces/packsmoke/packages-smoke-tests-publish
+sed -i 's/runs-on: ubuntu-latest/runs-on: self-hosted/' .github/workflows/*.yml
+sed -i 's/ruby\/setup-ruby@v1/actions\/setup-ruby@v1/' .github/workflows/*-rubygems.yml
+sed -i '1,7s/^#//' config
+sed -i '9,15s/^/#/' config
+
+git add config .github/*
+git commit -m "dev"
+cd /workspaces/packsmoke/packages-smoke-tests-install
+sed -i 's/runs-on: ubuntu-latest/runs-on: self-hosted/' .github/workflows/*.yml
+sed -i 's/ruby\/setup-ruby@v1/actions\/setup-ruby@v1/' .github/workflows/*-rubygems.yml
+sed -i '1,9s/^#//' config
+sed -i '11,19s/^/#/' config
+
+git add config .github/*
+git commit -m "dev"
+
+# Create releases for actions
+for repo in setup-node setup-dotnet setup-java; do
+  if gh release view --repo github.localhost/actions/$repo v3 >/dev/null 2>&1; then
+    echo "$repo@v3  exists"
+  else
+    gh release create --repo github.localhost/actions/$repo --title v3 --notes v3 v3
+  fi
+done
+
+if gh release view --repo github.localhost/actions/setup-ruby v1 >/dev/null 2>&1; then
+  echo "setup-ruby@v1 exists"
+else
+  gh release create --repo github.localhost/actions/setup-ruby --title v1 --notes v1 v1
+fi
+
+export org="github"
+
+# Create ORG repos for each visibility
+cd /workspaces/packsmoke/packages-smoke-tests-publish
+for visibility in public internal private; do
+  if gh repo view $org/psp-$visibility >/dev/null 2>&1; then
+    echo "*** $org/psp-$visibility already exists ***"
+  else
+    echo "*** Creating $org repo psp-$visibility ***"
+    gh repo create $org/psp-$visibility --$visibility
+    git push -u http://monalisa:$PAT@github.localhost/$org/psp-$visibility.git main
+  fi
+done
+
+cd /workspaces/packsmoke/packages-smoke-tests-install
+if gh repo view $org/psi >/dev/null 2>&1; then
+  echo "*** $org/psi already exists ***"
+else
+  echo "*** Creating $org repo psi ***"
+  gh repo create $org/psi --private
+  git push -u http://monalisa:$PAT@github.localhost/$org/psi.git main
+fi
+
+# Create publish IA repos
+for nwo in actions/publish-immutable-action github/test-publish-internal-ts-action; do
+  if gh repo view $nwo >/dev/null 2>&1; then
+    echo "*** $nwo already exists ***"
+  else
+    echo "*** Creating repo $nwo ***"
+    gh repo create $nwo --public
+  fi
+done
+
+# Push script changes and tags to the publish IA repos
+cd /workspaces/actions-org/publish-immutable-action
+sed -i 's/github\.com/github.localhost/' .github/workflows/*.yml
+sed -i 's/runs-on: ubuntu-latest/runs-on: self-hosted/' .github/workflows/*.yml
+sed -i 's/immutable-actions/github/' .github/workflows/*.yml
+
+if git diff --quiet && git diff --staged --quiet; then
+  echo "Changes already pushed to publish-immutable-action..."
+else
+  git add .
+  git commit -m "dev"
+  git push -u http://monalisa:$PAT@github.localhost/actions/publish-immutable-action.git main
+fi
+
+cd /workspaces/packsmoke/test-publish-internal-ts-action
+sed -i 's/immutable-actions\/publish-action-package/actions\/publish-immutable-action/g' .github/workflows/*.yml
+# When copy-pasting `\\\\\/` into bash to create this script, it changes it to `\\\/` in the script itself.
+# Then in the `sed` command the backslashes are telling it to interpret it as `\/` which is in the yaml file.
+sed -i 's/immutable-actions\\\\\/publish-action-package/actions\\\\\/publish-immutable-action/g' .github/workflows/*.yml
+
+sed -i 's/immutable-actions\/sync-releases-to-immutable-action/actions\/sync-releases-to-immutable-action/g' .github/workflows/*.yml
+sed -i 's/immutable-actions\/test-publish-internal-ts-action/github\/test-publish-internal-ts-action/g' .github/workflows/*.yml
+sed -i 's/runs-on: ubuntu-latest/runs-on: self-hosted/' .github/workflows/*.yml
+sed -i 's/github\.com/github.localhost/' .github/workflows/*.yml
+
+if git diff --quiet && git diff --staged --quiet; then
+  echo "Changes already pushed to test-publish-internal-ts-action..."
+else
+  git add .
+  git commit -m "dev"
+  git push -u http://monalisa:$PAT@github.localhost/github/test-publish-internal-ts-action.git main
+  git tag v0.0.0 # Necessary as a bootstrap so E2E test works
+  git push -u http://monalisa:$PAT@github.localhost/github/test-publish-internal-ts-action.git v0.0.0
+fi
+
+export user="monalisa"
+
+# Create USER repos for each visibility
+cd /workspaces/packsmoke/packages-smoke-tests-publish
+for visibility in public private; do
+  if gh repo view $user/psp-$visibility >/dev/null 2>&1; then
+    echo "*** $user/psp-$visibility already exists ***"
+  else
+    echo "*** Creating $user repo psp-$visibility ***"
+    gh repo create $user/psp-$visibility --$visibility
+    git push -u http://monalisa:$PAT@github.localhost/$user/psp-$visibility.git main
+  fi
+done
+
+cd /workspaces/packsmoke/packages-smoke-tests-install
+if gh repo view $user/psi >/dev/null 2>&1; then
+  echo "*** $user/psi already exists ***"
+else
+  echo "*** Creating $user repo psi ***"
+  gh repo create $user/psi --private
+  git push -u http://monalisa:$PAT@github.localhost/$user/psi.git main
+fi
+
+mkdir -p /workspaces/runners
+cd /workspaces/runners
+curl -o actions-runner-linux-x64-2.315.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.315.0/actions-runner-linux-x64-2.315.0.tar.gz
+for i in 0 1 2 3 4 5 6 7; do
+  rm -rf r$i
+  mkdir -p r$i
+  tar xzf ./actions-runner-linux-x64-2.315.0.tar.gz -C r$i
+done
+
+i=0
+# Avoid changing this order so the runner names match the VS Code task
+for nwo in github/psp-public github/psp-internal github/psp-private github/psi monalisa/psp-public monalisa/psp-private actions/publish-immutable-action github/test-publish-internal-ts-action; do
+  cd /workspaces/runners/r$i
+  rm .* || true
+  token=$(curl -L -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $PAT" -H "X-GitHub-Api-Version: 2022-11-28" http://api.github.localhost/repos/$nwo/actions/runners/registration-token | jq -r '.token')
+  ./config.sh remove
+  # Runners must have unique names, so generate a random one since it's a pain to remove them
+  runner_name=${nwo//\//-}-$(openssl rand -hex 5)
+  ./config.sh --url http://github.localhost/$nwo --token $token --unattended --name $runner_name --labels ubuntu-latest
+  i=$((i + 1))
+done

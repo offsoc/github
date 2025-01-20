@@ -1,0 +1,127 @@
+<%
+  issue ||= sidebar
+  project_cards ||= ProjectsClassicSunset.projects_classic_ui_enabled?(current_user, org: issue.repository.organization) ? issue.visible_cards_for(current_user).to_a : []
+  tags ||= []
+%>
+<div id="partial-discussion-sidebar"
+  class="js-socket-channel js-updatable-content"
+  <% if issue.pull_request? %>
+  data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.pull_request(issue.pull_request)) %>"
+  data-gid="<%= issue.pull_request.global_relay_id %>"
+  <% if issue&.repository&.feature_enabled?(:sidebar_event_updates) %>
+    data-channel-event-name="sidebar_updated"
+  <% end %>
+  <% else %>
+  data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.issue(issue)) %>"
+  data-gid="<%= issue.global_relay_id %>"
+  <% end %>
+  data-url="<%= show_partial_issue_path(:id => issue, :partial => "issues/sidebar") %>"
+  data-project-hovercards-enabled>
+
+  <% unless issue.pull_request? %>
+    <% if user_feature_enabled?(:issue_summarization) %>
+      <include-fragment src="<%= issue_summary_path(id: issue) %>"></include-fragment>
+    <% end %>
+  <% end %>
+
+  <% if pull_request = issue.pull_request %>
+    <% track_render_partial("pull_requests/sidebar/show/reviewers", tags) do %>
+      <%= render :partial => "pull_requests/sidebar/show/reviewers", :locals => { :pull_request => pull_request, :deferred_content => true } %>
+    <% end %>
+  <% end %>
+
+  <% track_render_partial("issues/sidebar/show/assignees", tags) do %>
+    <%= render :partial => "issues/sidebar/show/assignees",   :locals => { :issue => issue, :tags => tags } %>
+  <% end %>
+
+  <% if show_labels_ui?(current_repository) %>
+    <% track_render_partial("issues/sidebar/show/labels", tags) do %>
+      <%= render :partial => "issues/sidebar/show/labels",      :locals => { :issue => issue } %>
+    <% end %>
+  <% end %>
+
+  <% if show_projects_ui?(current_repository) %>
+    <% track_render_partial("issues/sidebar/show/projects", tags) do %>
+      <%= render :partial => "issues/sidebar/show/projects",    :locals => { :issue => issue, project_cards: project_cards, show_columns_menu: true } %>
+    <% end %>
+  <% end %>
+
+  <% if show_milestones_ui?(current_repository) %>
+    <% track_render_partial("issues/sidebar/show/milestone", tags) do %>
+      <%= render :partial => "issues/sidebar/show/milestone",   :locals => { :issue => issue } %>
+    <% end %>
+  <% end %>
+
+  <% if show_references_ui?(current_repository) %>
+    <%= render_nothing_if_database_fails do %>
+      <create-branch
+        data-default-repo="<%= current_repository.name_with_display_owner %>"
+        data-selected-nwo="<%= current_repository.name_with_display_owner %>"
+        data-default-source-branch="<%= issue.repository.default_branch %>"
+        data-sidebar-url="<%= closing_issue_references_sidebar_path(source_id: issue.id, source_type: "ISSUE") %>"
+        class="discussion-sidebar-item d-block">
+        <% track_render_partial("issues/sidebar/show/references", tags) do %>
+          <%= render partial: "issues/sidebar/show/references",     :locals=> { user: current_user, issue: issue } %>
+        <% end %>
+        <%= render(Branch::CreateBranchDialogComponent.new(
+          show: logged_in? && BranchIssueReference.creatable_for?(user: current_user, issue: issue, repository: issue.repository),
+          src: create_branch_for_issue_form_path(id: issue)
+        )) %>
+      </create-branch>
+    <% end %>
+  <% end %>
+
+  <% track_render_partial("issues/subscription", tags) do %>
+    <%= render partial: "issues/subscription", locals: { issue: issue, deferred_content: defined?(deferred_content) ? deferred_content : false } %>
+  <% end %>
+
+  <%= render_nothing_if_database_fails do %>
+    <% track_render_partial("users/participants", tags) do %>
+      <%= render :partial => "users/participants",              :locals => { :issue => issue } %>
+    <% end %>
+  <% end %>
+
+  <% if current_user_can_push? && issue.pull_request&.fork_collab_granted? %>
+    <div class="discussion-sidebar-item">
+      <%= primer_octicon("check", color: :success) %> Maintainers are allowed to edit this pull request.
+    </div>
+  <% end %>
+
+  <% track_render_partial("issues/locking", tags) do %>
+    <%= render :partial => "issues/locking",                  :locals => { :issue => issue } %>
+  <% end %>
+
+  <% track_render_partial("issues/pinning", tags) do %>
+    <%= render :partial => "issues/pinning",                  :locals => { :issue => issue } %>
+  <% end %>
+
+
+  <% if issue.transferrable_by?(current_user) %>
+    <% track_render_partial("issues/transfer", tags) do %>
+      <%= render partial: "issues/transfer", locals: { issue: issue } %>
+    <% end %>
+  <% end %>
+
+  <% if logged_in? && current_repository&.discussions_active? %>
+    <% track_render_partial("issues/convert_to_discussion", tags) do %>
+      <%= render "issues/convert_to_discussion", issue: issue %>
+    <% end %>
+  <% end %>
+
+  <% track_render_partial("issues/delete", tags) do %>
+    <%= render "issues/delete", issue: issue %>
+  <% end %>
+
+  <% if logged_in? && issue.pull_request&.fork_collab_available_for_user?(current_user) %>
+    <div class="discussion-sidebar-item">
+      <% track_render_partial("pull_requests/collab", tags) do %>
+        <%= render PullRequests::MaintainerEditsToggleComponent.new(
+          pull_request: issue.pull_request,
+          base_repository: issue.pull_request.base_repository,
+          head_repository: issue.pull_request.head_repository,
+          include_form: true,
+        ) %>
+      <% end %>
+    </div>
+  <% end %>
+</div>

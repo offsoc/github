@@ -1,0 +1,210 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%graphql
+  fragment User on User {
+    isViewer
+    login
+    name
+
+    paginatedProjects: projects(first: $first, after: $after, search: $query) {
+      nodes {
+        name
+      }
+    }
+
+    openProjects: projects(search: $query, states:[OPEN]) {
+      totalCount
+    }
+
+    closedProjects: projects(search: $query, states:[CLOSED]) {
+      totalCount
+    }
+
+    ...Views::Projects::List::ProjectOwner
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<%
+  if data.key?(:memex_projects)
+    render_memex_list = true
+    username = user.profile ? user.profile.name : nil
+
+    projects = data[:memex_projects]
+    is_viewer = data[:is_viewer]
+    write_accessible_project_ids = data[:write_accessible_project_ids]
+
+    open_projects_total_count = data[:open_memex_count]
+    closed_projects_total_count = data[:closed_memex_count]
+    projects_resource_path = user_path(user.login, params: { tab: :projects })
+    parsed_query = Search::Queries::MemexProjectQuery.new(query)
+    has_any_memex_projects = true
+  else
+    render_memex_list = false
+    user = Views::Users::Tabs::Projects::User.new(user)
+    username = user.name
+
+    projects = user.paginated_projects.nodes
+    is_viewer = user.is_viewer?
+
+    open_projects_total_count = user.open_projects.total_count
+    closed_projects_total_count = user.closed_projects.total_count
+    user_new_project_path = new_project_path
+    projects_resource_path = user_path(user.login, params: { tab: :projects, type: :classic })
+    parsed_query = parsed_query
+  end
+
+  if logged_in?
+    new_memex_path = create_user_project_beta_path(current_user, type: "new")
+  else
+    new_memex_path = nil
+  end
+
+  display_login =  User.to_display_login(user.login)
+
+  query_contains_beta = data[:query_contains_beta]
+  disable_classic_project_creation = data[:disable_classic_project_creation]
+  classic_path = user_path(display_login, params: { tab: :projects, type: :classic })
+  beta_path = user_path(display_login, params: { tab: :projects })
+  load_more_path = user_projects_path(display_login, type: "new")
+
+  page_info title: user_projects_title(login: display_login, name: username, is_viewer: is_viewer), breadcrumb: "Projects"
+%>
+<%= render Primer::Box.new(id: "user-projects-list", mt: 3) do %>
+  <% if show_memex_ui_for_current_user %>
+    <%= render Memex::ProjectsNewSplashComponent.new %>
+    <%= render Memex::ProjectsNewBannerComponent.new(display: :block) %>
+  <% end %>
+  <%= render Primer::Box.new(display: :flex, container: :lg, mb: 3, align_items: :center, flex_wrap: :reverse, justify_content: :space_between, style: "gap: 16px") do %>
+    <% if show_memex_ui_for_current_user && !disable_classic_projects %>
+      <%= render Memex::UserProjectsNavigationComponent.new(query_contains_beta: query_contains_beta, beta_path: beta_path, classic_path: classic_path) %>
+    <% end %>
+  <% end %>
+  <% if render_memex_list %>
+    <%= render Memex::ProjectListComponent.new(
+      context: User,
+      projects: projects,
+      owner: user,
+      is_recent_selected: false,
+      has_next_page: data[:has_next_page],
+      cursor: data[:cursor],
+      sort_query_cursor: data[:sort_query_cursor],
+      parsed_query: parsed_query,
+      open_memex_count: open_projects_total_count,
+      closed_memex_count: closed_projects_total_count,
+      load_more_path: load_more_path,
+      write_accessible_project_ids: write_accessible_project_ids,
+    ) do |list| %>
+      <%= list.with_controls do %>
+        <%= render Primer::Box.new(ml: 0, flex: :auto) do %>
+          <%= primer_form_with(method: :get) do |f| %>
+            <%= render(Memex::ProjectList::SearchForm.new(f, parsed_query: parsed_query, context: User)) %>
+          <% end %>
+        <% end %>
+        <%= render(Memex::ProjectList::AddProjectButtonComponent.new(owner: user, ui: MemexStats::UIValues::UserIndex)) %>
+      <% end %>
+    <% end %>
+  <%# FF disabled %>
+  <% else %>
+    <div class="container-lg d-flex mb-3" style="gap: 16px">
+      <div class="d-flex flex-column flex-1">
+        <%= form_tag user_path(user.login), method: :get, class: "flex-1 mr-0", "data-pjax": true do %>
+          <div class="auto-search-group width-full">
+            <%= text_field_tag :query, format_search_query(query), class: "form-control subnav-search-input input-contrast width-full", placeholder: "Search all projects", "aria-label": "Search all projects", "data-hotkey": local_search_hotkey %>
+            <%= render(Primer::Beta::Octicon.new(icon: "search", color: :muted, style: "top: 8px")) %>
+            <%= hidden_field_tag :tab, "projects" %>
+            <%= hidden_field_tag :type, query_contains_beta ? "new" : "classic"  %>
+          </div>
+        <% end %>
+      </div>
+
+      <% if is_viewer %>
+        <% if show_memex_ui_for_current_user %>
+          <%# TODO Remove query_contains_beta section after memex_project_team_linking is shipped %>
+          <% if query_contains_beta %>
+            <%= form_for :memex_project, url: new_memex_path, method: :post, "data-turbo": false do |f| %>
+              <%= hidden_field_tag :action, "create" %>
+              <%= f.hidden_field :title, value: MemexProject.default_user_title(current_user) %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, font_size: 5, classes: "ws-normal no-underline", test_selector: "new-project-button") do %>
+                New project
+              <% end %>
+            <% end %>
+          <% else %>
+            <%= render Memex::ProjectNewButtonComponent.new(
+              new_classic_project_path: new_project_path,
+              disable_classic_project_creation: disable_classic_project_creation,
+              new_memex_path: new_memex_path) %>
+          <% end %>
+        <% else %>
+          <%= render Primer::ButtonComponent.new(tag: :a, href: user_new_project_path, scheme: :primary, font_size: 5, classes: "ws-normal no-underline", test_selector: "new-project-button") do %>
+            New project
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+
+    <% if showing_filtered_projects? %>
+      <div class="mb-3">
+        <%= link_to projects_resource_path.to_s, class: "projects-reset-query Link--secondary text-bold no-underline" do %>
+          <%= primer_octicon(:x, color: :on_emphasis, text_align: :center, border_radius: 1, mr: 1, classes: "projects-reset-query-icon") %>
+          Clear current search query and sorts
+        <% end %>
+      </div>
+    <% end %>
+
+    <div class="Box Box--responsive">
+      <div class="Box-header d-flex flex-justify-between flex-items-center">
+        <div class="table-list-header-toggle states">
+          <% states = projects_search_term_values(:is) %>
+          <a href="<%= projects_resource_path %>&<%= { query: projects_search_query(append: [[:is, "open"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("open") %>">
+            <%= primer_octicon(render_memex_list ? :table : :project) %> <%= open_projects_total_count %> Open
+          </a>
+          <a href="<%= projects_resource_path %>&<%= { query: projects_search_query(append: [[:is, "closed"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("closed") %>">
+            <%= render(Primer::Beta::Octicon.new(icon: "archive")) %> <%= closed_projects_total_count %> Closed
+          </a>
+        </div>
+
+        <%= form_tag "", method: :get do %>
+          <details class="details-reset details-overlay position-relative">
+            <%= render(Primer::ButtonComponent.new(tag: :summary, dropdown: true, scheme: :link, color: :default, classes: ["no-underline"])) do %>
+              Sort
+            <% end %>
+            <details-menu class="SelectMenu right-0" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="SelectMenu-modal">
+                <div class="SelectMenu-list">
+                  <%# TODO Remove render_memex_list section after memex_project_team_linking is shipped %>
+                  <% if render_memex_list %>
+                    <% MemexesHelper::SORTS.each do |description, sort, flag| %>
+                      <% selected = data[:memex_query].selected_projects_sort?(sort) %>
+                      <% next_query = data[:memex_query].memex_project_query(replace: { sort: sort } ).stringify %>
+                      <a href="<%= projects_resource_path %>&query=<%= next_query %>"
+                        class="select-menu-item"
+                        role="menuitemradio"
+                        aria-checked="<%= selected %>">
+                        <%= render(Primer::Beta::Octicon.new(icon: "check", classes: "select-menu-item-icon")) %>
+                        <div class="select-menu-item-text"><%= description %></div>
+                      </a>
+                    <% end %>
+                  <% else %>
+                    <% ProjectsHelper::SORTS.each do |description, sort| %>
+                      <% selected = selected_project_sort?(sort) %>
+                      <% q = projects_search_query(replace: {sort: (!selected ? sort : nil)}) %>
+                      <a href="<%= projects_resource_path %>&<%= { query: q }.to_param %>"
+                        class="SelectMenu-item"
+                        role="menuitemradio"
+                        aria-checked="<%= selected %>">
+                        <%= render(Primer::Beta::Octicon.new(icon: "check", classes: "SelectMenu-icon SelectMenu-icon--check")) %>
+                        <%= description %>
+                      </a>
+                    <% end %>
+                  <% end %>
+                </div>
+              </div>
+            </details-menu>
+          </details>
+        <% end %>
+      </div>
+      <div id="projects-results">
+        <%= render partial: "projects/list", locals: { project_owner: user, query: query } %>
+      </div>
+    </div>
+  <% end %>
+<% end %>

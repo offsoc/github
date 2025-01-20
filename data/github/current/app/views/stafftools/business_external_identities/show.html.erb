@@ -1,0 +1,205 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<% page_info title: "#{business.name} - #{user.login}’s external identity", selected_link: :business_security %>
+
+<% if external_identity.present? %>
+  <%# User linked to the enterprise's SSO IdP %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>External identities / <%= user.login %><% end %>
+  <% end %>
+
+  <%= render(Primer::Beta::BorderBox.new(classes: "summary")) do |component| %>
+    <% component.with_row do %>
+      <div <%= test_selector "identity-details" %>>
+        <% unless external_identity.provider_type == "Business::OIDCProvider" %>
+          <dl>
+            <dt>SAML user data</dt>
+            <dd><pre><%= GitHub::JSON.encode(JSON.parse(external_identity.saml_user_data.to_json), pretty: true) %></pre></dd>
+          </dl>
+        <% end %>
+
+        <dl>
+          <dt>SCIM user data</dt>
+          <dd><pre><%= GitHub::JSON.encode(JSON.parse(external_identity.scim_user_data.to_json), pretty: true) %></pre></dd>
+        </dl>
+
+        <dl>
+          <dt>Orgs/Teams</dt>
+            <dd>
+                <%= safe_join(user.teams.map { |team|
+                if team.externally_managed?
+                  link_to("#{team.organization}/#{team.name}", gh_stafftools_team_path(team))
+                end
+                }, ', ') %>
+            </dd>
+        </dl>
+
+        <dl>
+          <dt>External Groups</dt>
+            <dd>
+              <%= safe_join(external_identity.external_identity_group_memberships.map { |group|
+                if GitHub.enterprise?
+                  link_to(group.external_group.display_name, stafftools_external_group_members_path(id: group.external_group.id))
+                else
+                  link_to(group.external_group.display_name, external_group_members_stafftools_enterprise_path(id: group.external_group.id))
+                end
+              }, ', ')%>
+            </dd>
+        </dl>
+
+        <dl>
+          <dt>SCIM User ID</dt>
+          <dd><%= external_identity.guid %></dd>
+        </dl>
+
+        <dl>
+          <dt>Provider type</dt>
+          <dd><%= external_identity.provider_type %></dd>
+        </dl>
+        <dl>
+          <dt>Created at</dt>
+          <dd><%= time_ago_in_words_js external_identity.created_at %></dd>
+        </dl>
+        <dl>
+          <dt>Updated at</dt>
+          <dd><%= time_ago_in_words_js external_identity.updated_at %></dd>
+        </dl>
+      </div>
+    <% end %>
+    <% unless GitHub.enterprise? %>
+      <% component.with_row do %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Unlink identity for #{user.login}",
+            button_class: "btn btn-danger",
+            details_class: "float-right ml-1",
+            title: "Unlink external identity for #{user.login}",
+        } do %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+            <p>
+              Be careful &mdash; this will unlink the
+              <% if user.organization? %>
+                organization's external identity and stop it from processing any new SCIM messages.
+              <% else %>
+                user's external identity and invalidate their active SSO sessions.
+              <% end %>
+            </p>
+            <% if external_identity.scim_user_data.any? %>
+              <% if user.organization? %>
+                <p><strong>Warning</strong> &mdash; this organization's external identity contains SCIM metadata. The identity provider will no longer be able to invite or remove members to/from this organization if SCIM data is removed. If the external identity is linked incorrectly an admin may need to update the Group assignment in the Identity Provider.</p>
+              <% else %>
+                <p><strong>Warning</strong> &mdash; this user's external identity contains SCIM metadata. The identity provider will no longer be able to synchronize or deprovision this user if SCIM data is removed. To change an existing external identity or user association, an admin may need to remove and re-assign the user to the GitHub application in the Identity Provider.</p>
+              <% end %>
+            <% end %>
+          <% end %>
+          <div class="Box-body overflow-auto">
+            <p>
+            <% if user.organization? %>
+              This should be done with caution as there is no easy way to recreate this association.
+              After unlinking, the Enterprise will not be able to process any more SCIM messages for this organization, and there is no easy way to re-create this association.
+              Unlink the existing organization identity if the customer is reporting that they are receiving a "Conflict" error when trying to link an IdP group with this organization.
+            <% else %>
+              They will not be removed from the enterprise, their credentials will remain authorized, and they will be able to link
+              their external identity again next time they authenticate with the Identity Provider.
+              Unlink the external identity if it has been linked to the wrong GitHub account, or if another problem has occurred.
+            <% end %>
+            </p>
+            <%= form_tag stafftools_enterprise_external_identity_path(business.slug, user.login), method: "delete" do %>
+              <div class="Box-footer">
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>
+                  Unlink external identity
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+
+        <div class="listgroup-item-title">Unlink external identity</div>
+        <div class="listgroup-item-body">
+          Be careful &mdash; this will
+          <% if user.organization? %>
+            prevent future SCIM calls from working for this organization, but will not remove it from the enterprise.
+          <% else %>
+            not remove the user from the enterprise.
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if users_in_organization.present? %>
+    <div>
+      <div class="Box Box--condensed mt-3">
+        <div class="Box-header">
+          <h3 class="Box-title" <%= test_selector "members-list" %>>
+            <%= pluralize(users_in_organization.total_entries, "linked member") %> in <%= user.login %>
+          </h3>
+        </div>
+
+        <%= render "stafftools/business_external_identities/external_members",
+          business: business,
+          external_members: users_in_organization %>
+      </div>
+    </div>
+
+    <div class="paginate-container" <%= test_selector "pagination" %>>
+      <%= will_paginate users_in_organization %>
+    </div>
+  <% end %>
+
+
+  <% unless user.organization? %>
+    <%= render "stafftools/external_identity_sessions/sessions", external_identity: external_identity %>
+
+    <%= render Primer::Beta::Subhead.new(mt: 3) do |component| %>
+      <% component.with_heading(tag: :h2) do %>Authorized credentials<% end %>
+    <% end %>
+
+    <% credential_authorizations =
+      external_identity.provider.target.credential_authorizations.where(actor: user) %>
+
+    <% if credential_authorizations.any? %>
+      <div class="listgroup">
+        <% credential_authorizations.each_with_index do |credential_authorization, index| %>
+          <% if credential_authorization.credential.present? %>
+            <% credential_view = Stafftools::Businesses::CredentialView.new(credential_authorization: credential_authorization) %>
+            <div id="access-token-<%= index %>" class="access-token">
+              <div class="listgroup-item">
+                <small class="last-used float-right"><%= credential_view.last_accessed_description %></small>
+                <span class="token-description">
+                  <strong><code><%= credential_view.masked_parts %></code></strong>
+                  <span class="color-fg-muted">
+                    &mdash;	<%= credential_view.display_name %>
+                    <%= credential_view.read_only_display %>
+                    <%= credential_view.scopes_description_tooltip %>
+                  </span>
+                </span>
+              </div>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+        <% c.with_visual_icon(icon: "key") %>
+
+        <% c.with_heading(tag: :h2) do %>
+          No authorized credentials
+        <% end %>
+
+        <% c.with_description do %>
+          <%= user.login %> has not authorized any credentials for API and Git access to organizations in this enterprise.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% else %>
+  <%# User not linked to the enterprise's SSO IdP %>
+  <%= render Primer::BlankslateComponent.new(
+    icon: "shield-lock",
+    title: "No linked identity",
+    spacious: true,
+  ) do %>
+    <p>
+      <%= link_to(user.login, stafftools_user_path(user.login), class: "Link--inTextBlock") %> has not linked their GitHub account to the identity provider.
+    </p>
+  <% end %>
+<% end %>

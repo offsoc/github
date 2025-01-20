@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#/ Usage: ghe-partition-setup [--help]
+#/
+#/   --help    Display this message
+#/
+#/ This script resizes the root filesystem to fill the entire disk and
+#/ creates a second partition on the same device as the root disk to be
+#/ used when upgrading between major releases. It is called from rc.local
+#/ and is also called during hotpatch installation in case a previous
+#/ release failed to create the upgrade partition.
+set -euo pipefail
+date -Iseconds
+
+usage() {
+  cat "$0" | grep '^#/' | cut -c4-
+}
+
+if [ "$#" -eq 1 ]; then
+  if [ "$1" = "--help" ] || [ "$1" = "--usage" ] ; then
+    usage
+    exit 0
+  else
+    echo "ERROR: unknown argument" >&2
+    usage
+    exit 1
+  fi
+elif [ "$#" -gt 1 ]; then
+  echo "ERROR: illegal number of aguments" >&2
+  usage
+  exit 1
+fi
+
+# Check the platform
+if [ -z "${RELEASE_PLATFORM:-}" ] ; then
+  . /etc/github/enterprise-release
+fi
+
+if [ -e /run/virt-what/container ]; then
+  echo "Running in a container, skipping partition setup"
+  exit 0
+fi
+
+# Get the root partition and the parent disk device
+if ! eval "$(lsblk --pairs --output MOUNTPOINT,KNAME,PKNAME | grep 'MOUNTPOINT="/"')" ; then
+  echo "ERROR: couldn't find root mountpoint using lsblk" >&2
+  exit 1
+fi
+
+rootdev=${KNAME:-}
+rootdisk=${PKNAME:-}
+
+if [ -z "$rootdev" ] || [ -z "$rootdisk" ] ; then
+  echo "ERROR: lsblk did not return the expected information (rootdev='$rootdev', rootdisk='$rootdisk')" >&2
+  exit 1
+fi
+
+# If there is already more than one Linux partition on the disk, don't do anything
+pcount=$(lsblk -o FSTYPE /dev/$rootdisk | grep -c ext4)
+
+if (( pcount > 1 )) ; then
+  echo "There are already $pcount partitions on $rootdisk, skipping partition setup"
+  exit 0
+fi
+
+# Move secondary GPT to end of disk in case VM disk size was increased
+if parted /dev/$rootdisk print | grep -q ": gpt" && type -P sgdisk &>/dev/null; then
+  sgdisk -e /dev/$rootdisk
+fi
+
+ # Ensure the root filesystem fills its whole partition
+parted -s -a optimal /dev/$rootdisk resizepart ${rootdev:0-1} 50%
+partprobe /dev/$rootdisk
+resize2fs /dev/$rootdev
+
+# Get the size of the disk the root partition is on
+if ! eval "$(lsblk --pairs --bytes --nodeps --output SIZE /dev/$rootdisk)" ; then
+  echo "ERROR: couldn't find the size of $rootdisk" >&2
+  exit 1
+fi
+
+rootsize=${SIZE:-}
+
+if [ -z "$rootsize" ] ; then
+  echo "ERROR: lsblk did not return the size of $rootdisk" >&2
+  exit 1
+fi
+
+# If the root disk is < 10GiB and this is an AMI, don't bother with partitioning
+if [ -f /etc/github/ec2-ami ] && [ $rootsize -lt 10737418240 ]; then
+  echo "This is an AMI with less than 10GiB, skipping partition setup"
+  exit 0
+fi
+
+# Create a secondary partition
+parted -a optimal /dev/$rootdisk mkpart primary 50% 100%
+partprobe /dev/$rootdisk
+
+if ! eval "$(lsblk --pairs --output KNAME /dev/$rootdisk | tail -n1)" ; then
+  echo "ERROR: couldn't find name of secondary partition" >&2
+  exit 1
+fi
+
+secondary=${KNAME:-}
+
+if [ -z "$secondary" ] ; then
+  echo "ERROR: lsblk did not return the name of the secondary partition" >&2
+  exit 1
+fi
+
+# Create a filesystem on the secondary partition
+mkfs.ext4 -L fallback /dev/$secondary

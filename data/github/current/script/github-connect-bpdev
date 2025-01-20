@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#/ Usage: script/github-connect-bpdev [options] <bp-dev instance name>
+#/
+#/ Configure local env and a remote bp-dev actions instance for developing GitHub Connect.
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -s, --sync         Checkout the same branch as used locally on the bp-dev instance and restart github
+#/   --ghes             Run locally in GHES mode (default)
+#/
+set -e
+BASE_PATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+: "${BPDEV_NAME:=$1}"
+# Remove any protocol from the name
+BPDEV_NAME=${BPDEV_NAME##*://}
+
+if [ -z "$BPDEV_NAME" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage
+  exit 1
+fi
+
+MODE="GHES"
+MODE_VAR="ENTERPRISE=1"
+PROXIMA=
+
+if [[ "$BPDEV_NAME" =~ review-lab.github.com$ ]] || \
+  [[ "$BPDEV_NAME" =~ githubpreview.dev$ ]] || \
+  [[ "$BPDEV_NAME" =~ preview.app.github.dev$ ]] || \
+  [[ "$BPDEV_NAME" =~ ghe.com$ ]]; then                   # Not really review-lab but we need to treat it the same as it's not dotcom.
+  REVIEW_LAB=1
+fi
+
+while [ "$2" ]; do
+  case "$2" in
+    -s|--sync)
+      SYNC=1
+      ;;
+    --ghes)
+      MODE="GHES"
+      MODE_VAR="ENTERPRISE=1"
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+
+nc="\\033[0m"
+yellow="\\033[33m"
+red="\\033[31m"
+
+error() {
+  echo -e "${red}=> ${1}${nc}"
+  exit 1
+}
+
+info() {
+  echo -e "${yellow}=> ${1}${nc}"
+}
+
+if [ -z "$REVIEW_LAB" ]; then
+
+  if ! ping -c1 "$BPDEV_NAME" > /dev/null 2>&1; then
+    error "Can't reach $BPDEV_NAME!!\\nPlease ensure $BPDEV_NAME exists, is running and you are connected to the developer VPN and try again."
+  fi
+
+  cat <<-EOF | ssh -T -A "build@$BPDEV_NAME" || error "Failed to update .profile or fix alambic on bp-dev!"
+    set -e
+    if [ ! -x "/workspace/src/github/vendor/alambic/bin/alambic" ]; then
+      echo -e "${yellow}=> Fixing alambic on bp-dev...${nc}"
+      rm -rf /workspace/src/github/vendor/alambic/ && GO111MODULE=off /workspace/src/github/script/build-subproject alambic
+    fi
+    if [ -z "\$(grep -o GITHUB_CONNECT_REVIEW_LAB /workspace/.profile)" ]; then
+      echo "export GITHUB_CONNECT_REVIEW_LAB='$BPDEV_NAME'" >> /workspace/.profile
+    fi
+EOF
+
+  if [ -n "$SYNC" ]; then
+    branch=$(git branch --no-color | grep '\*' | cut -c 3- | awk '{print $1}')
+    info "Switching branch on bp-dev to $branch"
+
+    cat <<-EOF | ssh -T -A "build@$BPDEV_NAME" || error "Failed to sync branch on bp-dev!"
+      set -e
+      git -C /workspace/src/github/ fetch -q origin $branch
+      git -C /workspace/src/github/ switch $branch
+      git -C /workspace/src/github/ pull -q origin $branch
+EOF
+  fi
+
+  info "Restarting github on bp-dev..."
+  cat <<-EOF | ssh -T -A "build@$BPDEV_NAME" || error "Failed to restart services on bp-dev!"
+    set -e
+    sudo systemctl restart github
+    sudo systemctl is-active github || sudo systemctl status github
+EOF
+
+  # Wait up to 100s for the remote side to become responsive
+  info "Waiting for github on bp-dev..."
+  tries=0
+  while [ $tries -lt 100 ] && ! curl -ks --connect-timeout 1 https://$BPDEV_NAME/status | grep -q "GitHub lives!"; do
+    sleep 1
+    tries=$((tries + 1))
+  done
+fi
+
+BASIC_AUTH=""
+# Codespaces currently has a basic auth requirement so we need the password from the VSCode notification to verify access.
+if [[ "$BPDEV_NAME" =~ githubpreview.dev$ ]] || [[ "$BPDEV_NAME" =~ preview.app.github.dev$ ]]; then
+  BPDEV_NAME=$(echo -n $BPDEV_NAME | sed 's|^https\?://||')
+  echo -n "Enter public access password of $BPDEV_NAME from Codespaces: "
+  read -s PASS
+  echo
+  BASIC_AUTH=$(echo -n "monalisa:${PASS}" | base64)
+fi
+
+curl -ks --connect-timeout 1 -H "Authorization: Basic $BASIC_AUTH" https://$BPDEV_NAME/status | grep -q "GitHub lives!" || {
+  error "GitHub service on $BPDEV_NAME isn't responding!"
+}
+
+if [[ "$BPDEV_NAME" =~ ghe.com$ ]]; then
+  PROXIMA=1
+fi
+
+info "Starting local server in $MODE mode..."
+eval ENTERPRISE_GITHUB_CONNECT_GHE_COM_ENABLED=$PROXIMA GITHUB_CONNECT_REVIEW_LAB="${CODESPACE_HTTP:-$BPDEV_NAME}" $MODE_VAR "$BASE_PATH/script/server"
+
+

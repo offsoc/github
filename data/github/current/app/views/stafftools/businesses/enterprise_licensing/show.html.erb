@@ -1,0 +1,200 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info title: view.name, selected_link: :business_licenses %>
+
+<% use_unified_ui = this_business.metered_plan? || GitHub.flipper[:licensing_overview_ghe_volume].enabled?(current_user) %>
+
+<style>
+  #enterprise-accounts-licenses-explanation-details > summary::-webkit-details-marker {
+    display: none;
+  }
+  #enterprise-accounts-licenses-explanation-details > summary {
+    list-style: none;
+  }
+</style>
+
+<div class="d-flex flex-column">
+  <%= render "stafftools/businesses/enterprise_licensing/navigation" %>
+  <%= render Primer::Beta::Subhead.new(test_selector: "license-overview") do |component| %>
+    <% component.with_heading(tag: :h2) do %>Overview<% end %>
+    <% component.with_actions do %>
+      <%= form_tag export_stafftools_enterprise_licensing_path, method: :post, class: "js-license-usage-download-form" do %>
+        <%= hidden_field_tag :export_format, "csv" %>
+        <% if !use_unified_ui %>
+          <%= render(Primer::ButtonComponent.new(scheme: :link, type: :submit, font_weight: :bold)) { "Download CSV report" } %>
+        <% end %>
+        <span class="js-license-usage-generating" hidden>
+          <%= render Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom, ml: 2) %>
+        </span>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <div class="d-flex" style="padding-bottom:16px;">
+    <%= render(Stafftools::Licensing::LicensingModelComponent.new(billable_entity: this_business, tag: :div)) %>
+    &nbsp
+    <span>
+      <a
+        <%= test_selector("licensing-model-changes-link") %>
+        target="_blank"
+        rel="noopener"
+        href="<%= stafftools_licensing_model_changes_audit_log_path(this_business, current_user) %>"
+      >
+        (View change history)
+      </a>
+    </span>
+  </div>
+
+  <div class="d-flex" style="padding-bottom:16px;">
+    <a
+      <%= test_selector("license-watermark-kusto-link") %>
+      target="_blank"
+      rel="noopener"
+      href="<%= kusto_link_for_licensing_watermark_report(this_business) %>"
+    >
+      View license watermark report in Kusto
+    </a>
+  </div>
+
+  <% unless this_business.metered_plan? %>
+    <%= render partial: "stafftools/businesses/license_overview", locals: { view: } %>
+  <% end %>
+
+  <% if use_unified_ui && !(this_business.copilot_licensing_enabled? && this_business.seats_plan_basic?) # hide GHE card for copilot-only businesses %>
+    <%= render_react_partial(
+      name: "licensing-enterprise-overview",
+      ssr: true,
+      props: {
+        enterpriseContactUrl: ent_contact_url,
+        ghe: ghe_overview_react_payload(business: this_business),
+        slug: this_business.slug,
+        isStafftools: true
+      }
+    ) %>
+  <% end %>
+
+  <% if this_business.metered_ghes_eligible? %>
+    <%= render_react_partial(
+      name: "metered-enterprise-server-licenses",
+      ssr: true,
+      props: {
+        business: this_business.as_json(only: [:slug], root: false),
+        serverLicenses: this_business.metered_server_licenses,
+        consumedEnterpriseLicenses: this_business.consumed_ghec_only_users_access_licenses,
+        isStafftools: true,
+        auditLogQueryUrl: stafftools_ghes_license_audit_log_path(this_business, current_user),
+      })
+    %>
+  <% end %>
+
+  <details id="enterprise-accounts-licenses-explanation-details" class="mb-3">
+    <summary>
+      <%= render Primer::Beta::Subhead.new(display: :inline) do |component| %>
+        <% component.with_heading(tag: :h2) do %>
+          <span class="d-flex flex-items-center flex-justify-between">
+            Cool story, but how are these numbers calculated?
+            <span class="d-flex flex-items-center">
+              <%= render Primer::Beta::Octicon.new(icon: :"chevron-down", size: :medium, aria: { label: "Enterprise Accounts Licenses Explanation" }) %>
+            </span>
+          </span>
+        <% end %>
+      <% end %>
+    </summary>
+    <%= render "shared/enterprise_accounts_licenses_explanation" %>
+  </details>
+
+  <% if current_user.feature_enabled?(:licensify_product_enablements) %>
+    <%= render_react_partial(
+      name: "licensify-licenses",
+      ssr: false,
+      props: {
+        customerId: this_business.customer_id.to_s,
+      }
+    ) %>
+    <%= render_react_partial(
+      name: "licensify-product-enablements",
+      ssr: false,
+      props: {
+        customerId: this_business.customer_id,
+      }
+    ) %>
+
+    <div class="form-group d-flex">
+      <div class="d-flex flex-column col-6">
+        <label>Synchronize SDLC licenses</label>
+        <span class="note">
+          This should only be done in extremely rare circumstances.
+        </span>
+      </div>
+      <div class="d-flex flex-1 flex-justify-center flex-column">
+        <%= form_tag sync_licenses_stafftools_customer_licensify_licenses_path(this_business.customer_id), method: :post do %>
+          <%= render(Primer::Alpha::Dialog.new(
+              title: "Confirm license sync",
+              id: dom_id(this_business, :licensify_licenses_sync),
+              size: :medium_portrait,
+            )) do |dialog| %>
+            <% dialog.with_show_button(
+              scheme: :danger,
+              block: true,
+              id: dom_id(this_business, :licensify_licenses_sync)
+            ) { "Sync licenses" } %>
+            <% dialog.with_body do %>
+              Use this to make sure we're tracking up-to-date licenses owned by the business.
+            <% end %>
+            <% dialog.with_footer do %>
+              <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": dom_id(this_business, :licensify_licenses_sync) })) { "Cancel" } %>
+              <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger)) { "Confirm" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+</div>
+
+<%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+  <% component.with_heading(tag: :h2, danger: true) do %>Danger zone<% end %>
+<% end %>
+
+<div class="Box Box--danger">
+  <div class="Box-row">
+    <div class="form-group d-flex mt-0">
+      <div class="d-flex flex-column col-12">
+        <label>Recalculate license usage</label>
+      </div>
+    </div>
+    <div class="form-group d-flex mt-0">
+      <div class="d-flex flex-column col-7">
+        <span class="note">
+          If the numbers in Overview don't match up, you can try recalculating the stored license usage.
+          This is a safe operation, that is normally run automatically. For example, when a new user is added
+          to one of the enterprise organizations.
+        </span>
+      </div>
+      <div class="d-flex flex-1 flex-justify-center flex-column">
+        <%= form_tag stafftools_enterprise_licensing_path(this_business), method: :patch do %>
+          <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger,  block: true) do %>Recalculate Enterprise license usage<% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+  <% if this_business.metered_plan? %>
+    <div class="Box-row">
+      <div class="form-group d-flex mt-0">
+        <div class="d-flex flex-column col-12">
+          <label>Reconcile Licenses with Billing Platform</label>
+        </div>
+      </div>
+      <div class="form-group d-flex mt-0">
+        <div class="d-flex flex-column col-8">
+          <p class="mr-3">If the number of licenses reflected in billing platform (as seen in the metered billing usage page) does not match the number of licensed users, you can run this job to reconcile the two.</p>
+        </div>
+        <div class="d-flex flex-1 flex-justify-center flex-column">
+          <%= form_tag reconcile_licenses_with_billing_platform_stafftools_enterprise_licensing_path(this_business), method: :post do %>
+            <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger, block: true) do %>Reconcile Licenses<% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+  <%= render Licensing::MeteredLicenseTransitionComponent.new(business: this_business, transition: transition) %>
+</div>

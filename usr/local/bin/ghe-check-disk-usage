@@ -1,0 +1,175 @@
+#!/bin/bash
+#/ Usage: ghe-check-disk-usage [-hv]
+#/
+#/ Check the disk for large files or files that have been deleted but still have
+#/ open file handles. This should be run when you're trying to free up space on
+#/ the root partition.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -v | --verbose   Run in verbose mode.
+#/
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ -n "$DEBUG" ]; then
+  set -x
+fi
+
+# Show usage.
+function usage {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+function message {
+  echo " --> ${1}"
+}
+
+ARGS=$(getopt --name "$0" --long verbose,help --options vh -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      set -x
+      shift
+      ;;
+    --)
+      shift;
+      break
+      ;;
+  esac
+done
+
+function filesize {
+  awk -v x="${1}" 'BEGIN{
+  split("B KB MB GB TB PB",type)
+  for(i=5;y < 1;i--) {
+    y = x / (2^(10*i))
+  }
+  print y " " type[i+2]
+  }'
+}
+
+old_IFS=$IFS      # save the field separator
+IFS=$'\n'     # new field separator, the end of line
+
+message "Searching for deleted files"
+deleted_files_size=0
+for line in $(lsof -VnP +a +L1 / | awk 'NR==1{print;next}{print|"sort -k7,7rn -k2,2n"}' | grep deleted); do
+  size=$(echo "${line}" | awk '{print $7}')
+  name=$(echo "${line}" | awk '{print $10}')
+  if [ "${name:0:1}" == "/" -a "$size" -gt 0 ]; then
+    echo "$(filesize "$size") $name"
+    deleted_files_size=$(expr $deleted_files_size + "$size")
+  fi
+done
+
+if [ "$deleted_files_size" -gt 0 ]; then
+  message "Found $(filesize "$deleted_files_size") of deleted files. Reboot to free up this space."
+else
+  message "No deleted files found."
+fi
+
+message "Searching for large files (> 100 MB)"
+large_files_size=0
+for line in $(find / -type f -size +100000k -exec ls -l {} \; 2>/dev/null | grep -E -v "/proc|/sys|/overlay2|/docker-images"); do
+  size=$(echo "${line}" | awk '{print $5}')
+  name=$(echo "${line}" | awk '{print $9}')
+  if [ "${name:0:1}" == "/" -a "$size" -gt 0 ]; then
+    echo "$(filesize "$size") $name"
+    large_files_size=$(expr $large_files_size + "$size")
+  fi
+done
+
+if [ "$large_files_size" -gt 0 ]; then
+  message "Found $(filesize "$large_files_size") of large files."
+else
+  message "No large files found."
+fi
+
+message "Largest log files"
+timeout 15s find -L /var/log -type f -exec du --time -h {} + | sort -hr | head -10
+
+message "Systemd journal usage"
+journalctl --merge --disk-usage
+
+if mountpoint -q /data/user; then
+  if [ -d /data/user/mysql ]; then
+    message "MYSQL USAGE"
+    if ! timeout 5s du -h --max-depth=1 --time /data/user/mysql/; then
+      echo "MySQL usage truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mysql/github_enterprise ]; then
+    message "MYSQL USAGE PER TABLE"
+    if ! timeout 5s find /data/user/mysql/github_enterprise/ -name '*.ibd' -exec du -h --time {} \; | sort -rh | sed -n 1,20p; then
+      echo "MySQL usage per table truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mssql ]; then
+    message "MSSQL USAGE"
+    if ! timeout 5s du -h --max-depth=1 --time /data/user/mssql/; then
+      echo "MSSQL usage truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mssql/data ]; then
+    message "MSSQL DATA FILE SIZES"
+    if ! timeout 5s du -h --time /data/user/mssql/data/*; then
+      echo "MSSQL data file sizes truncated"
+    fi
+  fi
+
+  if [ -d /data/user/elasticsearch/github-enterprise/nodes/0/indices ]; then
+    message "ELASTICSEARCH USAGE"
+    if ! timeout 5s du -h --max-depth=1 --time /data/user/elasticsearch/github-enterprise/nodes/0/indices | sort -hr; then
+      echo "Elasticsearch usage truncated."
+    fi
+  fi
+
+  message "REDIS USAGE"
+  if ! timeout 5s du -h -all --time /data/user/redis/; then
+    echo "Redis usage truncated."
+  fi
+
+  message "ALAMBIC USAGE"
+  sql_alambic='SELECT COUNT(*) AS "Count", ROUND(SUM(size)/POWER(2,30)) AS "Size [GB]" FROM storage_blobs;'
+  if ! timeout 5s bash -c "echo '$sql_alambic' | ghe-dbconsole -y 2>/dev/null | column -t -s $'\t'"; then
+    echo "Alambic usage truncated."
+  fi
+fi
+
+message "Largest directories (depth 2)"
+du -x -h / --max-depth=2 | sort -rh | head -n 20
+
+message "Current disk usage"
+for line in $(df -TP | grep -E -v "Filesystem|tmpfs|overlay"); do
+  device=$(echo "${line}" | awk '{print $1}')
+  percentage=$(echo "${line}" | awk '{print $6}')
+  mount=$(echo "${line}" | awk '{print $7}')
+  capacity=$(expr 1024 '*' $(echo "${line}" | awk '{print $3}'))
+  used=$(expr 1024 '*' $(echo "${line}" | awk '{print $4}'))
+  freespace=$(expr 1024 '*' $(echo "${line}" | awk '{print $5}'))
+  echo "${mount} (device ${device})"
+  echo "  Used space: ${percentage} ($(filesize "${used}") of $(filesize "${capacity}"))"
+  echo "  Free space: $(filesize "${freespace}")"
+  echo
+done
+
+IFS=$old_IFS     # restore default field separator

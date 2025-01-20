@@ -1,0 +1,127 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+    annotations:
+        # Transposes all matching values for `image` to refer to the image
+        # corresponding to the SHA deployed at deploy time.
+        heaven.githubapp.com/image-placeholder: github
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: transition
+        moda.github.net/inject-otel-env-vars-into-containers: transition
+        # opt into ConfigMap cluster preferences, which can override some parameters
+        # such as replicas if there is a ConfigMap named `cluster-preferences` in
+        # the namespace.
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        # Use the latest image for the query-analyzer container if it is present in the Job
+        moda.github.net/latest-image-placeholders-for: query-analyzer
+    name: transition-template-job
+spec:
+    # This deadline is not used when instantiating this template to run
+    # transitions. It only applies here in the "no-op" case.
+    activeDeadlineSeconds: 1000
+    backoffLimit: 0
+    template:
+        metadata:
+            annotations:
+                fluentbit.io/parser: logfmt_sloppy
+                observability.github.com/splunk_index: rails
+                observability.github.com/kafka_topic: rails
+        spec:
+            containers:
+                - command: [ "/bin/sh", "-c" ]
+                  args: ["/app/bin/query-analyzer -agent -socket /var/run/query-analyzer/agent.sock -api-address $QUERY_ANALYZER_API_ADDRESS" ]
+                  env:
+                    - name: QUERY_ANALYZER_API_ADDRESS
+                      value: "https://query-analyzer-staging.service.iad.github.net"
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/query-analyzer:main
+                  name: query-analyzer
+                  resources:
+                    limits:
+                        memory: 4G
+                    requests:
+                        cpu: 1
+                        memory: 2G
+                  volumeMounts:
+                    - name: query-analyzer-socket
+                      mountPath: /var/run/query-analyzer
+                - command:
+                    - script/run-automated-transition
+                  env:
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GRAPHITE_DISABLED
+                      value: "1"
+                    # each kube node runs a local dd-agent - to send data to it
+                    # we need to explicitly set the node hostname rather than 127.0.0.1
+                    # (which points to the *pod*)
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: OTEL_SERVICE_NAME
+                      value: github-transition
+                    - name: QUERY_ANALYZER_AGENT_SOCKET
+                      value: "/var/run/query-analyzer/agent.sock"
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - secretRef:
+                        name: vault-secrets
+                    - configMapRef:
+                        name: observability-config
+                  # Replaced with a SHA-tagged image at deploy time by virtue of the
+                  # `heaven.githubapp.com/image-placeholder` annotation.
+                  image: github
+                  name: transition
+                  resources:
+                    limits:
+                        memory: 10G
+                    requests:
+                        cpu: 1
+                        memory: 4G
+                  volumeMounts:
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - mountPath: /etc/ssl/certs
+                      name: ca-certificates
+                      readOnly: true
+                    - mountPath: /dev/log
+                      name: syslog
+                      readOnly: true
+                    - name: query-analyzer-socket
+                      mountPath: /var/run/query-analyzer
+            dnsPolicy: Default
+            restartPolicy: Never
+            volumes:
+                - hostPath:
+                    path: /etc/github/metadata.json
+                  name: github-metadata
+                - hostPath:
+                    path: /etc/ssl/certs
+                  name: ca-certificates
+                - hostPath:
+                    path: /dev/log
+                  name: syslog
+                - emptyDir: {}
+                  name: query-analyzer-socket

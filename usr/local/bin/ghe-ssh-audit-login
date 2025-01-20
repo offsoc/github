@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+
+############################
+## Print the help message ##
+############################
+function _print_usage() {
+  cat <<EOM
+USAGE:
+   $(basename $0) [Options]
+OPTIONS:
+  -h | --help             : Print this message.
+  -a | --all              : get all authorized key users and fingerprints
+  -f | --fingerprint      : lookup a single fingerprint
+  -d | --date             : include last login date
+  -j | --json             : output in json format
+
+DESCRIPTION:
+This script will find SSH fingerprints that are authorized to login and map them to specific users.
+It will also traverse the logs to find login activity for audit purposes.
+EOM
+  exit 2
+}
+
+##########################################################
+## Look up the SSH fingerprint our authorized keys file ##
+##########################################################
+function _fingerprints() {
+  login_fingerprint=${1}
+  login_date=${2}
+  remote_ip=${3}
+  local file="/home/admin/.ssh/authorized_keys"
+  while read l; do
+    [[ -n $l && ${l###} = $l ]]
+    fingerprint=$(ssh-keygen -l -f /dev/stdin <<<$l)
+    if [[ "$(echo ${fingerprint}|awk {'print $2'})" = "${login_fingerprint}" ]]
+    then
+      # This depends on the user's key containing the standard comment field.
+      # In some cases, users drop this field. This will not work in those cases.
+      # One example is https://github.com/<user>.keys, which does not contain the comment field.
+      admin_user=$(echo "$l"|awk {'print $NF'})
+      if [[ ${JSON} ]];then
+        if [[ ${DATE} ]];then
+          # provide the date and remote ip in json format
+          user_keys+=("{\"user\":\"${admin_user}\",\"fingerprint\":\"${login_fingerprint}\",\"last_login\":\"${login_date}\",\"remote_ip\":\"${remote_ip}\"}")
+        else
+          # provide only the user and fingerprint in json format
+          user_keys+=("{\"user\":\"${admin_user}\",\"fingerprint\":\"${login_fingerprint}\"}")
+        fi
+      else
+        if [[ ${DATE} ]];then
+          # provide the user and fingerprint in plain text, with the date and remote ip if requested
+          user_keys+=("${admin_user} ${login_fingerprint} ${login_date} ${remote_ip}")
+        else
+          # provide only the user and fingerprint in plain text
+          user_keys+=("${admin_user} ${login_fingerprint}")
+        fi
+      fi
+    fi
+  done < "${file}"
+}
+
+##########################################
+## Print the results of our audit query ##
+##########################################
+function _print_results() {
+  for ((i=0;i<${#user_keys[@]};i++));do
+    # get the array item
+    n=$(echo "${user_keys[${i}]}")
+    # join the array with commas
+    l="${l:+$l, }${n}"
+    # print plain text, if we're not formatting for JSON
+    [[ -z ${JSON} ]] && echo "${user_keys[${i}]}"
+  done
+  # Print the results in JSON format
+  if [[ ${JSON} ]];then
+    ## We have more than one result, so we need to wrap it in an array
+    echo "[${l}]"
+  fi
+}
+
+###################################################
+## Get our command-line arguments and store them ##
+###################################################
+PARSED_ARGUMENTS=$(getopt -a -n ghe-admin-ssh-audit -o ajdf:h --long all,json,date,fingerprint:,help -- "$@")
+
+#######################################################
+## Print the help menu if no arguments were supplied ##
+#######################################################
+VALID_ARGUMENTS=$?
+if [[ ${VALID_ARGUMENTS} -ne 0 || ${#PARSED_ARGUMENTS} -lt 6 ]]; then
+  _print_usage
+fi
+
+eval set -- "${PARSED_ARGUMENTS}"
+
+while :
+do
+  case "${1}" in
+    -a|--all)
+        GETALL=true
+        shift
+        ;;
+    -f|--fingerprint)
+        FINGERPRINT="${2}"
+        shift 2
+        ;;
+    -d|--date)
+        DATE=true
+        shift
+        ;;
+    -j|--json)
+        JSON=true
+        shift
+        ;;
+    -h|--help)
+        _print_usage
+        shift
+        ;;
+    -*)
+        shift
+        break
+        ;;
+    # If invalid options were passed, then getopt should have reported an error,
+    # which we checked as VALID_ARGUMENTS when getopt was called...
+    *)
+        echo "-------------------------------------------------------"
+        echo "ERROR"
+        echo "Unknown option: ${1}"
+        echo "-------------------------------------------------------"
+        PARSED_ARGUMENTS="${PARSED_ARGUMENTS} ${1}"
+        _print_usage
+        ;;
+  esac
+done
+
+###############################################
+## Don't allow it to run if we pass a single ##
+## fingerprint and request all fingerprints  ##
+###############################################
+if [[ ${FINGERPRINT} && ${GETALL} ]];then
+  echo "------------------------------------------------------------------------------"
+  echo "|                                  ERROR                                     |"
+  echo "| You cannot use the --all flag and the --fingerprint flag at the same time. |"
+  echo "------------------------------------------------------------------------------"
+  _print_usage
+fi
+
+##########################################################
+## If we want to look up all users that have logged in  ##
+## then we pull them all from /var/log/auth.log and     ##
+## match their fingerprints to the authorized_keys file ##
+##########################################################
+if [[ ${GETALL} ]];
+then
+  # Grab the authenticated users from auth.log
+  readarray -t LOGINS <<< "$(zgrep --no-filename publickey /var/log/auth.log*)"
+elif [[ -n ${FINGERPRINT} ]];
+then
+  readarray -t LOGINS <<< "$(zgrep --no-filename ${FINGERPRINT} /var/log/auth.log*)"
+fi
+for login in "${LOGINS[@]}";do
+  key=$(echo "${login}"|awk {'print $NF'})
+  login_date=$(echo "${login}"|awk {'print $1" "$2", "$3'})
+  remote_ip=$(echo "${login}"|awk {'print $11'})
+  # Look up the fingerprint for each user
+  _fingerprints "${key}" "${login_date}" "${remote_ip}"
+done
+# Print the results
+_print_results

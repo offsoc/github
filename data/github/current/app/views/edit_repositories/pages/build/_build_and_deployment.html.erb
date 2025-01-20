@@ -1,0 +1,98 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%= render(Pages::DeploymentStatusComponent.new(repository: current_repository)) %>
+
+<% has_pages = current_repository.page.present? %>
+<% current_build_type = current_repository.page&.build_type || "legacy" %>
+
+<% if has_pages && current_repository.private? && !current_repository.is_enterprise_managed? && !GitHub.multi_tenant_enterprise? %>
+  <%= render(Pages::VisibilityComponent.new(repository: current_repository)) %>
+<% end %>
+
+<% if GitHub.multi_tenant_enterprise? && (!GitHub.actions_enabled? || current_repository.actions_disabled?) %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :alert, test_selector: "pages-proxima-disabled-actions-error")) do %>
+    GitHub Actions is disabled for this repo. You must enable Actions to deploy your Pages site.
+  <% end %>
+<% elsif GitHub.single_or_multi_tenant_enterprise? && current_build_type == "workflow" && !actions_runners_available?(current_repository) %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :alert, test_selector: "pages-proxima-no-actions-runners")) do %>
+    There are no runners configured. <%= link_to "Learn more about using runners", "#{GitHub.help_url}/github/automating-your-workflow-with-github-actions/hosting-your-own-runners", class: "Link--inTextBlock" %> to run actions on your own servers.
+  <% end %>
+<% end %>
+
+<%= render(Primer::Beta::Heading.new(tag: :h2, font_weight: :normal, mt: 3, mb: 1)) { "Build and deployment" } %>
+
+<%= render(Pages::LegacyBuildAnnouncementComponent.new(repository: current_repository)) %>
+<pages-build-type class="pages-build-type" current="<%= current_build_type %>">
+
+  <%= form_tag pages_build_type_path(repository: current_repository), method: :put do %>
+    <%= render(Pages::BuildTypes::SelectComponent.new(repository: current_repository)) %>
+  <% end %>
+
+  <div class="build-type build-type-legacy mt-3 mb-4">
+    <%= render(Pages::JekyllConfigComponent.new(repository: current_repository, is_maintainer: is_maintainer)) %>
+  </div>
+
+  <% if !current_repository.archived? %>
+    <div class="build-type build-type-workflow mt-3 mb-4">
+      <% if current_repository.actions_disabled? %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :alert)) do %>
+          GitHub Actions is disabled for this repo. You must enable Actions or select another source to deploy your Pages site.
+        <% end %>
+      <% else %>
+        <%
+          workflow_run = current_repository.page&.workflow_run
+          hide_suggested_workflows = true
+          suggested_pages_workflows = []
+          if current_build_type == "workflow" && (workflow_run.nil? || workflow_run.workflow_file_path&.start_with?("dynamic/pages"))
+            suggested_pages_workflows = current_repository.suggested_pages_workflows
+            hide_suggested_workflows = suggested_pages_workflows.empty?
+          end
+        %>
+        <div class="mb-2" <%= hide_suggested_workflows ? "hidden" : "" %>>
+          <p class="mt-2">Use a suggested workflow, <a class="Link--inTextBlock" href="<%= "#{repository_path(current_repository)}/actions/new"%>">browse all workflows</a>, or
+            <a class="Link--inTextBlock" href="<%= "#{repository_path(current_repository)}/new/#{current_repository.default_branch}?filename=.github%2Fworkflows%2F&workflow_template=ci%2Fblank" %>">create your own</a>.
+          </p>
+          <% suggested_pages_workflows.each_slice(2) do |slice| %>
+            <%= render(Primer::Box.new(display: :flex, flex_wrap: [:wrap, :wrap, nil, nil, nil])) do %>
+              <% slice.each do |id| %>
+                <%= render(Pages::WorkflowCardComponent.new(id: id, user: current_user, repository: current_repository)) %>
+              <% end %>
+            <% end %>
+          <% end %>
+          <p class="mt-3">Workflow details will appear here once your site has been deployed. <a class="Link--inTextBlock" href="<%= "#{repository_path(current_repository)}/actions"%>">View workflow runs.</a></p>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+</pages-build-type>
+
+<%= render(Pages::DeploymentWorkflowComponent.new(repository: current_repository)) %>
+
+<% if has_pages && !is_maintainer %>
+  <% if !GitHub.enterprise? && !GitHub.multi_tenant_enterprise?%>
+    <%= render(Primer::Beta::Heading.new(tag: :h3, font_weight: :normal, mt: 4)) { "Custom domain" } %>
+    <%= render(Pages::CustomDomainComponent.new(
+      repository: current_repository,
+      state: current_repository.page.cname.present? ? :pending : :disabled))%>
+  <% end %>
+
+  <% if GitHub.multi_tenant_enterprise?%>
+    <%= render(Primer::Beta::Heading.new(tag: :h3, font_weight: :normal, mt: 4)) { "Custom subdomain" } %>
+    <%= render(Pages::CustomSubdomainComponent.new(
+      repository: current_repository))%>
+  <% end %>
+
+  <%=
+    cert_status = get_certificate_status(current_repository)
+    if cert_status && cert_status != :approved
+      render(Pages::CertificateStatusComponent.new(
+            state: cert_status,
+            cname: current_repository.page.cname)
+      )
+    end
+  %>
+
+  <% if !GitHub.multi_tenant_enterprise?%>
+    <%= render(Pages::HttpsComponent.new(repository: current_repository))  if !GitHub.enterprise?%>
+  <%end%>
+<% end %>

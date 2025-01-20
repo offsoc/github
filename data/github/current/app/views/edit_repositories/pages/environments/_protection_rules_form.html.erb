@@ -1,0 +1,177 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<% invisible_reviewers_count = environment.calculate_reviewers_invisible_to_user(current_user) %>
+<protection-rules max-reviewers="<%= Gate::MAX_APPROVERS %>%" invisible-viewers-count="<%=invisible_reviewers_count%>" min-reviewers-validation-message="At least one reviewer is required">
+  <%= form_with model: environment,
+    html: { "data-target": "protection-rules.form" },
+    url: repository_environment_path(environment_id: environment) do |f| %>
+
+    <h3 class="h4">Deployment protection rules</h3>
+
+    <p class="color-fg-muted mb-3">
+      Configure reviewers, timers, and custom rules that must pass before deployments to this environment can proceed.
+    </p>
+
+    <div class="Box mb-3">
+      <div class="Box-row d-flex flex-items-center">
+        <div class="form-checkbox m-0">
+          <input type="checkbox" name="use-approval-gate" id="use-approval-gate"
+            aria-describedby="help-text-for-approval-gate-checkbox"
+            class="form-checkbox-details-trigger"
+            <%= environment.has_approval_gate? ? "checked" : "" %>
+            data-target="protection-rules.toggle"
+            data-action="change:protection-rules#approverToggled">
+          <label for="use-approval-gate">Required reviewers</label>
+          <p class="note" id="help-text-for-approval-gate-checkbox">
+            Specify people or teams that may approve workflow runs when they access this environment.
+          </p>
+
+          <div class="form-checkbox-details text-normal mt-2">
+            <div class="form-group" style="width: 300px;">
+              <div class="form-group-header">
+                <label for="environment-approvers">Add up to
+                  <span data-target="protection-rules.count">
+                    <%= environment.calculate_remaining_allowed_reviewers %>
+                  </span> more
+                  <span data-target="protection-rules.reviewerVerbiage">
+                    <%= "reviewer".pluralize(environment.calculate_remaining_allowed_reviewers) %>
+                  </span>
+                </label>
+              </div>
+
+              <div class="form-group-body">
+                <auto-complete id="approver-autocomplete"
+                  src="<%= repository_environment_suggested_approvers_path %>"
+                  for="approver-results"
+                  class="position-relative"
+                  data-target="protection-rules.autoComplete"
+                  data-action="combobox-commit:protection-rules#selectSuggestion">
+                  <input type="text" id="environment-approvers" class="form-control input-sm" placeholder="Search for people or teams..." id="reviewers" data-target="protection-rules.autoCompleteInput">
+                  <ul id="approver-results" class="autocomplete-results"></ul>
+                </auto-complete>
+              </div>
+
+              <ul class="mt-2" data-target="protection-rules.reviewerList">
+                <% if environment.has_approval_gate? %>
+                  <% environment.approval_gate.gate_approvers.each do |gate_approver| %>
+                    <%
+                      approver = gate_approver.approver
+                      if approver && (approver.is_a?(User) || approver.visible_to?(current_user))
+                        name = approver.is_a?(User) ? approver.display_login : approver.combined_slug
+                    %>
+
+                      <li class="d-flex flex-items-center flex-justify-between width-full mb-1 js-reviewer"
+                        data-targets="protection-rules.reviewers"
+                        data-node-id="<%= approver.global_relay_id %>">
+                        <input type="hidden" name="reviewers[]" value="<%= approver.global_relay_id %>">
+
+                        <span>
+                          <%= avatar_for approver, 20, class: "avatar", width: 20, height: 20 %>
+                          <span class="css-truncate-target text-small text-bold"><%= name %></span>
+                        </span>
+
+                        <button class="btn-link color-fg-muted" type="button" aria-label="Remove" data-action="click:protection-rules#removeReviewer">
+                          <%= primer_octicon(:x) %>
+                        </button>
+                      </li>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </ul>
+
+              <% if invisible_reviewers_count > 0%>
+                <p class="note mt-2">
+                  Some reviewers are hidden from the list because you are an outside collaborator on this repository.
+                </p>
+              <% end %>
+
+              <template data-target="protection-rules.reviewerTemplate" hidden>
+                <li class="d-flex flex-items-center flex-justify-between width-full mb-1 js-reviewer" data-node-id="{{ nodeId }}" data-targets="protection-rules.reviewers">
+                  <input type="hidden" name="reviewers[]" value="{{ nodeId }}">
+
+                  <span>
+                    <img class="avatar avatar-user" width="20" height="20" src="{{ avatarUrl }}" alt="@{{ name }}">
+                    <span class="css-truncate-target text-small text-bold">{{ name }}</span>
+                  </span>
+
+                  <button class="btn-link color-fg-muted" type="button" aria-label="Remove" data-action="click:protection-rules#removeReviewer">
+                    <%= primer_octicon(:x) %>
+                  </button>
+                </li>
+              </template>
+
+            </div>
+              <div class="form-checkbox m-0">
+              <input type="checkbox" name="require-different-reviewer" id="require-different-reviewer"
+                aria-describedby="help-text-for-require-different-reviewer-checkbox"
+                class="form-checkbox-details-trigger"
+                <%= environment.has_approval_gate? && environment.approval_gate.prevent_self_review? ? "checked" : "" %>>
+              <label for="require-different-reviewer">Prevent self-review</label>
+              <p class="note" id="help-text-for-require-different-reviewer-checkbox">
+                Require a different approver than the user who triggered the workflow run.
+              </p>
+              </div>
+          </div>
+        </div>
+      </div>
+      <div class="Box-row d-flex flex-items-center">
+        <div class="form-checkbox m-0">
+          <input type="checkbox" name="use-wait-gate" id="use-wait-gate"
+            aria-describedby="help-text-for-use-wait-gate-checkbox"
+            class="form-checkbox-details-trigger"
+            <%= environment.has_wait_gate? ? "checked" : "" %>>
+          <label for="use-wait-gate">Wait timer</label>
+          <p class="note" id="help-text-for-use-wait-gate-checkbox">
+            Set an amount of time to wait before allowing deployments to proceed.
+          </p>
+
+          <div class="form-checkbox-details text-normal mt-2">
+            <div class="form-group my-0 d-flex flex-items-baseline gap-1" data-target="protection-rules.waitGroup">
+              <input type="number"
+                class="form-control hx_actions_timer_input"
+                name="wait_gate[timeout]"
+                pattern="\d*"
+                aria-label="Time to wait"
+                value="<%= environment.wait_gate&.timeout || 15 %>"
+                data-target="protection-rules.waitTime"
+                data-action="
+                  input:protection-rules#validateWaitTime
+                  blur:protection-rules#validateWaitTime"
+                min="1"
+                max="<%= Gate::MAX_TIMEOUT_MINUTES %>"
+                style="width: 70px" required>
+              minutes
+              <p class="note error" data-target="protection-rules.waitNote">
+                The time to wait must be an integer number between 1 and <%= Gate::MAX_TIMEOUT_MINUTES %>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <%= render "edit_repositories/pages/environments/custom_protection_rules", custom_protection_rules: environment.custom_protection_rules %>
+      <div class="Box-row">
+        <p class="text-bold m-0" <%= test_selector "promote-custom-protection-rules-heading" %>>
+          Enable <%= "additional " if environment.custom_protection_rules.count > 0 %>custom rules with GitHub Apps
+          <%= render(Primer::Beta::Label.new(scheme: :success)) { "Beta" } %>
+        </p>
+        <p class="note m-0" <%= test_selector "promote-custom-protection-rules-description" %>>
+          <%= link_to "Learn about existing apps", "#{GitHub.help_url}/actions/deployment/protecting-deployments/configuring-custom-deployment-protection-rules#using-existing-custom-deployment-protection-rules", rel: "noopener noreferrer", class: "Link--inTextBlock" %>
+          or
+          <%= link_to "create your own protection rules", "#{GitHub.help_url}/actions/deployment/targeting-different-environments/using-environments-for-deployment#custom-deployment-protection-rules", rel: "noopener noreferrer", class: "Link--inTextBlock" %>
+          so you can deploy with confidence.
+        </p>
+      </div>
+    </div>
+
+    <div class="form-checkbox">
+      <label>
+        <input type="checkbox" name="gates-admin-bypass-allowed" id="gates-admin-bypass-allowed"
+        class="form-checkbox-details-trigger"
+        <%= environment.gates_admin_enforced ? "" : "checked" %>>
+        Allow administrators to bypass configured protection rules
+      </label>
+    </div>
+
+    <%= render(Primer::Beta::Button.new(scheme: :primary, tag: :button, type: :submit, data: { "disable-invalid": "" })) { "Save protection rules" } %>
+  <% end %>
+</protection-rules>

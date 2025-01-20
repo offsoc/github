@@ -1,0 +1,168 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% if current_repository.action_invocation_blocked? %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-user" )) do %>
+      Action invocation is blocked for an owner of this repository. Visit the admin page of the user, organization, or enterprise which owns this repo for more information.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-user" )) do %>
+      Action invocation is blocked for an owner of this repository. Visit the admin page of the user, organization, or enterprise which owns this repo for more information.
+    <% end %>
+  <% end %>
+<% end %>
+<div class="boxed-group">
+  <h3>Actions Overview</h3>
+  <div class="boxed-group-inner clearfix">
+    <div class="summary">
+      <h3>Tenant Service Details</h3>
+      <dl>
+        <dt>Tenant Info</dt>
+        <dd>
+          <%  tenant_chatops = ".actions kusto nwo #{current_repository.name_with_owner}" %>
+          <%= render Primer::Beta::ClipboardCopy.new(display: :block, position: :relative, py: 1, "data-copy-feedback": "Copied!", role: "button", "aria-label": "Copy kusto chatops", value: tenant_chatops) do %>
+            <code><%= tenant_chatops %></code>
+            <%= render Primer::Beta::Octicon.new(icon: :copy, color: :accent, right: false, mr: 1, position: :absolute, classes: "js-clipboard-copy-icon", style: "top: 5px;") %>
+            <%= render Primer::Beta::Octicon.new(icon: :check, color: :success, position: :absolute, display: :none, classes: "js-clipboard-check-icon", style: "top: 6px; right: 5px;") %>
+          <% end %>
+        </dd>
+      </dl>
+      <dl>
+        <dt>Repo Environments</dt>
+        <dd><%= current_repository.environments.count %></dd>
+      </dl>
+      <% unless GitHub.enterprise? %>
+        <dl>
+          <dt>Repository Host Details</dt>
+          <dd>
+            <%
+              chatops_az_nwo_command = ".actions kusto nwo #{current_repository.name_with_owner}"
+            %>
+            <a target="_blank" rel="noopener" class="Link--inTextBlock" href="<%= Stafftools::RepositoriesHelper.get_kusto_link_for_repo_details(current_repository) %>">
+              Kusto link
+            </a>
+            (If you don't have access to Kusto, ping <a class="Link--inTextBlock" target="_blank" href="https://github.slack.com/channels/kusto4github"><code>#kusto4github</code></a>)
+            <%= render Primer::Beta::ClipboardCopy.new(display: :block, position: :relative, py: 1, classes: "CopyBlock", "data-copy-feedback": "Copied!", role: "button", "aria-label": "Copy kusto chatops", value: chatops_az_nwo_command) do %>
+              <code><%= chatops_az_nwo_command %></code>
+              <%= render Primer::Beta::Octicon.new(icon: :copy, color: :accent, right: false, mr: 1, position: :absolute, classes: "js-clipboard-copy-icon", style: "top: 5px;") %>
+              <%= render Primer::Beta::Octicon.new(icon: :check, color: :success, position: :absolute, display: :none, classes: "js-clipboard-check-icon", style: "top: 6px; right: 5px;") %>
+            <% end %>
+          </dd>
+        </dl>
+        <dl>
+          <dt>Repository Tier</dt>
+          <dd><%= repository_tier %></dd>
+        </dl>
+      <% end %>
+      <div class="summary">
+        <h3>OIDC Configuration</h3>
+        <dl>
+          <dt>Sub Claim Template</dt>
+          <dd>
+            <%= oidc_sub_claim_template.nil? ? "No custom template set" : oidc_sub_claim_template %>
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
+
+<%
+
+  higher_level_specified_actions = current_repository.highest_level_specified_actions?
+  fork_pr_policies = [
+    { name: "Run workflows from fork pull requests", state: current_repository.can_run_fork_pr_workflows? },
+    { name: "Send write tokens to workflows from fork pull requests", state: current_repository.can_run_fork_pr_workflows_with_write_tokens? },
+    { name: "Send secrets and variables to workflows from fork pull requests", state: current_repository.can_run_fork_pr_workflows_with_secrets? },
+  ]
+  public_fork_pr_policies = [
+    { name: "Send variables to workflows from fork pull requests", state: current_repository.can_run_public_fork_pr_workflows_with_variables? }
+  ]
+%>
+
+<div class="boxed-group">
+  <h3>Policy</h3>
+  <div class="boxed-group-inner">
+    <% if current_repository.actions_disabled? %>
+      <%= render Primer::Beta::Octicon.new(icon: "x", color: :danger) %>
+      <span class="text-bold f5 mb-2">
+        Actions is disabled <% "by the repository owner" if current_repository.actions_disabled_by_owner? %>
+      </span>
+    <% else %>
+      <span class="text-bold f4 mb-2">Actions is enabled for this repository</span>
+
+      <h4>Allowed actions</h4>
+
+      <% if current_repository.allows_all_actions? %>
+        Any action can be used, regardless of who authored it or where it is defined.
+      <% elsif current_repository.allows_local_actions_only? %>
+        Only local actions can be used.
+      <% else %>
+        <%
+          allowed_actions = []
+          if current_repository.highest_level_allowlist&.github_owned_allowed?
+            allowed_actions << "GitHub-owned actions"
+          end
+
+          if current_repository.highest_level_allowlist&.verified_allowed?
+            allowed_actions << "verified actions"
+          end
+
+          action_patterns = current_repository.highest_level_allowlist&.allowed_action_patterns
+          if action_patterns.any?
+            allowed_actions << "actions matching the list of specified actions"
+          end
+        %>
+        <%= allowed_actions.to_sentence.humanize %> can be used.
+        <ul class="ml-4">
+          <% action_patterns.each do |pattern| %>
+            <li>
+              <%= pattern.value %>
+            </li>
+          <% end %>
+        </ul>
+      <% end %>
+      <% if higher_level_specified_actions %>
+        <div class="color-fg-muted text-small note pb-3">
+          <%= render Primer::Beta::Octicon.new(icon: "shield-lock") %>
+          These options have been set by the repository's owner.
+        </div>
+      <% end %>
+      <h4>Fork pull request workflows</h4>
+      <ul class="list-style-none">
+        <% fork_pr_policies.each do |policy| %>
+          <li>
+            <%= render Primer::Beta::Octicon.new(icon: policy[:state] ? "check" : "x", color: policy[:state] ? :success : :danger) %>
+            <%= policy[:name] %>
+          </li>
+        <% end %>
+      </ul>
+      <h4>Public fork pull request workflows</h4>
+        <ul class="list-style-none">
+          <% public_fork_pr_policies.each do |policy| %>
+            <li>
+              <%= render Primer::Beta::Octicon.new(icon: policy[:state] ? "check" : "x", color: policy[:state] ? :success : :danger) %>
+              <%= policy[:name] %>
+            </li>
+          <% end %>
+        </ul>
+    <% end %>
+  </div>
+</div>
+<div class="boxed-group">
+  <h3>Audit log</h3>
+  <div class="boxed-group-inner">
+    <h4>Actions related events for this repository</h4>
+    <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+      <%= render \
+        partial: "stafftools/audit_log",
+        locals: {
+          query: audit_log_info[:query],
+          logs: audit_log_info[:logs],
+          more_results: audit_log_info[:more_results],
+        } %>
+    <% else %>
+      <p><%= stafftools_not_authorized_html %></p>
+    <% end %>
+  </div>
+</div>

@@ -1,0 +1,135 @@
+<%# `view` is an instance of Orgs::People::FailedInvitationToolbarActionsView %>
+<label for="select-all-failed" class="table-list-header-meta py-1 <% if view.selected_invitations.any? %>sr-only<% end %>">
+  <span
+    class="color-fg-default no-underline mr-2"
+    <%= test_selector("failed-invitation-toolbar-failed-invites") %>
+  >
+    <%= pluralize(number_with_delimiter(view.active_failed_invitations_count), "Failed invitation", "Failed invitations") %>
+  </span>
+</label>
+<%= hidden_field_tag "total_failed_invitations", view.active_failed_invitations_count, id: "total-failed-invitation-count" %>
+<% pluralized_invitations ="#{pluralize view.selected_invitations.count, "invitation", "invitations"}" %>
+<% if view.selected_invitations.any? %>
+  <% retry_url = org_invitations_action_dialog_path(view.organization, redirect_to_path: view.redirect_path, render_title: false,  action_dialog: "retry") %>
+  <% cancel_url = org_invitations_action_dialog_path(view.organization, redirect_to_path: view.redirect_path, render_title: false, action_dialog: "cancel") %>
+  <% view.selected_invitations.each { |inv|
+    retry_url += "&#{invitation_id_param_name(inv)}=#{inv.id}"
+    cancel_url +=  "&#{invitation_id_param_name(inv)}=#{inv.id}"
+  } %>
+
+  <%= render(Primer::Alpha::ActionMenu.new(test_selector: "failed-invitation-dropdown")) do |menu| %>
+    <% menu.with_show_button(size: :small, mr: 3) { |button|
+      button.with_trailing_action_icon(icon: :"triangle-down"); "#{pluralized_invitations} selected"
+    } %>
+    <% if view.show_retry_invitations? %>
+      <% menu.with_item(
+        tag: :button,
+        id: "retry_selected_invitations_button",
+        value: "",
+        test_selector: "retry-selected-invitations",
+        content_arguments: { "data-show-dialog-id": "retry_selected_invitations_dialog" }) do %>
+        Retry <%= "invitation".pluralize(view.selected_invitations.count) %>
+      <% end %>
+      <% menu.with_item(
+        tag: :button,
+        id: "retry_all_invitations_button",
+        value: "",
+        content_arguments: { "data-show-dialog-id": "retry_all_invitations_dialog", "hidden": "true" }) do %>
+        Retry <%= "invitation".pluralize(view.active_failed_invitations_count) %>
+      <% end %>
+    <% end %>
+    <% if view.show_delete_invitations? %>
+      <% menu.with_item(
+        tag: :button,
+        id: "delete_selected_invitations_button",
+        value: "",
+        test_selector: "delete-selected-invitations",
+        scheme: :danger,
+        content_arguments: { "data-show-dialog-id": "cancel_selected_invitations_dialog" }) do %>
+        Cancel <%= "invitation".pluralize(view.selected_invitations.count) %>
+      <% end %>
+      <% menu.with_item(
+        tag: :button,
+        id: "delete_all_invitations_button",
+        value: "",
+        scheme: :danger,
+        content_arguments: { "data-show-dialog-id": "cancel_all_invitations_dialog", "hidden": "true" }) do %>
+        Cancel <%= "invitation".pluralize(view.active_failed_invitations_count) %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Alpha::Dialog.new(
+    title: "Retry #{pluralized_invitations} from #{view.organization.display_login}",
+    id: "retry_selected_invitations_dialog"
+  )) do |dialog| %>
+    <% dialog.with_body do %>
+      <include-fragment class="my-3" loading="lazy" src="<%= retry_url %>" aria-label="Loading...">
+        <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+      </include-fragment>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Alpha::Dialog.new(
+    title: "Cancel #{pluralized_invitations} from #{view.organization.display_login}",
+    id: "cancel_selected_invitations_dialog"
+  )) do |dialog| %>
+    <% dialog.with_body do %>
+      <include-fragment class="my-3" loading="lazy" src="<%= cancel_url %>" aria-label="Loading...">
+        <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+      </include-fragment>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Alpha::Dialog.new(
+    title: "Retry invitations from #{view.organization.display_login}",
+    id: "retry_all_invitations_dialog"
+  )) do |dialog| %>
+    <% dialog.with_body do %>
+      All selected invitations will be retried
+    <% end %>
+    <% dialog.with_footer do %>
+      <%= form_tag org_retry_failed_invitations_path(view.organization) do %>
+        <input type="hidden" name="redirect_to_path" value="<%= view.redirect_path %>">
+        <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger) do %>
+          Retry invitations
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Alpha::Dialog.new(
+    title: "Cancel invitations from #{view.organization.display_login}",
+    id: "cancel_all_invitations_dialog"
+  )) do |dialog| %>
+    <% dialog.with_body do %>
+      All selected invitations will be canceled
+    <% end %>
+    <% dialog.with_footer do %>
+      <%= form_tag org_destroy_failed_invitations_path(view.organization), :method => :delete do %>
+        <input type="hidden" name="redirect_to_path" value="<%= view.redirect_path %>">
+        <%= render Primer::Beta::Button.new(type: :submit, scheme: :danger) do %>
+          Cancel invitations
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.active_failed_invitations_count > Orgs::People::IndexPageView::MEMBERS_PER_PAGE &&
+        view.selected_invitations.count == Orgs::People::IndexPageView::MEMBERS_PER_PAGE %>
+    <%= render Primer::Beta::Button.new(scheme: :link, font_size: 6, classes: "js-failed-invitations-mark-all") do %>
+      Select all <%= view.active_failed_invitations_count %> invitations
+    <% end %>
+
+    <%= render Primer::Beta::Button.new(scheme: :link, hidden: true, font_size: 6, classes: "js-failed-invitations-unmark-all") do %>
+      Clear selection
+    <% end %>
+  <% end %>
+
+  <% if view.scim_invitations? %>
+    <div class="pl-2 m-1" <%= test_selector("scim-invitation-warning") %>>
+      Some selected invitations were provisioned via SCIM. Changes to SCIM-generated invitations should be triggered
+      from the Identity Provider side.
+    </div>
+  <% end %>
+<% end %>

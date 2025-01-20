@@ -1,0 +1,242 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#/ Usage: generate-docs-payloads # hack: you need to run the script
+#/ Creates JSON files containing sample payloads (at the moment just for the Checks API)
+#/ Requirement: be running script/server in github/github
+
+# Show usage
+if ARGV.include?("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c3-"
+  exit 1
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+require "faker"
+
+module GitHub
+  module Config
+    def api_url
+      "https://api.github.com"
+    end
+  end
+end
+
+unless Rails.env.development?
+  puts "This can only be run in the development environment!"
+  exit 1
+end
+
+# Run background jobs inline for this script
+Rails.application.config.active_job.queue_adapter = :inline
+
+base_path = "tmp/docs_payloads"
+FileUtils.mkdir_p(base_path)
+
+org = Organization.find_by(login: "github")
+
+user = User.find_by(login: "octocat")
+user ||= User.create!(
+  login: "octocat",
+  email: String.new("octocat@github.com"), # can't have frozen string here
+  password: SecureRandom.hex,
+)
+org.add_admin user
+
+app_url = "http://super-duper.example.com"
+app = Integration.find_by(slug: "super-duper")
+app ||= Integration.create!(
+  owner: org,
+  name: "Super Duper",
+  url: app_url,
+  default_permissions: {
+    "statuses"      => :write,
+    "contents"      => :write,
+    "pull_requests" => :write,
+    "issues"        => :write,
+    "checks"        => :write,
+  },
+  default_events: %w(pull_request check_suite check_run),
+  hook_attributes: { url: "#{app_url}/webhooks", secret: "foo123" },
+  callback_url: "#{app_url}/callback",
+)
+
+repo_name = "hello-world"
+repo = Repository.find_by(owner_id: org.id, name: repo_name)
+
+repo ||= Repository.handle_creation(
+  user,
+  org,
+  {
+    name: repo_name,
+    public: true,
+  },
+  synchronous: true
+).repository
+
+installation = app.installations.with_repository(repo).first
+installation ||= app.install_on(
+  org,
+  repositories: [repo],
+  installer: org.admins.first,
+  version: app.latest_version,
+  entry_point: :script_generate_docs_payloads
+).installation
+
+team = org.teams.find_by(name: "Employees")
+team.add_member(user)
+team.add_repository(repo, :push)
+
+branch = "say-hello"
+master = repo.refs.find_or_build("refs/heads/master")
+
+if master.target_oid.nil?
+  metadata = {
+    message: "Add README",
+    committer: user,
+    author: user,
+  }
+  commit = master.append_commit(metadata, user) do |files|
+    content = "# Hello, World!"
+    files.add("README.md", content)
+  end
+end
+
+ref = repo.heads.find(branch)
+ref ||= repo.heads.create(branch, master.target_oid, user)
+
+metadata = {
+  message: "Say hello to the whole world",
+  committer: user,
+  author: user,
+}
+before_commit = ref.append_commit(metadata, user) do |files|
+  content = Faker::Lorem.paragraphs(number: paragraphs = 2).join("\n\n") + "\n"
+  files.add("README.md", content)
+end
+
+after_commit = nil
+metadata = {
+  message: "Say hello (again) to everybody",
+  committer: user,
+  author: user,
+}
+content = Faker::Lorem.paragraphs(number: paragraphs = 2).join("\n\n") + "\n"
+after_commit = ref.append_commit(metadata, user) do |files|
+  files.add("README.md", content)
+end
+push = Repositories::Domain::Pushes.new(:rest_api).by_repo_id_and_after(repository_id: repo.id, before: before_commit.oid, after: after_commit.oid)
+
+pr_attrs = {
+  user:  user,
+  base:  "master",
+  head:  branch,
+  title: "Add README",
+  body:  Faker::Lorem.paragraphs(number: 1).join("\n"),
+}
+pull_request = PullRequest.find_by(head_ref: branch, user_id: user.id)
+pull_request ||= PullRequest.create_for(repo, pr_attrs)
+
+suite_attrs = {
+  repository_id: repo.id,
+  github_app_id: app.id,
+  creator_id: push.pusher_id,
+  head_sha: push.after,
+  head_branch: "master",
+  push_id: push.id,
+}
+suite = CheckSuite.find_by(suite_attrs)
+suite ||= CheckSuite.create!(suite_attrs)
+
+run_attrs = {
+  name: "randscape",
+  creator_id: suite.creator_id,
+  status: "completed",
+  conclusion: "neutral",
+  started_at: Time.now,
+  completed_at: Time.now,
+  title: "Report",
+  summary: "It's all good.",
+  text: Faker::Lorem.paragraphs(number: 1).join("\n"),
+  images: [
+    {
+      alt: "Mind your words, they are important.",
+      image_url: "https://picsum.photos/300/200?image=206",
+      caption: "Favor focus over features.",
+    },
+  ],
+}
+run = suite.check_runs.create!(run_attrs)
+annotation = CheckAnnotation.create!(
+  check_run_id: run.id,
+  filename: "README.md",
+  blob_href: "https://github.com/#{repo.nwo}/blob/#{suite.head_sha}/README.md",
+  warning_level: "warning",
+  message: "This might be a problem, because reasons.",
+  start_line: "2",
+  end_line: "3",
+  raw_details: "This is just text.",
+)
+
+# Event payloads
+
+%w(completed requested rerequested).each do |action|
+  event = Hook::Event::CheckSuiteEvent.new(action: action.to_sym, check_suite_id: suite.id)
+  event_payload = Hook::Payload::CheckSuitePayload.new event
+  payload = event_payload.to_hash.merge({ "installation" => { "id" => installation.id } })
+  json = JSON.pretty_generate(payload)
+  File.open("%s/event.check-suite.#{action}.json" % base_path, "w") do |f|
+    f.puts json
+  end
+end
+
+event = Hook::Event::CheckRunEvent.new(action: "rerequested", check_run_id: run.id)
+event_payload = Hook::Payload::CheckRunPayload.new event
+payload = event_payload.to_hash.merge({ "installation" => { "id" => installation.id } })
+json = JSON.pretty_generate(payload)
+File.open("%s/event.check-run.rerequested.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+requested_action = { label: "fix", identifier: "fix_me" }
+event = Hook::Event::CheckRunEvent.new(action: "requested_action",
+  check_run_id: run.id,
+  requested_action: requested_action)
+event_payload = Hook::Payload::CheckRunPayload.new event
+payload = event_payload.to_hash.merge({ "installation" => { "id" => installation.id } })
+json = JSON.pretty_generate(payload)
+File.open("%s/event.check-run.requested_action.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+# API payloads
+
+payload = Api::Serializer.serialize(:check_suite_hash, suite)
+json = JSON.pretty_generate(payload)
+File.open("%s/api.check-suite.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+payload = Api::Serializer.serialize(:check_suites_hash, check_suites: [suite], total_count: 1)
+json = JSON.pretty_generate(payload)
+File.open("%s/api.check-suites.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+payload = Api::Serializer.serialize(:check_run_hash, run, repo: run.check_suite.repository)
+json = JSON.pretty_generate(payload)
+File.open("%s/api.check-run.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+payload = Api::Serializer.serialize(:check_runs_hash, check_runs: [run], repo: run.check_suite.repository, total_count: 1)
+json = JSON.pretty_generate(payload)
+File.open("%s/api.check-runs.json" % base_path, "w") do |f|
+  f.puts json
+end
+
+payload = Api::Serializer.serialize(:check_annotation_hash, run.annotations.first)
+json = JSON.pretty_generate([payload])
+File.open("%s/api.check-annotations.json" % base_path, "w") do |f|
+  f.puts json
+end

@@ -1,0 +1,39 @@
+#!/bin/bash
+. /usr/local/share/enterprise/ghe-nomad-lib
+mapfile -t nodes < <(jq -r .webserver_nodes[] /etc/github/configapply.json)
+nodes+=("localhost")
+
+for node in "${nodes[@]}"; do
+  # specify the babeld nomad task group because we don't want the babeld2hydro task group (it doesn't run btop)
+  allocation_id="$(find_allocation babeld "$node" babeld 2>/dev/null)"
+  ret=$?
+  if [[ "$ret" -eq 0 ]]; then
+    break
+  fi
+done
+
+if [[ -z "$allocation_id" ]]; then
+  echo "ghe-btop could not be executed as babeld is not running on an expected node"
+  exit 1
+fi
+
+# Show usage directly from `btop`
+usage() {
+  run_in_allocation --node "$node" "$allocation_id" /app/btop --help | sed 's/btop/ghe-btop/'
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help|--usage)
+      usage
+      exit 2
+      ;;
+    -*)
+      echo "Unknown argument: $1" 1>&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+run_in_allocation --node "$node" "$allocation_id" /app/btop "$@"

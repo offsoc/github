@@ -1,0 +1,45 @@
+#!/usr/bin/env ruby
+
+require "json"
+require "shellwords"
+require "ruby-progressbar"
+
+args = ARGV.dup
+lines = !!args.delete("--lines")
+
+def add_line_comment(file)
+  data = File.readlines(file["path"])
+  file["offenses"].each do |offence|
+    line = Integer(offence["location"]["line"]) - 1
+    data[line] = "#{data[line][0...-1]} # rubocop:disable #{offence["cop_name"]}\n"
+  end
+  File.open(file["path"], "w") { |f| f.write(data.join) }
+end
+
+def add_file_comment(file)
+  cops = file["offenses"].map { |o| o["cop_name"] }.uniq
+  if file["path"].end_with?(".erb")
+    comments = cops.map { |cop| "<%# rubocop:disable #{cop} %>\n" }.join
+  else
+    comments = cops.map { |cop| "# rubocop:disable #{cop}\n" }.join
+  end
+  data = File.read(file["path"])
+  File.open(file["path"], "w") { |f| f.write(comments + data) }
+end
+
+puts "==> Gather files to scan..."
+report = JSON.parse(`#{Shellwords.join(["rubocop", "--format", "json"] + args)}`)
+
+progressbar = ProgressBar.create(title: "Scanning...", total: report["files"].count)
+
+report["files"].each do |file|
+  if file["offenses"].any?
+    if lines
+      add_line_comment(file)
+    else
+      add_file_comment(file)
+    end
+  end
+
+  progressbar.increment
+end

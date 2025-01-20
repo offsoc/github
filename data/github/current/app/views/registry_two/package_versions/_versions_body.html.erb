@@ -1,0 +1,134 @@
+<div class="container-lg p-responsive clearfix">
+  <h1 class="sr-only">Package versions of <%= package.name %></h1>
+  <%# Title %>
+  <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) %>
+      <div class="mb-3 mt-1 clearfix">
+      <%= render(Primer::Beta::Breadcrumbs.new(mb: 1)) do |component| %>
+        <% component.with_item(href: packages_two_view_path(user_type: user_type), test_selector: "pkg-breadcrumbs-version-name") { package.name } %>
+        <% component.with_item(href: package_versions_two_path(user_type: user_type), test_selector: "pkg-breadcrumbs-versions") { "Versions" } %>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="mb-4 mt-1 clearfix">
+      <%= link_to package.name, packages_two_view_path(user_type: user_type) %>
+      /
+      <strong>All versions</strong>
+    </div>
+  <% end %>
+  <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Versions<% end %>
+  <% end %>
+  <div class="container-lg d-flex">
+    <div style="margin-top: -3px;" class="col-12 mb-4 d-flex flex-column flex-md-row">
+      <%# main content %>
+      <div class="col-12 mb-4">
+        <%# Versions %>
+        <% if params.dig(:filters, :versions) == "deleted" && !use_immutable_actions_ui %>
+          <p class="mb-4">These versions of the package have been deleted. You can restore a package version that was deleted within the last 30 days.</p>
+        <% end %>
+        <%= render(Primer::Beta::BorderBox.new(id: "versions-list")) do |component| %>
+          <% component.with_header do %>
+            <div class="table-list-filters flex-auto d-flex min-width-0">
+              <div class="flex-auto no-wrap">
+                <% if package.package_type == :container && !is_actions_package && params.dig(:filters, :versions) != "deleted" %>
+                  <div class="table-list-header-toggle states flex-auto pl-0 d-flex">
+                    <%= link_to package_versions_two_path(filters: { version_type: "tagged" }, user_type: user_type), class: "btn-link #{"selected" if version_type_filter == "tagged"}" do %>
+                      <%= primer_octicon(:tag, mr: 1) %>
+                      <%= "#{number_with_delimiter(tagged_count)} tagged" %>
+                    <% end %>
+                    <%= link_to package_versions_two_path(filters: { version_type: "untagged" }, user_type: user_type), class: "btn-link #{"selected" if version_type_filter == "untagged"}" do %>
+                      <%= "#{number_with_delimiter(untagged_count)} untagged" %>
+                    <% end %>
+                  </div>
+                <% elsif RegistryTwo::MembersHelper::NON_CONTAINER_V2_ECOSYSTEMS.include?(package.package_type.to_s) || is_actions_package %>
+                  <div class="table-list-header-toggle states flex-auto pl-0 d-flex">
+                    <% if viewer_is_admin %>
+                      <%= link_to package_versions_two_path(filters: { versions: "active" }, user_type: user_type), class: "btn-link #{"selected" if versions_filter == "active"}" do %>
+                        <%= primer_octicon(:tag, mr: 1) %>
+                        <%= "#{number_with_delimiter(active_count)} active" %>
+                      <% end %>
+                    <% else %>
+                      <div class="selected">
+                        <%= primer_octicon(:tag, mr: 1) %>
+                        <%= "#{number_with_delimiter(active_count)} active" %>
+                      </div>
+                    <% end %>
+                    <% if viewer_is_admin %>
+                      <%= link_to package_versions_two_path(filters: { versions: "deleted" }, user_type: user_type), class: "btn-link #{"selected" if versions_filter == "deleted"}" do %>
+                        <%= "#{number_with_delimiter(deleted_count)} deleted" %>
+                      <% end %>
+                    <% end %>
+                  </div>
+                <% end %>
+              </div>
+              <% if package.package_type == :container && viewer_is_admin && !is_actions_package %>
+                <div class="table-list-header-toggle no-wrap d-flex flex-auto flex-justify-between flex-sm-justify-end flex-lg-justify-end">
+                  <div>
+                    <%= render "registry_two/package_versions/status_filter", user_type: user_type %>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+          <% if package_versions.any? %>
+            <% package_versions.each do |package_version| %>
+              <% if params.dig(:filters, :versions) == "deleted" %>
+                <%= render "registry_two/package_versions/deleted_version",
+                  package: package,
+                  package_version: package_version,
+                  viewer_is_admin: viewer_is_admin,
+                  user_type: user_type,
+                  component: component,
+                  is_actions_package: is_actions_package
+                %>
+              <% else %>
+                <% if package.package_type == :container && is_actions_package %>
+                  <%= render "registry_two/package_versions/version_row_with_tags",
+                    package: package,
+                    package_version: package_version,
+                    viewer_is_admin: viewer_is_admin,
+                    user_type: user_type,
+                    disable_deletion: (tagged_count == 1 && package_version.metadata.tags.any?) || package_version.download_count > Registry::PackageDownloadStatsService::MAX_DOWNLOAD_COUNT_BEFORE_DELETE_RESTRICTION_FOR_IMMUTABLE_ACTIONS,
+                    component: component,
+                    is_actions_package: true,
+                    is_latest: package_version.id == package.latest_version.id
+                  %>
+                <% elsif package.package_type == :container %>
+                  <%= render "registry_two/package_versions/version_row_with_tags",
+                    package: package,
+                    package_version: package_version,
+                    viewer_is_admin: viewer_is_admin,
+                    user_type: user_type,
+                    disable_deletion: tagged_count == 1 && package_version.metadata.tags.any?,
+                    component: component,
+                    is_actions_package: false,
+                    is_latest: package_version.metadata.tags.any? { |tag| tag.name == PackageRegistry::PackageVersion::LATEST_TAG }
+                  %>
+                <% else %>
+                  <%= render "registry_two/package_versions/version_row",
+                    package: package,
+                    package_version: package_version,
+                    viewer_is_admin: viewer_is_admin,
+                    user_type: user_type,
+                    disable_deletion: false,
+                    component: component
+                  %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% else %>
+            <%= render "registry_two/package_versions/empty_state",
+              package: package,
+              component: component,
+              version_type_filter: version_type_filter
+            %>
+          <% end %>
+        <% end %>
+        <%# Pagination %>
+        <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+          <%= will_paginate(paginated_package_versions) %>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

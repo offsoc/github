@@ -1,0 +1,98 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require "octokit"
+
+# In some cases we will "bail out" in non-failing way, e.g. if the gauntlet test suite should not be run or
+# github.com is down. In those cases, we will output "__noop__" to inform that we should simply skip the tests.
+def exit_gracefully(message)
+  $stderr.puts message
+  $stdout.puts "__noop__"
+  exit 0
+end
+
+def running_on_resiliency_mirror?
+  # MIRROR_SERVER_URL is set in the github/internal-actions ci-larger-runners environment vault
+  ENV.fetch("GITHUB_SERVER_URL", "https://github.com") == ENV.fetch("MIRROR_SERVER_URL", "")
+end
+
+# Make this script work both in Janky, GitHub Actions, and Codespaces by trying a couple of variables
+github_token = ENV.fetch("GAUNTLET_TESTS_API_TOKEN", ENV["GITHUB_TOKEN"])
+
+if running_on_resiliency_mirror?
+  github_token = ENV["BP_GITHUB_MIRROR_TOKEN"]
+end
+
+if github_token.nil?
+  $stderr.puts "GITHUB_TOKEN or GAUNTLET_TESTS_API_TOKEN environment variable must be set"
+  exit 1
+end
+
+# Provide authentication credentials
+client = Octokit::Client.new(access_token: github_token)
+
+git_sha = `git rev-parse HEAD`.strip
+begin
+  prs_for_sha = client.commit_pulls("github/github", git_sha)
+rescue Octokit::ServerError => e
+  exit_gracefully "Failed to get PRs for commit #{git_sha}"
+end
+
+if prs_for_sha.empty?
+  exit_gracefully "No PRs found for commit #{git_sha}"
+end
+
+# prs_for_sha will contain all PRs that include the given commit SHA, whether that's directly or through a merge commit
+# onto another PR branch. We only want to consider PRs that have the current SHA as the head commit.
+prs_for_sha = prs_for_sha.select { |pr| pr[:head][:sha] == git_sha }
+if prs_for_sha.empty?
+  exit_gracefully "No PRs found with commit #{git_sha} as head"
+elsif prs_for_sha.count > 1
+  pr_numbers = prs_for_sha.map(&:number).join(", ")
+  exit_gracefully "Found #{prs_for_sha.count} PRs with commit #{git_sha} as head: #{pr_numbers}. Bailing out."
+end
+
+pr_for_sha = prs_for_sha.first
+
+# Skip tests if PR has a label starting with the string "Deploy train"
+if pr_for_sha.labels.count { |label| label.name.start_with?("Deploy train") } > 0
+  exit_gracefully "Skipping tests for PR with label 'Deploy train'"
+end
+
+# Skip tests if PR has the "Skip gauntlet suite" label
+if pr_for_sha.labels.count { |label| label.name.start_with?("Skip gauntlet suite") } > 0
+  exit_gracefully "PR has the Skip gauntlet suite label. Skipping tests."
+end
+
+# Finally, fetch the added and modified test files from the PR
+wanted_files_in_pr = []
+begin
+  client.pull_request_files("github/github", pr_for_sha.number).each do |file|
+    if file.filename.end_with?("_test.rb") && (file.status.eql?("added") || file.status.eql?("modified"))
+      wanted_files_in_pr.append file.filename
+    end
+  end
+rescue Octokit::ServerError => e
+  exit_gracefully "Failed to get files in PR #{pr_for_sha.number}: #{e.message}"
+end
+
+# Remove known paths that we don't want to cover
+excluded_paths = ["test/fast/", "test/rubocop/", "vendor/"]
+wanted_files_in_pr.reject! { |file| excluded_paths.any? { |path| file.start_with?(path) } }
+
+# Remove files containing the text "self.these_tests_are_order_dependent_and_yearn_to_be_random"
+wanted_files_in_pr.reject! { |file| File.foreach(file).grep(/these_tests_are_order_dependent_and_yearn_to_be_random/).any? }
+
+if wanted_files_in_pr.empty?
+  exit_gracefully "No added/modified test files found in PR #{pr_for_sha.number}"
+end
+
+$stderr.puts "Running gauntlet suite on new and modified tests."
+$stderr.puts "For questions, please refer to https://thehub.github.com/engineering/products-and-services/dotcom/testing/flakes/github-gauntlet/"
+
+puts wanted_files_in_pr
+
+# to ensure that at least one test is running with gauntlet
+# we add a dummy test to the gauntlet suite
+# otherwise a build will fail
+puts "test/test_helpers/gauntlet_dummy_test.rb"

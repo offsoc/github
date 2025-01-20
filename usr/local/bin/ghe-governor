@@ -1,0 +1,61 @@
+#!/bin/bash
+#/ Usage: ghe-governor [-h] <subcommand> args
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/
+#/ Valid subcommands are:
+#/   aggregate              Find the top (n) groups of queries for a grouping function and metric
+#/   health                 Summarize all recent activity on one or more servers
+#/   top                    Find the top (n) queries for a given metric
+#/   dump                   Dump individual operations
+#/   test-quotas            Check quota information
+#/
+#/ Try ghe-governor <subcommand> --help for more information on the arguments each subcommand takes.
+#/
+set -e
+
+usage() {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+fail() {
+  (>&2 echo "${1}")
+  exit 1
+}
+
+image=$(docker image list --format '{{.ID}}' gitmon)
+if [ -z "$image" ]; then
+  fail "could not find governor image"
+fi
+
+[ $# -eq 0 ] && usage
+
+OP="$1"
+shift
+
+export GITMON_DATA_DIR=/data/user/gitmon
+
+docker_run() {
+  opts=(-i --env GITMON_DATA_DIR -u git)
+  if test -t 1; then
+    opts+=(-t)
+  fi
+  # use running container if available
+  container=$(docker ps --format '{{.Names}}' --filter name=governor --filter status=running)
+  if [ -n "$container" ]; then
+    docker exec "${opts[@]}" \
+      "${container}" "$@"
+  else
+    # note that the query/* tools only use database files on the filesystem
+    docker run "${opts[@]}" \
+      -v /data/user/gitmon:/data/user/gitmon --rm \
+      "${image}" "$@"
+  fi
+}
+
+case "$OP" in
+  health|top|aggregate|dump|test-quotas)
+    docker_run govctl "$OP" "$@";;
+  *) usage ;;
+esac

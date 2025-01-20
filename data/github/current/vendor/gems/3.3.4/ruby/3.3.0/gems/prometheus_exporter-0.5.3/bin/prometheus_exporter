@@ -1,0 +1,99 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'optparse'
+require 'json'
+
+require_relative "./../lib/prometheus_exporter"
+require_relative "./../lib/prometheus_exporter/server"
+
+def run
+  options = {}
+  custom_collector_filename = nil
+  custom_type_collectors_filenames = []
+
+  OptionParser.new do |opt|
+    opt.banner = "Usage: prometheus_exporter [options]"
+    opt.on('-p',
+           '--port INTEGER',
+           Integer,
+           "Port exporter should listen on (default: #{PrometheusExporter::DEFAULT_PORT})") do |o|
+      options[:port] = o.to_i
+    end
+    opt.on('-b',
+           '--bind STRING',
+           String,
+           "IP address exporter should listen on (default: #{PrometheusExporter::DEFAULT_BIND_ADDRESS})") do |o|
+      options[:bind] = o.to_s
+    end
+    opt.on('-t',
+           '--timeout INTEGER',
+           Integer,
+           "Timeout in seconds for metrics endpoint (default: #{PrometheusExporter::DEFAULT_TIMEOUT})") do |o|
+      options[:timeout] = o.to_i
+    end
+    opt.on('--prefix METRIC_PREFIX', "Prefix to apply to all metrics (default: #{PrometheusExporter::DEFAULT_PREFIX})") do |o|
+      options[:prefix] = o.to_s
+    end
+    opt.on('--label METRIC_LABEL', "Label to apply to all metrics (default: #{PrometheusExporter::DEFAULT_LABEL})") do |o|
+      options[:label] = JSON.parse(o.to_s)
+    end
+    opt.on('-c', '--collector FILE', String, "(optional) Custom collector to run") do |o|
+      custom_collector_filename = o.to_s
+    end
+    opt.on('-a', '--type-collector FILE', String, "(optional) Custom type collectors to run in main collector") do |o|
+      custom_type_collectors_filenames << o
+    end
+    opt.on('-v', '--verbose') do |o|
+      options[:verbose] = true
+    end
+
+    opt.on('--unicorn-listen-address ADDRESS', String, '(optional) Address where unicorn listens on (unix or TCP address)') do |o|
+      options[:unicorn_listen_address] = o
+    end
+
+    opt.on('--unicorn-master PID_FILE', String, '(optional) PID file of unicorn master process to monitor unicorn') do |o|
+      options[:unicorn_pid_file] = o
+    end
+  end.parse!
+
+  if custom_collector_filename
+    eval File.read(custom_collector_filename), nil, File.expand_path(custom_collector_filename)
+    found = false
+
+    base_klass = PrometheusExporter::Server::CollectorBase
+
+    ObjectSpace.each_object(Class) do |klass|
+      if klass < base_klass && klass != base_klass
+        options[:collector_class] = klass
+        found = true
+      end
+    end
+
+    if !found
+      STDERR.puts "[Error] Can not find a class inheriting off PrometheusExporter::Server::CollectorBase"
+      exit 1
+    end
+  end
+
+  if custom_type_collectors_filenames.length > 0
+    custom_type_collectors_filenames.each do |t|
+      eval File.read(t), nil, File.expand_path(t)
+    end
+
+    ObjectSpace.each_object(Class) do |klass|
+      if klass < PrometheusExporter::Server::TypeCollector
+        options[:type_collectors] ||= []
+        options[:type_collectors] << klass
+      end
+    end
+  end
+
+  runner = PrometheusExporter::Server::Runner.new(options)
+
+  puts "#{Time.now} Starting prometheus exporter on #{runner.bind}:#{runner.port}"
+  runner.start
+  sleep
+end
+
+run

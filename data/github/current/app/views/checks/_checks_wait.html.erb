@@ -1,0 +1,67 @@
+
+<%
+  # checkrun is associated with a single deployment, which has a single environment,
+  # thus checkrun can have at most one approval gate and one wait gate
+  # See Environment#approval_gate, Environment#create_or_update_approval_gate and relevant methods for wait gate
+  gate_requests = check_run&.gate_requests || []
+  pending_approval_request = gate_requests.find { |r| r.state == "closed" && r.gate.type == "manual_approval" }
+  pending_custom_requests = gate_requests.find_all { |r| r.state == "closed" && r.gate.type == "custom" }
+  wait_request = gate_requests.find { |r| r.state == "closed" && r.gate.type == "timeout" }
+  check_suite = gate_requests.first&.check_run&.check_suite
+  actor = check_suite&.creator || check_suite&.pusher
+  all_pending_approval_requests = pending_requests(pending_gate_requests(check_suite))
+%>
+
+<div class="js-socket-channel js-updatable-content" <%= test_selector("check-run-gates-live-update") %>
+data-channel="<%= live_update_view_channel(check_run.gates_channel) %>"
+data-url="<%= check_run_show_checks_wait_partial_path(id: check_run.id) %>">
+  <% if pending_approval_request %>
+    <%
+      can_approve = pending_approval_request.approval_status(current_user) == "pending"
+      environment_name = pending_approval_request.gate&.environment&.name
+    %>
+    <div class="Blocked-Check-Warning d-flex flex-row flex-items-center mt-4 pl-3">
+      <span>
+        <span class="Blocked-Check-Text text-mono text-small mr-1">Waiting for review:</span>
+        <span class="Content-Text text-mono text-small">
+          <span class="wb-break-word"><%= environment_name %></span>
+          needs approval to start deploying changes.</span>
+        <% if can_approve %>
+          <%= render Actions::Environments::ApprovalsDialogComponent.new(
+            pending_gate_requests: all_pending_approval_requests,
+            approval_path: approve_or_reject_gate_requests_url,
+            actor: actor,
+            check_suite: check_suite,
+            in_check_run_logs_page: true) %>
+        <% end %>
+      </span>
+    </div>
+  <% end %>
+
+  <% if wait_request %>
+    <% environment_name = wait_request.gate&.environment&.name %>
+    <div class="Blocked-Check-Warning d-flex flex-row flex-items-center mt-4 pl-3">
+      <span class="Blocked-Check-Text text-mono text-small mr-1">Waiting for timer:</span>
+      <span class="Content-Text text-mono text-small ml-1"><%= environment_name %> has a
+        <relative-time format="elapsed" datetime="<%= (wait_request.created_at + (wait_request.gate.timeout).minutes).iso8601 %>"></relative-time>
+        wait time before proceeding.
+      </span>
+    </div>
+  <% end %>
+
+  <% if pending_custom_requests.present? %>
+    <% for pending_custom_request in pending_custom_requests %>
+      <%
+        app_name = pending_custom_request.gate&.integration&.name
+        environment_name = pending_custom_request.gate&.environment&.name
+      %>
+      <div class="Blocked-Check-Warning d-flex flex-row flex-items-center mt-4 pl-3">
+        <span>
+          <span class="Blocked-Check-Text text-mono text-small mr-1">Waiting for <%= app_name %>:</span>
+          <span class="Content-Text text-mono text-small">
+            <span class="wb-break-word"><%= environment_name %></span> has a pending deployment protection rule.</span>
+        </span>
+      </div>
+    <% end %>
+  <% end %>
+</div>

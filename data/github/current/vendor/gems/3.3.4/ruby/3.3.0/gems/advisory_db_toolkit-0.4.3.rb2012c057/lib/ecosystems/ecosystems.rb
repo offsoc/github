@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+require_relative "actions"
+require_relative "crates"
+require_relative "exceptions"
+require_relative "go"
+require_relative "hex"
+require_relative "maven"
+require_relative "npm"
+require_relative "nuget"
+require_relative "packagist"
+require_relative "pub"
+require_relative "pypi"
+require_relative "ruby_gems"

@@ -1,0 +1,119 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%#
+  Duplicated from comments/edit_form partial.
+  TODO deprecate when projects/card_issue_details_body partial is removed.
+%>
+<%graphql
+  fragment Comment on Comment {
+    createdViaEmail
+
+    ...Views::Comments::Projects::Edit::Tabnav::Comment
+    ...Views::Comments::Projects::Edit::WriteContent::Comment
+
+    ... on Issue {
+      databaseId
+    }
+
+    ... on PullRequest {
+      databaseId
+    }
+
+    ... on IssueComment {
+      pullRequest
+      issue {
+        databaseId
+      }
+    }
+
+    ... on RepositoryNode {
+      repository {
+        databaseId
+      }
+    }
+
+    ... on TeamDiscussionComment {
+      discussion {
+        team {
+          organization {
+            login
+          }
+        }
+      }
+    }
+
+    ... on GistComment {
+      gist {
+        name
+      }
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<%
+  required = false unless defined?(required)
+  unless comment.is_a?(Issue::Adapter::Base)
+    comment = Views::Comments::Projects::EditForm::Comment.new(comment)
+  end
+  subject_type = if comment.is_a?(PlatformTypes::TeamDiscussionComment)
+    "TeamDiscussion"
+  elsif comment.is_a?(PlatformTypes::GistComment)
+    "Gist"
+  end
+  subject = comment.is_a?(PlatformTypes::GistComment) ? comment.gist.name : nil
+  pull_request = if comment.is_a?(PlatformTypes::PullRequest)
+    comment.database_id
+  else
+    nil
+  end
+
+  data_preview_url = preview_path(
+    repository: comment.is_a?(PlatformTypes::RepositoryNode) ? comment.repository.database_id : nil,
+    pull_request:  pull_request,
+    issue: comment.is_a?(PlatformTypes::Issue) ? comment.database_id : (comment.is_a?(PlatformTypes::IssueComment) ? comment.issue.database_id : nil),
+    org: comment.is_a?(PlatformTypes::TeamDiscussionComment) ? comment.discussion.team.organization.login : nil,
+    subject_type: subject_type,
+    subject: subject,
+    markdown_unsupported: comment.created_via_email?)
+
+  # PullRequest should come before issue because pulls are both issues and pull requests when rendered via adapters
+  saved_reply_context = if comment.is_a?(PlatformTypes::PullRequest)
+    "pull_request"
+  elsif comment.is_a?(PlatformTypes::Issue)
+    "issue"
+  elsif comment.is_a?(PlatformTypes::IssueComment)
+    comment.pull_request ? "pull_request_comment" : "issue"
+  end
+%>
+<div class="js-previewable-comment-form previewable-comment-form write-selected" data-preview-url="<%= data_preview_url %>">
+  <%= csrf_hidden_input_for data_preview_url, class: "js-data-preview-url-csrf" %>
+  <%= render partial: "comments/projects/edit/tabnav", locals: { comment: comment, saved_reply_context: saved_reply_context, textarea_id: textarea_id } %>
+
+  <div class="clearfix"></div>
+
+  <%= render partial: "comments/stale_content_error" %>
+
+  <%= render partial: "comments/projects/edit/write_content", locals: { comment: comment, comment_context: comment_context, required: required, textarea_id: textarea_id } %>
+
+  <div class="preview-content">
+    <%= render :partial => "comments/preview_comment", locals: { side: defined?(comment.thread) && comment.thread.diff_side } %>
+  </div>
+
+  <div class="clearfix">
+    <% if comment.created_via_email? %>
+      <div class="float-left comment-md-support-link">
+        <span class="tabnav-extra">
+          <%= primer_octicon(:mail) %>
+          Email replies do not support Markdown
+        </span>
+      </div>
+    <% end %>
+
+    <div class="form-actions comment-form-actions">
+      <%= render Primer::ButtonComponent.new(scheme: :primary, type: :submit, "data-disable-with": "") do %>Update comment<% end %>
+      <%= render Primer::ButtonComponent.new(scheme: :danger, classes: "js-comment-cancel-button", "data-confirm-text": "Are you sure you want to discard your unsaved changes?") do %>
+        Cancel
+      <% end %>
+    </div>
+  </div>
+
+  <div class="comment-form-error mb-2 js-comment-update-error" hidden></div>
+</div>

@@ -1,0 +1,124 @@
+<%= render layout: "repos/code_scanning/tool_status/configurations/layout", locals: {
+  tool: tool,
+  configurations: configurations,
+  selected_item_id: :summary,
+  configuration_group: configuration_group,
+} do %>
+  <h2 class="mb-2 Subhead-heading border-bottom pb-1 mb-3"><%= (configuration_group.name || tool.name).dup.force_encoding(Encoding::UTF_8).scrub! %></h2>
+
+  <h3 class="f4 text-normal mb-2">Status</h3>
+
+  <%= render(Primer::Beta::BorderBox.new(mb: 3)) do |component| %>
+    <% component.with_row do %>
+      <% messages.fetch(tool.name, *configuration_group.categories).uniq(&:configuration_slug).tap do |errors| %>
+        <% if errors.count.zero? || configuration_group.overall_status == CodeScanning::Status::SUCCESS %>
+          <div class="d-flex" <%= test_selector("configuration-success") %>>
+            <%= render(Primer::Beta::Text.new(tag: :p, mb: 0)) do %>
+              <%= render Primer::Beta::Octicon.new(mr: 2, icon: "check-circle-fill", color: :success) %>
+            <% end %>
+            <p class="mb-0">This setup is working as expected.</p>
+          </div>
+        <% else %>
+          <div class="d-flex flex-justify-between flex-items-center" <%= test_selector("configuration-problems") %>>
+            <span>
+              <%= render(CodeScanning::Status::Icon.new(level: configuration_group.overall_status)) %>
+              <%= render(Primer::Beta::Text.new(ml: 2)) do %>
+                <% case configuration_group.overall_status %>
+                <% when CodeScanning::Status::DANGER %>
+                  Errors detected in
+                <% when CodeScanning::Status::ATTENTION %>
+                  Warnings detected in
+                <% else %>
+                  Notifications for
+                <% end %>
+                <%= pluralize(errors.count { |message| message.level == configuration_group.overall_status }, "configuration") %>.
+              <% end %>
+            </span>
+            <% if errors.one? %>
+              <%= render Primer::Beta::Link.new(
+                href: repository_code_scanning_results_tool_status_configurations_show_path(
+                  user_id: current_repository.owner_display_login,
+                  repository: current_repository,
+                  tool_name: tool.name,
+                  configuration: errors.first.configuration_slug
+                ),
+              ) do %>
+                View configuration
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <h3 class="f4 text-normal mb-2">Details</h3>
+
+  <%= render(Primer::Beta::BorderBox.new(mb: 3)) do |component| %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">Setup type</span>
+        <span class="flex-1 text-right">
+          <%= configuration_group.setup_type_with_links %>
+        </span>
+      </div>
+    <% end %>
+    <% if configuration_group.workflow_path.present? %>
+      <% component.with_row do %>
+        <div class="d-flex flex-items-center">
+          <span class="no-wrap text-bold">Workflow path</span>
+          <span class="flex-1 text-right" <%= test_selector("workflow-path") %>>
+            <% if configuration_group.workflow.present? %>
+              <%= render(Primer::Beta::Link.new(href: blob_path(configuration_group.workflow_path, current_repository.default_branch, current_repository))) { configuration_group.workflow_path.dup.force_encoding(Encoding::UTF_8).scrub! } %>
+            <% else %>
+              <%= configuration_group.workflow_path.dup.force_encoding(Encoding::UTF_8).scrub! %>
+            <% end %>
+          </span>
+        </div>
+      <% end %>
+    <% end %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">First scan</span>
+        <span class="flex-1 text-right">
+          <%= time_ago_in_words_js configuration_group.first_scan %>
+        </span>
+      </div>
+    <% end %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">Last scan</span>
+        <span class="flex-1 text-right">
+          <%= time_ago_in_words_js configuration_group.last_scan %>
+        </span>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if configuration_group.scan_events.present? || configuration_group.schedules.present? %>
+    <h3 class="f4 text-normal mb-2">Scan events</h3>
+
+    <%= render(Primer::Beta::BorderBox.new) do |component| %>
+      <% if configuration_group.schedules.present? %>
+        <% configuration_group.schedules.each do |schedule| %>
+          <% component.with_row(test_selector: "schedule-row") do %>
+            <div class="d-flex flex-items-center">
+              <span class="no-wrap px-2 text-bold">Schedule</span>
+              <span class="flex-1 text-right">
+                <%= render(CodeScanning::PrettyCronComponent.new(cron: schedule)) %>
+              </span>
+            </div>
+          <% end %>
+        <% end%>
+      <% end %>
+      <% if configuration_group.scan_events.present? %>
+        <% configuration_group.scan_events.each do |event, cfg| %>
+          <% component.with_row(test_selector: "scan-event-row") do %>
+            <%= render(CodeScanning::ToolStatus::ScanEventComponent.new(event: event, branches: cfg.try(:to_hash)&.fetch("branches", nil))) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+<% end %>

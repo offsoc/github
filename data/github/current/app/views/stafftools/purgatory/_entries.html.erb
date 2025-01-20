@@ -1,0 +1,177 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>Deleted repositories<% end %>
+<% end %>
+
+<% if view.any? %>
+<div class="Box js-check-all-container">
+  <div class="Box-header">
+    <h3 class="Box-title">
+      <input type="checkbox" data-check-all aria-label="Check all">
+      <%= view.title %>
+    </h3>
+  </div>
+
+  <ul class="standalone repositories">
+    <% view.sort(view.repos).each do |repo| %>
+    <li id="purgatory-repository-<%= repo.id %>" class="<%= view.repo_li_css repo %> Box-row clearfix js-repository-purgatory" data-restore-partial="<%= stafftools_restore_repo_partial_path(:id => repo.id) %>" data-bulk-job-status="<%= job_status_path(:id => BulkRepositoryRestoreJob.job_id([repo.id])) %>">
+      <% if repo %>
+      <%= render layout: "shared/details_dialog", locals: {
+              button_text: "Purge",
+              button_class: "btn btn-sm",
+              disabled: view.legal_hold?,
+              details_class: "float-right ml-1",
+              title: "Purge repository data"
+            } do %>
+      <div class="Box-body">
+        <% if view.legal_hold? %>
+          <p>
+            This repository is not purgable due to a legal hold.
+          </p>
+        <% else %>
+          <p>
+            Are you sure that you want to purge data for <%= repo.name_with_owner %>
+            This operation is not reversable and repository will no longer be recoverable.
+          </p>
+        <% end %>
+      </div>
+      <div class="Box-footer">
+        <%= form_tag stafftools_purge_repo_path(:id => repo.id), :class => "js-purgatory-purge" do %>
+        <button type="submit" class="btn btn-block btn-danger" <%= "disabled" if view.legal_hold? %>>
+          Purge Repository Data
+        </button>
+        <% end %>
+      </div>
+      <% end %>
+
+      <% unless view.belongs_to_a_soft_deleted_org?(repo) %>
+        <%= render layout: "shared/details_dialog", locals: {
+          button_text: "Restore",
+          button_class: "btn btn-sm",
+          details_class: "float-right ml-1",
+          title: "Restore repository data"
+        } do %>
+          <div class="Box-body">
+            <p>
+              Are you sure you want to restore repository <%= repo.name_with_owner %>?
+            </p>
+            <% if view.private_fork?(repo) %>
+            <p>
+              <b>This repo is a private fork. Please ensure the owner has
+                the necessary permissions before restoring.</b>
+            </p>
+            <% elsif repo.deleted_at.blank? %>
+            <p>
+              <b>The deleted_at field for this repository is not set. This repository may have
+                failed creation, and it may not exist on disk. Please check the audit log to ensure
+                the repository was successfully created before restoring.</b>
+            </p>
+            <% end %>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag stafftools_restore_repo_path(:id => repo.id), :class => "js-purgatory-restore" do %>
+              <div class="form-checkbox">
+                <label>
+                  <input name="lock" type="checkbox" value="true">
+                  Lock repository
+                  <span class="note">
+                    Block access to this repository to allow network extraction, visibility changes, etc.
+                  </span>
+                </label>
+              </div>
+              <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>
+                Restore
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+
+     <%= render layout: "shared/details_dialog", locals: {
+              button_text: "Detach",
+              button_class: "btn btn-sm",
+              details_class: "float-right ml-1",
+              title: "Detach deleted repository"
+            } do %>
+        <div class="Box-body">
+          <p>
+            Are you sure you want to detach the deleted repository <%= repo.name_with_owner %>? This is only necessary when attempting to dereference an unwanted commit to allow garbage collecting on the remaining network.
+          </p>
+        </div>
+        <div class="Box-footer">
+          <%= form_tag stafftools_detach_repo_path(id: repo.id), class: "js-purgatory-detach" do %>
+            <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>
+              Detach
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if repo.deleted_at %>
+      <span class="js-repository-status float-right timetext">
+        Deleted <%= time_ago_in_words_js repo.deleted_at %>
+      </span>
+      <% else %>
+        <span class="js-repository-status float-right timetext">
+          Deletion time not set
+        </span>
+      <% end %>
+
+      <input type="checkbox" class="js-purgatory-repo-select-checkbox" name="ids[]" value="<%= repo.id %>" data-check-all-item aria-label="Select <%= repo.name_with_owner %>">
+      <%= primer_octicon(view.repo_span_symbol(repo)) %>
+      <%= repo.name_with_owner %>
+      <small>
+        <%= stafftools_selected_link_to \
+                    primer_octicon(:rocket),
+                    stafftools_repository_path({:user_id => "#{repo.owner.login}", :id => "#{repo.name}"}),
+                    :class => "tooltipped tooltipped-n v-hidden js-stafftools-repository-link",
+                    "aria-label" => "View repository in stafftools" %>
+        &ndash;
+        <%= stafftools_selected_link_to \
+                    "##{repo.id}",
+                    stafftools_audit_log_path(:query => driftwood_ade_query?(current_user) ? "webevents | where repo_id == #{repo.id}" : "repo_id:#{repo.id}"),
+                    :class => "tooltipped tooltipped-n",
+                    "aria-label" => "Search audit log" %>
+      </small>
+      <% end %>
+    </li>
+    <% end %>
+  </ul>
+
+  <div class="Box-footer d-flex">
+    <%= render layout: "shared/details_dialog", locals: {
+        button_text: "Restore",
+        button_class: "btn btn-sm btn-primary m1 js-purgatory-restore-bulk-button",
+        details_class: "float-right flex-auto text-right js-purgatory-restore-bulk-details",
+        title: "Restore repository data",
+        disabled: true,
+      } do %>
+    <div class="Box-body text-left" id="js-purgatory-restore-bulk-status" data-started-message="Started" data-failure-message="Something went wrong" data-nonselected-message="You didn't select any repositories">
+      Are you sure you want to restore the <span data-check-all-count>0</span> selected repositories?
+      <p class="js-purgatory-restore-bulk-private-fork-message" hidden>
+        <b>Some of the selected repositories (highlighted yellow) are private forks.</b>
+        Please ensure the owner has the necessary permissions before restoring. For example,
+        are they on a team that can read the parent repository?
+      </p>
+      <p class="js-purgatory-restore-bulk-deleted-at-message" hidden>
+        <b>Some of the selected repositories (highlighted yellow) do not have deleted_at set.
+           These repositories may have failed creation, and they may not exist on disk.
+           Please check the audit log to ensure these repositories were successfully created
+           before restoring.</b>
+      </p>
+    </div>
+    <div class="Box-footer">
+      <%= form_tag stafftools_restore_repo_bulk_path, :class => "js-purgatory-restore-bulk" do %>
+      <%= render Primer::ButtonComponent.new(block: true, scheme: :danger, classes: "js-purgatory-restore-bulk") do %>
+        Restore
+      <% end %>
+      <% end %>
+    </div>
+    <% end %>
+  </div>
+</div>
+<% else %>
+  <p>This user has no deleted repositories.</p>
+<% end %>

@@ -1,0 +1,66 @@
+#!/bin/bash
+# USAGE: ghe-app-config-for github <env vars prefix>
+# This script is intended to *only* be used as a plugin to
+# nomad job templates. It reads app specific vars in ghe-config
+# and outputs nomad conformant env vars and corresponding interpolated
+# meta var names. This to be used in conjunction with 
+# the function all_app_config in /usr/local/share/enterprise/lib/configapply/view_helpers.rb
+# which is called from the /templates/etc/nomad.d/config.hcl.erb
+set -e
+
+if [[ -z "$*" ]]; then
+  echo "Argument required: app name"
+  exit 1
+fi
+
+app_name="$1"
+end_vars_prefix="${2:-ENTERPRISE}"
+
+declare -A env_map
+
+function map_env_vars {
+  local conf_name=${1:-github}
+  local conf_file="/data/user/common/$conf_name.conf"
+  local prefix=
+  local val_prefix=
+  if [[ $conf_name == "cluster" ]]; then
+    # no-op if not a cluster
+    [ ! -f /etc/github/cluster ] && return 0
+    local node_name
+    node_name=$(cat /etc/github/cluster)
+    prefix="cluster\\..*\\.$node_name.app.$app_name"
+    val_prefix="cluster\\..*\\"
+  elif [[ "$conf_name" == "github" ]]; then
+    prefix="app.$app_name"
+  else
+    echo "invalid config file name $conf_name"
+    return 1
+  fi
+
+  readarray -t raw_config < <(ghe-config -f "$conf_file" --list | grep "$prefix")
+
+  for l in "${raw_config[@]}"; do
+    key=$(echo ${end_vars_prefix}_)
+    key+="$(echo "$l" | sed "s/$prefix\.//g" | cut -d= -f1 | tr "-" "_" | tr "[:lower:]" "[:upper:]" )"
+    # note the value isn't the actual value in the config file.
+    # it is a corresponding key in the client metadata for the node
+    # see also all_app_config in view_helpers.rb
+    val_key=
+    if [[ -n "$val_prefix" ]]; then
+      val_key=$(echo "$l" | sed "s/$val_prefix\.//g" | cut -d= -f1)
+    else
+      val_key=$(echo "$l" | cut -d= -f1)
+    fi
+
+    value="meta.$val_key"
+    env_map["$key"]="$value"
+  done
+}
+
+map_env_vars github
+map_env_vars cluster
+
+for k in "${!env_map[@]}"; do
+  val=${env_map[$k]}
+  echo "$k={{ env \"$val\" }}"
+done

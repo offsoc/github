@@ -1,0 +1,57 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-nomad-cleanup [options]
+#/
+#/ Drains the nomad nodes, stops nomad and deletes the nomad data directory in cluster.
+#/
+#/ OPTIONS:
+#/  -h | --help         Show this message.
+#/
+set -euo pipefail
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+ARGS=$(getopt --name "$0" --long help --options h -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+echo "Drain nomad on all nodes."
+nomad_nodes=$(ghe-nomad-api nodes | jq -r '.[].ID')
+# Trigger all drains in parallel.
+# First mark all nodes as ineligible for scheduling
+# so nomad won't try to migrate services
+for node in $nomad_nodes; do
+  nomad node eligibility -disable "$node"
+done
+
+# Now drain each node, -force is equivalent
+# of -deadline 0s. It means don't wait for
+# migrations to work before shutting down the services
+# on the node. It *does* honor the service's kill_timeout
+# and kill_signal, so it fully drains the service's outstanding
+# connections or waits until "kill_timeout" before SIGKILLing
+# the service.
+for node in $nomad_nodes; do
+  nomad node drain -enable -force -detach "$node"
+done
+
+# Monitor drains sequentially until completion.
+for node in $nomad_nodes; do
+  nomad node drain -monitor "$node"
+done
+
+# Cleanup each of the nomad node without drain (since it is already drained and detached)
+ghe-cluster-each -- ghe-nomad-cleanup -y --skip-drain

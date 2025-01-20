@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -e
+
+LAUNCH_IMAGE_TAG="launch:$(cat /data/docker-image-tags/launch_image_tag)"
+
+MYSQL_USERNAME="${MYSQL_USERNAME:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)}"
+export DATABASE_URL="$MYSQL_USERNAME:$MYSQL_PASSWORD@tcp(localhost:3307)/github_enterprise?parseTime=true"
+export DEPLOYER_DATABASE_URL=${DATABASE_URL}
+export PAYLOADS_DATABASE_URL=${DATABASE_URL}
+export LAUNCH_LOG_DEBUG="${LAUNCH_LOG_DEBUG:-false}"
+
+GITHUB_TWIRP_HMAC_SECRET=not_needed_if_actions_never_enabled
+is_actions_ever_enabled=$(jq -r .is_actions_ever_enabled /etc/github/configapply.json)
+if [ "$is_actions_ever_enabled" = "true" ]; then
+    GITHUB_TWIRP_HMAC_SECRET=$(ghe-config secrets.github.api-internal-twirp-hmac-keys-for-launch)
+fi
+export GITHUB_TWIRP_HMAC_SECRET
+
+# Note: cmd is an array to handle quoted values appropriately
+case "$1" in
+migrate-deployer)
+    cmd=(migratorctl migrate deployer -d "$DATABASE_URL" -s migrations/deployer)
+    ;;
+migrate-payloads)
+    cmd=(migratorctl migrate payloads -d "$DATABASE_URL" -s migrations/actions_workflow_payloads)
+    ;;
+*)
+    echo "Usage: ghe-launch (migrate-deployer | migrate-payloads)" >&2
+    exit 1
+    ;;
+esac
+shift
+
+docker run --rm --network host \
+    -e LAUNCH_ENV=production \
+    -e LAUNCH_MODE=enterprise \
+    -e IS_DRY_RUN=false \
+    -e DISABLE_FRENO=true \
+    -e STATS_PREFIX=launch \
+    -e STATS_ADDR=localhost:8125 \
+    -e GITHUB_TWIRP_ADDR=http://localhost:1337/api/v3/internal \
+    -e GITHUB_TWIRP_HMAC_SECRET \
+    -e DATABASE_URL \
+    -e DEPLOYER_DATABASE_URL \
+    -e PAYLOADS_DATABASE_URL \
+    -e LAUNCH_LOG_DEBUG \
+    -i "$LAUNCH_IMAGE_TAG" \
+    "${cmd[@]}" "$@"

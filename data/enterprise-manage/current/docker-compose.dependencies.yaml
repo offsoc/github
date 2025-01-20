@@ -1,0 +1,176 @@
+version: "3.6"
+
+networks:
+  internal:
+
+volumes:
+  enterprise-manage-vendor-gems:
+  ldap-vendor-gems:
+  ldap-1-slapd-db:
+  ldap-1-slapd-schema:
+  ldap-2-slapd-db:
+  ldap-2-slapd-schema:
+  ldap-3-slapd-db:
+  ldap-3-slapd-schema:
+  ldap-4-slapd-db:
+  ldap-4-slapd-schema:
+
+services:
+  mysql:
+    image: mysql:5.7
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_USER: "mc"
+      MYSQL_PASSWORD: "mc"
+      MYSQL_DATABASE: "github_enterprise"
+    ports:
+      - 3306
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      retries: 10
+      timeout: 60s
+    networks:
+      - internal
+
+  # Consul Cluster
+  consul-1:
+    image: consul:1.6
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+    networks:
+      - internal
+
+  consul-2:
+    image: consul:1.6
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+    command: agent -dev -join=consul-1
+    depends_on:
+      - consul-1
+    networks:
+      - internal
+
+  consul-3:
+    image: consul:1.6
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+    command: agent -dev -join=consul-1
+    depends_on:
+      - consul-1
+    networks:
+      - internal
+
+  ldap-1:
+    environment:
+      - LDAP_DOMAIN=github.com
+      - LDAP_BASE=dc=github,dc=com
+      - LDAP_ADMIN_PASSWORD=secret
+      - LDAP_TLS=false
+    image: osixia/openldap:1.3.0
+    command: --copy-service --loglevel debug
+    volumes:
+      - ./test/fixtures/default.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/default.ldif
+      - ldap-1-slapd-db:/var/lib/ldap/
+      - ldap-1-slapd-schema:/etc/ldap/slapd.d/
+    networks:
+      - internal
+
+  ldap-2:
+    environment:
+      - LDAP_DOMAIN=github.com
+      - LDAP_BASE=dc=github,dc=com
+      - LDAP_ADMIN_PASSWORD=secret
+      - LDAP_TLS=false
+    image: osixia/openldap:1.3.0
+    command: --copy-service --loglevel debug
+    volumes:
+      - ./test/fixtures/github-with-subgroups.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/github-with-subgroups.ldif
+      - ldap-2-slapd-db:/var/lib/ldap/
+      - ldap-2-slapd-schema:/etc/ldap/slapd.d/
+    networks:
+      - internal
+
+  ldap-3:
+    environment:
+      - LDAP_DOMAIN=github.com
+      - LDAP_BASE=dc=github,dc=com
+      - LDAP_ADMIN_PASSWORD=secret
+      - LDAP_TLS=false
+    image: osixia/openldap:1.3.0
+    command: --copy-service --loglevel debug
+    volumes:
+      - ./test/fixtures/ghe.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/ghe.ldif
+      - ldap-3-slapd-db:/var/lib/ldap/
+      - ldap-3-slapd-schema:/etc/ldap/slapd.d/
+    networks:
+      - internal
+
+  ldap-4:
+    environment:
+      - LDAP_DOMAIN=github.com
+      - LDAP_BASE=dc=github,dc=com
+      - LDAP_ADMIN_PASSWORD=secret
+      - LDAP_TLS=false
+    image: osixia/openldap:1.3.0
+    command: --copy-service --loglevel debug
+    volumes:
+      - ./test/fixtures/github.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/github.ldif
+      - ldap-4-slapd-db:/var/lib/ldap/
+      - ldap-4-slapd-schema:/etc/ldap/slapd.d/
+    networks:
+      - internal
+
+  ghes-manage-gateway:
+    image: "ghcr.io/github/ghes-manage:sha-${GHES_MANAGE_SHA}"
+    entrypoint: /bin/ghes-manage --gateway
+    environment:
+      - PRIMARY_AGENT_HOSTNAME=ha-primary
+      - AUTH_HMAC_KEY=eb2045eb46f9ded88d427127b84eb83b68f6185f8a61ce4443cefe9fcb8b0439
+      - ENTERPRISE_DB_HOST=mysql
+      - ENTERPRISE_DB_USER=mc
+      - ENTERPRISE_DB_PASS=mc
+      - GM_ENVIRONMENT=testing
+    depends_on:
+       mysql:
+         condition: service_healthy
+       ghes-manage-agent:
+         condition: service_healthy
+    healthcheck:
+      test: wget -nv -t1 -O - http://localhost:3100/_ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+        - internal
+
+  ghes-manage-gateway-proxy:
+    networks:
+      - internal
+    image: nginx
+    depends_on:
+       ghes-manage-gateway:
+         condition: service_healthy
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: service nginx status || exit 1
+      timeout: 15s
+    volumes:
+      - ./nginx-dev.conf:/etc/nginx/nginx.conf:ro
+
+  ghes-manage-agent:
+    hostname: ha-primary
+    image: "ghcr.io/github/ghes-manage:sha-${GHES_MANAGE_SHA}"
+    ports:
+      - "3101:3101"
+    entrypoint: /bin/ghes-manage --agent
+    environment:
+      - AUTH_HMAC_KEY=eb2045eb46f9ded88d427127b84eb83b68f6185f8a61ce4443cefe9fcb8b0439
+      - GM_ENVIRONMENT=testing
+    healthcheck:
+      test: wget -nv -t1 -O - http://localhost:3101/_ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal

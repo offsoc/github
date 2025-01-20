@@ -1,0 +1,73 @@
+#!/bin/bash
+#/ Usage: ghe-actions-check-connectivity [-hst]
+#/
+#/ Check network connectivity from Actions services source to Actions service target.
+#/
+#/ OPTIONS:
+#/   -h  | --help            Show this message
+#/   -s  | --source          The name of the source service (actions, mps, token, artifactcache).
+#/                           Default to token if not specified.
+#/   -t  | --target          The name of the target service (actions, mps, token, artifactcache).
+#/                           Default to mps if not specified.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+source="token"
+target="mps"
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -s|--source)
+            source="$(to-lower "$2")"
+            shift 2
+            ;;
+        -t|--target)
+            target="$(to-lower "$2")"
+            shift 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if ! check-service-name "$source";then
+    echo "skipping connectivity test because $source is not active or is not a valid service name"
+    exit 0
+fi
+
+if ! check-service-name "$target";then
+    echo "skipping connectivity test because $target is not active or is not a valid service name"
+    exit 0
+fi
+
+invoke_webrequest_cmd="Invoke-WebRequest http://localhost:$(action-port "$target")/_apis/health"
+
+echo "Check connectivity from $(capitalize "$source") to $(capitalize "$target")..."
+
+out=$(ghe-actions-console -s "$source" -c "$invoke_webrequest_cmd" 2>&1) || ret=$?
+if echo "$out" | grep  -q "200 OK"; then
+    echo "Connectivity from $(capitalize "$source") to $(capitalize "$target") is healthy!"
+else
+    >&2 echo "Connectivity test from $(capitalize "$source") to $(capitalize "$target") failed:"
+    >&2 printf '==%.0s' {1..30}
+    >&2 echo
+    >&2 echo "$out"
+    >&2 echo
+    >&2 printf '==%.0s' {1..30}
+    >&2 echo
+    exit 1
+fi

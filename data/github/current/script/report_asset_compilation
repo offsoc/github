@@ -1,0 +1,144 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "datadog/statsd"
+
+Stats = Datadog::Statsd.new("localhost", 28126, tags: ["application:github"])
+
+class AssetReporter
+  WEBPACK_COMPILED_MESSAGE = /compiled.* in (?<time>\d+) ms/.freeze
+
+  def submit_metrics
+    # Production
+    gauge("assets.js.compilation.time", webpack_js_production_time, tags: ["bundle:total", "env:production", "bundler:webpack"])
+    gauge("assets.css.compilation.time", webpack_css_production_time, tags: ["bundle:total", "env:production", "bundler:webpack"])
+
+    # Development
+    webpack_js = webpack_js_development_times
+    gauge("assets.js.compilation.time", webpack_js[:compilation], tags: ["bundle:total", "env:development", "bundler:webpack"])
+    gauge("assets.js.recompilation.time", webpack_js[:recompilation], tags: ["bundle:behaviors", "env:development", "bundler:webpack"])
+    webpack_css = webpack_css_development_times
+    gauge("assets.css.compilation.time", webpack_css[:compilation], tags: ["bundle:total", "env:development", "bundler:webpack"])
+    gauge("assets.css.recompilation.time", webpack_css[:recompilation], tags: ["bundle:global", "env:development", "bundler:webpack"])
+  end
+
+  private
+
+  def gauge(stat, value, tags: [])
+    Stats.gauge(stat, value, tags: tags)
+    puts "DOGSTATS: #{stat} [#{tags.join(', ')}] #{value}|g"
+  end
+
+  def webpack_js_production_time
+    puts "Compiling production JS with webpack..."
+
+    total = time_execution do
+      `bin/npm run webpack:prod`
+    end
+
+    clean_cache
+    total
+  end
+
+  def webpack_css_production_time
+    puts "Compiling production CSS with webpack..."
+
+    total = time_execution do
+      `bin/npm run webpack:css:prod`
+    end
+
+    clean_cache
+    total
+  end
+
+  def webpack_js_development_times
+    run_with_recompile("bin/npm run webpack:serve 2>&1", matcher: WEBPACK_COMPILED_MESSAGE)
+  end
+
+  def webpack_css_development_times
+    run_with_recompile("bin/npm run webpack:css:serve 2>&1", matcher: WEBPACK_COMPILED_MESSAGE, css: true)
+  end
+
+  def run_with_recompile(cmd, matcher:, pre_matcher: nil, css: false)
+    stats = {}
+
+    puts "Compiling development #{css ? "CSS" : "JS"}..."
+
+    # Using IO.popen so we can analyze the output while the process is running.
+    # This guarantees that compilation ends without having to add arbitrary `sleep` calls.
+    IO.popen(cmd) do |io|
+      stats[:compilation] = wait_for_compilation(io, matcher: matcher, pre_matcher: pre_matcher)
+
+      puts "Recompiling development #{css ? "CSS" : "JS"}..."
+      # Update behaviors file to force recompilation
+      File.open(css ? "app/assets/stylesheets/bundles/global/index.scss" : "app/assets/modules/behaviors.ts", "a") { |f| f << "\n" }
+
+      stats[:recompilation] = wait_for_compilation(io, matcher: matcher)
+
+      # We want to make sure we kill all processed spawned from IO.popen, espceially webpack-dev-server
+      kill_child_processes(io.pid)
+    end
+
+    clean_cache
+
+    stats
+  end
+
+  # Clean up the cache directories to make sure we measure cold-starts.
+  def clean_cache
+    `rm -rf tsconfig.tsbuildinfo public/assets/`
+  end
+
+  # Rollup doesn't have a clear "end" message, so we may need to analyze two lines to make sure it ended.
+  # In that case, the output will need to match first the "pre_matcher" and then the "matcher".
+  def wait_for_compilation(io, matcher:, pre_matcher: nil)
+    pre_match = pre_matcher.nil?
+
+    time_execution do
+      while (line = io.gets) do
+        break if line.match?(matcher) && pre_match
+        pre_match = true if pre_matcher && line.match?(pre_matcher)
+      end
+    end
+  end
+
+  # Kill all child processes spawned from IO.popen.
+  def kill_child_processes(pid)
+    child_pids(pid).reverse_each do |cpid|
+      begin
+        Process.kill("QUIT", cpid.to_i)
+      rescue Errno::ESRCH
+        # ignore
+      end
+    end
+  end
+
+  # Recursively find all child processes of the given pid using `ps -ef`.
+  def child_pids(pid)
+    # get children
+    ps = `ps -ef | grep #{pid}`
+
+    child_pids = ps.split("\n").map do |line|
+      parts = line.split(/\s+/)
+      parts[1] if parts[2] == pid.to_s
+    end.compact
+
+    # get grandchildren
+    grandchild_pids = child_pids.map do |cpid|
+      child_pids(cpid)
+    end.flatten
+
+    child_pids + grandchild_pids
+  end
+
+  # Use clock_gettime to time the execution of the given block.
+  def time_execution
+    start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+    finish = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    finish - start
+  end
+end
+
+AssetReporter.new.submit_metrics

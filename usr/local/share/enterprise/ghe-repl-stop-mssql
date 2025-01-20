@@ -1,0 +1,87 @@
+#!/bin/bash
+#/ Usage: ghe-mssql-repl-stop [-h]
+#/
+#/ Stop MSSQL replication for this replica, remove it from existing availability group
+#/ and drop the availability group locally so the replica can later be added back to it.
+#/ This script supports HA and full-cluster environments.
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage() {
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+}
+
+# show usage if -h is passed
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+    esac
+done
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-repl-lib
+. ghe-mssql-repl-lib
+
+ensure_mssql_instance_is_replica
+
+role=$(get-ag-role)
+mssql_primary_instance_node_ip="$(mssql_primary_ip)"
+
+if ! echo "$role" | grep -q "PRIMARY" && ! echo "$role" | grep -q "SECONDARY"; then
+  echo "This host is not part of any availability group. Aborting."
+  exit 1
+fi
+
+# This replica is now a MSSQL PRIMARY but it's not the mssql-master set in cluster.conf,
+# therefore a failover must have happened. We could check if $(hostname) != $(ghe-config cluster.mssql-master),
+# but since we call ensure_mssql_instance_is_replica above, we know that $(hostname) != $(ghe-config cluster.mssql-master)
+if echo "$role" | grep -q "PRIMARY"; then
+  echo "Replica is now in PRIMARY role. Failover has already happened."
+
+  if ! ssh_cmd $mssql_primary_instance_node_ip -- /bin/true; then
+    echo "Old primary node is unavailable. Forced failover may have happened."
+  else
+    echo "Removing old primary from availability group [with best effort] ..."
+    # With the -p option, ghe-mssql-console runs the query on the mssql-master defined in cluster.conf
+    ghe-mssql-console -y -q "ALTER AVAILABILITY GROUP [ha] REMOVE REPLICA ON N'$(ssh_cmd $mssql_primary_instance_node_ip -- hostname)'" || true
+
+    echo "Recovering old primary for standalone setup [with best effort] ..."
+    # With the -p option, ghe-mssql-console runs the query on the mssql-master defined in cluster.conf
+    ghe-mssql-console -y -p -q "DROP AVAILABILITY GROUP [ha]" || true
+    ssh_cmd $mssql_primary_instance_node_ip -- "/usr/local/share/enterprise/ghe-mssql-repl-recover" || true
+  fi
+
+  echo "Dropping availability group on this replica..."
+  ghe-mssql-console -y -q "DROP AVAILABILITY GROUP [ha]"
+else
+  echo "Removing replica from availability group..."
+  ghe-mssql-console -y -p -q "ALTER AVAILABILITY GROUP [ha] REMOVE REPLICA ON N'$(hostname)';"
+
+  echo "Dropping availability group on this replica..."
+  ghe-mssql-console -y -q "DROP AVAILABILITY GROUP [ha]"
+
+  echo "Dropping replication endpoint and certificate..."
+  ghe-mssql-console -y -q "DROP ENDPOINT agep"
+  ghe-mssql-console -y -q "DROP CERTIFICATE dbm_certificate"
+  sudo rm -f /data/user/mssql/data/endpoint.cer
+  sudo rm -f /data/user/mssql/data/endpoint.pvk
+
+  echo "Bringing databases back ONLINE (from RESTORING) on replica..."
+  ghe-mssql-repl-recover
+fi

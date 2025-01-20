@@ -1,0 +1,262 @@
+<%
+signature = Commits::SignedCommitBadge.for(item, current_user: current_user)
+
+if !defined? badge_size
+  badge_size = "small"
+end
+
+if !defined? classes
+  classes = ""
+end
+
+if !defined? dropdown_direction
+  dropdown_direction = "s"
+end
+
+if !defined? item_type
+  item_type = item.class.name.downcase
+end
+
+verification_status = (signature&.verification_status || item&.verification_status)&.downcase&.to_sym
+unique_dialog_id = "#{SecureRandom.hex(4)}-dialog"
+%>
+
+<% if verification_status.present? && verification_status != :unsigned %>
+  <% if verification_status == :unverified %>
+    <% if signature.present? && signature.state == "GPGVERIFY_UNAVAILABLE" %>
+      <span class="signed-commit-badge signed-commit-badge-<%= badge_size %> <%= classes %>">
+        <%= render(Primer::Beta::Octicon.new(icon: "alert", size: :small, mr: 2, aria: {label: "The commit signature verification service is not available"})) %>
+      </span>
+    <% else %>
+      <%= render Primer::Alpha::Dialog.new(
+          title: "Unverified",
+          size: :small,
+          id: "commit-badge-unverified-#{unique_dialog_id}",
+          test_selector: "commit-badge-unverified"
+        ) do |dialog| %>
+        <% dialog.with_show_button(
+          classes: "signed-commit-badge signed-commit-badge-#{badge_size} unverified #{classes}"
+        ).with_content("Unverified") %>
+
+        <% dialog.with_header(show_divider: true, bg: :subtle, style: "border-radius: 12px 12px 0 0") do %>
+          <div class="d-flex">
+            <div class="pr-1">
+              <%= render(Primer::Beta::Octicon.new(icon: "unverified", size: :small, mr: 2)) %>
+            </div>
+            <div class="flex-1">
+              <% if signature.nil? %>
+                  This <%= item_type %> is not signed, but one or more authors requires that any <%= item_type %> attributed to them is signed.
+              <% else %>
+                <%=
+                case signature.state
+                when "INVALID"
+                  "The signature in this #{item_type} could not be verified. Someone may be trying to trick you."
+                when "MALFORMED_SIG"
+                  "We were unable to parse the signature in this #{item_type}."
+                when "UNKNOWN_KEY"
+                  if signature.signer&.is_viewer?
+                    key_name = signature.typename == "SshSignature" ? "SSH" : "GPG"
+                    link_to("Upload your public signing #{key_name} key", settings_keys_path) + " to verify your signature."
+                  else
+                    "This user has not yet uploaded their public signing key."
+                  end
+                when "BAD_EMAIL"
+                  "The email in this signature doesn’t match the committer email."
+                when "UNVERIFIED_EMAIL"
+                  if signature.signer&.is_viewer?
+                    link_to("Verify your email address", settings_email_preferences_path) + " to verify your signature."
+                  else
+                    "The committer email address is not verified."
+                  end
+                when "NO_USER"
+                  "No user is associated with the committer email."
+                when "UNKNOWN_SIG_TYPE"
+                  "GitHub supports GPG, SSH, and S/MIME signatures. We don’t know what type of signature this is."
+                when "GPGVERIFY_ERROR"
+                  "We had a problem verifying this signature. Please try again later."
+                when "NOT_SIGNING_KEY"
+                  "The key that signed this doesn't have usage flags that allow signing."
+                when "EXPIRED_KEY"
+                  "The key that signed this is expired."
+                when "OCSP_ERROR"
+                  "We had a problem checking for revoked certificates. Please try again later."
+                when "OCSP_REVOKED"
+                  "One or more certificates in the chain has been revoked."
+                when "BAD_CERT"
+                  "The signing certificate or its chain could not be verified."
+                when "GPGVERIFY_UNAVAILABLE", "UNSIGNED"
+                  # These cases are handled above.
+                else
+                  "We were unable to verify this signature."
+                end
+                %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
+        <% dialog.with_body do %>
+          <div class="signed-commit-footer">
+            <% if signature.present? %>
+              <% if signature.typename == "GpgSignature" && signature.key_id %>
+                <span class="d-block">GPG key ID: <span class="color-fg-muted"><%= signature.key_id %></span></span>
+                <div class="my-1">
+                  <% if signature.expired? %>
+                    <%= render Primer::Beta::Label.new(scheme: :accent, test_selector: 'expired-label') do %>Expired<% end %>
+                  <% end %>
+                  <% if signature.revoked? %>
+                    <%= render Primer::Beta::Label.new(scheme: :attention, test_selector: 'revoked-label') do %>Revoked<% end %>
+                  <% end %>
+                </div>
+              <% elsif signature.typename == "SmimeSignature" %>
+                <%= render :partial => "commits/smime_cert_info", :locals => { :signature => signature } %>
+              <% elsif signature.typename == "SshSignature" && signature.key_fingerprint %>
+                <span class="d-block">SSH Key Fingerprint: <span class="color-fg-muted"><%= signature.key_fingerprint %></span></span>
+              <% end %>
+            <% end %>
+            <%= commit_signature_verification_help_link %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% elsif verification_status == :partially_verified %>
+    <%= render Primer::Alpha::Dialog.new(
+      title: "Partially verified",
+      size: :small,
+      id: "commit-badge-partially-verified-#{unique_dialog_id}",
+      test_selector: "commit-badge-partially-verified"
+    ) do |dialog| %>
+      <% dialog.with_show_button(
+        classes: "signed-commit-badge signed-commit-badge-#{badge_size} verified #{classes}"
+      ).with_content("Partially verified") %>
+
+      <% dialog.with_header(show_divider: true, bg: :subtle, style: "border-radius: 12px 12px 0 0") do %>
+        <div class="d-flex">
+          <div class="d-inline-block pr-1">
+            <%= render(Primer::Beta::Octicon.new(icon: "verified", size: :small, mr: 2)) %>
+          </div>
+          <span class="flex-1 f5">
+            <% if signature.signed_by_github? %>
+              This <%= item_type %> was created on <%= GitHub.enterprise? ? "GitHub Enterprise Server and signed with a" : "GitHub.com and signed with GitHub’s"%> <strong class="color-fg-success">verified signature</strong>.
+            <% else %>
+              This <%= item_type %> is signed with the committer’s <strong class="color-fg-success">verified signature</strong>.
+            <% end %>
+            <% if signature.expired? %>
+              The key has expired<%= signature.revoked? ? " and has been revoked" : "" %>.
+            <% elsif signature.revoked? %>
+              The key has been revoked.
+            <% end %>
+          </span>
+        </div>
+      <% end %>
+
+      <% dialog.with_body(p: 0) do %>
+        <% unless signature.signed_by_github? %>
+          <div class="p-3 d-flex border-bottom">
+            <a class="pr-1" aria-label="<%= signature.signer.display_login %>" href="<%= user_path(signature.signer.display_login) %>">
+              <img src="<%= signature.signer.avatar_url  %>" alt="" class="avatar avatar-2 avatar-user mr-2">
+            </a>
+
+            <span class="signed-commit-signer-name flex-1 text-small">
+              <a class="color-fg-default text-bold" href="<%= user_path(signature.signer.display_login) %>"><%= signature.signer.display_login %></a>’s contribution has been verified via
+                <% case signature.typename %>
+                  <% when "GpgSignature" %>
+                    GPG key.
+                  <% when "SmimeSignature" %>
+                    S/MIME signature.
+                  <% when "SshSignature" %>
+                    SSH key.
+                  <% else %>
+                    an unknown signature type.
+                <% end %>
+            </span>
+          </div>
+        <% end %>
+
+        <div class="px-3 py-3 color-bg-attention d-flex rounded-bottom-2">
+          <div class="d-inline-block pr-1" >
+            <%= render(Primer::Beta::Octicon.new(icon: "info", size: :small, mr: 2)) %>
+          </div>
+          <span class="flex-1 text-small">
+            We cannot verify signatures from co-authors, and some of the co-authors attributed to this commit require their commits to be signed.
+          </span>
+        </div>
+      <% end %>
+    <% end %>
+
+<%
+  # our default behavior is to show `Verified` if any valid signature exists
+  # in order to prevent a noticeable change for all users until the feature is rolled out for everyone,
+  # we need to revert to the old behavior when the viewer has not been enrolled in the feature.
+  # For this reason, a `partially_verified` commit should be shown as a `verified` commit to anyone who is not in the feature rollout.
+%>
+  <% elsif verification_status == :verified %>
+    <%= render Primer::Alpha::Dialog.new(
+      title: "Verified",
+      size: :small,
+      id: "commit-badge-verified-#{unique_dialog_id}",
+      test_selector: "commit-badge-verified"
+    ) do |dialog| %>
+      <% dialog.with_show_button(
+        classes: "signed-commit-badge signed-commit-badge-#{badge_size} verified #{classes}"
+      ).with_content(signature.state == "VALID" ? "Verified" : "Pending") %>
+
+      <% dialog.with_header(show_divider: true, bg: :subtle, style: "border-radius: 12px 12px 0 0") do %>
+        <div class="d-flex">
+          <div class="pr-1">
+            <%= render(Primer::Beta::Octicon.new(icon: "verified", size: :small, mr: 2, color: :success)) %>
+          </div>
+          <div class="flex-1">
+            <% case signature.state %>
+            <% when "VALID" %>
+              <% if signature.signed_by_github? %>
+                This <%= item_type %> was created on <%= GitHub.enterprise? ? "GitHub Enterprise Server and signed with a" : "GitHub.com and signed with GitHub’s"%> <strong class="color-fg-success">verified signature</strong>.
+              <% else %>
+                This <%= item_type %> was signed with the committer’s <strong class="color-fg-success">verified signature</strong>.
+              <% end %>
+              <% if signature.expired? %>
+                The key has expired<%= signature.revoked? ? " and has been revoked" : "" %>.
+              <% elsif signature.revoked? %>
+                The key has been revoked.
+              <% end %>
+            <% when "OCSP_PENDING" %>
+              This <%= item_type %> was signed with a verified signature, though we’re still working on certificate revocation checking.
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+
+      <% dialog.with_body do %>
+        <% unless signature.signed_by_github? %>
+          <div class="d-flex">
+            <a class="pr-1" aria-label="<%= signature.signer.display_login %>" href="<%= user_path(signature.signer.display_login) %>">
+              <img src="<%= signature.signer.avatar_url  %>" alt="" class="avatar avatar-2 avatar-user mr-2">
+            </a>
+            <span class="signed-commit-signer-name flex-1">
+              <a class="signer" href="<%= user_path(signature.signer.display_login) %>"><%= signature.signer.display_login %></a>
+              <%= signature.signer.name %>
+            </span>
+          </div>
+        <% end %>
+        <div class="signed-commit-footer pt-3">
+          <% if signature.typename == "GpgSignature" && signature.key_id %>
+            <span class="d-block">GPG key ID: <span class="color-fg-muted"><%= signature.key_id %></span></span>
+            <div class="my-1">
+              <% if signature.expired? %>
+                <%= render Primer::Beta::Label.new(scheme: :accent, test_selector: 'expired-label') do %>Expired<% end %>
+              <% end %>
+              <% if signature.revoked? %>
+                <%= render Primer::Beta::Label.new(scheme: :attention, test_selector: 'revoked-label') do %>Revoked<% end %>
+              <% end %>
+            </div>
+          <% elsif signature.typename == "SmimeSignature" %>
+            <%= render :partial => "commits/smime_cert_info", :locals => { :signature => signature } %>
+          <% elsif signature.typename == "SshSignature" && signature.key_fingerprint %>
+            <span class="d-block">SSH Key Fingerprint: <span class="color-fg-muted"><%= signature.key_fingerprint %></span></span>
+          <% end %>
+          <%= commit_signature_verification_help_link %>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

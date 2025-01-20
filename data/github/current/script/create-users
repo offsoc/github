@@ -1,0 +1,74 @@
+#!/usr/bin/env ruby
+#/ Usage: create-users <prefix> <email-address> [<num>] [<team>]
+#/ Create a bunch of users in the database.
+#/ Each login will start with <prefix> and is suffixed with a number.
+#/ The <email-address> must be valid.
+#/ The <team> argument is optional and will add the users to a GitHub "team"
+#/ Example Usage:
+#/ create-users fake-user @github.localhost 10 Employees
+#/ This will create fake-user1..10@github.localhost under the GitHub/Employees team
+
+# Show usage maybe
+if ARGV.include?("--help") || ARGV.size < 2 || ARGV[1] !~ /@/
+  system "grep ^#/ '#{__FILE__}' |cut -c4-"
+  exit 1
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+
+# Parse arguments
+prefix   = ARGV.shift
+email    = ARGV.shift
+count    = (ARGV.shift || 50).to_i
+team     = ARGV.shift || nil
+password = SecureRandom.hex(14) + "@@"
+
+def add_member_to_team(gh_team:, user:)
+  gh_team.add_member(user)
+  puts "    added:  #{user.login} to #{gh_team}"
+end
+
+unless team.nil?
+  github = Organization.find_by(login: "github")
+  gh_team = github.teams.find_by(slug: team)
+  if gh_team
+    puts "Found #{gh_team}"
+  else
+    puts "Could not find #{team}. Creating team..."
+    gh_team = Team.new(
+      organization: github,
+      name: team,
+    )
+    gh_team.save!
+    puts "Successfully created #{gh_team} team"
+  end
+end
+
+# Create all the users
+User.transaction do
+  (1..count).each do |num|
+    login = "%s%03d" % [prefix, num]
+
+    existing_user = User.find_by_login(login)
+    if existing_user
+      puts "    exists: %s" % [login]
+      add_member_to_team(gh_team: gh_team, user: existing_user) unless gh_team.nil?
+      next
+    end
+
+    user =
+      User.new(
+        login: login,
+        email: email.sub(/@/, "+#{login}@"),
+        password: password,
+        password_confirmation: password,
+        spammy_reason: "Not spammy",
+      )
+    puts "  creating: %s <%s>" % [user.login, user.email]
+    user.save!
+
+    add_member_to_team(gh_team: gh_team, user: user) unless gh_team.nil?
+  end
+  puts "The password for all users is: #{password}"
+end

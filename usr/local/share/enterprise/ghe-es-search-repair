@@ -1,0 +1,30 @@
+#!/bin/bash
+#/
+#/ Wrapper script for running the ElasticSearch search repair process that ensures
+#/ attempts to repair the search indices are only made on the primary node and
+#/ not immediately after reboot.
+#/
+#/ Usage: ghe-es-search-repair
+#/
+#/ Exit codes:
+#/      0           Everything went swimmingly.
+#/      5           Attempt to run within 1hr of boot ignored.
+#/      6           Attempt to run on non-master node ignored.
+set -e
+
+# Do not run within the first hour of booting to ensure all boot-initiated jobs
+# have completed.
+UPTIME=${UPTIME:-3600}
+if [ $(cat /proc/uptime | cut -d. -f1) -lt $UPTIME ]; then
+  exit 5
+fi
+
+# variables return empty if Elasticsearch is not running
+es_node=$(curl -s http://localhost:9200/ | jq -r .name || true)
+es_master=$(curl -s http://localhost:9200/_cat/master?h=node || true)
+# Only run on the Elasticsearch master node for cluster and HA
+if [ "$es_node" != "" ] && [  "$es_node" = "$es_master" ]; then
+  /usr/local/bin/github-env bin/rake --trace es:reconcile > /dev/null 2>&1
+else
+  exit 6
+fi

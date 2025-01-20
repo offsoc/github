@@ -1,0 +1,394 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%
+  readme_source = package_version_readme_two_path(
+    version: view.package_version&.id,
+    is_package_page: false,
+    user_type: view.user_type
+  )
+%>
+<% contents = capture do %>
+  <% sidebar_icon_width = "width: 16px;" %>
+
+  <div class="container-lg p-responsive clearfix">
+    <%# Version Unavailable %>
+    <% if view.package_version.nil? || view.package_version.deleted? %>
+      <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+        <% c.with_visual_icon(icon: "package") %>
+
+        <% c.with_heading(tag: :h2) do %>
+          <%= "#{view.package.name} #{view.package_version.original_name} is unavailable." %>
+        <% end %>
+
+        <% c.with_description do %>
+          The package version you're trying to access has either been deleted or never been published.
+        <% end %>
+
+        <% c.with_secondary_action(href: package_versions_two_path(user_type: view.user_type)) do %>
+          View all package versions
+        <% end %>
+      <% end %>
+
+    <%# All versions deleted %>
+    <% elsif view.package_version.nil? || view.package.deleted? %>
+      <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+        <% c.with_visual_icon(icon: "package") %>
+
+        <% c.with_heading(tag: :h2) do %>
+          <%= "All versions of #{view.package.name} have been deleted." %>
+        <% end %>
+
+        <% c.with_description do %>
+          You can't install or publish a new package using the same name and version.
+        <% end %>
+
+        <% c.with_secondary_action(href: org_packages_path(current_org)) do %>
+          View all packages
+        <% end %>
+      <% end %>
+
+    <%# Package exists %>
+    <% else %>
+      <%# Display warning if container registry is disabled or read-only %>
+      <% container_registry_mode = PackageRegistryHelper.container_registry_mode %>
+      <% if container_registry_mode != "enabled" %>
+        <div class="container-lg clearfix mb-3">
+          <%= render Primer::Beta::Flash.new(scheme: :warning) do %>
+            <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+            <%= GitHub::RegistryViewModes.registry_view_warning_msg("Container", container_registry_mode) %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%# Breadcrumbs %>
+      <% if !GitHub.flipper[:view_immutable_actions].enabled?(current_user) %>
+        <div class="mb-3 mt-1 clearfix">
+          <%= link_to view.package.name, packages_two_view_path(user_type: view.user_type) %>
+          /
+
+          <span><%= view.package_version.name %></span>
+        </div>
+      <% else %>
+        <div <%= test_selector("pkg-versions-breadcrumbs")%> class="mb-3 mt-1 clearfix">
+          <%= render(Primer::Beta::Breadcrumbs.new(mb: 1)) do |component| %>
+            <% component.with_item(href: packages_two_view_path(user_type: view.user_type), test_selector: "pkg-breadcrumbs-name") { view.package.name } %>
+            <% component.with_item(href: package_versions_two_path(user_type: view.user_type), test_selector: "pkg-breadcrumbs-version") { "Versions" } %>
+            <% if view.package_tag %>
+              <% component.with_item(href: package_two_path(version: view.package_version.id, tag: view.package_tag, user_type: view.user_type), test_selector: "pkg-breadcrumbs-tag")  { view.package_tag } %>
+            <% else %>
+              <% component.with_item(href: package_two_path(version: view.package_version.id, user_type: view.user_type), test_selector: "pkg-breadcrumbs-tag")  { view.package_version.name } %>
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%# Title %>
+      <% if view.package_tag %>
+        <h1 class="mb-2 mt-1 clearfix" <%= test_selector("pkg-version-header")%>>
+          <%= primer_octicon(:tag, size: :medium, mb: 1) %>
+
+          <span class="overflow-hidden lh-condensed ml-1" >
+              <%= view.package_tag %>
+              <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) %>
+              <% if view.package.visibility == "private" || view.package.visibility == "internal" %>
+                <%= render Primer::Beta::Label.new(scheme: :secondary, mx: 1, title: "Label: #{view.package.visibility.capitalize}") do %>
+                  <%= view.package.visibility.capitalize %>
+                <% end %>
+              <% end %>
+                <% if view.package_version.id == view.package.latest_version&.id %>
+                  <%= render Primer::Beta::Label.new(scheme: :secondary, ml: 1) do %>Latest<% end %>
+                <% end %>
+              <% end %>
+          </span>
+        </h1>
+
+        <div class="mb-4">
+          <code><%= view.package_version.metadata.manifest.digest %></code>
+        </div>
+      <% else %>
+        <h1 class="mb-2 mt-1 clearfix" <%= test_selector("pkg-version-header")%>>
+          <span class="overflow-hidden lh-condensed ml-1">
+            <%= view.package_version.name %>
+            <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) %>
+              <% if view.package.visibility == "private" || view.package.visibility == "internal" %>
+                <%= render Primer::Beta::Label.new(scheme: :secondary, mx: 1, title: "Label: #{view.package.visibility.capitalize}") do %>
+                  <%= view.package.visibility.capitalize %>
+                <% end %>
+              <% end %>
+              <% if view.package_version.id == view.package.latest_version&.id %>
+                <%= render Primer::Beta::Label.new(scheme: :secondary, ml: 1) do %>
+                  Latest
+                <% end %>
+              <% end %>
+            <% end %>
+          </span>
+        </h1>
+      <% end %>
+
+      <% if view.is_actions_package? && GitHub.flipper[:view_immutable_actions].enabled?(current_user) && !(view.package_version.id == view.package.latest_version&.id) %>
+        <div class="d-flex flex-column flex-md-row flex-md-row mt-n1 gutter-condensed gutter-lg">
+          <div class="col-12 col-md-9">
+            <%= render Primer::Alpha::Banner.new(icon: :info, dismiss_scheme: :none, mb: 3, test_selector: "pkg-latest-version-available-banner") do |component| %>
+              A newer version of this action is available.
+              <% component.with_action_content do %>
+                <%= render(Primer::Beta::Button.new(tag: :a, href: package_two_path(version: view.package.latest_version&.id, tag: view.package.latest_version.metadata&.tag&.name, user_type: view.user_type), test_selector: "pkg-button-link-latest-version")) { "View latest version" } %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+
+      <div class="d-flex flex-column flex-md-row flex-md-row mt-n1 gutter-condensed gutter-lg">
+        <div class="col-12 col-md-9">
+          <%# Instructions %>
+          <%# Instructions are not shown for signature versions %>
+          <% if view.package_version.package_subtype != "sig" %>
+            <% version_tag = view.package_tag ? ":#{view.package_tag}" : "@#{view.package_version.metadata.manifest.digest}" %>
+            <div>
+              <div class="mt-n1">
+                <% case view.package.ecosystem %>
+                <% when :container %>
+                  <%= render "registry_two/packages/container_package_body",
+                    package: view.package,
+                    package_version: view.package_version,
+                    version_tag: version_tag,
+                    platforms: view.package_version.platforms,
+                    show_docker_base_image_usage: true,
+                    owner: view.owner
+                  %>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+
+          <%# Description %>
+          <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) %>
+
+            <include-fragment loading="lazy" src="<%= readme_source %>">
+              <p class="text-center py-5" data-hide-on-error>
+                <%= render(Primer::Beta::Spinner.new) %>
+              </p>
+              <p class="Box mt-4 mb-4 p-3" data-show-on-error hidden>
+                <%= primer_octicon(:alert) %>
+                Sorry, something went wrong.
+              </p>
+            </include-fragment>
+          <% else %>
+            <% if view.package_version.description.present? %>
+              <div class="markdown-body mb-5">
+                <%= view.package_version.description %>
+              </div>
+            <% else %>
+              <include-fragment loading="lazy" src="<%= readme_source %>">
+                <p class="text-center py-5" data-hide-on-error>
+                  <%= render(Primer::Beta::Spinner.new) %>
+                </p>
+                <p class="Box mt-4 mb-4 p-3" data-show-on-error hidden>
+                  <%= primer_octicon(:alert) %>
+                  Sorry, something went wrong.
+                </p>
+              </include-fragment>
+            <% end %>
+          <% end %>
+
+          <%# Manifest %>
+          <% if !view.package_version.multi_arch? && view.package_version.manifest_has_layers && !view.is_actions_package? %>
+            <h4 class="mb-3">Manifest</h4>
+            <div class="Box color-bg-subtle border-0 text-left mx-auto p-3">
+              <code class="d-block color-bg-subtle border-0 rounded-2 f6 lh-default">
+                <pre class="color-fg-muted" style="font-size: 13px; overflow: scroll;"><%= JSON.pretty_generate(view.manifest_formatted) %></pre>
+              </code>
+            </div>
+          <% end %>
+        </div>
+
+        <%# Sidebar %>
+        <div class="col-12 col-md-3 mb-5">
+          <%# Sidebar: package details %>
+          <div class="mb-5">
+            <h4 style="margin-bottom: 10px;">Details</h4>
+            <ul class="list-style-none">
+              <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) && view.is_actions_package? %>
+                <li class="d-flex flex-items-center mb-2">
+                  <span style="<%= sidebar_icon_width %> top: -1px; left: 1px;" class="mr-2 text-center d-flex flex-shrink-0 position-relative">
+                    <%= primer_octicon(:calendar, color: :default) %>
+                  </span>
+                  <span class="flex-auto text-left color-fg-muted">
+                    Published <%= time_ago_in_words(Time.at(view.package_version.updated_at)) %> ago
+                  </span>
+                </li>
+              <% else %>
+                <li class="d-flex flex-items-center mb-2">
+                  <% if GitHub.flipper[:view_immutable_actions].enabled?(current_user) && view.is_actions_package? %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "play", mr: 2, size: :small)) %>
+                  <% else %>
+                    <%= render Packages::IconComponent.new(type: view.package.ecosystem, mr: 2, size: 16) %>
+                  <% end %>
+                  <span class="flex-auto text-left">
+                    <%= link_to view.package.name, packages_two_view_path(user_type: view.user_type), class: "Link--primary" %>
+                  </span>
+                </li>
+                <li class="d-flex flex-items-center mb-2">
+                  <span class="mr-2">
+                    <%= avatar_for view.owner, 16, class: "avatar" %>
+                  </span>
+                  <span class="flex-auto text-left">
+                    <%= link_to view.owner.display_login, user_path(view.owner), class: "Link--primary" %>
+                  </span>
+                </li>
+                <% if view.package.linked_repo_url.present? && view.viewer_can_read_repo %>
+                  <li class="d-flex flex-items-center mb-2">
+                    <span style="<%= sidebar_icon_width %> top: -1px; left: 1px;" class="mr-2 text-center d-flex flex-shrink-0 position-relative">
+                      <%= primer_octicon(:repo) %>
+                    </span>
+                    <span class="text-left">
+                      <%= link_to view.package.repository_name_with_owner, view.package.linked_repo_url, class: "Link--primary" %>
+                    </span>
+                    <% if view.package.repository&.owner == view.package.owner %>
+                      <%# Package references a GitHub repository owned by the package owner %>
+                      <%= primer_octicon(:verified, color: :accent, ml: 2) %>
+                    <% elsif view.package.repository %>
+                      <%# Package references a GitHub repository not owned by the package owner %>
+                      <%= primer_octicon(:question, color: :muted, ml: 2) %>
+                    <% else %>
+                      <%# Package references a non-GitHub repository %>
+                      <%= primer_octicon(:question, color: :muted, ml: 2) %>
+                    <% end %>
+                  </li>
+                <% end %>
+                <li class="d-flex flex-items-center mb-2">
+                  <span style="<%= sidebar_icon_width %> top: -1px; left: 1px;" class="mr-2 text-center d-flex flex-shrink-0 position-relative">
+                    <%= primer_octicon(:calendar, color: :default) %>
+                  </span>
+                  <span class="flex-auto text-left color-fg-muted">
+                    <%= time_ago_in_words(Time.at(view.package_version.updated_at)) %> ago
+                  </span>
+                </li>
+                <% if view.package_version.license.present? %>
+                  <li class="d-flex flex-items-center mb-2">
+                    <span style="<%= sidebar_icon_width %> top: -1px; left: 1px;" class="mr-2 text-center d-flex flex-shrink-0 position-relative">
+                      <%= primer_octicon(:law, color: :default) %>
+                    </span>
+                    <span class="flex-auto text-left color-fg-muted">
+                      <%= view.package_version.license %>
+                    </span>
+                  </li>
+                <% end %>
+              <% end %>
+            </ul>
+          </div>
+          <hr class="my-4">
+
+          <%# Sidebar: download activity %>
+          <% if !GitHub.enterprise? || PackageRegistryHelper.ghes_registry_v2_enabled? %>
+            <div class="mb-5 mt-n1">
+              <h4 style="margin-bottom: 10px;">Download activity</h4>
+              <div class="d-block mt-n1 mb-2 tooltipped tooltipped-s" aria-label="Download activity of this version"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+                <svg width="200" height="24"><%# erblint:disable GitHub::Accessibility::SvgHasAccessibleText %>
+                  <defs>
+                    <linearGradient id="gradient-<%= view.package.id %>" x1="0" x2="0" y1="1" y2="0">
+                        <stop offset="10%" stop-color="#c6e48b"></stop>
+                        <stop offset="33%" stop-color="#7bc96f"></stop>
+                        <stop offset="66%" stop-color="#239a3b"></stop>
+                        <stop offset="90%" stop-color="#196127"></stop>
+                    </linearGradient>
+                    <mask id="sparkline-<%= view.package.id %>" x="0" y="0" width="200" height="24">
+                      <polyline transform="translate(0, 22) scale(1,-1)" points="<%= view.download_points %>" fill="transparent" stroke="#8cc665" stroke-width="2">
+                    </polyline></mask>
+                  </defs>
+
+                  <g transform="translate(0, 2)">
+                    <rect x="0" y="-2" width="200" height="24" style="stroke: none; fill: url(#gradient-<%= view.package.id %>); mask: url(#sparkline-<%= view.package.id %>)"></rect>
+                  </g>
+                </svg>
+              </div>
+              <ul class="list-style-none">
+                <li class="d-flex mb-1">
+                  <span class="text-left color-fg-muted">Total downloads</span>
+                  <span class="flex-auto text-right text-bold"><%= number_to_human(view.package_download_counts.total, units: {million: 'M', billion: 'B', trillion: 'T'}, delimiter: ',', precision: view.package_download_counts.total < 1e6 ? 6 : 3, format: "%n%u") %></span>
+                </li>
+                <li class="d-flex mb-1">
+                  <span class="text-left color-fg-muted">Last 30 days</span>
+                  <span class="flex-auto text-right text-bold"><%= number_to_human(view.package_download_counts.last_30, units: {million: 'M', billion: 'B', trillion: 'T'}, delimiter: ',', precision: view.package_download_counts.last_30 < 1e6 ? 6 : 3, format: "%n%u") %></span>
+                </li>
+                <li class="d-flex mb-1">
+                  <span class="text-left color-fg-muted">Last week</span>
+                  <span class="flex-auto text-right text-bold"><%= number_to_human(view.package_download_counts.last_week, units: {million: 'M', billion: 'B', trillion: 'T'}, delimiter: ',', precision: view.package_download_counts.last_week < 1e6 ? 6 : 3, format: "%n%u") %></span>
+                </li>
+                <li class="d-flex mb-1">
+                  <span class="text-left color-fg-muted">Today</span>
+                  <span class="flex-auto text-right text-bold"><%= number_to_human(view.package_download_counts.today, units: {million: 'M', billion: 'B', trillion: 'T'}, delimiter: ',', precision: view.package_download_counts.today < 1e6 ? 6 : 3, format: "%n%u") %></span>
+                </li>
+              </ul>
+            </div>
+
+          <% end %>
+
+          <%# Sidebar: recent versions %>
+          <% if view.package_version.tags.length >= 1 && !view.is_actions_package? || (view.is_actions_package? && !GitHub.flipper[:view_immutable_actions].enabled?(current_user)) %>
+            <hr class="my-4">
+            <div class="mb-5 mt-n1">
+              <div class="d-flex flex-justify-between flex-items-baseline" style="margin-bottom: 10px;">
+                <h4>Other tags on this version</h4>
+              </div>
+              <ul class="d-inline-flex flex-wrap mt-1 list-style-none mb-3">
+                <%# Special UI treatment for latest (green) and comes first %>
+                <% if view.package_version.tags.any? { |tag| tag.name == PackageRegistry::PackageVersion::LATEST_TAG } %>
+                  <li class="mx-1">
+                    <%= link_to "latest", package_two_path(version: view.package_version.id, tag: "latest", user_type: view.user_type), class: "Label Label--success mr-1 mb-2" %>
+                  </li>
+                <% end %>
+                <% view.package_version.tags(include_latest: false).first(10).each do |tag| %>
+                  <li class="mx-1">
+                    <%= link_to tag.name, package_two_path(version: view.package_version.id, tag: tag.name, user_type: view.user_type), class: "Label mr-1 mb-2 text-normal" %>
+                  </li>
+                <% end %>
+                <li class="mx-1">
+                  <%= link_to "View all versions", package_versions_two_path(user_type: view.user_type) %>
+                </li>
+              </ul>
+            </div>
+          <% end %>
+        </div>
+      </div>
+
+    <% end %>
+  </div>
+
+<% end %>
+<% if view.package.repository.present? && view.viewer_can_read_repo %>
+  <%
+  page_info(
+    title: %{#{view.package.name} versions · #{view.package.namespace}},
+    skip_pjax_container: true,
+    container_xl: true,
+    selected_link: :repo_packages,
+  )
+  %>
+  <%= render layout: "layouts/repository_container", locals: { repository: view.package.repository } do %>
+    <div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+      <%= contents %>
+    </div>
+  <% end %>
+<% else %>
+  <% page_info(
+    title: %{Package #{view.package.name}},
+    skip_pjax_container: true,
+    selected_link: :packages
+  ) %>
+
+  <div class="<%= "mt-3" if header_redesign_enabled? %>">
+    <% if view.package.owner.is_a?(Organization) %>
+      <div itemscope itemtype="http://schema.org/Organization">
+        <%= render partial: "orgs/packages/header", locals: { organization: view.package.owner } %>
+      </div>
+    <% else %>
+      <div itemscope itemtype="http://schema.org/User">
+        <%= render partial: "registry_two/package_settings/user_header", locals: { user: view.package.owner } %>
+      </div>
+    <% end %>
+
+    <%= contents %>
+  </div>
+<% end %>

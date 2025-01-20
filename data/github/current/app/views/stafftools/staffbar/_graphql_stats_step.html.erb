@@ -1,0 +1,216 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  node_path = node.path.join(".")
+%>
+<% if node.own_mysql_calls_count > 0 %>
+  <% mysql_modal = capture do %>
+    <div class="Box-body overflow-auto f6">
+      <table>
+        <thead>
+          <tr>
+            <th class="pb-2 pr-2">Start</th>
+            <th class="pb-2 pr-2">Duration</th>
+            <th class="pb-2 pr-2">Results</th>
+            <th class="pb-2 pr-2">Query</th>
+          </tr>
+        </thead>
+        <tbody>
+          <%
+            all_mysql_calls = node.own_mysql_calls + node.own_mysql_cache_hits
+            all_mysql_calls.sort_by!(&:start_time)
+          %>
+          <% all_mysql_calls.each do |mysql_call| %>
+            <tr>
+              <td class="pb-2"><%= "%.3f" % mysql_call.start_time %>s</td>
+              <td class="pb-2">
+                <% if mysql_call.duration.nil? %>
+                  CACHE
+                <% else %>
+                  <%= render_graphql_ms(mysql_call.duration * 1000) %>
+                <% end %>
+              </td>
+              <td class="pb-2"><%= mysql_call.result_count %></td>
+              <td class="pb-2">
+                <span class="highlight">
+                  <code><%=
+                    sql = mysql_call.sql.gsub(%r{/\*ap.+\*/\z}, "").force_encoding("utf-8").squish.scrub!
+                    safe_join(GitHub::Colorize.highlight_one("source.sql", sql))
+                  %></code>
+                </span>
+                <% backtrace = mysql_call.backtrace.dup %>
+                <% first_backtrace_location = backtrace.shift %>
+                <details class="my-2">
+                  <summary class="no-wrap"><pre class="d-inline-block"><%= first_backtrace_location %></pre></summary>
+                  <% backtrace.each do |backtrace_location| %>
+                    <pre><%= backtrace_location %></pre>
+                  <% end %>
+                </details>
+                <%= mysql_call.connection_url %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+<% end %>
+<% if node.own_gitrpc_calls_count > 0 %>
+  <% gitrpc_modal = capture do %>
+    <div class="Box-body overflow-auto">
+      <p>
+        <%= node.own_gitrpc_calls_count %> <%= "call".pluralize(node.own_gitrpc_calls_count) %>,
+        <%= render_graphql_ms(node.own_gitrpc_calls_ms) %>
+      </p>
+      <ul class="list-style-none">
+        <% node.own_gitrpc_calls.each do |gitrpc_call| %>
+          <li>
+            <details>
+              <summary>
+                <%= render_graphql_ms(gitrpc_call.duration) %>:
+                <code><%= gitrpc_call.command %><%= gitrpc_call.arguments.any? ? "(#{gitrpc_call.pretty_printed_arguments})" : "" %></code>
+              </summary>
+              <pre><%= gitrpc_call.formatted_backtrace %></pre>
+            </details>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+<% end %>
+<% if node.profile_objects.any? %>
+  <% objects_modal = capture do %>
+    <div class="Box-body overflow-auto f6">
+      <p>Grouped by class and line of source code, sorted by number of objects allocated.</p>
+      <ul class="list-style-none mb-3">
+        <% skip_prefix_length = Rails.root.to_s.length %>
+        <% node.profile_objects.sort_by { |k, v| -v[:count] }.each do |(class_name, line_counts)| %>
+          <li>
+            <%= line_counts[:count] %>: <code><%= class_name %></code>
+            <ul class="ml-5 no-wrap">
+              <% line_counts[:lines].sort_by { |k, v| -v }.each do |(line, count)| %>
+                <li><%=  count %>: <code><%= line[skip_prefix_length..-1] %></code></li>
+              <% end %>
+            </ul>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+<% end %>
+<% if node.profile_lines.any? %>
+  <% lines_modal = capture do %>
+    <div class="overflow-auto">
+      <div class="Box-body">
+        Individual lines of code, sorted by time spent calling them (includes child methods). Hover to see source path.
+      </div>
+      <ul class="Box-body list-style-none">
+        <li><code style="white-space: pre;">     CPU +       IO  calls | Ruby source</code></li>
+        <%
+          skip_prefix_length = Rails.root.to_s.length
+          lines = node.profile_lines.inject([]) { |memo, (k, v)| v.inject(memo) { |m2, (k2, v2)| m2 << v2 } }
+          lines.sort_by! { |l| -l[0] }
+          lines = lines.first(50)
+        %>
+        <% lines.each do |line| %>
+          <% wall, cpu, calls, allocations, filepath, lineno, linetext = line %>
+          <li><code style="white-space: pre;" title="<%= "#{filepath[skip_prefix_length..-1]}:#{lineno}" %>"><%= sprintf("%6.1fms + %6.1fms (%4d) | %s", cpu / 1000.0, (wall - cpu) / 1000.0, calls, linetext) %></code></li><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+<% end %>
+
+<div
+  class="graphql-query-trace-node js-graphql-query-trace-node"
+  data-graphql-node-ms="<%= node.total_ms %>"
+  data-graphql-node-path="<%= node_path %>"
+  data-graphql-node-name="<%= node.name %>"
+  >
+  <div class="graphql-query-trace-node-row">
+    <span class="graphql-query-trace-node-name">
+      <% if node.children.any? %>
+        <a role="button" class="btn-link js-graphql-toggle-children graphql-toggle-children"><%# erblint:disable GitHub::Accessibility::LinkHasHref %>
+          <code class="graphql-query-trace-node-name"><%= node.name %></code>
+        </a>
+      <% else %>
+        <code class="graphql-query-trace-node-name"><%= node.name %></code>
+      <% end %>
+    </span>
+    <span class="graphql-query-trace-total-time">
+      <%= render_graphql_ms(node.total_ms) %>
+      <% if node.count > 1 %>
+        <br>
+        (<%= node.count %> <%= "call".pluralize(node.count) %>, avg <%= render_graphql_ms(node.avg_ms) %>)
+      <% end %>
+    </span>
+    <span class="graphql-query-trace-own-time">
+      <% if node.profile_lines.any? %>
+      <%= render(layout: "shared/details_dialog", locals: {
+        button_text: render_graphql_ms(node.own_ms),
+        button_class: "btn-link js-graphql-trace-profile-dialog",
+        dialog_class: "Box-overlay--wide text-mono",
+        title: "Lines executed by #{node_path} (#{node.names.join(", ")})"}) { lines_modal } %>
+      <% else %>
+        <a title="re-run with rblineprof" href="?graphql_query_trace=true&graphql_query_trace_profile_kind=lines&graphql_query_trace_profile_path=<%= node_path %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+          <%= render_graphql_ms(node.own_ms) %>
+        </a>
+      <% end %>
+    </span>
+    <span class="graphql-query-trace-child-time" title="Time spent resolving subselections"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+      <% if node.children.any? %>
+        <%= render_graphql_ms(node.children_ms) %>
+      <% end %>
+    </span>
+    <span class="graphql-query-trace-gc">
+      <% if node.profile_objects.any? %>
+      <%= render(layout: "shared/details_dialog", locals: {
+        button_text: "#{node.own_allocated_objects}",
+        button_class: "btn-link js-graphql-trace-profile-dialog",
+        dialog_class: "Box-overlay--wide text-mono",
+        title: "Objects allocated by #{node_path} (#{node.names.join(", ")})"}) { objects_modal } %>
+      <% else %>
+        <a title="re-run with allocation tracing" href="?graphql_query_trace=true&graphql_query_trace_profile_path=<%= node_path %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+          <%= node.own_allocated_objects %>
+        </a>
+      <% end %>
+    </span>
+    <span class="graphql-query-trace-external-calls">
+      <% all_mysql_calls_count = node.own_mysql_calls_count + node.own_mysql_cache_hits_count %>
+      <% if all_mysql_calls_count > 0 %>
+        <span class="graphql-query-trace-external-call-item">
+          <%= render(layout: "shared/details_dialog", locals: {
+            button_text: "#{all_mysql_calls_count} MySQL (#{render_graphql_ms(node.own_mysql_calls_ms)} #{", #{node.own_mysql_cache_hits_count} cache" if node.own_mysql_cache_hits_count > 0})",
+            button_class: "btn-link",
+            dialog_class: "Box-overlay--wide text-mono",
+            title: "MySQL: #{render_graphql_ms(node.own_mysql_calls_ms)} #{node_path} (#{node.names.join(", ")})"
+          }) { mysql_modal } %>
+        </span>
+      <% end %>
+      <% if (calls = node.own_redis_calls_count) > 0 %>
+        <span class="graphql-query-trace-external-call-item">
+          <%= calls %> redis (<%= render_graphql_ms(node.own_redis_calls_ms) %>)
+        </span>
+      <% end %>
+      <% if (calls = node.own_elastomer_calls_count) > 0 %>
+        <span class="graphql-query-trace-external-call-item">
+          <%= calls %> elastomer (<%= render_graphql_ms(node.own_elastomer_calls_ms) %>)
+        </span>
+      <% end %>
+      <% if (calls = node.own_memcached_calls_count) > 0 %>
+        <span class="graphql-query-trace-external-call-item">
+          <%= calls %> memcached (<%= render_graphql_ms(node.own_memcached_calls_ms) %>)
+        </span>
+      <% end %>
+      <% if (calls = node.own_gitrpc_calls_count) > 0 %>
+        <span class="graphql-query-trace-external-call-item">
+          <%= render(layout: "shared/details_dialog", locals: {
+            button_text: "#{calls} GitRPC (#{render_graphql_ms(node.own_gitrpc_calls_ms)})",
+            button_class: "btn-link",
+            dialog_class: "Box-overlay--wide text-mono",
+            title: "GitRPC #{node_path} (#{node.names.join(", ")}"}) { gitrpc_modal } %>
+        </span>
+      <% end %>
+    </span>
+  </div>
+  <%= render partial: "stafftools/staffbar/graphql_stats_children", locals: { children: node.children.values, sort: true } %>
+</div>

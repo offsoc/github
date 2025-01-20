@@ -1,0 +1,160 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  view = BillingSettings::SignupFormView.new(
+    @user,
+    params[:code],
+    signup_path(plan: params[:plan], setup_organization: params[:setup_organization])
+  )
+%>
+
+<%
+  octocaptcha = Octocaptcha.new(session)
+  show_captcha = octocaptcha.show_captcha?
+  form_class = "setup-form js-signup-form"
+  show_captcha && form_class += " js-octocaptcha-parent"
+%>
+
+
+<%= form_for :user, :url => view.form_url,
+      :html => {
+        :autocomplete        => "off",
+        :id                  => "signup-form",
+        :class               => form_class,
+      } do |f| -%>
+
+  <h2 class="f2-light mb-1">
+    Create your personal account
+  </h2>
+  <% if view.user_errors? %>
+    <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+      <%= render(Primer::Alpha::Banner.new(scheme: :danger, my: 3)) do %>
+        <%= view.user_error_message %>
+        <% if view.error_requires_sys_admin? %>
+          <p>Your system administrator is required to resolve the issue.</p>
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= render(Primer::Beta::Flash.new(scheme: :danger, my: 3)) do %>
+        <%= view.user_error_message %>
+        <% if view.error_requires_sys_admin? %>
+          <p>Your system administrator is required to resolve the issue.</p>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+
+  <auto-check src="<%= username_check_get_path(suggest_usernames: true) %>"  http-method="GET" required>
+    <%=
+      f.text_group "Username", :login, {
+        name:           view.username_field,
+        hint:           view.username_hint,
+        autocapitalize: :off,
+        autofocus:      true,
+        error:          error_for(@user, :login),
+        required:       true
+      }
+    %>
+  </auto-check>
+
+  <auto-check src="<%= email_check_path %>" required>
+    <%=
+      f.text_group "Email address", :email, {
+        name:           view.email_field,
+        hint:           ("We’ll occasionally send updates about your account to this inbox. We’ll never share your email address with anyone." if !enterprise?),
+        autocapitalize: :off,
+        error:          view.email_error,
+        required:       true
+      }
+    %>
+    <%= csrf_hidden_input_for email_check_path %>
+  </auto-check>
+
+  <password-strength
+    minimum-character-count="<%= PasswordStrengthHelper::MINIMUM_VALID_CHARACTERS %>"
+    passphrase-length="<%= User::PASSPHRASE_LENGTH %>"
+    invalid-message="Password is invalid."
+    error-class="color-fg-danger text-bold"
+    pass-class="color-fg-success"
+  >
+    <%=
+      f.password_group "Password", :password, {
+        name:     view.password_field,
+        value:    GitHub.default_password,
+        error:    errors_sentence_for(@user, :password),
+        group_class: "mb-2",
+        required: true,
+        passwordrules: User::PASSWORD_RULES,
+        class: primary_password_field_confirmation_class,
+        autocomplete: "new-password",
+      }
+    %>
+    <p class="note mb-3"><%= password_strength_sentence %></p>
+  </password-strength>
+
+  <% if GitHub.password_confirmation_required? %>
+    <%=
+      f.password_group "Confirm your password", :password_confirmation,
+        value: GitHub.default_password,
+        error: error_for(@user, :password_confirmation),
+        required: true,
+        "data-error-message": "Password Confirmation doesn't match the password",
+        "data-validity-message": "Does not match password",
+        class: "js-password-confirm",
+        group_class: "js-form-group",
+        autocomplete: "new-password"
+    %>
+  <% end %>
+
+  <% if GitHub.default_password %>
+    <p class="note">
+      <strong>Tip:</strong>
+      The default password for all users in development:
+      <strong><%= GitHub.default_password %></strong>
+    </p>
+  <% end %>
+
+  <% if enterprise? && user_can_create_organizations? %>
+    <div class="form-checkbox setup-organization-next">
+      <label>
+        <%= check_box_tag 'setup_organization', true, params[:setup_organization] %>
+        Help me set up an organization next
+        <p class="note details">
+          Organizations are separate from personal accounts and are best suited for businesses who need to manage permissions for many employees.<br>
+          <a href="<%= GitHub.help_url %>/articles/about-organizations">Learn more about organizations.</a>
+        </p>
+      </label>
+    </div>
+  <% end %>
+
+  <input type="hidden" name="source" class="js-signup-source" value="<%= params[:source] || "form-join" %>">
+
+  <%= hidden_field_tag :return_to, return_to if return_to %>
+  <%= hidden_field_tag :redeeming_coupon, true if local_assigns.has_key? :redeeming_coupon %>
+  <%= hidden_field_tag :invitation_token, invitation_token if local_assigns.has_key? :invitation_token %>
+  <%= spamurai_form_signals %>
+
+  <% if show_captcha %>
+    <%= render partial: "shared/octocaptcha", locals: { origin_page: "github_signup", octocaptcha_timeout: @octocaptcha_timeout } %>
+  <% end %>
+
+  <% if view.show_tos? %>
+    <p class="tos-info">By clicking &ldquo;Create an account&rdquo; below, you agree to our
+    <a class="Link--inTextBlock" href="<%= site_terms_path %>" target="_blank">Terms of Service</a> and
+    <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank">Privacy Statement</a>. We’ll occasionally send you account-related emails.</p>
+  <% end %>
+
+  <button type="submit"
+          class="btn btn-primary js-octocaptcha-form-submit"
+          id="signup_button"
+          data-disable-invalid
+          data-disable-with="Creating account&hellip;"
+          <%= show_captcha ? "disabled" : nil %>>
+    Create an account
+  </button>
+
+<% end %>

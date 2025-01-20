@@ -1,0 +1,118 @@
+#!/bin/bash
+#/ Usage: ghe-redis-usage [-s|-c] [OPTIONS] [KEY...]
+#/
+#/ Calculate memory usage of keys in redis.
+#/
+#/ OPTIONS:
+#/   -h | --help             Show this message
+#/   -n | --database <N>     Specify the database number N
+#/   -c | --count            Count the number of keys not size
+#/   -s | --summarize        Display only a total
+#/   -H | --human-readable   Print sizes in human readable format
+#/
+set -ef
+
+# Default options
+db=0
+searches=()
+humanize=""
+summarize=""
+count=""
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h|--help)
+			usage
+			;;
+		-n|--database)
+			shift
+			db="$1"
+			;;
+		-c)
+			count="true"
+			;;
+		-sH|-Hs)
+			summarize="true"
+			humanize="true"
+			;;
+		-s|--summarize)
+			summarize="true"
+			;;
+		-H|--human-readable)
+			humanize="true"
+			;;
+		-*)
+			usage
+			;;
+		*)
+			searches+=("$1")
+			;;
+	esac
+	shift
+done
+
+if [ ${#searches} -eq 0 ]; then
+	searches=('*')
+fi
+
+redis_key_size() {
+	$redis_cmd debug object "$1" | sed -E 's/^.* serializedlength:([0-9]+).*$/\1/g'
+}
+
+humanize() {
+	echo "$1" | numfmt --to iec
+}
+
+count_keys() {
+	if [ -n "$keys" ]; then
+		nkeys=$(wc -l <<< "$keys")
+	else
+		nkeys=0
+	fi
+	echo -e "$nkeys\t$search"
+}
+
+sum_key_size() {
+	sum=0
+	for k in $keys; do
+		key_size_bytes="$(redis_key_size "$k")"
+		sum=$((sum + key_size_bytes))
+	done
+	if [ -n "$humanize" ]; then
+		hsum="$(humanize $sum)"
+		echo -e "$hsum\t$search"
+	else
+		echo -e "$sum\t$search"
+	fi
+}
+
+all_key_sizes() {
+	for k in $keys; do
+		key_size_bytes="$(redis_key_size "$k")"
+		if [ -n "$humanize" ]; then
+			hsize="$(humanize "$key_size_bytes")"
+			echo -e "$hsize\t$k"
+		else
+			echo -e "$key_size_bytes\t$k"
+		fi
+	done
+}
+
+redis_cmd="ghe-redis-cli -n $db"
+
+for search in "${searches[@]}"; do
+	keys=$($redis_cmd keys "$search" | cat)
+
+	if [ -n "$count" ]; then
+		count_keys
+	elif [ -n "$summarize" ]; then
+		sum_key_size
+	else
+		all_key_sizes
+	fi
+done

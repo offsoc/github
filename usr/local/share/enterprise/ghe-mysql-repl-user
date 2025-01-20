@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# Creates a MySQL user for replication with a random password
+# if a user already exists the credentials will be returned
+#   usage:
+#       ghe-mysql-repl-user                            # returns the rep user's creds
+#       ghe-mysql-repl-user -f                         # forces regeneration of the repl user
+#       ghe-mysql-repl-user -f <username> <password>   # allow you to set the creds
+
+set -e
+
+MYSQL_DIR="/data/user/mysql/"
+USERNAME="ghe-repl"
+CREDS_FILE="${MYSQL_DIR}/repl_user.txt"
+
+if [[ $# -gt 0 ]]; then
+  if [[ $1 == "-f" ]]; then
+    force=true
+  else
+    force=false
+  fi
+else
+  force=false
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+
+echo_creds() {
+  echo "$USERNAME $(ghe-config secrets.mysql-replication)"
+}
+
+store_creds(){
+  password=$1
+  ghe-config 'secrets.mysql-replication' $password
+}
+
+if [ -f $CREDS_FILE ]; then
+  password=$(tail -1 $CREDS_FILE | cut -d ' ' -f 2)
+  store_creds $password
+  rm -f $CREDS_FILE
+else
+  password=$(ghe-config 'secrets.mysql-replication')
+fi
+
+[ -n "$password" ] || exit 1
+
+query "SET sql_log_bin = OFF; FLUSH PRIVILEGES; CREATE USER IF NOT EXISTS '${USERNAME}'@'%' IDENTIFIED WITH mysql_native_password BY '${password}'; GRANT REPLICATION SLAVE ON *.* TO '${USERNAME}'@'%'; FLUSH PRIVILEGES;"
+echo_creds

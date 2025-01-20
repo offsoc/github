@@ -1,0 +1,66 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: cat dump.json | ghe-es-load-json http://localhost:9200 > failures.json
+require "rubygems"
+require "net/http"
+require "json"
+require "uri"
+
+if ARGV.size < 1
+  puts File.read(__FILE__).lines.select { |l| l =~ /^#\// }.map { |l| l[3, l.size] }.join("\n")
+  exit 1
+end
+
+url = ARGV[0]
+uri = URI.parse(url)
+
+Net::HTTP.start(uri.host, uri.port) do |http|
+  uri.path = "/_bulk"
+
+  max_documents = 100
+  lines = []
+
+  submit_request = lambda do |lines|
+    request_lines = []
+    lines.each do |line|
+      doc = JSON.parse(line)
+
+      source = doc.delete("_source")
+      doc.delete("_type")
+      doc_metadata = {"index" => doc}
+
+      request_lines << JSON.dump(doc_metadata)
+      request_lines << JSON.dump(source)
+    end
+
+    request = Net::HTTP::Post.new uri
+    request["Content-Type"] = "application/json"
+    request.body = request_lines.join("\n") + "\n"
+
+    response = http.request request
+    body = JSON.parse(response.body)
+
+    if !body.key?("errors") && body.key?("items")
+      body["items"].each_with_index do |item, i|
+        if item["index"]["error"]
+          STDERR.puts item["index"]
+          STDOUT.puts lines[i]
+        end
+      end
+    end
+  end
+
+  STDIN.set_encoding("BINARY", "BINARY") if STDIN.respond_to?(:set_encoding)
+  STDIN.each do |line|
+    lines << line
+
+    if lines.size >= max_documents
+      submit_request.call(lines)
+      lines = []
+    end
+  end
+
+  if lines.size > 0
+    submit_request.call(lines)
+  end
+end

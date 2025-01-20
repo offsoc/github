@@ -1,0 +1,105 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  fullscreen = params["fullscreen"] && params["fullscreen"] == "true"
+
+  page_classes = class_names(
+    "page-edit-blob",
+    {
+      "full-width": blob_fullwidth?,
+      "actions-full-screen": fullscreen
+    }
+  )
+%>
+
+<% page_info \
+  selected_link: :repo_source,
+  container_xl: true,
+  class: page_classes,
+  skip_pjax_container: blob_fullwidth?,
+  full_height: blob_fullwidth?,
+  full_height_scrollable: blob_fullwidth?,
+  footer: !blob_fullwidth?,
+  skip_responsive_padding: true,
+  dashboard_pinnable_item_id: current_repository.global_relay_id
+%>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="<%= class_names(
+  "clearfix container-xl px-3 px-md-4 px-lg-5",
+  "d-flex flex-column flex-auto" => full_height?,
+  "mt-4" => !full_height?
+) %>">
+  <div class="px-lg-3">
+    <%= render Repositories::SurveyPromptComponent.new(repository: current_repository, user: current_user) %>
+  </div>
+
+  <% if blob_fullwidth? %><div class="d-flex flex-column width-full height-full" style="min-height: 550px"><% end %>
+    <% if current_blob.name.blank? %>
+      <% page_title "Editing #{current_repository.name_with_display_owner} at #{h tree_name_for_display}" %>
+    <% else %>
+      <% page_title "Editing #{current_repository.name}/#{current_blob.display_name} at #{h tree_name_for_display} · #{current_repository.name_with_display_owner}" %>
+    <% end %>
+
+    <%= render :partial => "web_commit/fork_octotip", :locals => {
+               :newfork => !!@forked_reason,
+               :fork_name_with_owner => @forked_repo.name_with_display_owner
+        } if @forked_repo %>
+
+    <div class="file-box <%= "d-flex flex-column flex-auto position-relative" if blob_fullwidth? %>">
+      <%= form_tag url_for(:action => :preview), :class => "d-none js-blob-preview-form" do %>
+        <input type="hidden" name="code">
+        <input type="hidden" name="commit">
+        <input type="hidden" name="blobname">
+        <input type="hidden" name="willcreatebranch">
+        <input type="hidden" name="checkConflict">
+      <% end %>
+      <% url = file_save_path(current_repository.owner, current_repository, @branch, @path) %>
+
+      <%
+        form_class = if blob_fullwidth?
+          then 'js-blob-form d-flex flex-column flex-auto position-absolute width-full height-full'
+          else 'js-blob-form'
+          end
+      %>
+
+      <%view = create_view_model(
+            Blob::EditorView,
+            :blob => current_blob,
+            :filename => @filename,
+            :new_filename => @new_filename_string,
+            :path => @path,
+            :branch => @branch,
+            :parent_repo => current_repository,
+            :forked_repo => @forked_repo,
+            :allow_contents_unchanged => @allow_contents_unchanged,
+            :default_filename => @default_filename,
+            :last_commit => @last_commit,
+            :contents => @contents,
+            :old_filename => path_string,
+            :cancel_url => url_for(:action => 'show'),
+            :target_branch => params[:target_branch],
+            :quick_pull => params[:quick_pull],
+            :detected_secrets => @detected_secrets,
+            :unblock_secret_success => @unblock_secret_success,
+          )%>
+      <%if current_blob.large?%>
+        <%= render "blob/large_blob_edit", view: view %>
+      <%else%>
+        <%= form_for(current_blob, {:as => :blob, :html => {class: form_class, :'data-github-confirm-unload' => 'Your edits will be lost.' }, :url => url }) do |f| %>
+          <%= render "blob/editor", view: view %>
+        <% end %>
+        <% if flash[:secret_detected] %>
+          <%= form_with url: repository_secret_scanning_push_protection_bypass_add_from_blob_path(parent_action: :edit), method: :post, id: "bypass-form", class: "js-bypass-form" %>
+        <% end %>
+      <%end%>
+    </div>
+  <% if show_profile_readme_info?(current_repository, current_user, @filename) %>
+    <div class="p-2 my-2">
+      <span class="border color-border-success rounded-2 color-fg-success p-1">New</span> <strong><%=
+      current_repository.name_with_display_owner %></strong> is now a special
+      repository: its <code>README.md</code> will appear on your profile!
+    </div>
+  <% end %>
+  <% if blob_fullwidth? %></div><% end %>
+</div>
+<% end %>

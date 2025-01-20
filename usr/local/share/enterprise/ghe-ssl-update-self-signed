@@ -1,0 +1,55 @@
+#!/bin/bash
+# Regenerate self-signed SSL certificates after the IP has changed.
+
+set -e
+
+if [ -f /etc/github/ec2-ami ]; then
+  exit
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+if [ ! -f /etc/haproxy/ssl.crt+key ]; then
+  exit
+fi
+
+# Don't want to regenerate SSL cert for cluster or HA replicas
+if [ -f /etc/github/cluster ]; then
+  if ! ghe-config --true cluster.ha || [ "$(cat /etc/github/repl-state 2>/dev/null)" = "replica" ]; then
+    exit
+  fi
+fi
+
+
+if $(openssl x509 -in /etc/haproxy/ssl.crt -text | grep "Subject:" | grep -q "GitHub Automatic Self Signed Certificate"); then
+  cert_ip=$(openssl x509 -in /etc/haproxy/ssl.crt -text | grep -oE 'IP Address:[^,]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | tail -n 1)
+
+  if [ -n "$new_ip_address" ]; then
+   # "new_ip_address" is passed in after the DHCP client has done an initial binding to a new address
+   # See: https://linux.die.net/man/8/dhclient-script under the "Bound" section
+    net_ip=$new_ip_address
+  else
+    if [ -z "$net_ip" ]; then
+      net_ip=$(ip -f inet addr show eth0 | grep inet | awk '{ print $2 }' | cut -d '/' -f 1 | head -1)
+    fi
+  fi
+
+  if test -f /data/user/common/github.conf && ghe-config 'core.github-hostname' && [ "$(ghe-config github-ssl.cert)" = "$(cat /etc/haproxy/ssl.crt)" ]; then
+    set +e
+    domain_available=$(openssl x509 -in /etc/haproxy/ssl.crt -text | grep "Subject Alternative Name" -A1 | grep -v "Subject Alternative Name" | grep $(ghe-config 'core.github-hostname'))
+    set -e
+  else
+    domain_available=true
+  fi
+
+  if [ -n "$net_ip" ] && { 
+    [ "$cert_ip" != "$net_ip" ] ||
+    [ -z "$domain_available" ]
+  }; then
+      /usr/local/share/enterprise/ghe-ssl-certificate-setup -R "$net_ip"
+  fi
+fi

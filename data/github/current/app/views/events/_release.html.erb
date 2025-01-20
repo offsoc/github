@@ -1,0 +1,127 @@
+<%
+  discussion_number, comment_count = local_assigns.dig(:discussion_number_and_comment_count_by_release_id, event.release_id)
+  reaction_count_by_content = local_assigns.dig(:reaction_count_by_content_by_release_id, event.release_id) || {}
+  viewer_reaction_contents = local_assigns.dig(:viewer_reaction_contents_by_release_id, event.release_id) || []
+  reactions_disabled = user_feature_enabled?(:disable_release_reactions_on_dashboard_feed)
+  sponsored_user_ids = local_assigns.fetch(:sponsored_user_ids, Set.new)
+  sponsorable_user_ids = local_assigns.fetch(:sponsorable_user_ids, Set.new)
+  include_title = local_assigns.fetch(:include_title, true)
+  max_avatars = local_assigns.fetch(:max_avatars, 6)
+  header_link_class_names = "Link--primary no-underline wb-break-all"
+  feed_v2_classes = user_feature_enabled?(:feeds_v2) ? "color-bg-overlay" : ""
+  best_context_is_repo_owner = current_organization.blank? &&
+    header_should_use_repo_owner_context?(
+      event_view: event,
+      followed_user_ids: local_assigns.fetch(:followed_user_ids, nil),
+      starred_repo_ids: local_assigns.fetch(:starred_repo_ids, nil))
+%>
+
+<div class="<%= card_container_classes(include_separator: !event.grouped) %>">
+  <div class="d-flex flex-column width-full" style="min-width: 0;">
+    <% if include_title %>
+      <div class="color-fg-muted">
+        <% if best_context_is_repo_owner %>
+          <span class="mr-2">
+            <%= link_to_event_repo_owner_avatar(event, classes: header_link_class_names, size: 32, test_selector_name: "repo-owner-context-avatar") %>
+          </span>
+          <%= link_to_event_repo(event, classes: header_link_class_names) %>
+        <% else %>
+          <%= link_to_event_avatar(event, test_selector_name: "feeds-redesign-avatar") %>
+          <%= link_to_event_actor(event, classes: header_link_class_names) %>
+          <%= bot_identifier(event.sender_record) %>
+        <% end %>
+        released
+        <%= link_to_event_release(event, text: event.release_tag_name, link_class: header_link_class_names) %>
+        <% if !best_context_is_repo_owner %>
+          of
+          <%= link_to_event_repo(event, classes: header_link_class_names) %>
+        <% end %>
+        <span <%= test_selector("micro-time-ago") %>>
+          · <%= render(Primer::Beta::RelativeTime.new(datetime: event.created_at, tense: :past)) %>
+        </span>
+      </div>
+    <% end %>
+
+    <div <%= test_selector("dashboard-feeds-card")%> class="Box mt-2 color-shadow-medium <%=feed_v2_classes%>">
+      <div class="p-3">
+        <div class="d-flex flex-items-start flex-justify-between flex-column flex-sm-row">
+          <div class="d-flex flex-items-center">
+            <div class="mr-1">
+              <%= link_to_event_repo_owner_avatar(event) %>
+            </div>
+            <div>
+              <%= link_to_event_repo_owner(event) %> /
+              <%= link_to_event_repo(event, include_owner: false) %>
+            </div>
+          </div>
+
+          <%=
+            render Events::SponsorButtonComponent.new(
+              event: event,
+              sponsorable_user_ids: sponsorable_user_ids,
+              sponsored_user_ids: sponsored_user_ids,
+              link_class: "mt-2 mb-3 mt-sm-0 mb-sm-0"
+            )
+          %>
+        </div>
+
+        <div class="f4 lh-condensed text-bold color-fg-default my-2" <%= test_selector("release-event-title") %>>
+          <%= link_to_event_release(event) %>
+        </div>
+
+        <% if event.release_short_description_html.present? %>
+          <div class="dashboard-break-word color-fg-muted comment-body markdown-body mt-1 p-0 release-feed-inline-last-p">
+            <%= event.release_short_description_html %>
+            <% if event.release_short_description_html_truncated? %>
+                <%= link_to_event_release(event, text: "Read more", link_class: "no-underline") %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+      <div class="p-3 border-top">
+        <% if event.release_mentions.present? %>
+          <div class="h6 mb-1 color-fg-muted">
+            Contributors
+          </div>
+          <div class="mt-1 mb-3">
+            <%= render Users::AvatarListComponent.new(
+              event.release_mentions.take(max_avatars)
+            ) do |component| %>
+              <% (event.release_mentions.count > max_avatars) && component.with_truncator do %>
+                <span class="flex-self-center color-fg-muted">+<%= event.release_mentions.count - max_avatars %></span>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+
+        <% unless atom_feed? %>
+          <div class="<%= class_names(
+            "d-flex",
+            "flex-justify-between js-comment" => !reactions_disabled,
+            "flex-justify-end" => reactions_disabled
+          ) %>">
+            <% unless reactions_disabled %>
+              <%=
+                render DashboardFeed::ReactionsComponent.new(
+                  target_global_id: Platform::Helpers::NodeIdentification.to_legacy_global_id("Release", event.release_id),
+                  reaction_path: event_repo_reaction_path(event),
+                  emotions: Releases::Public.emotions,
+                  reaction_count_by_content: reaction_count_by_content,
+                  viewer_reaction_contents: viewer_reaction_contents,
+                )
+              %>
+            <% end %>
+
+            <% if discussion_number %>
+              <%= link_to_event_release_discussion(event, discussion_number: discussion_number) do %>
+                <%= render Primer::Beta::Octicon.new(icon: "comment-discussion") %>
+                <%= comment_count > 0 ? pluralize(comment_count, "comment") : "Join the discussion" %>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+
+    </div>
+  </div>
+</div>

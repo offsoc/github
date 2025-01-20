@@ -1,0 +1,169 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# `view` is an instance of Orgs::People::MemberView %>
+
+<%
+  only_should_show_guest_collaborators ||= false
+  active_account_two_factor_requirement = !view.member_two_factor_enabled? && view.member_has_active_account_two_factor_requirement?
+  pending_account_two_factor_requirement = !view.member_two_factor_enabled? && view.member_has_pending_account_two_factor_requirement?
+%>
+
+<div class="d-flex flex-wrap flex-justify-end">
+  <% if view.show_admin_stuff? %>
+    <% if view.enterprise_managed? %>
+      <div class="text-right text-small color-fg-muted py-3 f5 flex-auto pl-6 pr-3" <%= test_selector("domain-email-enterprise-managed-organization") %>>
+      </div>
+    <% else %>
+      <div class="text-right text-small color-fg-muted py-3 f5 flex-auto pl-6 pr-3" <%= test_selector("domain-email-not-managed-organization") %>>
+        <% if view.show_verified_emails? %>
+          <% if view.admin_viewable_domain_email.present? %>
+            <%= view.admin_viewable_domain_email %>
+            <% if view.show_more_emails_link? %>
+              (<a href="<%= org_person_path(view.organization, view.member) %>"><%= view.admin_viewable_domain_emails.count - 1 %> more</a>)
+            <% end %>
+          <% else %>
+            <span class="text-italic">
+              <%= view.no_admin_viewable_domain_email %>
+            </span>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+
+
+  <% if view.show_2fa? %>
+    <%= render partial: "orgs/people/user_two_factor_details", locals: {
+      user_login: view.member.display_login,
+      two_factor_enabled: view.member_two_factor_enabled?,
+      active_account_two_factor_requirement: view.member_has_active_account_two_factor_requirement?,
+      pending_account_two_factor_requirement: view.member_has_pending_account_two_factor_requirement?,
+      account_two_factor_required_by_date: view.member_account_two_factor_required_by_date,
+    }%>
+  <% end %>
+
+  <% if view.organization.direct_or_team_member?(current_user) %>
+    <% if view.enterprise_managed? %>
+      <div class="text-left member-meta  py-3 f5 flex-shrink-0 pr-3" <%= test_selector("member-visibility-enterprise-managed-organization") %>>
+      </div>
+    <% else %>
+      <% if view.can_change_visibility?  %>
+        <div class="text-left member-meta  py-3 f5 flex-shrink-0 pr-3" <%= test_selector("member-visibility-not-managed-organization") %>>
+          <details class="details-reset details-overlay select-menu">
+            <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, classes: "Link--secondary select-menu-button") do %>
+              <%= render "orgs/people/member_visibility", view: view %>
+            <% end %>
+            <%= render "orgs/people/visibility_select", view: view %>
+          </details>
+        </div>
+      <% else %>
+        <div class="text-left color-fg-muted  py-3 f5 flex-shrink-0 pr-3" <%= test_selector("not-managed-organization") %>>
+          <%= render "orgs/people/member_visibility", view: view %>
+        </div>
+      <% end %>
+    <% end %>
+    <div class="text-left color-fg-muted  py-3 f5 flex-shrink-0 pr-3">
+      <%= view.role_name %>
+    </div>
+  <% end %>
+
+  <% if view.show_admin_stuff? || view.organization.direct_member?(current_user) %>
+    <div class="<%= view.show_admin_stuff? ? "text-left" : "text-right" %> color-fg-muted  py-3 pr-3 f5 flex-shrink-0 pr-3">
+      <a class="Link--secondary" href="<%= teams_path(view.organization, :query => "@" + view.member.display_login) %>">
+        <%= pluralize view.organization.teams_for(view.member, viewer: current_user).size, "team" %>
+      </a>
+    </div>
+  <% end %>
+
+  <% if view.show_org_role_assignment_counts? %>
+    <div class="<%= view.show_admin_stuff? ? "text-left hide-sm" : "text-right hide-sm" %> color-fg-muted  py-3 pr-3 f5 flex-shrink-0 pr-3">
+      <a class="Link--secondary" href="<%= settings_org_role_assignments_path(view.organization, :query => view.member.display_login) %>">
+        <%= pluralize view.organization_roles_count, "role" %>
+      </a>
+    </div>
+  <% end %>
+</div>
+
+<% if view.show_admin_stuff? && !only_should_show_guest_collaborators %>
+  <div class="py-3 pr-3 flex-shrink-0">
+    <%= render(Primer::Alpha::ActionMenu.new(anchor_align: :end)) do |menu| %>
+      <% menu.with_show_button(
+        icon: :"kebab-horizontal",
+        test_selector: "member-settings-button",
+        "aria-label": "Member settings"
+      ) %>
+      <% menu.with_item(
+        label: "Manage",
+        href: org_person_path(view.organization, view.member),
+        "data-ga-click": "Orgs, manage member, location:member list; text:Manage"
+      ) %>
+      <% if view.role.can_be_modified_by?(current_user) %>
+        <% menu.with_item(
+          label: "Change role…",
+          content_arguments: { "data-show-dialog-id": "change-role-dialog-#{view.member.id}" }
+        ) %>
+      <% end %>
+      <% if view.organization.allow_conversion_to_outside_collaborator?(actor: current_user) %>
+        <% menu.with_item(
+          label: "Convert to #{outside_collaborators_verbiage(view.organization).singularize}…",
+          content_arguments: { "data-show-dialog-id": "convert-to-collab-dialog-#{view.member.id}" }
+        ) %>
+      <% end %>
+      <% unless view.organization.prevent_removal_of_scim_managed_user?(user: view.member, reason: :derived) %>
+        <% menu.with_item(
+          label: "Remove from organization…",
+          content_arguments: { "data-show-dialog-id": "remove-member-dialog-#{view.member.id}" },
+          test_selector: "remove-member-from-organization-allowed",
+          "data-ga-click": "Orgs, remove from organization, location:member list; text:Remove from organization"
+        ) %>
+      <% end %>
+    <% end %>
+
+    <%= render(Primer::Alpha::Dialog.new(
+      size: :large,
+      title: "Change the role of #{view.member.display_login}?",
+      id: "change-role-dialog-#{view.member.id}"
+    )) do |dialog| %>
+      <% dialog.with_body do %>
+        <%= render partial: "orgs/people/change_role_dialog", locals: {
+          members: [view.member],
+          member_ids: [view.member.id],
+          view: view
+        } %>
+      <% end %>
+    <% end %>
+    <%= render(Primer::Alpha::Dialog.new(
+      size: :large,
+      title: "Convert #{view.member.display_login} to #{outside_collaborators_verbiage(view.organization).singularize}?",
+      id: "convert-to-collab-dialog-#{view.member.id}"
+    )) do %>
+      <%= render partial: "orgs/people/convert_to_outside_collaborator_dialog", locals: {
+        members: [view.member],
+        member_ids: [view.member.id]
+      } %>
+    <% end %>
+    <%= render(Primer::Alpha::Dialog.new(
+      size: :large,
+      title: "Removing 1 member from #{view.organization.display_login}",
+      id: "remove-member-dialog-#{view.member.id}"
+    )) do |dialog| %>
+      <% dialog.with_body do %>
+        <include-fragment
+          class="my-3"
+          aria-label="Loading..."
+          src="<%= org_destroy_people_dialog_path(
+            view.organization,
+            "member_ids[]": view.member.id,
+            redirect_to_path: org_people_path(view.organization)
+          ) %>">
+          <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+        </include-fragment>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>
+
+<% unless view.organization.direct_or_team_member?(current_user) %>
+  <div class="text-center color-fg-muted py-3 pr-3 f5 text-right flex-shrink-0">
+    <%= follow_button view.member %>
+  </div>
+<% end %>

@@ -1,0 +1,156 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+    - ../../../base/production/unicorn-api/
+    - ../../../base/production/unicorn/
+
+nameSuffix: -performance
+
+# We only want to duplicate the unicorn deployment, not unicorn-api
+patches:
+  - |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: unicorn-api
+
+patchesJson6902:
+  - target:
+      kind: Service
+      name: unicorn-api
+    patch: |-
+      - op: remove
+        path: /metadata/annotations/moda.github.net~1canary-v2
+      - op: replace
+        path: /metadata/annotations/kubernetes.io~1ingress.class
+        value: "haproxytech-unicorn-api-performance"
+      - op: replace
+        path: /metadata/labels/service
+        value: unicorn-api-performance
+      - op: replace
+        path: /spec/selector/service
+        value: unicorn-performance
+      - op: remove
+        path: /spec/ports/0/nodePort
+      - op: replace
+        path: /metadata/annotations/opaque.github.net~1checks
+        value:  |
+          - http:
+              url: "https://api.github.com/rate_limit"
+              header:
+                  authorization: "Bearer {{ .Env.GITHUB_API_TOKEN }}"
+            tags:
+                - "api-type:unicorn-api-performance"
+                - "dotcom-api:true"
+  - target:
+      kind: Service
+      name: unicorn
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/kubernetes.io~1ingress.class
+        value: "haproxytech-unicorn-performance"
+      - op: replace
+        path: /metadata/labels/service
+        value: unicorn-performance
+      - op: replace
+        path: /spec/selector/service
+        value: unicorn-performance
+      - op: remove
+        path: /spec/ports/0/nodePort
+  - target:
+      kind: Deployment
+      name: unicorn
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/2/env/9
+        value:
+          name: KUBE_DEPLOYMENT_NAME
+          value: unicorn-performance
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: replace
+        path: /spec/strategy/rollingUpdate/maxUnavailable
+        value: 0
+      - op: replace
+        path: /spec/strategy/rollingUpdate/maxSurge
+        value: 100%
+      - op: replace
+        path: /spec/selector/matchLabels/service
+        value: unicorn-performance
+      - op: replace
+        path: /spec/template/metadata/labels/service
+        value: unicorn-performance
+      - op: add
+        path: /spec/template/spec/containers/2/env/8
+        value:
+          name: DD_TRACE_DEBUG
+          value: "true"
+      - op: add
+        path: /spec/template/spec/containers/2/env/10
+        value:
+          name: DD_PROFILING_ENABLED
+          valueFrom:
+            secretKeyRef:
+                key: PERF_DD_PROFILING_ENABLED
+                name: vault-secrets
+      - op: add
+        path: /spec/template/spec/containers/2/env/11
+        value:
+          name: DD_PROFILING_EXPERIMENTAL_TIMELINE_ENABLED
+          valueFrom:
+            secretKeyRef:
+                key: PERF_DD_PROFILING_EXPERIMENTAL_TIMELINE_ENABLED
+                name: vault-secrets
+      - op: add
+        path: /spec/template/spec/containers/2/env/12
+        value:
+          name: LUC_PERFORMANCE
+          value: "1"
+      - op: add
+        path: /spec/template/spec/containers/2/env/13
+        value:
+          name: DD_TRACE_AGENT_URL
+          value: "http://$(DOGSTATSD_HOST):8126"
+      - op: add
+        path: /metadata/annotations/moda.github.net~1cluster-preferences
+        value: >
+          {
+            "dotcom-1-ash1-iad": {
+              "spec": {
+                "replicas": 12,
+                "template": {
+                  "spec": {
+                    "affinity": {
+                      "nodeAffinity": {
+                        "preferredDuringSchedulingIgnoredDuringExecution": [
+                          {
+                            "weight": 1,
+                            "preference": {
+                              "matchExpressions": [
+                                {
+                                  "key": "kubernetes.github.com/pool",
+                                  "operator": "In",
+                                  "values": [
+                                    "performance-testing"
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - effect: NoSchedule
+            key: dedicated
+            operator: Equal
+            value: performance-testing

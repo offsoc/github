@@ -1,0 +1,451 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 7 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    ... on Repository {
+      name
+      owner {
+          databaseId
+          login
+            ... on Organization {
+              viewerIsAMember
+            }
+        }
+      }
+      ... on Organization {
+        login
+        name
+        viewerIsAMember
+      }
+      ... on User {
+        login
+      }
+
+      projectsResourcePath
+      viewerCanCreateProjects
+
+      projects(search: "sort:created-desc") {
+        totalCount
+      }
+
+      openProjects: projects(search: $query, states:[OPEN]) {
+        totalCount
+      }
+
+      closedProjects: projects(search: $query, states:[CLOSED]) {
+        totalCount
+      }
+
+      ...Views::Projects::List::ProjectOwner
+    }
+  %><%# erblint:disable NoGraphqlFragments %>
+  <% project_owner = Views::Projects::Index::ProjectOwner.new(project_owner) %>
+
+  <%
+    is_repo_projects = project_owner.is_a?(PlatformTypes::Repository)
+    is_org_projects = project_owner.is_a?(PlatformTypes::Organization)
+
+    memex_enabled = GitHub.projects_new_enabled?
+
+    title = case project_owner
+    when PlatformTypes::Repository then "#{project_owner.owner.login}/#{project_owner.name}"
+    when PlatformTypes::Organization then project_owner.login
+    end
+
+    selected_link = case project_owner
+    when PlatformTypes::Repository then :repo_projects
+    when PlatformTypes::Organization then :projects
+    end
+
+    projects_beta_index_path = case project_owner
+    when PlatformTypes::Organization then org_projects_path(project_owner.login, query: "is:open")
+    when PlatformTypes::Repository then repo_projects_beta_path
+    end
+
+    projects_beta_created_by_me_index_path = if logged_in?
+      case project_owner
+      when PlatformTypes::Organization then project_owner.viewer_is_a_member? && org_projects_path(project_owner.login, query: "is:open creator:@me")
+      end
+    end
+
+    projects_beta_recent_path = if has_recently_visited_projects
+      case project_owner
+      when PlatformTypes::Organization then org_projects_path(project_owner.login)
+      end
+    end
+
+    projects_index_path = case project_owner
+    when PlatformTypes::Organization then org_projects_path(project_owner.login, type: "classic")
+    when PlatformTypes::Repository then repo_projects_path
+    end
+
+    template_path = if show_templates_index
+      case project_owner
+      when PlatformTypes::Repository then repo_projects_beta_path(query: "is:open is:template")
+      when PlatformTypes::Organization then org_projects_path(query: "is:open is:template")
+      end
+    end
+
+    new_project_beta_path = case project_owner
+    when PlatformTypes::Organization then new_org_project_path(project_owner.login)
+    # for repo the "new" path is for linking an org path - there's no new path for a repo-project
+    end
+
+    new_memex_path = case project_owner
+      when PlatformTypes::Organization then create_org_memex_path(project_owner.login)
+    end
+
+    new_classic_project_path = case project_owner
+      when PlatformTypes::Organization then new_org_project_path(project_owner.login, type: "classic")
+      when PlatformTypes::Repository then new_repo_project_path(user_id: project_owner.owner.login)
+    end
+
+    breadcrumb_owner = case project_owner
+    when PlatformTypes::Organization then this_organization
+    when PlatformTypes::User then this_user
+    end
+
+    projects_beta_link = if project_owner.is_a?(PlatformTypes::Repository)
+      case project_owner.owner
+      when PlatformTypes::Organization then org_projects_path(project_owner.owner.login)
+      when PlatformTypes::User then user_path(project_owner.owner.login, params: { tab: :projects })
+      end
+    end
+
+    should_show_for_org_projects = project_owner.is_a?(PlatformTypes::Repository) &&
+      project_owner.owner.is_a?(PlatformTypes::Organization) &&
+      memex_enabled &&
+      project_owner.owner.viewer_is_a_member? &&
+      current_repository.repository_memex_projects_enabled?
+
+    should_show_for_user_projects = project_owner.is_a?(PlatformTypes::Repository) &&
+      project_owner.owner.is_a?(PlatformTypes::User) &&
+      project_owner.owner.database_id == current_user&.id &&
+      memex_enabled &&
+      current_repository.repository_memex_projects_enabled?
+
+    should_show_projects_beta_prompt = should_show_for_org_projects || should_show_for_user_projects
+  %>
+
+  <% page_info(
+      title: "Projects · #{title}",
+      container_xl: true,
+      selected_link: selected_link,
+      breadcrumb_owner: breadcrumb_owner,
+      breadcrumb: "Projects"
+    )
+  %>
+
+  <% states = projects_search_term_values(:is) %>
+
+  <%= render layout: "layouts/projects", locals: { project_owner: project_owner } do %>
+    <% if current_repository.present? %>
+      <h1 class='sr-only'>Projects: <%= current_repository.name_with_display_owner %></h1>
+    <% else %>
+      <h1 class='sr-only'>Projects</h1>
+    <% end %>
+    <% show_old_blank_page = !memex_enabled %>
+    <% if project_owner.projects.total_count.zero? && show_old_blank_page %>
+      <% if project_owner.is_a?(PlatformTypes::Organization) && !project_owner.viewer_is_a_member? %>
+        <div class="clearfix py-3">
+          <%= render Primer::Beta::Blankslate.new do |c| %>
+            <% c.with_visual_icon(icon: "project") %>
+
+            <% c.with_heading(tag: :h2) do %>
+              <%= "#{project_owner.name} doesn’t have any #{public_project_label} projects." %>
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <div class="clearfix py-3">
+          <div class="col-lg-8 col-md-7 col-sm-12 float-left">
+            <p class="f1">Organize your issues with project boards</p>
+            <p class="color-fg-muted">Did you know you can manage projects in the same place you keep your code? Set up a project board on GitHub to streamline and automate your workflow.</p>
+          </div>
+          <div class="col-lg-4 col-md-5 col-sm-12 float-left text-lg-right text-md-right text-sm-left py-3">
+            <%= render Primer::ButtonComponent.new(tag: :a, href: "#{ GitHub.help_url }/articles/about-project-boards") do %>Learn more<% end %>
+            <% if project_owner.viewer_can_create_projects? %>
+                <%= render Primer::ButtonComponent.new(tag: :a, href: new_classic_project_path, scheme: :primary, ml: 1, test_selector: "create-repo-owned-legacy-project-button") do %>Create a project<% end %>
+            <% end %>
+          </div>
+        </div>
+
+        <hr>
+
+        <div class="d-flex flex-wrap">
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-get-organized.svg", aria: true, title: "Get organized", class: "mb-2") %>
+            <p class="f3">Sort tasks</p>
+            <p class="color-fg-muted">Add issues and pull requests to your board and prioritize them alongside note cards containing ideas or task lists.</p>
+          </div>
+
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-plan-project.svg", aria: true, title: "Plan project", class: "mb-2") %>
+            <p class="f3">Plan your project</p>
+            <p class="color-fg-muted">Sort tasks into columns by status. You can label columns with status indicators like "To Do", "In Progress", and "Done".</p>
+          </div>
+
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-automate-workflow.svg", aria: true, title: "Automate workflow", class: "mb-2") %>
+            <p class="f3">Automate your workflow</p>
+            <p class="color-fg-muted">Set up triggering events to save time on project management&mdash;we’ll move tasks into the right columns for you.</p>
+          </div>
+
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-track-progress.svg", aria: true, title: "Track progress", class: "mb-2") %>
+            <p class="f3">Track progress</p>
+            <p class="color-fg-muted">Keep track of everything happening in your project and see exactly what’s changed since the last time you looked.</p>
+          </div>
+
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-share-status.svg", aria: true, title: "Share status", class: "mb-2") %>
+            <p class="f3">Share status</p>
+            <p class="color-fg-muted">Each card has a unique URL, making it easy to share and discuss individual tasks with your team.</p>
+          </div>
+
+          <div class="col-lg-4 col-md-6 col-sm-12 p-4 text-center">
+            <%= svg("modules/projects/octicon-finish-project.svg", aria: true, title: "Finish project", class: "mb-2") %>
+            <p class="f3">Wrap up</p>
+            <p class="color-fg-muted">After you wrap up your work, close your project board to remove it from your active projects list. On to the next project!</p>
+          </div>
+        </div>
+      <% end %>
+    <% else %>
+      <%
+        show_repo_memexes = memex_enabled && is_repo_projects && current_repository.memex_projects_enabled?
+        show_org_memexes = memex_enabled && project_owner.is_a?(PlatformTypes::Organization)
+        index_navigation_options = {
+          selected_item_id: :classic,
+          beta_path: projects_beta_index_path,
+          recent_path: projects_beta_recent_path,
+          created_by_me_path: projects_beta_created_by_me_index_path,
+          classic_path: projects_index_path,
+          template_path: template_path,
+        }
+      %>
+
+      <% if show_org_memexes || show_repo_memexes %>
+        <div class="clearfix mb-3">
+          <div class="d-flex flex-column flex-lg-row width-full">
+            <div class="d-flex d-lg-none mb-3 flex-auto flex-justify-between flex-row">
+              <%= render Memex::IndexNavigationComponent.new(
+                **index_navigation_options,
+                display_mode: :dropdown
+              ) %>
+
+              <%# We don't currently support creating a linked repo memex from the projects list %>
+              <% if is_repo_projects && project_owner.viewer_can_create_projects? && !disable_classic_project_creation %>
+                  <a href="<%= new_classic_project_path %>" class="btn d-block d-md-inline-block float-md-right text-center" <%= test_selector("create-repo-owned-legacy-project-button") %>>New classic project</a>
+              <% elsif is_org_projects && project_owner.viewer_can_create_projects? && new_memex_path %>
+
+              <%= render Memex::ProjectNewButtonComponent.new(
+                new_classic_project_path: new_classic_project_path,
+                disable_classic_project_creation: disable_classic_project_creation,
+                new_memex_path: new_memex_path) %>
+              <% end %>
+            </div>
+
+            <div class="d-lg-block d-none col-3 pr-lg-4 pr-xl-5">
+              <%= render Memex::IndexNavigationComponent.new(
+                **index_navigation_options,
+                owner_type: show_repo_memexes ? :repo : :org,
+                display_mode: :list,
+              ) %>
+            </div>
+
+            <div class="flex-auto col-12 col-lg-8">
+              <div class="d-flex flex-items-center mb-3" style="gap: 8px">
+                <%= form_tag project_owner.projects_resource_path.to_s, method: :get, class: "ml-0 flex-auto subnav-search", "data-pjax": true, role: "search", "aria-label": "Projects" do %>
+                  <div class="auto-search-group width-full" style="max-width: 544px; width: 100%; min-width: 75px">
+                    <%= hidden_field_tag :type, "classic" %>
+                    <%= text_field_tag :query,
+                      format_search_query(query),
+                      class: "form-control subnav-search-input input-contrast width-full #{showing_filtered_projects? ? 'pr-5' : ''}",
+                      placeholder: "Search projects",
+                      "aria-label": "Search projects",
+                      "data-hotkey": local_search_hotkey
+                    %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "search", color: :muted, style: "top: 8px")) %>
+                    <% if showing_filtered_projects? %>
+                      <%= link_to "#{project_owner.projects_resource_path}?#{{ type: "classic" }.to_param}", class: "projects-reset-query Link--secondary text-bold no-underline position-absolute", "aria-label":  "Clear current search query, filters, and sorts", style: "padding: 3px; top: 4px; right: 4px; display: inline-flex;" do %>
+                        <%= render(Primer::Beta::Octicon.new(icon: "x-circle-fill", text_align: :center, classes: "projects-reset-query-icon")) %>
+                      <% end %>
+                    <% end %>
+                  </div>
+                <% end %>
+
+                <%# We don't currently support creating a linked repo memex from the projects list %>
+                <% if is_repo_projects && project_owner.viewer_can_create_projects? && !disable_classic_project_creation %>
+                  <a href="<%= new_classic_project_path %>" class="btn d-none d-lg-block float-md-right text-center" <%= test_selector("create-repo-owned-legacy-project-button") %> >New classic project</a>
+                <% elsif is_org_projects && project_owner.viewer_can_create_projects? && new_memex_path %>
+                  <%= render Memex::ProjectNewButtonComponent.new(
+                  new_classic_project_path: new_classic_project_path,
+                  disable_classic_project_creation: disable_classic_project_creation,
+                  new_memex_path: new_memex_path,
+                  classes: "d-none d-lg-block") %>
+                <% end %>
+              </div>
+
+              <div class="Box Box--responsive">
+                <div class="Box-header d-flex flex-justify-between flex-items-center">
+                  <div class="table-list-header-toggle states">
+                    <a href="<%= project_owner.projects_resource_path %>?<%= { type: "classic", query: projects_search_query(append: [[:is, "open"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("open") %>">
+                      <%= render(Primer::Beta::Octicon.new(icon: "project")) %> <%= project_owner.open_projects.total_count %> Open
+                    </a>
+                    <a href="<%= project_owner.projects_resource_path %>?<%= { type: "classic", query: projects_search_query(append: [[:is, "closed"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("closed") %>">
+                      <%= render(Primer::Beta::Octicon.new(icon: "archive")) %> <%= project_owner.closed_projects.total_count %> Closed
+                    </a>
+                  </div>
+
+                  <details class="details-reset details-overlay position-relative">
+                    <%= render(Primer::ButtonComponent.new(tag: :summary, dropdown: true, scheme: :link, color: :default, classes: ["no-underline"])) do %>
+                      Sort
+                    <% end %>
+                    <details-menu class="SelectMenu right-0" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                      <div class="SelectMenu-modal">
+                        <div class="SelectMenu-list">
+                          <% ProjectsHelper::SORTS.each do |description, sort| %>
+                            <% selected = selected_project_sort?(sort) %>
+                            <% q = projects_search_query(replace: {sort: (!selected ? sort : nil)}) %>
+                            <a href="<%= project_owner.projects_resource_path %>?<%= { query: q, type: "classic" }.to_param %>"
+                              class="SelectMenu-item"
+                              role="menuitemradio"
+                              aria-checked="<%= selected %>">
+                              <%= render(Primer::Beta::Octicon.new(icon: "check", classes: "SelectMenu-icon SelectMenu-icon--check")) %>
+                              <%= description %>
+                            </a>
+                          <% end %>
+                        </div>
+                      </div>
+                    </details-menu>
+                </details>
+                </div>
+                <div id="projects-results">
+                  <% if project_owner.is_a?(PlatformTypes::Repository) %>
+                    <% if project_owner.projects.total_count.zero?  %>
+                      <%= render Primer::Beta::Blankslate.new do |c| %>
+                        <% c.with_visual_icon(icon: :project) %>
+                        <% c.with_heading(tag: :h2) do %>
+                          There aren't any projects yet
+                        <% end %>
+                        <% if current_user_can_push?%>
+                          <% c.with_description do %>
+                            Try starting a new one.
+                          <% end %>
+                         <% end %>
+                      <% end %>
+                    <% else %>
+                      <%= render partial: "projects/list", locals: { project_owner: project_owner, query: query } %>
+                    <% end %>
+                  <% elsif project_owner.is_a?(PlatformTypes::Organization) %>
+                    <% if project_owner.projects.total_count.zero?  %>
+                      <% if project_owner.viewer_is_a_member? %>
+                        <%= render Primer::Beta::Blankslate.new do |c| %>
+                          <% c.with_visual_icon(icon: :project) %>
+
+                          <% c.with_heading(tag: :h2) do %>
+                            There aren't any projects yet
+                          <% end %>
+
+                          <% c.with_description do %>
+                            Try starting a new one.
+                          <% end %>
+                        <% end %>
+                      <% else %>
+                        <%= render Primer::Beta::Blankslate.new do |c| %>
+                          <% c.with_visual_icon(icon: :project) %>
+
+                          <% c.with_heading(tag: :h2) do %>
+                            There aren't any public projects yet
+                          <% end %>
+                        <% end %>
+                      <% end %>
+                    <% else %>
+                      <%= render partial: "projects/list", locals: { project_owner: project_owner, query: query } %>
+                    <% end %>
+                  <% end %>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      <% else %>
+        <% if project_owner.viewer_can_create_projects? %>
+          <div class="clearfix mb-3">
+            <div class="d-none d-md-block col-6 float-right text-right mb-2 mb-md-0">
+              <% if should_show_projects_beta_prompt  %>
+                <div class="d-inline-flex mr-3 color-fg-muted flex-items-center" style="height: 32px">
+                  <span>Try the <a class="Link--inTextBlock" href="<%= projects_beta_link %>" <%= test_selector("repos-memex-beta-link") %>>new projects today.</a> Repository access coming soon ✨</span>
+                </div>
+              <% end %>
+              <a href="<%= new_classic_project_path %>" class="btn d-block d-md-inline-block float-md-right text-center">New classic project</a>
+            </div>
+            <%= form_tag project_owner.projects_resource_path.to_s, method: :get, class: "col-12 col-md-6", "data-pjax": true, role: "search", "aria-label": "Projects" do %>
+              <div class="auto-search-group float-left width-full">
+                <%= hidden_field_tag :type, "classic" %>
+                <%= text_field_tag :query,
+                  format_search_query(query),
+                  class: "form-control subnav-search-input input-contrast width-full #{showing_filtered_projects? ? 'pr-5' : ''}",
+                  placeholder: "Search all projects",
+                  "aria-label": "Search all projects",
+                  "data-hotkey": local_search_hotkey
+                %>
+                <%= render(Primer::Beta::Octicon.new(icon: "search", color: :muted, style: "top: 8px")) %>
+                 <% if showing_filtered_projects? %>
+                  <%= link_to "#{project_owner.projects_resource_path}?#{{ type: "classic" }.to_param}", class: "projects-reset-query Link--secondary text-bold no-underline position-absolute", "aria-label": "Clear current search query, filters, and sorts", style: "padding: 3px; top: 4px; right: 4px; display: inline-flex;" do %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "x-circle-fill", text_align: :center, classes: "projects-reset-query-icon")) %>
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+
+        <div class="Box Box--responsive">
+          <div class="Box-header">
+            <div class="float-right table-list-header-toggle states">
+              <%= form_tag "", method: "GET" do %>
+                <details class="details-reset details-overlay select-menu">
+                  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, pr: 0, classes: "select-menu-button icon-only") do %>
+                    Sort
+                  <% end %>
+
+                  <details-menu class="select-menu-modal position-absolute right-0" style="z-index: 99;" aria-label="Sort options"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                    <div class="select-menu-header">
+                      <span class="select-menu-title">Sort by</span>
+                    </div>
+
+                    <div class="select-menu-list">
+                      <% ProjectsHelper::SORTS.each do |description, sort| %>
+                        <% selected = selected_project_sort?(sort) %>
+                        <% q = projects_search_query(replace: {sort: (!selected ? sort : nil)}) %>
+                        <a href="<%= project_owner.projects_resource_path %>?<%= { type: "classic", query: q }.to_param %>"
+                          class="select-menu-item"
+                          role="menuitemradio"
+                          aria-checked="<%= selected %>">
+                          <%= render(Primer::Beta::Octicon.new(icon: "check", classes: "select-menu-item-icon")) %>
+                          <div class="select-menu-item-text"><%= description %></div>
+                        </a>
+                      <% end %>
+                    </div>
+                  </details-menu>
+                </details>
+              <% end %>
+            </div>
+            <div class="table-list-header-toggle states">
+              <% states = projects_search_term_values(:is) %>
+              <a href="<%= project_owner.projects_resource_path %>?<%= { type: "classic", query: projects_search_query(append: [[:is, "open"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("open") %>">
+                <%= render(Primer::Beta::Octicon.new(icon: "project")) %> <%= project_owner.open_projects.total_count %> Open
+              </a>
+              <a href="<%= project_owner.projects_resource_path %>?<%= { type: "classic", query: projects_search_query(append: [[:is, "closed"]]) }.to_param %>" class="btn-link <%= "selected" if states.include?("closed") %>">
+                <%= render(Primer::Beta::Octicon.new(icon: "check")) %> <%= project_owner.closed_projects.total_count %> Closed
+              </a>
+            </div>
+          </div>
+          <div id="projects-results">
+            <%= render partial: "projects/list", locals: { project_owner: project_owner, query: query } %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>

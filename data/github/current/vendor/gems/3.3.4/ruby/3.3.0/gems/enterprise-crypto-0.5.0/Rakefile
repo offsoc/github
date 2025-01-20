@@ -1,0 +1,81 @@
+require 'rake/testtask'
+Rake::TestTask.new(:test) do |test|
+  test.libs << 'lib' << 'test'
+  test.pattern = 'test/**/test_*.rb'
+  test.verbose = true
+end
+
+# Utility class to prompt for user input. Defaults to reading from STDIN, but
+# allows for dependency injection for testing.
+class RakeIO
+  class <<self
+    # Public: an instance of IO to read from. Defaults to STDIN
+    attr_writer :input
+
+    # Public: instance of IO to write output to. Defaults to STDOUT
+    attr_writer :output
+
+    # Public: directory .write_file writes to. Defaults to working directory
+    attr_writer :dir
+
+    def input
+      @input ||= STDIN
+    end
+
+    def output
+      @output ||= STDOUT
+    end
+
+    def dir
+      @dir ||= Dir.getwd
+    end
+
+    def prompt_for(message, default = nil)
+      output.print "#{message}#{'(' + default.to_s + ')' if default}: "
+      value = input.gets.chomp
+
+      value.empty? ? default : value
+    end
+
+    def write_file(filename, &blk)
+      File.open(File.join(dir, filename), 'w', &blk)
+    end
+  end
+end
+
+desc "Generate a test license"
+task 'license:create' do
+  $:.unshift(File.join(File.dirname(__FILE__), 'lib'))
+  require 'enterprise/crypto'
+  include Enterprise::Crypto
+
+  customer_secret_key = 'test/files/customer_sec.gpg'
+  customer_public_key = 'test/files/customer_pub.gpg'
+  license_secret_key  = 'test/files/license_sec.gpg'
+  license_public_key  = 'test/files/license_pub.gpg'
+
+  name  = RakeIO.prompt_for "Customer Name"
+  email = RakeIO.prompt_for "Customer Email"
+  seats = RakeIO.prompt_for "Seat Count", 100
+  expire_at = RakeIO.prompt_for "Expires At", (Time.now + (60 * 60 * 24 * 30))
+  filename = RakeIO.prompt_for "Write to filename", "license.ghl"
+
+  customer_vault = CustomerVault.new(File.read(customer_secret_key),
+                                     File.read(customer_public_key),
+                                     blank_password: true)
+
+  license_vault = LicenseVault.new(File.read(license_secret_key),
+                                   File.read(license_public_key),
+                                   blank_password: true)
+
+  Enterprise::Crypto.customer_vault = customer_vault
+  Enterprise::Crypto.license_vault  = license_vault
+
+  customer = Customer.generate(name, email)
+
+  license = customer.generate_license(seats, expire_at)
+
+  RakeIO.write_file(filename) { |f| f.puts(license.to_bin) }
+end
+
+task :default => :test

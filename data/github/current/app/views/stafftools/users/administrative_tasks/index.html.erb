@@ -1,0 +1,2171 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%
+  page_info title: view.page_title
+  user = view.user
+  high_profile_user, high_profile_reason = HighProfileSignals.high_profile_user?(user)
+  soft_deletable_org = user.organization? && user.can_soft_delete?(current_user)
+%>
+<%= render(
+  "stafftools/users/ldap_sync",
+  view: create_view_model(Stafftools::User::SyncView, subject: user),
+) %>
+
+<div class="boxed-group">
+  <h3>Contributions</h3>
+  <div class="boxed-group-inner clearfix">
+    <%= form_tag stafftools_user_repositories_contributions_rebuild_path(user) do %>
+      <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+        Rebuild
+      <% end %>
+    <% end %>
+    <h4>Rebuild commit contributions data</h4>
+    <p>
+      Update <%=h user.login %>’s contribution calendar with missing commits from the repositories
+      they own or have access to via organizations.
+    </p>
+
+    <hr>
+    <%= form_tag(
+      stafftools_user_large_scale_contributor_classification_path(user),
+      method: :patch,
+    ) do %>
+      <% if user.large_scale_contributor? %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          classes: "boxed-action",
+          test_selector: "admin-unflag-large-scale-contributor",
+        ) do %>
+          Remove flag
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          classes: "boxed-action",
+          test_selector: "admin-flag-large-scale-contributor",
+        ) do %>
+          Flag contributor
+        <% end %>
+      <% end %>
+    <% end %>
+    <h4>Flag as large-scale contributor</h4>
+    <% if user.large_scale_contributor? %>
+      <p>This user is <strong>currently flagged</strong> as a large-scale contributor.</p>
+    <% end %>
+    <p>
+      Flag user to only show contributions from public repositories they own in their contribution
+      graph, in order to prevent timeouts.
+    </p>
+
+    <hr>
+    <h4>Flagged Contribution Types</h4>
+
+    <p>Select contribution types to ignore to prevent timeouts:</p>
+
+    <%= form_tag stafftools_user_contribution_class_flags_path(user), method: :patch do %>
+      <% view.contribution_classes.each do |contribution_class| %>
+        <input
+          type="checkbox"
+          id="<%= contribution_class.short_name %>"
+          name="contribution_classes[]"
+          value="<%= contribution_class.name %>"
+          <% if contribution_class.flagged? %>
+            checked
+          <% end %>
+        >
+        <%= label_tag contribution_class.short_name, contribution_class.short_name %>
+        <br>
+      <% end %>
+
+      <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+        Update
+      <% end %>
+    <% end %>
+  </div>
+</div>
+
+<% if user != current_user %>
+  <% if view.show_spam? %>
+    <div class="boxed-group">
+      <h3>Spam</h3>
+      <div class="boxed-group-inner">
+        <% if user.spammy? %>
+          <%= form_for user, url: stafftools_user_spam_path(user), method: :delete do |f| %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-unflag-as-spammy",
+            ) do %>
+              Clear spam flag
+            <% end %>
+          <% end %>
+          <%= form_for(
+            user,
+            url: allowlist_stafftools_user_spam_path(user),
+            method: :post,
+          ) do |f| %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-clear-spammy-and-allowlist",
+            ) do %>
+              Clear and allowlist
+            <% end %>
+          <% end %>
+          <h4>Spam flag</h4>
+          <p>
+            This user is currently marked as <strong>spammy</strong>
+            <% if spam_flag_timestamp(this_user) %>
+              [<%= time_ago_in_words spam_flag_timestamp(this_user) %> ago].
+            <% end %>
+            <div>Reason: <%= autolink_spammy_reason(user.spammy_reason) %></div>
+            <br>
+            <%= link_to "View in Spamurai", Spam.url_for_account_id(user.id) %>
+          </p>
+          <p>
+            Users flagged as spam will have their Pages, Gists and comments
+            hidden from other users and will not generate notifications.
+          </p>
+        <% elsif user.employee? %>
+          <%= render Primer::Beta::Button.new(
+            type: :button,
+            classes: "boxed-action disabled",
+            disabled: true,
+            test_selector: "admin-flag-as-spammy-employee",
+          ) do %>
+            Flag as spam
+          <% end %>
+          <h4>Spam flag</h4>
+          <p>
+            This user is currently marked as <strong>not spammy</strong>.
+          </p>
+          <p>
+            Site admins cannot be flagged as spam.
+          </p>
+        <% else %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "flag-user-#{user.id}-spammy",
+            header_variant: :large,
+            width: :xlarge,
+            title: "Flag #{user} as spam",
+            form_url: stafftools_user_spam_path(user),
+            form_method: :post
+          )) do |c| %>
+            <% c.with_show_button(float: :right) do |s| %>
+              Flag as spam
+            <% end %>
+            <% c.with_body do %>
+              <% if view.show_high_profile_signals?(current_user) %>
+                <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                  <%= link_to "High Profile User", "https://github.com/github/trust-safety/blob/main/docs/operations/escalation-procedures/high-profile-escalation.md", class: "Link--inTextBlock" %> - if uncertain check with Trust & Safety prior to flagging
+                  <small>
+                    <br>
+                    <%= high_profile_reason %>
+                  </small>
+                <% end %>
+              <% end %>
+              <% if user.paid_plan? %>
+                <p>
+                  This account is currently on a paid plan, please be certain that they are posting
+                  spammy content. For other issues consider using a TOS violation or account
+                  suspension instead.
+                </p>
+                <p>
+                  This action will only hide the account’s content and prevent notifications.
+                  Refunds and voids will not be automatically created, future charges will still be
+                  processed, and the account’s billing plan be not be changed.
+                </p>
+                <%= hidden_field_tag "paid_confirm", true %>
+              <% end %>
+              <%= render Primer::Alpha::Select.new(
+                name: "reason",
+                label: "Violating Reason",
+                id: "reason",
+                include_blank: true,
+                required: true,
+                caption: "Reasons marked with ^ do not publish action to the DSA",
+              ) do |reasons| %>
+                <% view.tos_reasons.each do |label, value| %>
+                  <% reasons.option(label:, value:) %>
+                <% end %>
+              <% end %>
+              <%= render Primer::Alpha::CheckBoxGroup.new(
+                name: "content_formats",
+                label: "Format of Violating Content (select at least one)",
+                id: "content_formats",
+                caption: "What format of content did the user post/upload that violated GitHub's terms of service?",
+                required: true,
+                mt: 2
+              ) do |content_format|
+                DsaConstants::CONTENT_FORMAT_OPTIONS.each do |label, value|
+                  content_format.check_box(label:, value:)
+                end
+              end %>
+              <%= render(Primer::Box.new(direction: :column, mt: 1, mb: 2)) do %>
+                <label for="created_at">Date of Violating Content Creation</label>
+                <%= render(Primer::Box.new(direction: :row)) do %>
+                  <%= render(Primer::Beta::Octicon.new(:calendar, size: :small)) %>
+                  <input
+                    type="date"
+                    id="created_at"
+                    name="created_at"
+                    value="<%= Date.today.strftime("%Y-%m-%d") %>"
+                    max="<%= Date.today.strftime("%Y-%m-%d") %>"
+                  >
+                <% end %>
+              <% end %>
+              <%= render Primer::Alpha::TextArea.new(name: "notes", label: "Add Notes", id: "notes", caption: 'Add any additional notes here') %>
+              <%= render Primer::Box.new(direction: :column, mt: 2) do %>
+                <%= render Primer::Alpha::Select.new(name: "source", label: "Select a Source", id: "source") do |source| %>
+                  <% DsaConstants::SOURCE_OPTIONS.each do |label, value| %>
+                    <% source.option(label: label, value: value) %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+            <% c.with_button(
+              data: { "close-dialog-id": "flag-user-#{user.id}-spammy" }
+            ) { "Cancel" } %>
+            <% c.with_button(
+              type: :submit,
+              scheme: :danger,
+              data: { "disable-with": "" },
+              test_selector: "admin-flag-as-spammy"
+            ) { "Flag as spam" } %>
+          <% end %>
+
+          <h4>Spam flag</h4>
+          <p>
+            This user is currently marked as <strong>not spammy</strong>.
+            <% if user.hammy? %>
+              They have also been <strong>allowlisted</strong> from automatically being flagged as
+              spam.
+            <% end %>
+          </p>
+          <p>
+            Users flagged as spam will have their Pages, Gists and comments hidden from other users
+            and will not generate notifications.
+          </p>
+        <% end %>
+
+        <hr>
+
+        <% if user.last_ip && view.same_ip_count > 1 %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "flag-all-users-spammy",
+            header_variant: :large,
+            width: :xlarge,
+            title: "Flag all users from #{user.last_ip} as spam",
+            form_url: flag_all_stafftools_user_spam_path(user),
+            form_method: :post
+          )) do |c| %>
+            <% c.with_show_button(float: :right) do |s| %>
+              Flag all as spam
+            <% end %>
+            <% c.with_body do %>
+              <%= render Primer::Alpha::Select.new(
+                name: "reason",
+                label: "Violating Reason",
+                id: "reason",
+                include_blank: true,
+                required: true,
+                caption: "NOTE: Options marked with ^ DO NOT publish to the DSA",
+              ) do |reasons| %>
+                <% view.tos_reasons.each do |label, value| %>
+                  <% reasons.option(label:, value:) %>
+                <% end %>
+              <% end %>
+              <%= render Primer::Alpha::CheckBoxGroup.new(
+                name: "content_formats",
+                label: "Format of Violating Content (select at least one)",
+                id: "content_formats",
+                caption: "What format of content did the user post/upload that violated GitHub's terms of service?",
+                required: true,
+                mt: 2
+              ) do |content_format|
+                DsaConstants::CONTENT_FORMAT_OPTIONS.each do |label, value|
+                  content_format.check_box(label:, value:)
+                end
+              end %>
+              <%= render(Primer::Box.new(direction: :column, mt: 1, mb: 2)) do %>
+                <label for="created_at">Date of Violating Content Creation</label>
+                <%= render(Primer::Box.new(direction: :row)) do %>
+                  <%= render(Primer::Beta::Octicon.new(:calendar, size: :small)) %>
+                  <input
+                    type="date"
+                    id="created_at"
+                    name="created_at"
+                    value="<%= Date.today.strftime("%Y-%m-%d") %>"
+                    max="<%= Date.today.strftime("%Y-%m-%d") %>"
+                  >
+                <% end %>
+              <% end %>
+              <%= render Primer::Alpha::TextArea.new(name: "notes", label: "Add Notes", id: "notes", caption: 'Add any additional notes here') %>
+              <%= render Primer::Box.new(direction: :column, mt: 2) do %>
+                <%= render Primer::Alpha::Select.new(name: "source", label: "Select a Source", id: "source") do |source| %>
+                  <% DsaConstants::SOURCE_OPTIONS.each do |label, value| %>
+                    <% source.option(label: label, value: value) %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+            <% c.with_button(
+              data: { "close-dialog-id": "flag-all-users-spammy" }
+            ) { "Cancel" } %>
+            <% c.with_button(
+              type: :submit,
+              scheme: :danger,
+              data: { "disable-with": "" },
+              test_selector: "admin-flag-all-as-spammy"
+            ) { "Flag users from #{user.last_ip} as spam" } %>
+          <% end %>
+
+          <h4>Other users on this IP</h4>
+          <p>
+            <%= link_to(
+              "View #{view.same_ip_count} users",
+              stafftools_users_ip_address_path(user.last_ip),
+              class: "Link--inTextBlock"
+            ) %>
+            who last connected from <%= user.last_ip %>.
+          </p>
+        <% else %>
+          <%= render Primer::Beta::Button.new(
+            type: :button,
+            classes: "boxed-action",
+            test_selector: "admin-flag-all-as-spammy-disabled",
+            disabled: true
+          ) do %>
+            Flag all as spam
+          <% end %>
+
+          <h4>Other users on this IP</h4>
+          <p>
+            <% if user.last_ip %>
+              No other users share <%= user.last_ip %>.
+            <% else %>
+              User IP unknown.
+            <% end %>
+          </p>
+        <% end %>
+
+        <% if user.spammy? %>
+          <hr>
+          <%= form_for(
+            user,
+            url: toggle_renaming_or_deleting_stafftools_user_spam_path(user),
+            method: :post
+          ) do |f| %>
+            <%= hidden_field_tag :toggle_type, :deleting %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-deleting-abilities",
+            ) do %>
+              <% if !view.spammy_rename_delete_overridden?(:deleting) %>
+                Allow deleting abilities
+              <% else %>
+                Revoke deleting abilities
+              <% end %>
+            <% end %>
+          <% end %>
+          <%= form_for(
+            user,
+            url: toggle_renaming_or_deleting_stafftools_user_spam_path(user),
+            method: :post
+          ) do |f| %>
+            <%= hidden_field_tag :toggle_type, :renaming %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-renaming-abilities",
+            ) do %>
+              <% if !view.spammy_rename_delete_overridden?(:renaming) %>
+                Allow renaming abilities
+              <% else %>
+                Revoke renaming abilities
+              <% end %>
+            <% end %>
+          <% end %>
+          <h4>Renaming or deleting abilities</h4>
+          <p>
+            Grant ability for spammy <% if user.user? %>users<% else %>orgs<% end %> to rename or
+            delete themselves.
+          </p>
+        <% end %>
+
+        <% if view.show_spammy_org_override? %>
+          <hr>
+          <%= form_for(
+            user,
+            url: toggle_override_for_owned_orgs_stafftools_user_spam_path(user),
+            method: :post
+          ) do |f| %>
+            <%= hidden_field_tag :toggle_type, :deleting %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-org-deleting-abilities",
+            ) do %>
+              <% if !view.spammy_orgs_rename_delete_overridden?(:deleting) %>
+                Allow deleting abilities
+              <% else %>
+                Revoke deleting abilities
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <%= form_for(
+            user,
+            url: toggle_override_for_owned_orgs_stafftools_user_spam_path(user),
+            method: :post
+          ) do |f| %>
+            <%= hidden_field_tag :toggle_type, :renaming %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-org-renaming-abilities",
+            ) do %>
+              <% if !view.spammy_orgs_rename_delete_overridden?(:renaming) %>
+                Allow renaming abilities
+              <% else %>
+                Revoke renaming abilities
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <h4>Renaming or deleting abilities for orgs</h4>
+          <p>Grant ability for users to rename or delete all their spammy organizations.</p>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+<% end %>
+
+<% if view.batch_scannable?(current_user) %>
+  <div class="boxed-group">
+    <h3>Automated content classification</h3>
+    <div class="boxed-group-inner clearfix">
+      <%= form_tag stafftools_user_asset_batch_scan_path(user_id: user.login) do %>
+        <% count_to_scan = view.number_of_images_to_scan %>
+        <p>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            classes: "boxed-action",
+            disabled: count_to_scan == 0,
+            test_selector: "admin-asset-batch-scan-button"
+          ) do %>
+            Submit uploads for automated content classification
+          <% end %>
+        </p>
+        <p>
+          If you suspect that this user's images contain Child Sexual
+          Exploitation Imagery or Extreme Terrorism content, submit all images
+          for classification and potential flagging.
+
+          <strong>Note: For now, please check with the Slack channel #schaefer
+            before clicking this button.</strong>
+
+          This will trigger <%= count_to_scan %> scans.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if view.show_interaction_ban? %>
+  <div class="boxed-group">
+    <h3>Interactions</h3>
+    <div class="boxed-group-inner clearfix">
+      <% if stafftools_action_authorized?(controller: Stafftools::Users::InteractionsController, action: :index) %>
+        <%= form_tag(
+          stafftools_user_interaction_ban_path(user),
+          method: view.interaction_disallowed? ? :delete : :post,
+        ) do %>
+          <% if view.interaction_disallowed? %>
+            <p>
+              This user is banned from making comments, opening pull requests, and opening issues
+              on other people’s repositories until <%= view.interaction_ban_expiry %>.
+            </p>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-allow-interactions-button",
+            ) do %>
+              Allow Interactions
+            <% end %>
+          <% else %>
+            <p>
+              Prevent this user from commenting on or opening pull requests, issues,
+              and reviews for <%= pluralize view.interaction_ban_duration, "hour" %>.
+            </p>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              classes: "boxed-action",
+              test_selector: "admin-disallow-interactions-button",
+            ) do %>
+              Disallow Interactions
+            <% end %>
+          <% end %>
+        <% end %>
+      <% else %>
+        <p><%= stafftools_not_authorized_html %></p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if !user.organization? && Organization.transforming?(user) %>
+  <div class="boxed-group dangerzone">
+    <h3>Organization transformation</h3>
+    <div class="boxed-group-inner">
+      <%= form_tag stafftools_user_transformation_lockout_path(user), method: :delete do %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          classes: "boxed-action",
+          test_selector: "admin-transforming-clear-lock",
+        ) do %>
+          Clear lock
+        <% end %>
+      <% end %>
+      <h4>Transform in progress</h4>
+      <p>
+        This user account is currently locked because it is being converted
+        into an organization. The account may still be locked if it failed to
+        be converted into an organization. You should be able to clear the
+        lock if you know the job has failed.
+      </p>
+      <% if stafftools_action_authorized?(
+          controller: Stafftools::SearchController,
+          action: :audit_log,
+      ) %>
+        <p>
+          <%= link_to(
+            "Search audit logs",
+            stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? view.audit_kql_query : view.audit_query), class: "Link--inTextBlock"
+          ) %> for organization transform events.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<%= render Primer::Beta::Subhead.new(hide_border: true) do |subhead| %>
+  <% subhead.with_heading(tag: :h3, danger: true) do %>Danger zone<% end %>
+<% end %>
+<% if user == current_user %>
+  <%= render(Primer::Beta::BorderBox.new(border_color: :danger, mb: 6)) do |box| %>
+    <% box.with_row do %>
+      You can’t use this section on your own account! Move along…
+    <% end %>
+  <% end %>
+<% else %>
+  <%= render(Primer::Beta::BorderBox.new(border_color: :danger, mb: 6)) do |box| %>
+    <% box.with_row do %>
+      <% if stafftools_action_authorized?(
+        controller: Stafftools::Users::RenamesController,
+        action: :create
+      ) %>
+        <% if user.system_account? %>
+          <h4>Rename account</h4>
+          <p>
+            This account cannot be renamed because it is a system account that
+            is important for <%= GitHub.flavor %> to function properly.
+          </p>
+        <% elsif user.renaming? %>
+          <h4>Rename account</h4>
+          <p><%= user %> is in the process of being renamed…</p>
+        <% elsif user.scim_managed_user? %>
+          <%= render Primer::Beta::Button.new(
+            test_selector: "admin-rename-account-button-disabled",
+            classes: "btn btn-danger boxed-action",
+            disabled: true,
+          ) do %><%= view.rename_disabled_button_label %><% end %>
+          <h4>Rename account</h4>
+          <p id="rename-disallowed-message">
+            <%= view.rename_disallowed_reason %>
+          </p>
+        <% elsif GitHub.enterprise? %>
+          <%= form_tag stafftools_user_rename_path(user) do %>
+            <dl class="form-group mt-0">
+              <dt><label for="user_rename_login">Rename account</label></dt>
+              <dd>
+              <%= text_field_tag :login, user.login, class: "short", id: "user_rename_login" %>
+              <%= render Primer::Beta::Button.new(
+                type: :submit,
+                test_selector: "enterprise-admin-rename-account-button",
+              ) do %>Change name<% end %>
+              </dd>
+            </dl>
+          <% end %>
+        <% else %>
+          <div class="js-details-container Details">
+            <%= render Primer::Beta::Button.new(
+              type: :button,
+              scheme: :danger,
+              classes: "boxed-action js-details-target",
+              aria: { expanded: "false" }
+            ) do %>
+              Rename
+            <% end %>
+
+            <h4>Rename account</h4>
+            <p>
+              <%= user.dormant?(
+                strict: !GitHub.enterprise? && current_user.employee?,
+              ) ? " This account appears to" : primer_octicon(
+                :alert,
+                classes: "error",
+              ) + " This account may not" %>
+              be dormant.
+              <br>
+              Check the
+              <a
+                class="Link--inTextBlock"
+                target="_blank"
+                href="https://thehub.github.com/support/compliance/usernames/supporting-username-requests/"
+              >
+                dormancy policy
+              </a> and
+              <%= link_to "account activity", stafftools_user_activity_path(user), class: "Link--inTextBlock" %> before
+              renaming.
+            </p>
+
+            <div class="inline-confirm">
+              <%= form_tag stafftools_user_rename_path(user) do %>
+                <dl class="form-group required">
+                  <dt class="input-label">
+                    <label
+                      for="user_rename_reason"
+                      required <%= test_selector "user_rename_reason" %>
+                    >
+                      Reason
+                    </label>
+                  </dt>
+                  <dd class="js-length-limited-input-container width-full col-12 col-lg-8">
+                    <select
+                      id="user_rename_reason"
+                      name="reason"
+                      class="form-control form-select js-prevent-keyboard-submit"
+                      autofocus
+                      required
+                    >
+                      <option value disabled selected>Select Reason</option>
+                      <% view.user_rename_reasons.each do |reason| %>
+                        <option><%= reason %></option>
+                      <% end %>
+                    </select>
+                  </dd>
+                </dl>
+                <dl class="form-group required">
+                  <dt class="mt-3">
+                    <label for="user_rename_login">Rename account</label>
+                  </dt>
+                  <dd>
+                    <%= hidden_field_tag :original_login, user.login, id: "original_login" %>
+                    <%= text_field_tag(
+                      :login,
+                      user.login,
+                      class: "short js-prevent-keyboard-submit",
+                      id: "user_rename_login",
+                    ) %>
+                  </dd>
+                </dl>
+                <dl class="form-group" id="user_rename_notes_container">
+                  <dt class="mt-3">
+                    <label for="user_rename_notes">Notes</label>
+                  </dt>
+                  <dd>
+                    <input
+                      type="text"
+                      id="user_rename_notes"
+                      name="notes"
+                      class="form-control input-block js-prevent-keyboard-submit"
+                    >
+                  </dd>
+                  <div class="form-actions">
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      test_selector: "dotcom-admin-rename-account-button",
+                    ) do %>Change name<% end %>
+                  </div>
+                </dl>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% else %>
+        <h4>Rename account</h4>
+        <p><%= stafftools_not_authorized_html %></p>
+      <% end %>
+    <% end %>
+    <% if user.organization? %>
+      <% box.with_row do %>
+        <%= render partial: "stafftools/organizations/archive", locals: { organization: user } %>
+      <% end %>
+    <% end %>
+    <% if view.show_role? %>
+      <% box.with_row do %>
+        <% if GitHub.single_business_environment? %>
+          <h4>Privileged access</h4>
+          <p>
+            Manage administrators of this <%= GitHub.flavor %> installation using the
+            <%= link_to(
+              "enterprise administrators",
+              enterprise_admins_path(GitHub.global_business), class: "Link--inTextBlock"
+            ) %> page.
+          </p>
+        <% else %>
+          <% if !view.normal_user_or_employee? %>
+            <div class="js-details-container Details">
+              <% if stafftools_action_authorized?(
+                controller: Stafftools::Users::PrivilegedAccessRevocationsController,
+                action: :create
+              ) %>
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "set-normal-user-dialog",
+                  header_variant: :large,
+                  width: :large,
+                  title: "Change #{user} to a normal user",
+                  form_url: stafftools_user_privileged_access_revocation_path(user),
+                  form_method: :post
+                )) do |c| %>
+                  <% c.with_show_button(
+                    scheme: :danger,
+                    float: :right,
+                    classes: "boxed-action",
+                    test_selector: "make-normal-user"
+                  ) do |s| %>
+                    Make normal user
+                  <% end %>
+                  <% c.with_body do %>
+                    <input type="hidden" name="id" value="<%= user.name %>">
+                    <label for="revoke_privileged_reason">
+                      For the record, why is this person being changed to a normal user?
+                    </label>
+                    <%= hidden_field_tag "reason_preamble", "Changed gh_role" %>
+                    <p>
+                      <input
+                        type="text"
+                        name="reason"
+                        id="revoke_privileged_reason"
+                        class="form-control input-block"
+                        autofocus
+                      >
+                    </p>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "set-normal-user-dialog" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" }
+                  ) { "Demote #{user}" } %>
+                <% end %>
+
+                <h4>Privileged access</h4>
+                <p>This account is currently a <strong><%= view.account_type %></strong></p>
+              <% else %>
+                <h4>Privileged access</h4>
+                <p><%= stafftools_not_authorized_html %></p>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if GitHub.billing_enabled? && !view.biztools_user? %>
+            <div class="js-details-container Details">
+              <% if stafftools_action_authorized?(
+                controller: Stafftools::Users::GitHubBiztoolsPromotionsController,
+                action: :create
+              ) %>
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "biztools-dialog",
+                  header_variant: :large,
+                  width: :large,
+                  title: "Change #{user} to Biztools user",
+                  form_url: stafftools_user_github_biztools_promotion_path(user),
+                  form_method: :post
+                )) do |c| %>
+                  <% c.with_show_button(
+                    scheme: :danger,
+                    float: :right,
+                    classes: "boxed-action"
+                  ) do |s| %>
+                    Make Biztools User
+                  <% end %>
+                  <% c.with_body do %>
+                    <input type="hidden" name="id" value="<%= user.name %>">
+                    <label for="biztools_reason">
+                      For the record, why is this person being given access to Biztools?
+                    </label>
+                    <%= hidden_field_tag "reason_preamble", "Changed gh_role" %>
+                    <p>
+                      <input
+                        type="text"
+                        name="reason"
+                        id="biztools_reason"
+                        class="form-control input-block"
+                        autofocus
+                      >
+                    </p>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "biztools-dialog" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" },
+                    test_selector: "admin-make-biztools-user-button"
+                  ) { "Promote #{user}" } %>
+                <% end %>
+
+                <h4>Biztools Access</h4>
+                <p>
+                  Biztools users are able to create/manage coupons and apply them to accounts.
+                </p>
+              <% else %>
+                <h4>Biztools Access</h4>
+                <p><%= stafftools_not_authorized_html %></p>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if !view.github_developer? && GitHub.devtools_enabled? %>
+            <div class="js-details-container Details">
+              <% if stafftools_action_authorized?(
+                controller: Stafftools::Users::GitHubDeveloperPromotionsController,
+                action: :create
+              ) %>
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "github-developer-dialog",
+                  header_variant: :large,
+                  width: :large,
+                  title: "Change #{user} to GitHub developer",
+                  form_url: stafftools_user_github_developer_promotion_path(user),
+                  form_method: :post
+                )) do |c| %>
+                  <% c.with_show_button(
+                    scheme: :danger,
+                    float: :right,
+                    classes: "boxed-action"
+                  ) do |s| %>
+                    Make GitHub developer
+                  <% end %>
+                  <% c.with_body do %>
+                    <input type="hidden" name="id" value="<%= user.name %>">
+                    <label for="devtools_reason">
+                      For the record, why is this person being made a GitHub developer?
+                    </label>
+                    <%= hidden_field_tag "reason_preamble", "Changed gh_role" %>
+                    <p>
+                      <input
+                        type="text"
+                        name="reason"
+                        id="devtools_reason"
+                        class="form-control input-block"
+                        autofocus
+                      >
+                    </p>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "github-developer-dialog" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" },
+                    test_selector: "admin-make-github-dev-button"
+                  ) { "Promote #{user}" } %>
+                <% end %>
+
+                <h4>Developer Tools Access</h4>
+                <p>
+                  GitHub developers have access to Devtools, but not Stafftools.
+                </p>
+              <% else %>
+                <h4>Developer Tools Access</h4>
+                <p><%= stafftools_not_authorized_html %></p>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if !view.site_admin? %>
+            <div class="js-details-container Details">
+              <% if stafftools_action_authorized?(
+                controller: Stafftools::Users::SiteAdminsController,
+                action: :create
+              ) %>
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "make-user-site-admin",
+                  header_variant: :large,
+                  width: :large,
+                  title: "Change #{user.login} to site admin",
+                  form_url: stafftools_user_site_admins_path(user),
+                  form_method: :post
+                )) do |c| %>
+                  <% c.with_show_button(
+                    scheme: :danger,
+                    float: :right,
+                    classes: "boxed-action",
+                    test_selector: "admin-make-site-admin-button"
+                  ) do |s| %>
+                    Make site admin
+                  <% end %>
+                  <% c.with_body do %>
+                    <input type="hidden" name="id" value="<%= user.name %>">
+                    <label for="site_admin_reason">
+                      For the record, why is this person being made a site admin?
+                    </label>
+                    <%= hidden_field_tag "reason_preamble", "Changed gh_role" %>
+                    <p>
+                      <input
+                        type="text"
+                        id="site_admin_reason"
+                        name="reason"
+                        class="form-control input-block"
+                        autofocus
+                      >
+                    </p>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "make-user-site-admin" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" }
+                  ) { "Promote #{user.login}" } %>
+                <% end %>
+
+                <h4>Site admin access</h4>
+                <p>
+                  Site admins have full access to all user accounts and repositories
+                  <% if GitHub.devtools_enabled? %> in addition to Devtools.<% end %>
+                </p>
+              <% else %>
+                <h4>Site admin access</h4>
+                <p><%= stafftools_not_authorized_html %></p>
+              <% end %>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% unless GitHub.enterprise? %>
+      <% if user.user? && !user.deceased? %>
+        <% box.with_row do %>
+          <div class="d-flex flex-justify-between">
+            <div>
+              <h4>Deceased User</h4>
+              <div class="pr-2">
+                This will record that the user is confirmed as deceased.
+              </div>
+            </div>
+
+            <%= render(
+              layout: "shared/details_dialog",
+              locals: {
+                button_text: "Mark user as deceased",
+                button_class: "btn btn-block btn-danger",
+                title: "Are you sure you want to mark #{user} as deceased?",
+              },
+            ) do %>
+              <div class="Box-body overflow-auto">
+                <p>
+                  This action is irreversible.
+                </p>
+                <%= form_tag stafftools_user_successors_promotion_path(user) do %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    mt: 2,
+                    block: true,
+                    scheme: :danger,
+                    data: { "close-dialog": "" },
+                    autofocus: "",
+                    test_selector: "admin-mark-as-deceased-button"
+                  ) do %>
+                    Mark as deceased
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if view.show_suspension_button? %>
+      <% box.with_row do %>
+        <% if stafftools_action_authorized?(controller: Stafftools::Users::SuspensionsController, action: :create) %>
+          <% if user.sdn_suspended? %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              scheme: :danger,
+              classes: "boxed-action",
+              disabled: true
+            ) do %>
+              Unsuspend
+            <% end %>
+            <h4>Account Suspension</h4>
+            <p id="deletion-disallowed-message">
+              This account cannot be unsuspended due to trade restriction.
+            </p>
+          <% else %>
+            <%= render(Primer::Experimental::Dialog.new(
+              dialog_id: "user-suspension",
+              header_variant: :large,
+              width: :large,
+              title: "#{view.suspension_action} #{user.login}",
+              form_url: stafftools_user_suspension_path(user),
+              form_method: user.suspended? ? :delete : :post
+            )) do |c| %>
+              <% c.with_show_button(
+                scheme: :danger,
+                float: :right,
+                classes: "boxed-action"
+              ) do |s| %>
+                <%= view.suspension_action %>
+              <% end %>
+              <% c.with_body do %>
+                <% if view.show_high_profile_signals?(current_user) %>
+                  <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                    <%= link_to "High Profile User", "https://github.com/github/trust-safety/blob/main/docs/operations/escalation-procedures/high-profile-escalation.md", class: "Link--inTextBlock" %> - if uncertain check with Trust & Safety prior to flagging
+                    <small>
+                      <br>
+                      <%= high_profile_reason %>
+                    </small>
+                  <% end %>
+                <% end %>
+                <% if !user.suspended? %>
+                  <p>
+                    <%= user.is_a?(Organization) ? "Organization owners" : "The user" %> will be notified of the suspension by email<%= user.is_a?(Organization) ? "" : ", with a link to the appeal and reinstatement documentation for more information" %>.
+                    Includes the list of paid subscription items cancelled as a result.
+                  </p>
+                  <%= render Primer::Alpha::Select.new(
+                    name: "reason",
+                    label: "Violating Reason",
+                    id: "reason",
+                    include_blank: true,
+                    required: true,
+                    caption: "Reasons marked with ^ do not publish action to the DSA",
+                  ) do |reasons| %>
+                    <% view.tos_reasons.each do |label, value| %>
+                      <% reasons.option(label:, value:) %>
+                    <% end %>
+                  <% end %>
+                  <%= render Primer::Alpha::CheckBoxGroup.new(
+                    name: "content_formats",
+                    label: "Format of Violating Content (select at least one)",
+                    id: "content_formats",
+                    caption: "What format of content did the user post/upload that violated GitHub's terms of service?",
+                    required: true,
+                    mt: 2
+                  ) do |content_format|
+                    DsaConstants::CONTENT_FORMAT_OPTIONS.each do |label, value|
+                      content_format.check_box(label:, value:)
+                    end
+                  end %>
+                  <%= render(Primer::Box.new(direction: :column, mt: 1, mb: 1)) do %>
+                    <label for="created_at">Date of Violating Content Creation</label>
+                    <%= render(Primer::Box.new(direction: :row)) do %>
+                      <%= render(Primer::Beta::Octicon.new(:calendar, size: :small)) %>
+                      <input
+                        type="date"
+                        id="created_at"
+                        name="created_at"
+                        value="<%= Date.today.strftime("%Y-%m-%d") %>"
+                        max="<%= Date.today.strftime("%Y-%m-%d") %>"
+                      >
+                    <% end %>
+                  <% end %>
+                  <%= render Primer::Alpha::TextArea.new(name: "notes", label: "Add Notes", id: "notes", caption: 'Add any additional notes here') %>
+                  <%= render Primer::Box.new(direction: :column, mt: 2) do %>
+                    <%= render Primer::Alpha::Select.new(name: "source", label: "Select a Source", id: "source") do |source| %>
+                      <% DsaConstants::SOURCE_OPTIONS.each do |label, value| %>
+                        <% source.option(label: label, value: value) %>
+                      <% end %>
+                    <% end %>
+                  <% end %>
+                <% else %>
+                  <p> You are unsuspending <b><%= user.login %></b>. </p>
+                  <%= render Primer::Alpha::TextArea.new(
+                    name: "reason",
+                    label: "Provide a reason",
+                    required: true,
+                    id: "reason",
+                    caption: 'Add a reason for unsuspending the user')
+                  %>
+                <% end %>
+              <% end %>
+              <% c.with_button(
+                data: { "close-dialog-id": "user-suspension" }
+              ) { "Cancel" } %>
+              <% c.with_button(
+                type: :submit,
+                scheme: :danger,
+                data: { "disable-with": "" },
+                test_selector: "admin-suspension-action-button"
+              ) { view.suspension_action } %>
+            <% end %>
+          <% end %>
+          <h4>Account suspension</h4>
+          <p>
+            Suspended users are prevented from logging in, pushing, and pulling code.
+            <% if GitHub.billing_enabled? %>
+            Their billing will also be locked.
+            <% end %>
+            <% if GitHub.licensed_mode? %>Suspended users do not consume license seats.<% end %>
+            <br>
+            This account is currently <strong><%= view.suspension_status %></strong>
+          </p>
+        <% else %>
+          <h4>Account suspension</h4>
+          <p><%= stafftools_not_authorized_html %></p>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if view.show_emu_deprovisioning_button? %>
+      <% box.with_row do %>
+        <% if stafftools_action_authorized?(
+            controller: Stafftools::Users::EmuDeprovisioningController,
+            action: :create,
+        ) %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "soft-deprovision-emu",
+            header_variant: :large,
+            width: :large,
+            title: "Soft deprovision #{user.display_login}",
+            form_url: stafftools_user_emu_deprovisioning_path(user),
+            form_method: :post
+          )) do |c| %>
+            <% c.with_show_button(
+              scheme: :danger,
+              float: :right,
+              classes: "boxed-action"
+            ) do |s| %>
+              Soft deprovision
+            <% end %>
+            <% c.with_body do %>
+              This action:
+              <ol class="pl-3 mb-1 mt-1">
+                <li>Suspends the user.</li>
+                <li>Obfuscates their login and primary email.</li>
+                <li>Disables their linked external identity.</li>
+              </ol>
+              Only use this button when IdP soft deprovisioning is no longer possible.
+
+              <div class="form-group form-checkbox">
+                <input type="checkbox" name="okta_scim" id="okta_scim">
+                <label for="okta_scim">Okta SCIM provider</label>
+                <p class="note">
+                  <%= primer_octicon(:question) %>
+                  If this option is checked, in addition to the soft deprovisioning actions, this action will obfuscate the profile email,
+                  set the display name to an empty string, and delete the user's external identity attributes. To determine if a user's enterprise SCIM provider is Okta,
+                  see <a class="Link--inTextBlock" href="https://splunk.githubapp.com/en-US/app/github_identity/enterprise_scim_api_dashboard">Splunk Dashboard</a>. Look for "Enterprise SCIM provider" board
+                  and use the "Business" filter.
+                </p>
+              </div>
+            <% end %>
+            <% c.with_button(
+              type: :submit,
+              scheme: :danger,
+              data: { "disable-with": "" },
+              test_selector: "admin-soft-deprovision-emu-button"
+            ) { "Soft deprovision" } %>
+          <% end %>
+          <h4>Soft Deprovision EMU</h4>
+          <p>
+            This action will perform the same set of actions that would happen if the IdP sent a call to
+            soft deprovision the user. This action:
+            <ol class="pl-3 mb-2">
+              <li>Suspends the user.</li>
+              <li>Obfuscates their login and primary email.</li>
+              <li>Disables their linked external identity.</li>
+            </ol>
+            Only use this button when IdP soft deprovisioning is no longer possible.
+          </p>
+        <% else %>
+          <h4>Soft Deprovision EMU</h4>
+          <p><%= stafftools_not_authorized_html %></p>
+        <% end %>
+
+        <% if stafftools_action_authorized?(
+            controller: Stafftools::Users::EmuDeprovisioningController,
+            action: :destroy,
+        ) %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "hard-deprovision-emu",
+            header_variant: :large,
+            width: :large,
+            title: "Hard Deprovision #{user.display_login}",
+            form_url: stafftools_user_emu_deprovisioning_path(user),
+            form_method: :delete
+          )) do |c| %>
+            <% c.with_show_button(
+              scheme: :danger,
+              float: :right,
+              classes: "boxed-action"
+            ) do |s| %>
+              Hard deprovision
+            <% end %>
+            <% c.with_body do %>
+              This action:
+              <ol class="pl-3 mb-1 mt-1">
+                <li>Permanently suspends the EMU.</li>
+                <li>Obfuscates their login and profile email.</li>
+                <li>Disables their linked external identity.</li>
+                <li>Sets the display name to an empty string.</li>
+                <li>Deletes the user's external identity attributes.</li>
+                <li>Deletes the emails, avatar, PATs, SSH keys, OAuth authorizations credentials, and GPG keys for the user.</li>
+              </ol>
+              Only use this button when IdP hard deprovisioning is no longer possible.
+            <% end %>
+            <% c.with_button(
+              type: :submit,
+              scheme: :danger,
+              data: { "disable-with": "" },
+              test_selector: "admin-hard-deprovision-emu-button"
+            ) { "Hard deprovision" } %>
+          <% end %>
+          <h4>Hard Deprovision EMU</h4>
+          <p class="mb-2">
+            This is only for EMU enterprises with a SCIM provider that is not Okta.
+            For Okta SCIM provider, use the "Soft Deprovision EMU" button and check the "Okta SCIM provider" option.
+            To determine if a user's enterprise SCIM provider is Okta,
+            see <a class="Link--inTextBlock" href="https://splunk.githubapp.com/en-US/app/github_identity/enterprise_scim_api_dashboard">Splunk Dashboard</a>. Look for "Enterprise SCIM provider" board
+            and use the "Business" filter.
+          </p>
+          <p class="mb-2">
+            This action will perform the same set of actions that would happen if the IdP sent a call to
+            hard deprovision the user. This action:
+          </p>
+          <ol class="pl-3 mb-2">
+            <li>Permanently suspends the EMU.</li>
+            <li>Obfuscates their login and profile email.</li>
+            <li>Disables their linked external identity.</li>
+            <li>Sets the display name to an empty string.</li>
+            <li>Deletes the user's external identity attributes.</li>
+            <li>Deletes the emails, avatar, PATs, SSH keys, OAuth authorizations credentials, and GPG keys for the user.</li>
+          </ol>
+          <p>
+            Only use this button when IdP hard deprovisioning is no longer possible.
+          </p>
+        <% else %>
+          <h4>Hard Deprovision EMU</h4>
+          <p><%= stafftools_not_authorized_html %></p>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if !GitHub.single_business_environment? &&
+      user.suspended? &&
+      stafftools_action_authorized?(
+        controller: Stafftools::Users::SuspensionsController,
+        action: :create
+      )
+    %>
+      <% box.with_row do %>
+        <div class="d-flex flex-justify-between">
+          <div>
+            <h4>Scrub Profile</h4>
+            <div class="pr-2">
+              Delete all public Profile information. Generally this is used in
+              response to COPPA notices.  The user must be suspended before
+              their profile can be scrubbed.
+            </div>
+          </div>
+
+          <%= render(
+            layout: "shared/details_dialog",
+            locals: {
+              button_text: "Scrub Profile",
+              title: "Delete Profile for #{user.login}",
+              button_class: "btn btn-danger boxed-action",
+              details_class: "text-left",
+            },
+          ) do %>
+            <div class="Box-body overflow-auto">
+              <p>
+                This action permanently deletes profile data.
+              </p>
+              <%= form_tag stafftools_user_profile_data_path(user), method: :delete do %>
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  scheme: :danger,
+                  mt: 2,
+                  data: { "close-dialog": "" },
+                  autofocus: true,
+                  test_selector: "admin-scrub-profile-button"
+                ) do %>
+                  Scrub profile
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+    <% if !GitHub.enterprise? && view.downgradable? %>
+      <% box.with_row do %>
+        <% if stafftools_action_authorized?(
+          controller: Stafftools::Users::DataPacksController,
+          action: :delete
+        ) %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "downgrade-account",
+            header_variant: :large,
+            width: :large,
+            title: view.downgrade_action,
+            form_url: stafftools_user_data_packs_path(user),
+            form_method: :delete
+          )) do |c| %>
+            <% c.with_show_button(
+              scheme: :danger,
+              float: :right,
+              classes: "boxed-action"
+            ) do |s| %>
+              <%= view.downgrade_action %>
+            <% end %>
+            <% c.with_body do %>
+              <% if view.has_subscriptions? %>
+                <%= user.login %> has marketplace integrations that need to be removed.
+                <br>
+                <strong><%= link_to "View marketplace integrations", "billing", class: "Link--inTextBlock" %></strong>
+              <% elsif view.plan != "Free" %>
+                <% if user.data_packs > 0 %>
+                  This will remove <%= user.login %>'s data pack subscriptions, and downgrade their
+                  account to <strong>Free</strong>.
+                  <br>
+                  <span class="payment-method js-payment-summary">
+                    <strong>
+                      Charges will be prorated for the remainder of the billing cycle.
+                    </strong>
+                  </span>
+                <% else %>
+                  Downgrade <%= user.login %> to a <strong>Free</strong> account.
+                <% end %>
+              <% end %>
+            <% end %>
+            <% unless view.has_subscriptions? %>
+              <% c.with_button(
+                type: :submit,
+                scheme: :danger,
+                data: { "disable-with": "" },
+                test_selector: "admin-downgrade-account-button"
+              ) { "Save changes" } %>
+            <% end %>
+          <% end %>
+
+          <h4>Downgrade account</h4>
+          <p>
+            Downgrading this account will <% if user.data_packs > 0 %>remove LFS data subcriptions
+            and <% end %>downgrade the account to a <strong>Free</strong> plan.
+            <br>
+            This account currently has a <strong><%= view.plan %></strong> plan.
+          </p>
+        <% else %>
+          <h4>Downgrade account</h4>
+          <p><%= stafftools_not_authorized_html %></p>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if view.show_revoke_employee_access? %>
+      <% box.with_row do %>
+        <div class="js-details-container Details">
+          <%= render(
+            layout: "shared/details_dialog",
+            locals: {
+              details_class: "boxed-action",
+              button_text: "Revoke employee access",
+              button_class: "btn btn-danger",
+              title: "Revoke all access for #{user.login}",
+            },
+          ) do %>
+            <%= form_tag stafftools_user_employee_access_revocation_path(user) do %>
+              <div class="Box-body">
+                <input type="hidden" name="id" value="<%= user.name %>">
+                <label for="reason_input">
+                  For the record, why are we revoking this user's access?
+                </label>
+                <input
+                  id="reason_input"
+                  type="text"
+                  name="reason"
+                  class="form-control input-block"
+                  autofocus
+                >
+              </div>
+              <div class="Box-footer">
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  block: true,
+                  scheme: :danger,
+                ) do %>
+                  Revoke access for <%= user.login %>
+                <% end %>
+              </div>
+            <% end %>
+          <% end %>
+          <h4>Revoke Employee Access</h4>
+          <p>
+            Revoke all access an employee has to GitHub.com. Use only when absolutely necessary, as
+            this will revoke all of the user's OAuth authorizations, unverify their SSH keys, remove
+            them from the GitHub org, reset all their web sessions, and scramble their password.
+          </p>
+        </div>
+      <% end %>
+    <% end %>
+    <% if !GitHub.enterprise? && !user.organization? %>
+      <% box.with_row do %>
+        <% if stafftools_action_authorized?(
+            action: :create,
+            controller: Stafftools::Users::Repositories::BulkPrivatizationsController,
+        ) && !user.organization? %>
+          <% if user.public_repositories.not_forks.any? %>
+            <%= render GitHub::DialogComponent.new(
+              title: "Make all public repositories private for #{user.login}",
+            ) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+              <% dialog.with_summary do %>
+                <%= render Primer::Beta::Button.new(
+                  tag: :summary,
+                  scheme: :danger,
+                  classes: "boxed-action",
+                  test_selector: "make-public-repos-private-button",
+                ) do %>
+                  Make public repos private
+                <% end %>
+              <% end %>
+              <%= form_tag stafftools_user_repositories_bulk_privatization_path(user) do %>
+                <div class="Box-body">
+                  <input type="hidden" name="id" value="<%= user.name %>">
+                  Are you sure want to make all public repositories private for
+                  <%= user.name %>?<br><br>
+
+                  <%= render Primer::Beta::Details.new do |c| %>
+                    <% c.with_summary(mb: 2) do %>
+                      Select Target Repositories <span class="dropdown-caret"></span>
+                    <% end %>
+                    <% c.with_body do %>
+                      <%= label_tag :select_all_public_repos, class: "d-block" do %>
+                        <%= check_box_tag(
+                          :select_all_public_repos,
+                          :yes,
+                          false,
+                          class: "mr-1 js-bulk-privatizations-select-all-public",
+                        ) %>
+                        Select all
+                      <% end %>
+
+                      <p class="my-2">Recently created public repositories (up to 10):</p>
+                      <%= collection_check_boxes(
+                        :bulk_privatization,
+                        :repository_ids,
+                        user.
+                          public_repositories.
+                          not_forks.
+                          select(:id, :owner_login, :name).
+                          order(:created_at).
+                          limit(10),
+                        :id,
+                        :nwo,
+                      ) do |checkbox| %>
+                        <%= checkbox.label(class: "d-block") do %>
+                          <%=
+                            checkbox.check_box(class: "mr-2 js-bulk-privatizations-public-repo") +
+                              checkbox.text
+                          %>
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  <% end %>
+
+                  <p class="mt-2">
+                    <%= primer_octicon("alert", classes: "error") %>
+                    <strong>Warning:</strong> All affected repositories will permanently lose all stars
+                    and watchers.
+                  </p>
+
+                  <p>
+                    <strong>Note:</strong> Dependency graph will remain enabled. Leaving them enabled
+                    grants us permission to perform read-only analysis on this repository.
+                  </p>
+
+                  <p>Code scanning will become unavailable.</p>
+
+                  <p>This tool can only mark 10 public repositories as private at a time.</p>
+                </div>
+                <div class="Box-footer">
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    block: true,
+                    scheme: :danger,
+                  ) do %>
+                    Make selected public repos private
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
+            <h4>Bulk mark repositories private</h4>
+            Make all (or a selected subset) of this user's public repositories private.
+          <% else %>
+            <%= render Primer::Beta::Button.new(
+              type: :button,
+              scheme: :danger,
+              classes: "boxed-action",
+              disabled: true,
+            ) do %>
+              Make public repos private
+            <% end %>
+            <h4>Bulk mark repositories private</h4>
+            This user has no public repositories.
+          <% end %>
+        <% elsif !user.organization? %>
+          <h4>Bulk mark repositories private</h4>
+          <p><%= stafftools_not_authorized_html %></p>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% box.with_row do %>
+      <% if !stafftools_action_authorized?(controller: Stafftools::UsersController, action: :destroy) %>
+        <h4>Delete account</h4>
+        <p><%= stafftools_not_authorized_html %></p>
+      <% elsif user.system_account? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p>
+          This account cannot be deleted because it is a system account that is important for
+          <%= GitHub.flavor %> to function properly.
+          <% if GitHub.enterprise? && user.user? %>
+            This account does not consume a license seat.
+          <% end %>
+        </p>
+      <% elsif user.legal_hold? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p id="deletion-disallowed-message">
+          This account cannot be deleted because it is under a legal hold.
+        </p>
+      <% elsif user.trade_screening_record.delete_restricted? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p id="deletion-disallowed-message">
+          This account cannot be deleted because it is under a trade restriction.
+        </p>
+      <% elsif view.owned_orgs_preventing_deletion? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p id="deletion-disallowed-reason">
+          <%= view.deletion_disallowed_orgs_reason %>
+          <strong><%= view.deletion_disallowed_orgs_list %></strong>
+        </p>
+        <p id="deletion-disallowed-message">
+          This user must leave or transfer ownership of these organizations before being deleted.
+        </p>
+      <% elsif !GitHub.enterprise? && view.downgradable? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p id="deletion-disallowed-reason">
+          <%= view.deletion_disallowed_plan_reason %>
+        </p>
+        <p id="deletion-disallowed-message">
+          <% if view.has_subscriptions? %>
+            <%= link_to "View marketplace integrations", "billing", class: "Link--inTextBlock" %>
+          <% else %>
+            The users account must be downgraded before being deleted.
+          <% end %>
+        </p>
+      <% elsif view.deletable_user? %>
+        <% if soft_deletable_org %>
+          <% if user.soft_deleted? %>
+            <%= render Stafftools::Organizations::PurgeOrganizationDialogComponent.new(organization: user, with_show_button: true) %>
+
+            <% unless user.belongs_to_a_soft_deleted_business? %>
+              <%= render(Primer::Experimental::Dialog.new(
+                dialog_id: "restore-org",
+                header_variant: :large,
+                width: :large,
+                title: "Restore this organization?",
+                form_url: stafftools_user_undeletes_path(user.display_login),
+                form_method: :post,
+                test_selector: "restore-org-dialog"
+              )) do |c| %>
+                <% c.with_show_button(
+                  scheme: :danger,
+                  float: :right,
+                  test_selector: "restore-org-button") do |s| %>
+                  Restore
+                <% end %>
+                <% c.with_body do %>
+                  <p>
+                    This will restore the <strong><%= user.display_login %></strong> organization.
+                    As a result, all functionality and settings of the organization and its repositories will
+                    become accessible again.
+                  </p>
+
+                  <%= render(Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :danger,
+                    block: true,
+                    mt: 3,
+                    data: { "disable-with": "", "disable-invalid": "" }
+                  )) { "Restore #{user.display_login}" } %>
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <h4>Deleted organization</h4>
+            <p>
+              Deleted <strong><%= time_ago_in_words_js(this_user.soft_deleted_at) %></strong>
+            </p>
+          <% else %>
+            <%= render(Primer::Experimental::Dialog.new(
+              dialog_id: "delete-org",
+              header_variant: :large,
+              width: :large,
+              title: "Delete this organization",
+              form_url: stafftools_user_soft_deletion_path(user),
+              form_method: :post,
+              test_selector: "soft-deletion-org-dialog"
+            )) do |c| %>
+              <% c.with_show_button(
+                scheme: :danger,
+                float: :right,
+                test_selector: "soft-delete-org-button") do |s| %>
+                Delete this organization
+              <% end %>
+              <% c.with_body do %>
+                <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+                  Make sure you want to do this.
+                <% end %>
+                <p>
+                  This will mark the <%= user.display_login %> organization as deleted.
+                </p>
+                <% if view.has_repos? %>
+                  <p>
+                    Please note that deleting this organization will also delete
+                    <strong><%= pluralize(user.repositories.size, "repository") %></strong> owned by this
+                    <%= user.type.downcase %>.
+                  </p>
+                <% end %>
+                <p>
+                  The organization owners <strong>will not</strong> be notified of this deletion.
+                </p>
+
+                <label>
+                  Please enter the organization name you would like to delete to confirm.
+                  <input type="text" class="form-control input-block"
+                    pattern="<%= case_insensitive_pattern user.display_login %>"
+                    required autofocus>
+                </label>
+
+                <%= render(Primer::Beta::Button.new(
+                  type: :submit,
+                  scheme: :danger,
+                  block: true,
+                  mt: 3,
+                  data: { "disable-with": "", "disable-invalid": "" }
+                )) { "Delete this organization" } %>
+              <% end %>
+            <% end %>
+
+            <h4>Delete organization</h4>
+            <p>
+              Deleting this organization will remove all its content including repositories, gists, and
+              comments.
+            </p>
+          <% end %>
+        <% else %>
+          <%= render(Primer::Experimental::Dialog.new(
+            dialog_id: "delete-account",
+            header_variant: :large,
+            width: :large,
+            title: "Delete account",
+            form_url: stafftools_user_path(user),
+            form_method: :delete,
+            form_id: "cancel_plan"
+          )) do |c| %>
+            <% c.with_show_button(
+              scheme: :danger,
+              float: :right,
+              test_selector: "delete-account-button") do |s| %>
+              Delete this account
+            <% end %>
+            <% c.with_body do %>
+              <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+                Make sure you want to do this.
+              <% end %>
+              <% if view.has_repos? %>
+                <p>
+                  Please note that deleting this account will also delete
+                  <strong><%= pluralize(user.repositories.size, "repository") %></strong> owned by this
+                  <%= user.type.downcase %>.
+                </p>
+              <% end %>
+              <p>
+                The <%= user.organization? ? "organization owners" : "user" %>
+                <strong>will not</strong> be notified of this deletion.
+              </p>
+
+              <label>
+                Please enter the username you would like to delete to confirm.
+                <input type="text" class="form-control input-block"
+                  pattern="<%= case_insensitive_pattern user.login %>"
+                  required autofocus>
+              </label>
+
+              <%= render(Primer::Beta::Button.new(
+                type: :submit,
+                scheme: :danger,
+                block: true,
+                mt: 3,
+                data: { "disable-with": "", "disable-invalid": "" }
+              )) { "Delete this account" } %>
+            <% end %>
+          <% end %>
+
+          <h4>Delete account</h4>
+          <p>
+            Deleting this account will remove all its content including repositories, gists, and
+            comments.
+          </p>
+        <% end %>
+
+      <% else %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          scheme: :danger,
+          classes: "boxed-action",
+          disabled: true,
+        ) do %>
+          Delete this account
+        <% end %>
+        <h4>Delete account</h4>
+        <p id="deletion-disallowed-message">
+          <%= view.deletion_disallowed_account_reason %>
+        </p>
+      <% end %>
+    <% end %>
+    <% if user.last_ip && view.same_ip_count > 1 &&
+      stafftools_action_authorized?(controller: Stafftools::UsersController, action: :destroy) %>
+      <% box.with_row do %>
+        <p>
+          <%= link_to(
+            "View #{view.same_ip_count} users",
+            stafftools_users_ip_address_path(user.last_ip),
+            class: "Link--inTextBlock"
+          ) %> who last connected from <%= user.last_ip %>.
+        </p>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Repository default settings</h3>
+  <div class="boxed-group-inner clearfix">
+    <% if stafftools_action_authorized?(controller: Stafftools::RepositoriesController, action: :change_allow_force_push) %>
+      <h4>Force pushes</h4>
+      <% if user.force_push_rejection_writable? %>
+        <p>
+          <% if user.organization? %>
+            Allow or block force pushes made to repositories within this organization.
+          <% else %>
+            Allow or block force pushes made to this user’s repositories.
+          <% end %>
+
+          <% if user.force_push_rejection_inherited? %>
+            <br>
+            The current value is inherited from
+            <strong><%= view.setting_source_detail_text(
+              user.force_push_rejection_source,
+            ) %></strong>.
+          <% end %>
+        </p>
+
+        <%= form_tag stafftools_user_force_push_preference_path(user), method: :patch, data: {autosubmit: true} do %>
+          <details class="select-menu block-force-push details-reset details-overlay">
+            <%= render Primer::Beta::Button.new(
+              tag: :summary,
+              size: :small,
+              classes: "select-menu-button",
+            ) do %>
+              <%= primer_octicon(:"repo-push") %>
+              <span data-menu-button><%= view.force_detail_text %></span>
+            <% end %>
+
+            <details-menu class="select-menu-modal position-absolute" style="z-index: 99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="select-menu-header">
+                <span class="select-menu-title">Force Push</span>
+              </div>
+
+              <div class="select-menu-list">
+                <% view.force_rejection_choices.each do |label, value| %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :link,
+                    classes: "select-menu-item",
+                    block: true,
+                    align_content: :start,
+                    role: "menuitemradio",
+                    value: value,
+                    name: "value",
+                    aria: { checked: view.force_selected?(value) }
+                  ) do %>
+                    <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                    <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                  <% end %>
+                <% end %>
+              </div>
+            </details-menu>
+          </details>
+
+          <div class="block-force-push-policy-buttons">
+            <%= check_box_tag :policy, "policy", view.force_rejection_local_policy? %>
+            <%= label_tag :policy, 'Enforce on all repositories' %>
+          </div>
+        <% end %>
+      <% else %>
+        <p>
+          Force pushes are currently <strong><%= view.force_detail_text.downcase %></strong>.
+          This is a policy set at
+          <strong><%= view.setting_source_detail_text(user.force_push_rejection_source) %></strong>
+          and cannot be changed here.
+        </p>
+      <% end %>
+    <% else %>
+      <h4>Force pushes</h4>
+      <p><%= stafftools_not_authorized_html %></p>
+    <% end %>
+  </div>
+</div>
+
+<% if view.show_rate_limit_allowlisting? %>
+  <div class="boxed-group">
+    <h3>Rate limit allowlisting</h3>
+    <div class="boxed-group-inner clearfix">
+      <p>
+        <a class="Link--inTextBlock" href="https://thehub.github.com/support/ecosystem/rate-limits/content-creation/">
+          What are secondary rate limits?
+        </a>
+      </p>
+      <p>
+        <% if view.user_allowlisted? %>
+          <%= user.login %> was <%= "temporarily" if view.user_temporarily_allowlisted? %>
+          allowlisted from the issue and comment rate limit by <%= view.allowlisting_user %>
+          <%= time_ago_in_words_js(view.allowlisted_at) %>. Removing them from the allowlist will
+          restrict them to creating comments and issues within the normal user rate limit.
+        <% else %>
+          <%= user.login %> is currently not allowlisted from the issue and comment rate limit.
+          Allowlisting this user will allow them to create comments and issues at any speed.
+        <% end %>
+      </p>
+      <p>
+        <% if view.last_rate_limit_violation %>
+          <%= user.login %> last violated the rate limit on
+          <%= view.last_rate_limit_violation.created_at %>
+          (<%= link_to(
+             time_ago_in_words_js(view.last_rate_limit_violation.created_at),
+             stafftools_audit_log_path(view.rate_limit_audit_log_link_arguments),
+             class: "Link--inTextBlock"
+          ) %>).
+         <% else %>
+           <%= user.login %> has never reached the rate limit.
+         <% end %>
+      </p>
+      <p>
+        <%= form_tag(
+          stafftools_user_rate_limits_override_path(user),
+          class: "inline-form",
+          method: :patch,
+        ) do %>
+          <%= render Primer::Beta::Button.new(type: :submit, value: "permanently") do %>
+            <%= view.allowlist_button_text %>
+          <% end %>
+        <% end %>
+        <% if view.display_temporary_allowlist_button? %>
+          <%= form_tag(
+            stafftools_user_rate_limits_temporary_override_path(user),
+            class: "inline-form",
+          ) do %>
+            <%= render Primer::Beta::Button.new(type: :submit, value: "temporary") do %>
+              <%= view.temporary_allowlist_button_text %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if porter_admin_url = view.porter_admin_url %>
+  <div class="boxed-group">
+    <h3>Importer</h3>
+    <div class="boxed-group-inner">
+      <p>
+        Visit <a class="Link--inTextBlock" href="<%= porter_admin_url %>">Porter’s stafftools</a> to see details about imports
+        started by this user.
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.git_lfs_config_enabled? %>
+  <div class="boxed-group">
+    <h3>Git LFS</h3>
+    <div class="boxed-group-inner">
+      <% if user.git_lfs_enabled? %>
+        <%= form_tag preview_lfs_stafftools_user_path(user), method: :delete do %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            classes: "boxed-action",
+            test_selector: "admin-disable-git-lfs-button",
+          ) do %>
+            Disable
+          <% end %>
+        <% end %>
+      <% else %>
+        <%= form_tag preview_lfs_stafftools_user_path(user) do %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            classes: "boxed-action",
+            test_selector: "admin-enable-git-lfs-button",
+          ) do %>
+            Enable
+          <% end %>
+        <% end %>
+      <% end %>
+      <h4>Toggle Git LFS access</h4>
+      <p>
+        <%= user.git_lfs_enabled? ? :Disable : :Enable %> Git LFS for all of this
+        <%= user.organization? ? "organization’s" : "user’s" %> repositories.
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if user.site_admin? %>
+  <div class="boxed-group">
+    <h3>Git operator mode</h3>
+    <div class="boxed-group-inner">
+      <%= form_tag(
+        stafftools_user_operator_mode_path(user),
+        method: user.operator_mode_enabled? ? :delete : :post,
+      ) do %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          classes: "boxed-action",
+          test_selector: "admin-toggle-operator-mode-button",
+        ) do %>
+          <%= user.operator_mode_enabled? ? :Disable : :Enable %>
+        <% end %>
+      <% end %>
+      <h4>Toggle Git operator mode</h4>
+      <p>
+        <%= user.operator_mode_enabled? ? :Disable : :Enable %> Git operator mode for this user.
+        This gives a much more verbose <br> output and is useful for debugging Git issues.
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.can_disable_git_ssh_access? %>
+  <div class="boxed-group">
+    <h3>Git SSH access</h3>
+    <div class="boxed-group-inner clearfix">
+      <h4>Git SSH Access</h4>
+      <% if user.ssh_writable? %>
+        <p>
+          Enable or disable Git SSH access for all of this
+          <%= user.organization? ? "organization’s" : "user’s" %> repositories.
+
+          <% if user.ssh_inherited? %>
+            <br>
+            The current value is inherited from
+            <strong><%= view.setting_source_detail_text(user.ssh_source) %></strong>.
+          <% end %>
+        </p>
+        <%= form_tag stafftools_user_ssh_access_preference_path(user), method: :patch do %>
+          <details class="select-menu disable-ssh details-reset details-overlay">
+            <%= render Primer::Beta::Button.new(
+              tag: :summary,
+              size: :small,
+              classes: "select-menu-button",
+              test_selector: "admin-ssh-access-preference-button",
+            ) do %>
+              <%= primer_octicon(:key) %>
+              <span data-menu-button><%= user.ssh_enabled? ? "Enabled" : "Disabled"  %></span>
+            <% end %>
+
+            <details-menu class="select-menu-modal position-absolute" style="z-index: 99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="select-menu-header">
+                <span class="select-menu-title">Git SSH Access</span>
+              </div>
+
+              <div class="select-menu-list">
+                <% view.ssh_choices.each do |label, value| %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :link,
+                    classes: "select-menu-item",
+                    block: true,
+                    align_content: :start,
+                    role: "menuitemradio",
+                    value: value,
+                    name: "value",
+                    aria: { selected: user.ssh_enabled?.to_s == value }
+                  ) do %>
+                    <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                    <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                  <% end %>
+                <% end %>
+              </div>
+            </details-menu>
+          </details>
+          <div class="disable-ssh-policy-buttons">
+            <%= check_box_tag :ssh_local_policy, "policy", view.ssh_local_policy? %>
+            <%= label_tag :ssh_local_policy, 'Enforce on all repositories' %>
+          </div>
+        <% end %>
+      <% else %>
+        <p>
+          Git SSH access is currently
+          <strong><%= user.ssh_enabled? ? "enabled" : "disabled" %></strong>. This is a policy set
+          at <strong><%= view.setting_source_detail_text(user.ssh_source) %></strong> and cannot be
+          changed here.
+        </p>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% unless GitHub.enterprise? || user.user? %>
+  <div class="boxed-group">
+    <h3>EU Standard Contractual Clauses</h3>
+    <div class="boxed-group-inner">
+      <%= form_tag(
+        stafftools_user_standard_contractual_clauses_path(user),
+        method: user.standard_contractual_clauses? ? :delete : :post,
+      ) do %>
+        <% if user.standard_contractual_clauses? %>
+          <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+            Remove
+          <% end %>
+        <% else %>
+          <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+            Add
+          <% end %>
+        <% end %>
+      <% end %>
+      <p>
+        Standard Contractual Clauses
+        <% unless user.standard_contractual_clauses? %>
+          <strong>do not</strong>
+        <% end %> apply to this organization.
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.actions_enabled? %>
+  <div class="boxed-group">
+    <h3>Actions Invocation</h3>
+    <div class="boxed-group-inner">
+      <% if user.action_invocation_blocked? %>
+        <%= form_tag action_invocation_stafftools_user_path(user) do %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            classes: "boxed-action",
+            test_selector: "admin-actions-unblock-invocations-button",
+          ) do %>
+            Unblock
+          <% end %>
+        <% end %>
+        <p <%= test_selector("admin-actions-invocations-blocked-non-reputation") %>>
+          Action invocation for <%= user.login %> is <strong>blocked</strong>.
+        </p>
+      <% else %>
+        <%= form_tag action_invocation_stafftools_user_path(user), method: :delete do %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            classes: "boxed-action",
+            test_selector: "admin-actions-block-invocations-button",
+          ) do %>
+            Block
+          <% end %>
+          <p>Action invocation for <%= user.login %> is <strong>not blocked</strong>.</p>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Legal Hold</h3>
+  <div class="boxed-group-inner">
+    <%= form_tag(
+      stafftools_user_legal_hold_path(user),
+      method: user.legal_hold? ? :delete : :post,
+    ) do %>
+      <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+        <%= view.legal_hold_action_text %>
+      <% end %>
+    <% end %>
+    <h4>Toggle Legal Hold</h4>
+    <p>
+      A legal hold means that no repositories owned by this user or organization will be purged
+      after deletion.
+    </p>
+  </div>
+</div>
+
+<% if GitHub.interaction_limits_enabled? %>
+  <div class="boxed-group" id="interaction-limits">
+    <h3>Temporary interaction limits</h3>
+    <div class="boxed-group-inner clearfix">
+      <p>
+        Temporarily restrict which users can interact with all of this user's public repositories
+        (comment, open issues, or create pull requests). This may be used to force a "cool-down"
+        period during heated discussions.
+      </p>
+
+      <%= render InteractionLimits::SettingsComponent.new(object: user, staff_actor: true) %>
+    </div>
+  </div>
+<% end %>
+
+<%= render partial: "stafftools/users/max_packages_authorizable_per_token", locals: { user: user } %>

@@ -1,0 +1,179 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# view is an instance of EditRepositories::Pages::ManagedAccessPageView %>
+<% invited_text = current_repository.is_enterprise_managed? ? "added" : "invited" %>
+<% no_collaborators_text = "You haven't #{invited_text} any collaborators yet" %>
+
+<% page_info \
+  title: "Manage access",
+  container_xl: true,
+  selected_link: :repo_settings %>
+
+<% if flash[:seat_limit_error] || flash[:rate_limit_error] %>
+  <% flash_rendered! %>
+  <%= render(Primer::Beta::Flash.new(scheme: :danger, dismissible: true, px: 3)) do %>
+    <% if flash[:seat_limit_error] %>
+      <%= safe_join([flash[:seat_limit_error], " ", link_to("Add seat", org_seats_path(owner, seats: 1))]) %>
+    <% elsif flash[:rate_limit_error] %>
+      <%= flash[:rate_limit_error] %>
+      <a class="Link--inTextBlock" href="<%= "#{GitHub.help_url}/github/setting-up-and-managing-organizations-and-teams/adding-outside-collaborators-to-repositories-in-your-organization" %>">Learn more about adding <%= outside_collaborators_verbiage(view.organization) %></a>.
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render layout: "edit_repositories/edit" do %>
+
+  <div class="d-flex mb-3 flex-items-center">
+    <h2 class="f2 text-normal flex-auto">Who has access</h2>
+  </div>
+
+   <%= render(Repositories::AccessManagement::AccessSummaryComponent.new(view: view)) %>
+
+  <div class="d-flex flex-wrap flex-justify-end mt-6 mb-3 flex-items-center">
+    <h2 class="f2 text-normal flex-auto">Manage access</h2>
+    <% if view.show_admin_stuff? %>
+      <div class="js-add-access-form">
+        <% if view.show_org_info? && view.can_create_team? %>
+          <a href="<%= new_team_path(org: view.organization) %>" class="mr-2">Create team</a>
+        <% end %>
+
+        <% if view.direct_access_headcount > 0 || view.repository.owner.organization? %>
+          <%= render(Repositories::AccessManagement::NewAddAccessComponent.new(
+            repository: view.repository,
+            add_type: :user,
+            show_button_text: view.add_user_label,
+            title: "#{view.add_user_label} to #{view.repository.name}",
+            mr: 2,
+          )) %>
+          <% if view.show_org_info? %>
+            <%= render(Repositories::AccessManagement::NewAddAccessComponent.new(
+              repository: view.repository,
+              add_type: :team,
+              show_button_text: view.add_team_label,
+              title: "#{view.add_team_label} to #{view.repository.name}",
+            )) %>
+          <% end %>
+        <% end %>
+      </div>
+    <% elsif view.repo_deny_team_changes? %>
+      <div class="js-add-access-form">
+        <a href="<%= organization_group_settings_path(view.organization) %>" class="mr-2">Access is managed by group settings</a>
+      </div>
+    <% end %>
+  </div>
+
+  <% if view.direct_access_headcount == 0 && !view.repository.owner.organization? %>
+    <div class="Box text-center px-4 py-6" <%= test_selector("empty-headcount-container") %> >
+      <img src="<%= image_path "icons/permissions.png" %>" alt="user granting permissions" class="mb-3" style="width: 56px; height: 56px;">
+      <% if view.org_owned_repo? && !view.is_user_fork_of_private_org_repo? %>
+        <h2 class="mb-3 f3">You haven't added any teams or people yet</h2>
+        <p class="color-fg-muted">
+          Organization owners can manage individual and team access to the organization's repositories. Team maintainers can also manage a team's repository access.
+          <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/github/setting-up-and-managing-organizations-and-teams/managing-access-to-your-organizations-repositories">
+            Learn more about organization access
+          </a>
+        </p>
+      <% else %>
+        <h3 class="mb-3"><%= no_collaborators_text %></h3>
+      <% end %>
+
+      <% if view.show_admin_stuff? %>
+        <%= render layout: "shared/spacious_details_dialog", locals: {
+          button_text: view.add_user_label,
+          title: view.add_user_label,
+          hide_title: true,
+          button_class: "btn btn-primary mt-3",
+          dialog_class: "Box-overlay--wide",
+          container_class: "p-4 min-height-0"
+        } do %>
+          <%= render(Repositories::AccessManagement::AddAccessComponent.new(repository: view.repository, add_type: :user)) %>
+        <% end %>
+
+        <% if view.show_org_info? %>
+          <%= render layout: "shared/spacious_details_dialog", locals: {
+            button_text: view.add_team_label,
+            title: view.add_team_label,
+            hide_title: true,
+            button_class: "btn btn-primary mt-3",
+            dialog_class: "Box-overlay--wide",
+            container_class: "p-4 min-height-0"
+          } do %>
+            <%= render(Repositories::AccessManagement::AddAccessComponent.new(repository: view.repository, add_type: :team)) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  <% elsif view.repository.owner.organization? %>
+    <%= render(Repositories::AccessManagement::MembersTableComponent.new(view: view)) %>
+  <% else %>
+    <%= render "edit_repositories/admin_screen/access_management/members_table", view: view %>
+  <% end %>
+
+  <% if view.show_custom_roles_upsell_component? %>
+    <%= render Primer::Box.new(mt: 6, border: true, border_radius: 2, id: "custom-roles", classes: "color-bg-premium js-notice") do %>
+      <%= render Primer::Beta::BorderBox.new(border: false, padding: :spacious) do |c| %>
+        <% c.with_body(position: :relative, mb: 0) do %>
+          <div class="d-lg-flex flex-items-center">
+            <div class="col-lg-8">
+              <h3 class="mr-4">Create custom roles with GitHub Enterprise</h3>
+              <p class="color-fg-muted mt-2 mb-3">Enterprise accounts offer organizations more granular control over permissions by allowing you to configure up to three custom repository roles. This enables greater control over who and how your users access code and data in your organization.</p>
+              <div class="width-full d-lg-flex flex-items-center">
+                <% if view.org_owner?(current_user) %>
+                  <%= render Primer::Beta::Button.new(
+                    tag: :a,
+                    mr: 3,
+                    href: enterprise_trial_accounts_new_path,
+                    classes: "btn-premium",
+                    data: analytics_click_attributes(category: "start_a_free_trial", action: "click_to_set_up_enterprise_trial", label: "ref_page:#{request.fullpath};ref_cta:try_github_enterprise;ref_loc:manage_access;"),
+                  ) do %>
+                    <%= render(Primer::Beta::Octicon.new(icon: :rocket, color: :sponsors, mr: 1)) %>
+                    Try GitHub Enterprise
+                  <% end %>
+
+                  <div class="mt-2 mt-lg-0">
+                    <%= render(Primer::Beta::Button.new(
+                      scheme: :link,
+                      tag: :a,
+                      href: "https://docs.github.com/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/about-custom-repository-roles",
+                      data: analytics_click_attributes(category: "Suggestion", action: "click to read docs", label: "ref_page:#{request.fullpath};ref_cta:Learn more;ref_loc:Manage access;")
+                    )) { "Learn more" } %>
+                  </div>
+                <% else %>
+                  <%= render(Organizations::MemberRequests::FeatureRequestComponent.new(
+                    requester: current_user,
+                    organization: view.repository&.organization,
+                    feature: MemberFeatureRequest::Feature::CustomRepositoryRoles,
+                    learn_more_url: "https://docs.github.com/enterprise-cloud@latest/organizations/managing-peoples-access-to-your-organization-with-roles/about-custom-repository-roles"
+                  )) do |c| %>
+                    <%= c.with_request_cta(
+                      display: :inline,
+                      classes: "btn-premium",
+                      mr: 3,
+                      data: analytics_click_attributes(
+                        category: "member_feature_request",
+                        action: "action.#{MemberFeatureRequest::Feature::CustomRepositoryRoles}",
+                        label: "ref_page:#{request.fullpath};ref_cta:ask_admin_for_access;ref_loc:manage_access;")) do %>
+                      Ask admin for access
+                    <% end %>
+                    <%= c.with_remove_request_cta(scheme: :link) { "Remove request" } %>
+                    <% c.with_requested_message do %>
+                      <div class="d-inline color-fg-subtle mt-2 mr-1">
+                        You've successfully submitted a request to your organization's admins for this feature.
+                      </div>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+            <div class="d-none d-lg-block col-lg-4 mt-n4">
+              <img src="<%= image_path "modules/suggestions/custom-roles.png" %>" class="width-full" alt="roles dropdown menu">
+            </div>
+          </div>
+          <%= form_tag dismiss_notice_path("vault_custom_roles"), class: "js-notice-dismiss position-absolute mt-4 mr-4 top-0 right-0" do %>
+            <%= render Primer::Beta::CloseButton.new(type: :submit) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

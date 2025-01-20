@@ -1,0 +1,464 @@
+<div <%= test_selector("security-updates-org-settings") %>>
+  <% if security_configs_enabled_for_org? %>
+    <div>
+  <% else %>
+    <div class="ml-4">
+  <% end %>
+    <% show_update_tip = params[:show_update_tip].present? %>
+    <% if show_update_tip %>
+      <% security_task = OnboardingTasks::Organizations::DependabotSecurityUpdates.new(taskable: @owner, user: current_user) %>
+      <%= render(Onboarding::Organizations::TipComponent.new(
+        organization: @owner,
+        show_tip: show_update_tip,
+        task: security_task,
+        mt: 4,
+        )) do %>
+          <h3 class="mb-1">Get automatic security updates</h3>
+          <div class="color-fg-muted">
+            <p>When enabled,
+              <a
+                href="https://docs.github.com/code-security/supply-chain-security/managing-vulnerabilities-in-your-projects-dependencies/about-dependabot-security-updates"
+                target="_blank"
+                class="Link--inTextBlock"
+              >
+                Dependabot security updates
+              </a> will automatically try to fix any vulnerable dependencies for you by raising pull requests with the necessary updates.</p>
+            <p>
+              <a
+                href="https://docs.github.com/code-security/supply-chain-security/managing-vulnerabilities-in-your-projects-dependencies/configuring-dependabot-security-updates"
+                target="_blank"
+                class="Link--inTextBlock"
+              >
+                <%= render(Primer::Beta::Octicon.new(icon: "file", color: :accent, mr: 1 )) %>Configuring Dependabot security updates
+              </a>
+            </p>
+          </div>
+      <% end %>
+
+      <%= render(Onboarding::Organizations::CompletedGuidanceComponent.new(
+        organization: @owner,
+        completed_task: OnboardingTasks::Organizations::DependabotSecurityUpdates.new(taskable: @owner, user: current_user),
+        show_tip: show_update_tip,
+        container_class: "mt-4"
+      )) %>
+    <% end %>
+
+    <% unless security_configs_enabled_for_org? %>
+      <div class="d-flex flex-md-row flex-md-justify-between flex-column pt-3 pb-2">
+        <div class="mb-md-0 mb-2 mr-3">
+          <h4>Dependabot security updates</h4>
+          <p class="mb-0">
+            Enabling this option will result in Dependabot automatically attempting to open pull requests to resolve every open Dependabot alert with an available patch.
+          </p>
+          <% if GitHub.enterprise? %>
+            <p class="mb-0 color-fg-muted text-small">Contact your <%= GitHub.flavor %> administrators to <%= link_to "#{GitHub.dependabot_enabled? ? "disable" : "enable"} Dependabot Security Updates", "#{GitHub.enterprise_admin_help_url(skip_version: true)}/github-actions/enabling-github-actions-for-github-enterprise-server/setting-up-dependabot-updates", class: "Link--inTextBlock" %>.</p>
+          <% end %>
+        </div>
+        <% if GitHub.dependabot_enabled? %>
+          <div>
+            <div class="BtnGroup d-flex flex-shrink-0">
+              <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                  summary_button_text: "Disable all",
+                  confirm_button_text: "Disable Dependabot security updates",
+                  disabled: button_disabled_no_repos(include_public_repos: true),
+                  button_class: "btn btn-disabled btn-danger mr-1",
+                  title: button_disabled_no_repos_title("Disable Dependabot security updates", include_public_repos: true),
+                  button_aria_label: "Disable all Dependabot security updates",
+                  dialog_text: "You're about to disable Dependabot security updates on all #{user_or_org_text(@owner, false)}.",
+                  input_name: "vulnerability_updates",
+                  input_value: "disable_all",
+                  checkbox_name: "vulnerability_updates_new_repos",
+                  checkbox_id: "dialog-vulnerability-updates-disable-all",
+                  checkbox_condition: false,
+                  checkbox_label: "Enable by default for new repositories",
+                  test_selector: "vulnerability-updates-disable-all-button"
+                )) %>
+              <% end %>
+
+              <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                <%= hidden_field_tag :show_update_tip, params[:show_update_tip].presence %>
+                <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                  summary_button_text: "Enable all",
+                  confirm_button_text: "Enable Dependabot security updates",
+                  disabled: button_disabled_no_repos(include_public_repos: true),
+                  title: button_disabled_no_repos_title("Enable Dependabot security updates", include_public_repos: true),
+                  button_aria_label: "Enable all Dependabot security updates",
+                  dialog_text: "You're about to enable Dependabot security updates on all #{user_or_org_text(@owner, false)}. Dependabot security updates require the dependency graph and Dependabot alerts, so we'll also turn that on for all repositories.",
+                  input_name: "vulnerability_updates",
+                  input_value: "enable_all",
+                  checkbox_name: "vulnerability_updates_new_repos",
+                  checkbox_id: "dialog-vulnerability-updates-enable-all",
+                  checkbox_condition: true,
+                  checkbox_label: "Enable by default for new repositories",
+                  test_selector: "vulnerability-updates-enable-all-button"
+                )) %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+    <% if GitHub.dependabot_enabled? && !security_configs_enabled_for_org? %>
+      <div class="pb-3 width-full">
+        <div class="d-flex flex-justify-start">
+          <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+              name: "vulnerability_updates_new_repos",
+              id: "vulnerability-updates-enable-new-repos",
+              checked_condition: @owner.vulnerability_updates_enabled_for_new_repos?,
+              label_text: "Automatically enable for new repositories",
+              test_selector: "vulnerability-updates-enable-new-checkbox",
+              classes: "mr-2"
+            } %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
+    <% if GitHub.dependabot_enabled? && show_grouped_security_updates? %>
+      <div class="pb-2 width-full">
+        <% if security_configs_enabled_for_org? %>
+          <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <input type="hidden" name="vulnerability_updates_grouping_new_repos" value="disabled">
+            <input type="checkbox" name="vulnerability_updates_grouping_new_repos"
+            <%= test_selector("vulnerability-updates-grouping-enable-new-checkbox") %>
+            id="vulnerability-updates-grouping-enable-new-repos" value="enabled"
+            <%= @owner.vulnerability_updates_grouping_enabled_for_new_repos? ? 'checked' : '' %>
+            class="mr-2"
+          >
+            <label for="vulnerability-updates-grouping-enable-new-repos" class="h4">
+              Grouped security updates
+            </label>
+            <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1">
+              <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+              <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            </span>
+          <% end %>
+          <p class="mb-0">
+            Groups all available updates that resolve a Dependabot alert into one pull request (per package manager and directory of requirement manifests). This option may be overridden by group rules specified in dependabot.yml -
+            <%= render(Primer::Beta::Link.new(href: helpers.docs_url("code-security/configuration-dependabot.yml-groups", ghec: !!(owner&.is_a?(Business) && !GitHub.enterprise?)), classes: "Link--inTextBlock")) { "Learn how to group updates." } %>
+          </p>
+        </div>
+        <% else %>
+          <div class="d-flex flex-md-row flex-md-justify-between flex-column pt-3 pb-2">
+            <div class="mb-md-0 mb-2 mr-3">
+              <h4>
+                Grouped security updates
+              </h4>
+              <p class="mb-0">
+                Groups all available updates that resolve a Dependabot alert into one pull request (per package manager and directory of requirement manifests). This option may be overridden by group rules specified in dependabot.yml -
+                <%= render(Primer::Beta::Link.new(href: helpers.docs_url("code-security/configuration-dependabot.yml-groups", ghec: !!(owner&.is_a?(Business) && !GitHub.enterprise?)), classes: "Link--inTextBlock")) { "Learn how to group updates." } %>
+              </p>
+              <% if GitHub.enterprise? %>
+                <p class="mb-0 color-fg-muted text-small">Contact your <%= GitHub.flavor %> administrators to <%= link_to "#{GitHub.dependabot_enabled? ? "disable" : "enable"} Dependabot grouped security updates", "#{GitHub.enterprise_admin_help_url(skip_version: true)}/github-actions/enabling-github-actions-for-github-enterprise-server/setting-up-dependabot-updates", class: "Link--inTextBlock" %>.</p>
+              <% end %>
+            </div>
+            <% if GitHub.dependabot_enabled? %>
+            <div>
+              <div class="BtnGroup d-flex flex-shrink-0">
+                <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                  <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                    summary_button_text: "Disable all",
+                    confirm_button_text: "Disable grouped security updates",
+                    disabled: button_disabled_no_repos(include_public_repos: true),
+                    button_class: "btn btn-disabled btn-danger mr-1",
+                    title: button_disabled_no_repos_title("Disable grouped security updates", include_public_repos: true),
+                    button_aria_label: "Disable all grouped security updates",
+                    dialog_text: "You're about to disable grouped security updates on all #{user_or_org_text(@owner, false)}.",
+                    input_name: "vulnerability_updates_grouping",
+                    input_value: "disable_all",
+                    checkbox_name: "vulnerability_updates_grouping_new_repos",
+                    checkbox_id: "dialog-vulnerability-updates-grouping-disable-all",
+                    checkbox_condition: false,
+                    checkbox_label: "Enable by default for new repositories",
+                    test_selector: "vulnerability-updates-grouping-disable-all-button"
+                  )) %>
+                <% end %>
+
+                <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                  <%= hidden_field_tag :show_update_tip, params[:show_update_tip].presence %>
+                  <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                    summary_button_text: "Enable all",
+                    confirm_button_text: "Enable grouped security updates",
+                    disabled: button_disabled_no_repos(include_public_repos: true),
+                    title: button_disabled_no_repos_title("Enable grouped security updates", include_public_repos: true),
+                    button_aria_label: "Enable all grouped security updates",
+                    dialog_text: "You're about to enable grouped security updates on all #{user_or_org_text(@owner, false)}. Grouped security updates require the dependency graph, Dependabot alerts, Dependabot security updates and Dependabot security updates, so we'll also turn that on for all repositories.",
+                    input_name: "vulnerability_updates_grouping",
+                    input_value: "enable_all",
+                    checkbox_name: "vulnerability_updates_grouping_new_repos",
+                    checkbox_id: "dialog-vulnerability-updates-grouping-enable-all",
+                    checkbox_condition: true,
+                    checkbox_label: "Enable by default for new repositories",
+                    test_selector: "vulnerability-updates-grouping-enable-all-button"
+                  )) %>
+                <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+    </div>
+      <% unless security_configs_enabled_for_org? %>
+        <% if GitHub.dependabot_enabled? && show_grouped_security_updates? %>
+          <div class="pb-3 width-full">
+            <div class="d-flex flex-justify-start">
+              <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+                <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+                  name: "vulnerability_updates_grouping_new_repos",
+                  id: "vulnerability-updates-grouping-enable-new-repos",
+                  checked_condition: @owner.vulnerability_updates_grouping_enabled_for_new_repos?,
+                  label_text: "Automatically enable for new repositories",
+                  test_selector: "vulnerability-updates-grouping-enable-new-checkbox",
+                  classes: "mr-2"
+                } %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% if GitHub.dependabot_enabled? && !GitHub.single_or_multi_tenant_enterprise? && show_dependabot_on_actions? %>
+      <div class="pb-2 width-full">
+        <% if security_configs_enabled_for_org? %>
+        <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <input type="hidden" name="dependabot_on_actions_new_repos" value="disabled">
+            <input type="checkbox" name="dependabot_on_actions_new_repos"
+            <%= test_selector("dependabot-on-actions-enable-new-checkbox") %>
+            id="dependabot-on-actions-enable-new-repos" value="enabled"
+            <%= @owner.dependabot_on_actions_enabled_for_new_repos? ? 'checked' : '' %>
+            class="mr-2"
+          >
+            <label for="dependabot-on-actions-enable-new-repos" class="h4">
+              Dependabot on Actions runners
+            </label>
+            <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1">
+              <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+              <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            </span>
+          <% end %>
+          <p class="mb-0">
+           Run Dependabot security and version updates on Actions runners.
+          </p>
+        <% else %>
+          <% if @owner.organization? %>
+            <div class="d-flex flex-justify-between pt-3 pb-2">
+          <% else %>
+            <div class="d-flex flex-md-row flex-md-justify-between flex-column pt-3 pb-2">
+          <% end %>
+            <div class="<% unless @owner.organization? %>mb-md-0 mb-2<% end %> mr-3">
+              <h4>Dependabot on Actions runners</h4>
+              <p class="mb-0">
+                Run Dependabot security and version updates on Actions runners.
+              </p>
+            </div>
+              <div>
+                <div class="BtnGroup d-flex flex-shrink-0">
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Disable all",
+                      confirm_button_text: "Disable dependabot on actions",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      button_class: "btn btn-disabled btn-danger mr-1",
+                      title: button_disabled_no_repos_title("Disable dependabot on actions", include_public_repos: true),
+                      button_aria_label: "Disable all dependabot on actions",
+                      dialog_text: "You're about to disable dependabot on actions on all #{user_or_org_text(@owner, false)}.",
+                      input_name: "dependabot_on_actions",
+                      input_value: "disable_all",
+                      test_selector: "dependabot-on-actions-disable-all-button"
+                    )) %>
+                  <% end %>
+
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= hidden_field_tag :show_update_tip, params[:show_update_tip].presence %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Enable all",
+                      confirm_button_text: "Enable dependabot on actions",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      title: button_disabled_no_repos_title("Enable dependabot on actions", include_public_repos: true),
+                      button_aria_label: "Enable all dependabot on actions",
+                      dialog_text: "You're about to enable dependabot on actions on all #{user_or_org_text(@owner, false)}. Dependabot on actions requires Actions so we'll also turn that on for all repositories.",
+                      input_name: "dependabot_on_actions",
+                      input_value: "enable_all",
+                      test_selector: "dependabot-on-actions-enable-all-button"
+                    )) %>
+                  <% end %>
+                </div>
+              </div>
+        <% end %>
+      </div>
+    <% end %>
+    <% if GitHub.dependabot_enabled? && !GitHub.single_tenant_enterprise? && show_dependabot_self_hosted? %>
+      <div class="pb-2 width-full">
+        <% if security_configs_enabled_for_org? %>
+        <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <input type="hidden" name="dependabot_self_hosted_new_repos" value="disabled">
+            <input type="checkbox" name="dependabot_self_hosted_new_repos"
+            <%= test_selector("dependabot-self-hosted-enable-new-checkbox") %>
+            id="dependabot-self-hosted-enable-new-repos" value="enabled"
+            <%= @owner.dependabot_self_hosted_enabled_for_new_repos? ? 'checked' : '' %>
+            class="mr-2"
+          >
+            <label for="dependabot-self-hosted-enable-new-repos" class="h4">
+              Dependabot on self-hosted runners
+            </label>
+            <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1">
+              <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+              <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            </span>
+          <% end %>
+          <p class="mb-0">
+           Run Dependabot security and version updates on self-hosted Actions runners.
+          </p>
+        <% else %>
+          <% if @owner.organization? %>
+            <div class="d-flex flex-justify-between pt-3 pb-2">
+          <% else %>
+            <div class="d-flex flex-md-row flex-md-justify-between flex-column pt-3 pb-2">
+          <% end %>
+            <div class="<% unless @owner.organization? %>mb-md-0 mb-2<% end %> mr-3">
+              <h4>Dependabot on self-hosted runners</h4>
+              <p class="mb-0">
+                Run Dependabot security and version updates on self-hosted Actions runners.
+              </p>
+            </div>
+              <div>
+                <div class="BtnGroup d-flex flex-shrink-0">
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Disable all",
+                      confirm_button_text: "Disable dependabot self-hosted",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      button_class: "btn btn-disabled btn-danger mr-1",
+                      title: button_disabled_no_repos_title("Disable dependabot self-hosted", include_public_repos: true),
+                      button_aria_label: "Disable all dependabot self-hosted",
+                      dialog_text: "You're about to disable dependabot self-hosted on all #{user_or_org_text(@owner, false)}.",
+                      input_name: "dependabot_self_hosted",
+                      input_value: "disable_all",
+                      test_selector: "dependabot-self-hosted-disable-all-button"
+                    )) %>
+                <% end %>
+
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= hidden_field_tag :show_update_tip, params[:show_update_tip].presence %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Enable all",
+                      confirm_button_text: "Enable dependabot self-hosted",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      title: button_disabled_no_repos_title("Enable dependabot self-hosted", include_public_repos: true),
+                      button_aria_label: "Enable all dependabot self-hosted",
+                      dialog_text: "You're about to enable dependabot self-hosted on all #{user_or_org_text(@owner, false)}. Dependabot self-hosted depends on Dependabot on Actions so we'll also turn that on for all repositories.",
+                      input_name: "dependabot_self_hosted",
+                      input_value: "enable_all",
+                      test_selector: "dependabot-self-hosted-enable-all-button"
+                    )) %>
+                  <% end %>
+                </div>
+              </div>
+        <% end %>
+      </div>
+    <% end %>
+    <% if GitHub.dependabot_enabled? && !security_configs_enabled_for_org? && !GitHub.single_tenant_enterprise? && show_dependabot_self_hosted? %>
+      <div class="pb-3 width-full">
+        <div class="d-flex flex-justify-start">
+          <%= form_tag security_analysis_update_path(@owner), :class => "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+              name: "dependabot_self_hosted_new_repos",
+              id: "dependabot-self-hosted-enable-new-repos",
+              checked_condition: @owner.dependabot_self_hosted_enabled_for_new_repos?,
+              label_text: "Automatically enable for new repositories",
+              test_selector: "dependabot-self-hosted-enable-new-checkbox",
+              classes: "mr-2"
+            } %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+    <% if GitHub.dependabot_enabled? && !GitHub.single_tenant_enterprise? && show_dependabot_autofix? %>
+      <div class="pb-2 width-full">
+        <% if security_configs_enabled_for_org? %>
+          <%= form_tag security_analysis_update_path(@owner), class: "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+              <input type="hidden" name="dependabot_autofix_new_repos" value="disabled">
+              <input type="checkbox" name="dependabot_autofix_new_repos"
+              <%= test_selector("dependabot_autofix-enable-new-checkbox") %>
+              id="dependabot_autofix-enable-new-repos" value="enabled"
+              <%= @owner.dependabot_autofix_enabled_for_new_repos? ? 'checked' : '' %>
+              class="mr-2"
+            >
+              <label for="dependabot_autofix-enable-new-repos" class="h4">
+                Dependabot Copilot Autofix
+              </label>
+              <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1">
+                <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+              </span>
+            <% end %>
+            <p class="mb-0">
+              Suggest fixes for a CI-breaking change in a Dependabot PR using AI.
+            </p>
+        <% else %>
+          <% if @owner.organization? %>
+            <div class="d-flex flex-justify-between pt-3 pb-2">
+          <% else %>
+            <div class="d-flex flex-md-row flex-md-justify-between flex-column pt-3 pb-2">
+          <% end %>
+            <div class="<% unless @owner.organization? %>mb-md-0 mb-2<% end %> mr-3">
+              <h4>Dependabot Copilot Autofix</h4>
+              <p class="mb-0">
+                Suggest fixes for a CI-breaking change in a Dependabot PR using AI.
+              </p>
+            </div>
+              <div>
+                <div class="BtnGroup d-flex flex-shrink-0">
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Disable all",
+                      confirm_button_text: "Disable dependabot copilot autofix",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      button_class: "btn btn-disabled btn-danger mr-1",
+                      title: button_disabled_no_repos_title("Disable dependabot copilot autofix", include_public_repos: true),
+                      button_aria_label: "Disable all dependabot copilot autofix",
+                      dialog_text: "You're about to disable dependabot copilot autofix on all #{user_or_org_text(@owner, false)}.",
+                      input_name: "dependabot_autofix",
+                      input_value: "disable_all",
+                      test_selector: "dependabot_autofix-disable-all-button"
+                    )) %>
+                <% end %>
+
+                  <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                    <%= hidden_field_tag :show_update_tip, params[:show_update_tip].presence %>
+                    <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                      summary_button_text: "Enable all",
+                      confirm_button_text: "Enable Dependabot Copilot Autofix",
+                      disabled: button_disabled_no_repos(include_public_repos: true),
+                      title: button_disabled_no_repos_title("Enable Enable Dependabot Copilot Autofix", include_public_repos: true),
+                      button_aria_label: "Enable all Enable Dependabot Copilot Autofix",
+                      dialog_text: "You're about to enable Enable Dependabot Copilot Autofix on all #{user_or_org_text(@owner, false)}. Enable Dependabot Copilot Autofix depends on Dependabot on Actions so we'll also turn that on for all repositories.",
+                      input_name: "dependabot_autofix",
+                      input_value: "enable_all",
+                      test_selector: "dependabot_autofix-enable-all-button"
+                    )) %>
+                  <% end %>
+                </div>
+              </div>
+        <% end %>
+      </div>
+    <% end %>
+    <% if GitHub.dependabot_enabled? && !security_configs_enabled_for_org? && !GitHub.single_tenant_enterprise? && show_dependabot_autofix? %>
+      <div class="pb-3 width-full">
+        <div class="d-flex flex-justify-start">
+          <%= form_tag security_analysis_update_path(@owner), class: "js-setting-toggle d-flex flex-items-center", "data-autosubmit" => true, method: :put do %>
+            <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+              name: "dependabot_autofix_new_repos",
+              id: "dependabot-autofix-enable-new-repos",
+              checked_condition: @owner.dependabot_autofix_enabled_for_new_repos?,
+              label_text: "Automatically enable for new repositories",
+              test_selector: "dependabot-autofix-enable-new-checkbox",
+              classes: "mr-2"
+            } %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+</div>

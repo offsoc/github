@@ -1,0 +1,188 @@
+#!/bin/bash
+#/ Usage:
+#/    ghe-mssql-repl-promote [-h]
+#/
+#/ Options:
+#/    -h | --help     Show this message.
+#/    -f | --force    Use forced failover.
+#/
+#/ Manually failover MSSQL availability group to the replica where this script runs
+#/
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+}
+
+fail() {
+  >&2 echo "$@"
+  exit 1
+}
+
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+  usage
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-repl-lib
+. ghe-mssql-repl-lib
+
+ensure_mssql_instance_is_replica
+
+force=
+replica=$(hostname)
+mssql_primary_instance_node_ip="$(mssql_primary_ip)"
+
+forced-failover() {
+  echo "Forcing failover with possible data loss ..."
+  ghe-mssql-console -y -q "ALTER AVAILABILITY GROUP [ha] FORCE_FAILOVER_ALLOW_DATA_LOSS"
+}
+
+planned-failover() {
+  local aborted=
+  local failed=
+
+  primary=$(ssh_cmd $mssql_primary_instance_node_ip -- hostname)
+
+  echo "Changing AVAILABILITY_MODE to SYNCHRONOUS_COMMIT ..."
+  ssh_cmd $mssql_primary_instance_node_ip --  "ghe-mssql-console -y -q \"
+    ALTER AVAILABILITY GROUP [ha] MODIFY REPLICA ON N'$primary' WITH (AVAILABILITY_MODE = SYNCHRONOUS_COMMIT);
+    ALTER AVAILABILITY GROUP [ha] MODIFY REPLICA ON N'$replica' WITH (AVAILABILITY_MODE = SYNCHRONOUS_COMMIT)\""
+
+  if wait-replica-synchronized; then
+    echo "Setting REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to 1 ..."
+    ssh_cmd $mssql_primary_instance_node_ip --  "ghe-mssql-console -y -q \"ALTER AVAILABILITY GROUP [ha] SET (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 1)\""
+
+    if ensure-failover-ready; then
+      echo "Promoting secondary replica $replica ..."
+      # Use FORCE_FAILOVER_ALLOW_DATA_LOSS due to CLUSTER_TYPE=NONE
+      ghe-mssql-console -y -q "ALTER AVAILABILITY GROUP [ha] FORCE_FAILOVER_ALLOW_DATA_LOSS" || failed=1
+    else
+      aborted=1
+    fi
+  else
+    aborted=1
+  fi
+
+  echo "Restoring HA setting on replica $replica ..."
+  ghe-mssql-console -y -q "
+    ALTER AVAILABILITY GROUP [ha] SET (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 0);
+    ALTER AVAILABILITY GROUP [ha] MODIFY REPLICA ON N'$replica' WITH (AVAILABILITY_MODE = ASYNCHRONOUS_COMMIT)" || true
+
+  if [ -n "$aborted" ]; then
+    fail "Error: Failover was aborted to prevent data loss. Use -f for forced failover if needed"
+  elif [ -n "$failed" ]; then
+    fail "Error: Failover ran into error. See logs above for details"
+  fi
+}
+
+primary-alive() {
+  alive=$(ssh_cmd $mssql_primary_instance_node_ip --  "ghe-mssql-console -y -q \"print 'Alive'\"" | grep "Alive")
+  [ -n "$alive" ]
+}
+
+wait-replica-synchronized() {
+  local attempts=240
+  local interval=3
+
+  for i in $(seq 1 "$attempts"); do
+    if replica-synchronized > /dev/null; then
+      return 0
+    fi
+
+    if [ "$i" -eq "$attempts" ]; then
+      echo "Error: Timeout waiting for replica to become synchronized"
+      local content=
+      content=$(ghe-mssql-console -y -q "
+          SET NOCOUNT ON;
+          SELECT *
+          FROM sys.dm_hadr_database_replica_states drs, sys.availability_groups ag
+          WHERE drs.group_id = ag.group_id AND synchronization_state_desc != \"SYNCHRONIZED\"") || true
+      echo "Unsynchronized databases"
+      echo "$content"
+      content=$(ssh_cmd $mssql_primary_instance_node_ip -- ghe-mssql-console -y -r -q "SET NOCOUNT ON; SELECT * FROM sys.dm_hadr_database_replica_states") || true
+      echo "Primary database replica state"
+      echo "$content"
+      return 1
+    else
+      echo "Waiting for replica to become synchronized ..."
+      sleep $interval
+    fi
+  done
+}
+
+replica-synchronized() {
+  while IFS= read -r line; do
+    echo "$line"
+    return 1
+  done < <(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT ag.name,
+      drs.database_id,
+      drs.group_id,
+      drs.replica_id,
+      drs.synchronization_state_desc,
+      ag.sequence_number
+    FROM sys.dm_hadr_database_replica_states drs, sys.availability_groups ag
+    WHERE drs.group_id = ag.group_id AND synchronization_state_desc != \"SYNCHRONIZED\"")
+
+  return 0
+}
+
+ensure-failover-ready() {
+  while read -r line; do
+    if [[ "$line" && "$line" != "1" ]]; then
+      echo "Replica was not ready for graceful failover!"
+      return 1
+    fi
+  done < <(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT is_failover_ready
+    FROM sys.dm_hadr_database_replica_cluster_states
+    WHERE replica_id = (SELECT replica_id FROM sys.availability_replicas WHERE replica_server_name = N'$replica')")
+
+  return 0
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -f|--force)
+      force=1
+      shift
+      ;;
+    *)
+      fail "Error: Unrecognized argument: $1"
+      ;;
+  esac
+done
+
+ag_role=$(get-ag-role)
+
+if ! echo "$ag_role" | grep -q "PRIMARY" && ! echo "$ag_role" | grep -q "SECONDARY"; then
+  echo "Current replica is not part of any availability group. Skipping ..."
+  exit 0
+elif echo "$ag_role" | grep -q "PRIMARY"; then
+  echo "Current replica is now in PRIMARY role; failover already happened. Skipping ..."
+  exit 0
+fi
+
+if [ -n "$force" ]; then
+  forced-failover
+else
+  if ! primary-alive; then
+    fail "MSSQL primary replica isn't healthy. Failover without data loss isn't possible. Use -f|--force to force failover."
+  fi
+  planned-failover
+  echo "MSSQL failover succeeded!"
+fi

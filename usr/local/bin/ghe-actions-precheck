@@ -1,0 +1,193 @@
+#!/bin/bash
+#/ Usage: ghe-actions-precheck [-h] -p [s3/azure] -cs ["connectionstring"]
+#/
+#/ Check that blob storage provider for GitHub Actions is valid.
+#/
+#/ OPTIONS:
+#/   -h  | --help              Show this message
+#/   -p  | --provider          The name of the storage provider (Azure/S3/MinIO/gcs).
+#/                             If not specified, will default to s3.
+#/   -a  | --auth-type         Authentication type for the storage provider. (credential/oidc)
+#/                             If not specified, will default to credential type
+#/   -cs | --connection-string The connection string to the storage provider.
+#/   -s  | --save              Automatically updates blob storage configuration if all tests pass
+#/                             If blob storage has been previously configured then -o/--overwrite option must be provided too
+#/   -o  | --overwrite         Tells to overwrite existing configuration if -s/--save option is specified
+#/                             Note that overwriting existing configuration may result in the loss of Actions data
+#/  Sample S3 connection string:
+#/   "BucketName=<bucket-name>;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=https://s3.us-east-1.amazonaws.com;PathPrefix=actions-storage-check"
+#/  Sample Minio connection string:
+#/   "ForcePathStyle=true;BucketName=<bucket-name>;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=<url-to-minio-service>;PathPrefix=actions-storage-check"
+#/  Sample Azure connection string:
+#/   "DefaultEndpointsProtocol=https;AccountName=<azure-account-name>;AccountKey=<azure-account-key>;EndpointSuffix=core.windows.net"
+#/  Sample GCS connection string:
+#/   "BucketName=<bucket-name>;ServiceUrl=https://storage.googleapis.com;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>"
+#/
+set -e
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options
+storage_provider="s3"
+auth_type="credential"
+connection_string=""
+prompt_save_configuration=true
+prompt_overwrite_existing=true
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+prompt() {
+    read -p "$1 Please type 'Yes' or 'No': " -r
+
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        if [[ ! $REPLY =~ ^[Nn][Oo]$ ]]; then
+            echo "Assuming you answered No"
+        fi
+        exit 1
+    fi
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -p|--provider)
+            storage_provider="$(echo $2| tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;
+        -a|--auth-type)
+            auth_type="$(echo $2| tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;
+        -cs|--connection-string)
+            connection_string=$2
+            shift 2
+            ;;
+        -s|--save)
+            prompt_save_configuration=false
+            shift 1
+            ;;
+        -o|--overwrite)
+            prompt_overwrite_existing=false
+            shift 1
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+if [[ -z $connection_string ]]; then
+ echo "Connection string is invalid."
+ usage
+fi
+
+if [[ $auth_type == "oidc" ]];then
+    echo "$storage_provider OIDC authentication is not supported"
+    exit 1
+fi
+
+# Minio is the same as s3.
+[[ "$storage_provider" == "minio" ]] && storage_provider="s3"
+
+# Parse connection string into a dictionary
+declare -A cs_settings
+old_IFS=$IFS
+IFS=';' read -ra cs_parts <<< "$connection_string"
+for part in "${cs_parts[@]}"; do
+    IFS='=' read -ra kv_pair <<< "$part"
+    key=$(echo "${kv_pair[0]}" | tr -d '[:space:]')
+    value=$(echo "${kv_pair[1]}" | tr -d '[:space:]')
+    cs_settings["$key"]="$value"
+done
+IFS=$old_IFS
+
+# Disallow backslashes as both ERB and consul templating have escaping issues and can break Actions.
+# This is only known to occur when MinIO has specifically been configured with such an access/secret key.
+if [[ "${cs_settings['AccessKeyId']}" == *"\\"* || "${cs_settings['SecretAccessKey']}" == *"\\"* ]]; then
+    echo "Backslashes are not supported in the AccessKeyId or SecretAccessKey"
+    exit 1
+fi
+
+check-blob-storage() {
+    echo "Running blob storage checks."
+    ghe-check-blob-connection -s token -p "$storage_provider" -cs "$connection_string" -at "$auth_type"
+}
+
+if check-blob-storage; then
+    if $prompt_save_configuration; then
+        prompt "Would you like to configure Actions storage with these settings?"
+    fi
+
+    if $prompt_save_configuration || $prompt_overwrite_existing; then
+        if ghe-config --present "secrets.actions.storage.blob-provider"; then
+            echo "WARNING: There is existing storage configuration. Replacing it may result in the loss of Actions data."
+            prompt "Do you want to overwrite existing blob storage configuration?"
+        fi
+    fi
+
+    echo "Saving $storage_provider blob storage provider configuration..."
+    if [[ $storage_provider == "azure" ]]; then
+        if ([ $auth_type == "oidc" ]); then
+            ghe-config secrets.actions.storage.azure-oidc.tenant-id "${cs_settings['TenantId']}"
+            ghe-config secrets.actions.storage.azure-oidc.client-id "${cs_settings['ClientId']}"
+            ghe-config secrets.actions.storage.azure-oidc.storage-account "${cs_settings['StorageAccount']}"
+            ghe-config secrets.actions.storage.azure-oidc.endpoint-suffix "${cs_settings['EndpointSuffix']}"
+         else
+            ghe-config secrets.actions.storage.azure.connection-string "$connection_string"
+         fi
+    elif [[ $storage_provider == "s3" ]]; then
+        if ([ $auth_type == "oidc" ]); then
+            ghe-config secrets.actions.storage.s3-oidc.bucket-name "${cs_settings['BucketName']}"
+            ghe-config secrets.actions.storage.s3-oidc.role-arn "${cs_settings['RoleARN']}"
+            if [[ -n "${cs_settings['STSEndpoint']}" ]]; then
+                ghe-config secrets.actions.storage.s3-oidc.sts-endpoint "${cs_settings['STSEndpoint']}"
+            else
+                ghe-config --unset secrets.actions.storage.s3-oidc.sts-endpoint || true
+            fi
+         else
+            ghe-config secrets.actions.storage.s3.bucket-name "${cs_settings['BucketName']}"
+            ghe-config secrets.actions.storage.s3.service-url "${cs_settings['ServiceUrl']}"
+            ghe-config secrets.actions.storage.s3.access-key-id "${cs_settings['AccessKeyId']}"
+            ghe-config secrets.actions.storage.s3.access-secret "${cs_settings['SecretAccessKey']}"
+         fi
+
+        if [[ -n "${cs_settings['ForcePathStyle']}" ]]; then
+            ghe-config secrets.actions.storage.s3.force-path-style "${cs_settings['ForcePathStyle']}"
+        else
+            ghe-config --unset secrets.actions.storage.s3.force-path-style || true
+        fi
+    elif [[ $storage_provider == "gcs" ]]; then
+
+
+        if ([ $auth_type == "oidc" ]); then
+            ghe-config secrets.actions.storage.gcs-oidc.bucket-name "${cs_settings['BucketName']}"
+            ghe-config secrets.actions.storage.gcs-oidc.service-url "${cs_settings['ServiceUrl']}"
+            ghe-config secrets.actions.storage.gcs-oidc.workload-id "${cs_settings['WorkloadProviderId']}"
+            ghe-config secrets.actions.storage.gcs-oidc.service-acc "${cs_settings['ServiceAccount']}"
+        else
+            ghe-config secrets.actions.storage.gcs.bucket-name "${cs_settings['BucketName']}"
+            ghe-config secrets.actions.storage.gcs.service-url "${cs_settings['ServiceUrl']}"
+            ghe-config secrets.actions.storage.gcs.access-key-id "${cs_settings['AccessKeyId']}"
+            ghe-config secrets.actions.storage.gcs.access-secret "${cs_settings['SecretAccessKey']}"
+        fi
+
+        if [[ -n "${cs_settings['ForcePathStyle']}" ]]; then
+            ghe-config secrets.actions.storage.gcs.force-path-style "${cs_settings['ForcePathStyle']}"
+        else
+            ghe-config --unset secrets.actions.storage.gcs.force-path-style || true
+        fi
+    else
+        echo "$storage_provider blob storage provider is not supported"
+        exit 1
+    fi
+
+    ghe-config secrets.actions.storage.blob-provider $storage_provider
+    ghe-config secrets.actions.storage.auth-type $auth_type
+
+    echo "$storage_provider blob storage provider has been successfully configured"
+fi

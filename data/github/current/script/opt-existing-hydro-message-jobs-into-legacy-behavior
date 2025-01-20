@@ -1,0 +1,26 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+ENV["PRELOAD"] = "1"
+require File.expand_path("../../config/environment", __FILE__)
+
+# get the file paths and line numbers, then reverse them so we don't mess up insert locations
+# when there are multiple jobs in a file
+legacy_job_class_locations = HydroMessageJob.descendants.map do |job_class|
+  Object.const_source_location(job_class.name)
+end.sort.reverse
+
+legacy_job_class_locations.each do |(path, line_number)|
+  file_contents = File.read(path)
+
+  lines = file_contents.lines
+  class_has_comment = lines[line_number - 1].strip.starts_with?("#")
+
+  next if lines[line_number + (class_has_comment ? 1 : 0)].include?("default_to_write_connection!")
+
+  indent = lines[line_number - 1].length - lines[line_number - 1].lstrip.length
+  indent += 2 unless class_has_comment
+  add_extra_new_line = lines[line_number].strip.length > 0
+  lines.insert(line_number, "#{"\n" if class_has_comment}#{" " * indent}default_to_write_connection! # rubocop:todo GitHub/JobsDoNotDefaultToWriteConnection\n#{"\n" if add_extra_new_line}")
+  File.write(path, lines.join)
+end

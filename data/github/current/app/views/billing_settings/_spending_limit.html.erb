@@ -1,0 +1,98 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# `view` is BillingSettings::OverviewView %>
+
+<%
+  trade_screening_error_data = view.trade_screening_error_data(check_for_current_user: true)
+%>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>
+    <%= link_to "Billing & plans", target_billing_path(view.account), "data-pjax" => true %>
+    <% if view.codespaces_ui_enabled? %>
+      / Monthly spending limits
+    <% else %>
+      / Monthly spending limit
+    <% end %>
+  <% end %>
+<% end %>
+
+<p class="mb-4">
+  Set up a monthly spending limit. You can adjust it at any time. Read more information about
+  <% if view.codespaces_ui_enabled? %>
+    <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/github/setting-up-and-managing-billing-and-payments-on-github/managing-your-github-billing-settings">spending limits</a>.
+  <% else %>
+    <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/github/setting-up-and-managing-billing-and-payments-on-github/managing-your-spending-limit-for-github-actions#about-spending-limits-for-github-actions">Actions spending limits</a> and
+    <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/github/setting-up-and-managing-billing-and-payments-on-github/managing-your-spending-limit-for-github-packages#about-spending-limits-for-github-packages">Packages spending limits</a>.
+  <% end %>
+</p>
+
+<% unless view.allowed_to_update_spending_limit? %>
+  <% if view.account_has_screening_restriction?(feature_type: :cost_management) %>
+    <div class="border-top py-3" <%= test_selector("trade-restriction-notice") %>>
+      <%= render(Primer::Beta::Flash.new(scheme: trade_screening_error_data[:scheme])) do %>
+        <h2 class="h5">
+          <%= render(Primer::Beta::Octicon.new(trade_screening_error_data[:icon])) %>
+          You can't proceed at this time
+        </h2>
+        <div class="ml-5">
+          <%= trade_screening_error_data[:message] %>
+        </div>
+      <% end %>
+    </div>
+  <% elsif !view.account_eligible_for_budget_management? %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, icon: "alert")) do %>
+      <strong class="ml-1">Payment method is missing</strong>
+      <p class="text-small pt-1">
+        You can’t increase the spending limits until you set up a valid payment method.
+      </p>
+      <% if view.account_has_coupon? %>
+        <p class="text-small">
+          <strong>Coupons do not apply to any overages.</strong>
+          Any incurred overages will be paid in full by the added payment method.
+        </p>
+      <% end %>
+      <%= link_to "Add payment method", target_payment_method_path(view.account), class: "btn btn-sm", 'data-test-selector' => 'spending_limit_add_payment_method' %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%
+  form_action = view.account.organization? ? settings_org_spending_limit_path : settings_user_spending_limit_path
+%>
+
+<%=
+  render(Billing::MeteredBilling::CostManagementComponent.new(
+    product_name: "Actions & Packages",
+    title: view.codespaces_ui_enabled? ? "Actions & Packages" : nil,
+    budget_group: "shared",
+    billing_target: view.account,
+    form_action: form_action,
+    disabled: !view.allowed_to_update_spending_limit?,
+    enforce_spending_limit: view.actions_and_packages_budget.enforce_spending_limit,
+    spending_limit_in_subunits: view.actions_and_packages_budget.spending_limit_in_subunits,
+    notification_form_action: view.usage_notification_form_action_path,
+    included_usage_notification: view.actions_and_packages_budget.included_usage_notification,
+    paid_usage_notification: view.actions_and_packages_budget.paid_usage_notification,
+    has_products_with_included_usage: view.actions_and_packages_budget.has_products_with_included_usage?
+  ))
+%>
+
+<% if view.codespaces_ui_enabled? %>
+  <%=
+    render(Billing::MeteredBilling::CostManagementComponent.new(
+      title: "Codespaces",
+      product_name: "Codespaces",
+      budget_group: "codespaces",
+      billing_target: view.account,
+      form_action: form_action,
+      disabled: !view.allowed_to_update_spending_limit?,
+      enforce_spending_limit: view.codespaces_budget.enforce_spending_limit,
+      spending_limit_in_subunits: view.codespaces_budget.spending_limit_in_subunits,
+      notification_form_action: view.usage_notification_form_action_path,
+      included_usage_notification: view.codespaces_budget.included_usage_notification,
+      paid_usage_notification: view.codespaces_budget.paid_usage_notification,
+      has_products_with_included_usage: view.codespaces_budget.has_products_with_included_usage?
+    ))
+  %>
+<% end %>

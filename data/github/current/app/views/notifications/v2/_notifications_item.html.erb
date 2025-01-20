@@ -1,0 +1,210 @@
+<%# view is an instance of Notification::V2::IndexView %>
+
+<%
+  locals = ensure_local_vars(local_assigns, {
+    required: [:notification, :view],
+    optional: [],
+    defaults: {},
+    view: "notifications/v2/notifications_item"
+  })
+%>
+
+<%
+  notification_link_id = "notification_#{notification.global_relay_id}_link"
+  is_starred_page = view.selected_tab?(:saved)
+  is_read = !notification.unread? && !notification.archived?
+  is_unread = notification.unread? && !is_starred_page
+  is_archived = notification.archived? && !is_starred_page
+
+  css_classes = class_names(
+    "notifications-list-item p-0 pl-2 pb-2 pb-md-0 position-relative border-0 js-notifications-list-item js-navigation-item border-bottom color-border-muted",
+    {
+      "notification-read": is_read,
+      "notification-unread": is_unread,
+      "notification-archived": is_archived,
+      "notification-unsubscribed": ["unsubscribed", "list_ignored"].include?(notification.subscription_status),
+      "notification-starred": notification.starred?,
+    }
+  )
+
+  notification_href = view.previewless_notification_url(
+    notification.url,
+    notification.global_relay_id
+  )
+
+  hydro_data_attributes = hydro_click_tracking_attributes("notifications.read", {
+    list_type: notification.list_type,
+    list_id: notification.list_id,
+    thread_type: notification.thread_type,
+    thread_id: notification.thread_id,
+    comment_type: notification.last_comment_type,
+    comment_id: notification.last_comment_id,
+    version: "V2"
+  })
+%>
+
+<li
+  class="<%= css_classes %>"
+  data-notification-id="<%= notification.global_relay_id %>"
+  <%= test_selector("notifications-list-item") %>
+>
+  <div class="d-flex flex-column flex-md-row flex-md-items-center">
+    <div class="d-flex flex-row flex-md-1">
+      <div class="d-flex flex-column flex-sm-row flex-self-start flex-items-center" style="margin-top:5px;">
+        <div class="notification-list-item-unread-indicator circle d-none d-md-block"></div>
+
+        <% unless is_starred_page %>
+          <label class="p-2 clearfix">
+            <input class="float-left js-notification-bulk-action-check-item"
+                  type="checkbox"
+                  name="notification_ids[]"
+                  value="<%= notification.global_relay_id %>"
+                  aria-labelledby="<%= notification_link_id %>"
+                  data-check-all-item
+                  autocomplete="off">
+          </label>
+        <% end %>
+      </div>
+
+      <% track_render_partial("notifications/index/list_item_headline") do %>
+        <a class="d-flex flex-items-center flex-auto min-width-0 no-underline py-2 js-navigation-open notification-list-item-link wb-break-word"
+          href="<%= notification_href %>"
+          <%= safe_data_attributes(hydro_data_attributes) %>
+        >
+          <div class="d-flex flex-column flex-md-row mr-2 flex-self-start flex-items-center">
+            <div class="flex-shrink-0 flex-self-start text-center" style="width: 16px;">
+              <% if notification.subject.is_a?(CheckSuite) && notification.check_suite_summary_conclusion %>
+                <% conclusion_view = Notifications::CheckSuiteConclusionView.new(notification.check_suite_summary_conclusion) %>
+                <%= octicon(conclusion_view.icon, class: conclusion_view.text_color) %>
+              <% elsif !notification.subject.is_a?(CheckSuite) %>
+                <%= notification_octicon_for(notification.subject) %>
+              <% end %>
+            </div>
+
+            <div class="notification-list-item-unread-indicator circle d-md-none d-block mt-1"></div>
+          </div>
+
+          <div class="d-flex flex-column flex-auto" id="<%= notification_link_id %>">
+            <div class="d-flex">
+              <p class="m-0 f6 flex-auto">
+                <% case notification.subject %>
+                <% when Issue, PullRequest %>
+                  <%= notification.list.name_with_display_owner %>
+                  <span class="text-normal color-fg-muted">
+                    #<%= notification.subject.number %>
+                  </span>
+                <% when Discussion %>
+                  <% if notification.subject.organization_discussion? %>
+                    <%= notification.list.organization.name %> Discussion
+                  <% else %>
+                    <%= notification.list.name_with_display_owner %>
+                  <% end %>
+                  <span class="text-normal color-fg-muted">
+                    #<%= notification.subject.number %>
+                  </span>
+                <% when RepositoryVulnerabilityAlert, Commit, RepositoryDependabotAlertsThread, RepositoryInvitation %>
+                  <%= notification.list.name_with_display_owner %>
+                <% when RepositoryAdvisory, AdvisoryCredit %>
+                  <%= notification.list.name_with_display_owner %>
+                  <span class="text-normal color-fg-muted">
+                    <%= notification.subject.ghsa_id %>
+                  </span>
+                <% when SecurityAdvisory %>
+                  <%= notification.subject.ghsa_id %>
+                <% when Release %>
+                  <%= notification.subject.tag_name %> in <%= notification.list.name_with_display_owner %>
+                <% when DiscussionPost %>
+                  <%= notification.list.combined_slug %>
+                <% when CheckSuite %>
+                  <%= notification.list.name_with_display_owner %>
+                  <% if notification.subject.workflow_run %>
+                    <span class="text-normal color-fg-muted">
+                      – <%= notification.subject.workflow_name %> #<%= notification.subject.workflow_run.run_number %>
+                    </span>
+                  <% end %>
+                <% when Actions::WorkflowRun %>
+                  <%= notification.list.name_with_display_owner %>
+                  <% if notification.subject.workflow %>
+                    <span class="text-normal color-fg-muted">
+                      – <%= notification.subject.workflow.name %> #<%= notification.subject.run_number %>
+                    </span>
+                  <% end %>
+                <% when MemexProject %>
+                  <%= notification.list.name_with_display_owner %>
+                  <span class="text-normal color-fg-muted">
+                    #<%= notification.subject.number %>
+                  </span>
+                <% end %>
+              </p>
+              <p class="note m-0 pr-2 d-block d-md-none color-fg-muted text-right flex-shrink-0">
+                <%= time_ago_in_words_js(notification.last_updated_at) %>
+                <span class="text-center d-inline-block notification-is-starred-icon color-fg-severe ml-1" style="width:16px">
+                  <%= primer_octicon(:bookmark, ml: 1, color: :severe, classes: "notification-is-starred-icon") %>
+                </span>
+              </p>
+            </div>
+            <p class="m-0 text-normal pr-2 pr-md-0 markdown-title" <%= test_selector("notifications-list-item-title") %>>
+              <% case notification.thread_type %>
+              <% when "Issue" %>
+                <%= title_markdown(notification.title) %>
+              <% when "RepositoryAdvisory" %>
+                <%= notification.subject.get_title(current_user) %>
+              <% else %>
+                <%= notification.title %>
+              <% end %>
+            </p>
+          </div>
+
+          <% case notification.subject %>
+          <% when SecurityAdvisory, RepositoryDependabotAlertsThread %>
+          <% else %>
+            <div class="d-md-flex d-none flex-items-center min-width-0 pl-3 flex-shrink-0">
+              <% if notification.unread_items_count > 1 %>
+                <span class="f6 mx-2 px-2 flex-shrink-0">+<%= notification.unread_items_count - 1 %></span>
+              <% end %>
+            </div>
+          <% end%>
+        </a>
+      <% end %>
+    </div>
+
+    <div class="d-flex flex-row flex-md-row-reverse">
+      <%# line-height and v-align-middle on octicon are to ensure the positioning is the same as the button that appears on hover %>
+      <p class="note m-0 d-md-block d-none color-fg-muted text-right pr-3 flex-shrink-0 notification-list-item-hide-on-hover"
+         style="width: 140px; line-height: 20px;"
+      >
+        <%= time_ago_in_words_js(notification.last_updated_at) %>
+        <span class="text-center d-inline-block notification-is-starred-icon color-fg-severe ml-1" style="width:16px">
+          <%= primer_octicon(:bookmark, vertical_align: :middle) %>
+        </span>
+      </p>
+
+      <% if notification.recent_participants.length > 0 %>
+        <% track_render_partial("notifications/index/list_item_avatars") do %>
+          <div style="width: 70px; min-width: 70px;" class="AvatarStack <%= avatar_stack_count_class(notification.recent_participants.length) %> AvatarStack--right mr-0 mr-sm-3 mr-md-0 mr-lg-0 clearfix d-inline-block">
+            <div class="AvatarStack-body">
+              <% notification.recent_participants.reverse_each do |participant| %>
+                <%= linked_avatar_for(participant, 20, link_class: "avatar avatar-user") %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+
+      <% unless notification_reason_label(notification.reason) == "saved" %>
+        <span class="f6 flex-self-center ml-2 px-2 flex-shrink-0"><%= notification_reason_label(notification.reason) %></span>
+      <% end %>
+    </div>
+  </div>
+
+  <ul class="notification-list-item-actions d-none position-absolute top-0 bottom-0 right-0 list-style-none mr-2 d-flex flex-items-center">
+    <% track_render_partial("notifications/index/list_item_actions") do %>
+      <%= render partial: "notifications/v2/actions/item_actions", locals: {
+            notification_id: notification.global_relay_id,
+            starring_only: is_starred_page,
+            list_is_ignored: notification.subscription_status == "list_ignored"
+          }
+      %>
+    <% end %>
+  </ul>
+</li>

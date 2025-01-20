@@ -1,0 +1,32 @@
+#!/bin/bash
+# wait until a unicorn-based service is ready to receive signals
+# usage: $0 [systemd service name] [optional timeout, default 120]
+
+set -e
+
+service="$1"
+timeout="${2:-120}"
+status="$(systemctl is-active "$service" || true)"
+
+# if the service is "activating", wait around for it to become "active"
+if [ "$status" = "activating" ] ; then
+  while [ "$timeout" -gt 0 ] && [ "$status" != "active" ]; do
+    sleep 1.0
+    status="$(systemctl is-active github-unicorn || true)"
+    timeout=$[timeout-1]
+  done
+fi
+
+# if the service isn't "active" then give up
+[ "$status" != "active" ] && exit 1
+
+# check for old unicorn masters and wait until they die
+while [ "$timeout" -gt 0 ] ; do
+  systemctl status "$service" | grep -q "master (old)" || exit 0
+  sleep 1.0
+  timeout=$[timeout-1]
+done
+
+# timeout expired, one last try before giving up
+systemctl status "$service" | grep -q "master (old)" || exit 0
+exit 1

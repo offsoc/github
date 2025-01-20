@@ -1,0 +1,90 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    project(number: $projectNumber) {
+      closed
+      searchQueryForViewer
+      searchResultsResourcePath
+      viewerCanUpdate
+
+      linkedRepositories
+      linkedRepositoriesSettingsResourcePath
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<%
+  project_owner = Views::Projects::Panes::AddCards::ProjectOwner.new(project_owner)
+  project = project_owner.project
+  card_search_query = params[:add_cards_query] || project.search_query_for_viewer || default_card_search_value
+%>
+<div class="project-pane js-project-pane js-project-triage-pane js-build-status-to-the-left <%= "d-none" unless params[:add_cards_query] %> border-left border-bottom position-relative bottom-0 top-0 right-0 overflow-auto ws-normal hide-sm height-full width-full project-touch-scrolling"
+    data-back-to-label="Add cards"
+    data-back-to-class="js-show-project-triage">
+  <div class="py-2 border-bottom color-bg-subtle">
+    <%= render Primer::ButtonComponent.new(scheme: :link, position: :absolute, pt: 2, pr: 3, pb: 1, top: 0, right: 0, classes: "project-pane-close js-hide-project-menu", "aria-label": "Hide project triage") do %>
+      <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+    <% end %>
+    <h4 class="pl-3 f5">
+      <%= render Primer::ButtonComponent.new(scheme: :link, mr: 2, classes: "Link--secondary js-show-project-menu", "aria-label": "Hide project triage") do %>
+        <%= primer_octicon(:"chevron-left") %>
+      <% end %>
+      <%= primer_octicon(:plus) %> Add cards
+    </h4>
+  </div>
+  <div class="p-3 position-relative border-bottom">
+    <%= form_tag project.search_results_resource_path.to_s, class: "js-project-search-form project-search-form", method: :get, autocomplete: "off" do %>
+      <input type="hidden" name="triage" class="js-show-triage-field" value="show">
+      <%= render(Primer::Beta::Spinner.new(size: :small, position: :absolute, mt: 1, mr: 1, classes: "loading-indicator")) %>
+      <input type="text"
+        aria-label="Search for Issues and Pull Requests"
+          placeholder="Search for Issues and Pull Requests"
+          class="form-control input-block js-project-triage-search-text"
+          name="q"
+          value="<%= card_search_query %>">
+
+      <% if project.linked_repositories.count > 0 %>
+        <%
+          # If the query has a "repo" string in it, the user has added that.
+          # This means it's not scoped to linked repos!
+          check_repo_scope = card_search_query.include?("repo:") ? "" : "checked"
+        %>
+
+        <div class="form-checkbox mt-2 mb-1">
+          <label>
+            <input type="checkbox" <%= check_repo_scope %> class="js-toggle-linked-repo-scope">
+            Only show results from linked repositories
+          </label>
+        </div>
+      <% elsif project.viewer_can_update? && project_owner.is_a?(PlatformTypes::Organization) %>
+        <div class="mt-2 mb-1">
+          Refine search results with <a class="Link--inTextBlock" href="<%= project.linked_repositories_settings_resource_path %>">linked repositories</a>.
+        </div>
+      <% end %>
+    <% end %>
+
+    <small class="color-fg-muted">
+      <span class="f6">
+        You can use the filters available in <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/searching-issues/">issue search</a>.
+      </span>
+    </small>
+  </div>
+
+  <%= render partial: "stafftools/staffbar/project_stats" %>
+
+  <div class="js-project-column-cards js-project-search-results <% if !project.closed? && enable_dragging?(project) %>js-project-search-results-drag-container<% end %> <% if enable_drag_by_handle? %>js-drag-by-handle<% end %> color-bg-default p-3">
+
+    <%
+      fragment_query_values = {
+        q: card_search_query,
+        triage: "show"
+      }
+
+      fragment_url = project.search_results_resource_path.clone
+      fragment_url.query_values ||= {}
+      fragment_url.query_values = fragment_url.query_values.merge(fragment_query_values)
+    %>
+    <include-fragment src="<%= fragment_url %>">
+      <div class="text-center py-3 f5 color-fg-muted">Loading search results…</div>
+    </include-fragment>
+  </div>
+</div>

@@ -1,0 +1,212 @@
+#!/bin/bash
+#/ Usage: ghe-actions-start [-h]
+#/
+#/ Starts GitHub Actions (Enabled services) on this GitHub Enterprise appliance.  Will also
+#/ setup the databases the first time this script is called.
+#/
+#/ OPTIONS:
+#/   -p | --phase    The setup phase to execute (db or app).  If no phase is
+#/                   provided, will run all setup phases.
+#/   -s | --services Starts only the specified services. This is used only during OIDC storage provider validation
+#/   -h | --help     Show this message.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+phase=
+actions_services=$(action-services)
+launch_services=$(launch-services)
+skip_storage_provider_validation=false
+
+# check-state <state> <service>
+#   Checks if the service is in the given state.  The state must be set by
+#   update-state.
+check-state() {
+    ensure-service-name "$2"
+    sudo -u actions grep "$1" "/data/user/actions/states/${2}_state" &> /dev/null
+}
+
+# update-state <state> <service>
+#   Set or update the state of the service.  The state is stored in the file
+#   <service>_state in /data/user/actions/states.  The following states are currently
+#   used:
+#      - creating  Begun creating the database
+#      - created   Database created but service not connected
+#      - connected Service connected but not yet registered
+#      - complete  Service ready
+update-state() {
+    ensure-service-name "$2"
+    echo "$1" | sudo -u actions tee "/data/user/actions/states/${2}_state" > /dev/null
+}
+
+# usage
+#   Display usage information for this script.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+# Process command line arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -p|--phase)
+            phase="$2"
+            shift 2
+            ;;
+        -s|--services)
+            actions_services="$(to-lower "$2")"
+            launch_services=""
+            skip_storage_provider_validation=true
+            shift 2
+            ;;           
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Verify all Docker images exist
+ensure-images
+
+# Wait for MSSQL to be available.
+ghe-actions-check -s mssql
+
+
+if ghe-config --present secrets.actions.storage.auth-type; then
+    auth_type=$(ghe-config secrets.actions.storage.auth-type)
+else
+    auth_type="credential"
+fi
+
+
+# actions may not be enabled (we may be starting it up during ghe-run-migrations)
+# ideally storage would always be in the a good state, but if actions has been disabled then it may not be
+if ghe-config --true app.actions.enabled && [ "$auth_type" == "credential" ] && ! $skip_storage_provider_validation; then
+  # Wait for Blob storage to be available.
+  # Hack to let actions developers disable this check while we provision environments for internal use.
+  if ghe-config --blank app.actions.storage-checks-disabled; then
+     ghe-actions-check -s blob
+  fi
+fi
+
+# Ensure secrets and certificates exist.  They are normally created by
+# ghe-config-apply, but may not exist if this script is called directly.
+if ! ghe-config --name-only --get-regex secrets.actions > /dev/null; then
+    echo "Initializing secrets..."
+    /usr/local/share/enterprise/ghe-secrets-init
+fi
+
+# Create the MPS, Token, ArtifactCache, and Actions databases.
+if [ -z "$phase" ] || [ "$phase" == "db" ]; then
+    create_db="
+        New-ServiceConfigDb
+    "
+
+    declare -A pids
+
+    for service in $actions_services; do
+        if check-state complete "$service" || check-state created "$service" || check-state connected "$service"; then
+            echo "$(capitalize "$service") databases already created, skipping..."
+        elif check-state creating "$service"; then
+            echo "$(capitalize "$service") database creation incomplete. Clean up and try again."
+            exit 1
+        else
+            echo "Initializing $(capitalize "$service") databases..."
+            update-state creating "$service"
+            ghe-actions-console -s "$service" -c "$create_db" & pids["$service"]=$!
+        fi
+    done
+
+    failed_services=( )
+    for service in "${!pids[@]}"; do
+        wait ${pids["$service"]} && update-state created "$service" || failed_services+=( "$service" )
+    done
+
+    if (( ${#failed_services[@]} )); then
+        echo "Database creation failed for the following services: ${failed_services[@]}. Please see the logs at /data/user/actions/lightrail/<service>/logs for more details."
+        exit 1
+    fi
+fi
+
+# Start the application services.
+if [ -z "$phase" ] || [ "$phase" == "app" ]; then
+    connect="
+        Connect-DeploymentHost
+    "
+
+    create_service_db="
+        New-ServiceDatabase
+    "
+
+    register="
+        Wait-DefaultPartitionDatabase
+        Register-WithMps
+    "
+
+    for service in $launch_services; do
+        echo "Starting $(capitalize "$service") service..."
+        /usr/local/share/enterprise/ghe-nomad-jobs queue "/etc/nomad-jobs/launch/$service.hcl"
+
+        # Immediately attempt to run the job so the next health check doesn't have to wait
+        # for nomad-jobs.timer (which runs every 10 seconds)
+        # Note that this may not immediately run the job if the nomad service is not yet running
+        /usr/local/share/enterprise/ghe-nomad-jobs apply-wait-all-queues
+    done
+
+    previous_service=
+
+    for service in $actions_services; do
+        if check-state created "$service"; then
+            if [ -n "$previous_service" ]; then
+                echo "Waiting for $(capitalize "$previous_service") to come online..."
+                ghe-actions-check -s "$previous_service"
+
+                echo "Checking connectivity to $(capitalize "$previous_service")..."
+                ghe-actions-check-connectivity -s "$service" -t "$previous_service"
+            fi
+
+            echo "Connecting $(capitalize "$service") service..."
+            ghe-actions-console -s "$service" -c "$connect"
+            if [ "$service" == "mps" ] ||  [ "$service" == "token" ]; then
+                echo "Skipping Partition DB Creation for $(capitalize "$service")"
+            else
+                echo "Creating Partition DB for $(capitalize "$service")"
+                ghe-actions-console -s "$service" -c "$create_service_db"
+            fi
+            update-state connected "$service"
+        fi
+
+        # queuing the nomad job will no-opt if the hcl file has not been changed
+        echo "Starting $(capitalize "$service") service..."
+        /usr/local/share/enterprise/ghe-nomad-jobs queue "/etc/nomad-jobs/actions/$service.hcl"
+
+        # Immediately attempt to run the job so the next health check doesn't have to wait
+        # for nomad-jobs.timer (which runs every 10 seconds)
+        # Note that this may not immediately run the job if the nomad service is not yet running
+        /usr/local/share/enterprise/ghe-nomad-jobs apply-wait-all-queues
+
+        previous_service="$service"
+    done
+
+    for service in $actions_services; do
+        if check-state connected "$service"; then
+            echo "Registering $(capitalize "$service") service..."
+            ghe-actions-console -s "$service" -c "$register"
+            update-state complete "$service"
+        fi
+    done
+
+    # For OIDC auth perform storage check after starting the services
+    if [ "$auth_type" == "oidc" ]&& ! $skip_storage_provider_validation; then
+        ghe-actions-check -s blob
+    fi
+
+    echo "Actions was enabled!"
+fi

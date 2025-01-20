@@ -1,0 +1,158 @@
+#!/usr/bin/env ruby
+#
+# nwo: Determine a repository's NWO (name with owner) from its repository ID
+#      or from various other ways of specifying a repository.
+#
+# Usage: nwo 3
+#        github/github
+#
+# Forms recognized:
+# - For repositories:
+#   - repo/<repo-id>
+#   - fork/<repo-id>
+#   - <repo-id>
+#   - <repo-id>.git
+#   - <network-path>/<repo-id>.git (trailing '.git' is optional)
+#   - <repo-global-relay-id>
+# - For wikis (output as '<NWO>.wiki'):
+#   - wiki/<repo-id>
+#   - <repo-id>.wiki
+#   - <repo-id>.wiki.git
+#   - <network-path>/<repo-id>.wiki.git (trailing '.git' is optional)
+# - For networks (the nwo of the root repository is returned):
+#   - network/<network-id>
+#   - <network-id>/network.git
+#   - <network-path>
+#   - <network-path>/network.git
+# - For gists (output as gist/<gist-name>):
+#   - gist/<gist-id>
+#   - gist/<gist-name>
+#   - <shard-path>/gist/<gist-name>.git (trailing '.git' is optional)
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+require "github/sql"
+require "graphql"
+require_relative "../app/platform/helpers/node_identification"
+require_relative "../app/platform/helpers/global_id"
+require_relative "../app/platform/helpers/global_id/legacy"
+require_relative "../app/platform/helpers/global_id/next"
+require_relative "../app/platform/errors/execution"
+require_relative "../app/platform/errors/not_found"
+
+GitHub.load_activerecord
+
+class Error < StandardError; end
+class NoResultError < Error; end
+
+def repo_nwo_from_id(id)
+  sql = Arel.sql <<-SQL, id: id
+    SELECT repositories.owner_login, repositories.name
+      FROM repositories
+      WHERE repositories.id=:id
+  SQL
+  results = ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+  if results.empty?
+    raise NoResultError, "could not find repository with ID #{id}!"
+  end
+  login, name = results.first
+  "#{login}/#{name}"
+end
+
+def wiki_nwo_from_id(id)
+  sql = Arel.sql <<-SQL, id: id
+    SELECT repositories.owner_login, repositories.name, repositories.has_wiki
+      FROM repositories
+      WHERE repositories.id=:id
+  SQL
+  results = ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+  if results.empty?
+    raise NoResultError, "could not find repository with ID #{id}!"
+  end
+  login, name, has_wiki = results.first
+  if has_wiki != 1
+    raise NoResultError, "repository with ID #{id} doesn't have a wiki!"
+  end
+  "#{login}/#{name}.wiki"
+end
+
+def repo_nwo_from_network_id(id)
+  sql = Arel.sql <<-SQL, id: id
+    SELECT CONCAT(repositories.owner_login, "/", repositories.name)
+      FROM repository_networks
+      JOIN repositories ON repositories.id=repository_networks.root_id
+      WHERE repository_networks.id=:id
+  SQL
+  results = ApplicationRecord::Domain::Repositories.connection.select_rows(sql)
+  if results.empty?
+    raise NoResultError, "could not find network with ID #{id}!"
+  end
+  results.first.first
+end
+
+def repo_nwo_from_gist_id(id)
+  sql = Arel.sql <<-SQL, id: id
+    SELECT repo_name
+      FROM gists
+      WHERE gists.id=:id
+  SQL
+  results = ApplicationRecord::Domain::Gists.connection.select_rows(sql)
+  if results.empty?
+    raise NoResultError, "could not find gist with ID #{id}!"
+  end
+  repo_name = results.first.first
+  "gist/#{repo_name}"
+end
+
+def repo_nwo_from_gist_name(name)
+  sql = Arel.sql <<-SQL, name: name
+    SELECT login
+      FROM gists
+      LEFT JOIN users ON users.id=gists.user_id
+      WHERE gists.repo_name=:name
+  SQL
+  if ApplicationRecord::Domain::Gists.connection.select_rows(sql).empty?
+    raise NoResultError, "could not find gist with name #{name}!"
+  end
+  "gist/#{name}"
+end
+
+def nwo_from_arg(arg)
+  case arg
+  when %r{\A(?:repo|fork)/(\d+)\z},
+       %r{\A(?:.*/[0-9a-f]/nw/(?:[0-9a-f]{2}/){3}\d+/)?(\d+)(?:\.git)?\z}
+    repo_nwo_from_id($1.to_i)
+  when %r{\Awiki/(\d+)\z},
+       %r{\A(?:.*/[0-9a-f]/nw/(?:[0-9a-f]{2}/){3}\d+/)?(\d+)\.wiki(?:\.git)?\z}
+    wiki_nwo_from_id($1.to_i)
+  when %r{\Anetwork/(\d+)\z},
+       %r{\A(\d+)/network\.git\z},
+       %r{\A.*/[0-9a-f]/nw/(?:[0-9a-f]{2}/){3}(\d+)(?:/(?:network\.git)?)?\z}
+    repo_nwo_from_network_id($1.to_i)
+  when %r{\Agist/(\d{1,19})\z},
+       %r{\A.*/[0-9a-f]/(?:[0-9a-f]{2}/){3}gist/(\d{1,19}+)(?:\.git)?\z}
+    repo_nwo_from_gist_id($1.to_i)
+  when %r{\Agist/([0-9a-f]{32}|[0-9a-f]{20})\z},
+       %r{\A.*/[0-9a-f]/(?:[0-9a-f]{2}/){3}gist/([0-9a-f]{32}|[0-9a-f]{20})(?:\.git)?\z}
+    repo_nwo_from_gist_name($1)
+  else
+    begin
+      type_name, id = Platform::Helpers::NodeIdentification.from_global_id(arg)
+      if type_name == "Repository"
+        repo_nwo_from_id(id.to_i)
+      else
+        raise Error, "The decoded value's type, #{type_name}, is not supported. Only the `Repository` type is supported."
+      end
+    rescue Platform::Errors::NotFound
+      raise Error, "unrecognized input: #{arg.inspect}"
+    end
+  end
+end
+
+ARGV.each do |arg|
+  begin
+    puts nwo_from_arg(arg)
+  rescue Error => e
+    puts "error: #{e}"
+  end
+end

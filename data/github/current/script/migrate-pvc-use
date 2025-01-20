@@ -1,0 +1,101 @@
+#!/bin/bash
+
+usage() {
+  echo IMORTANT NOTE:
+  echo "  This script is meant to run in a dotcom codespace, and has not been tested on mac or"
+  echo "  other operating systems."
+  echo
+  echo "Description:"
+  echo "  The migrate-pvc-use script will update all found instances of the component you specify as the"
+  echo "  original name, and update them to use the updated component name that you provide. It will"
+  echo "  then look for use of the named slots that you specify and convert them from '.#{slot_name}' to"
+  echo "  '.with_#{slot_name}'."
+  echo
+  echo "  Once that is complete, a series of pull requests will be opened, grouping files by code owner"
+  echo "  into the pull requests"
+  echo
+  echo "Basic Use:"
+  echo "  script/migrate-pvc-use 'old component name' [-u 'updated name'] [-s 'slot name list'] [-f 'folder']"
+  echo
+  echo "Parameters:"
+  echo "  'old component name': the full namespace and name of the old component, such as Primer::BorderBoxComponent"
+  echo "  -u 'updated name':    the updated namespace and name of the component, such as Primer::Beta::BorderBox"
+  echo "  -s 'slot name list':  a comma separated list of _singularized_ slot names for the component, such as header,footer"
+  echo "  -f 'folder/name':     the folder in which to search for named components and slot use"
+  echo
+  echo "Example:"
+  echo "  script/migrate-pvc-use 'Primer::BorderBoxComponent' -u 'Primer::Beta::BorderBox' -s 'header,footer,body,row'"
+  echo
+  echo "Slot Names:"
+  echo "  It's important to note the use of 'row' in the list of slot names, for the example above. This is from"
+  echo "  a 'renders_many :rows' slot, but the name has been singularized when calling the script. Adding 'rows',"
+  echo "  as the plural form to the list of slot names will not work. They must be singularized."
+
+  exit 1
+}
+
+# if no args, then show usage and exit
+[ $# -eq 0 ] && usage
+
+# args with default values
+FOLDER_NAME="app"
+ORIGINAL_NAME=$1
+shift 1
+
+# process named args
+while getopts "f:s:u:h" arg; do
+  case "$arg" in
+    f)
+      FOLDER_NAME="${OPTARG}"
+      ;;
+    s)
+      SLOT_NAMES="${OPTARG}"
+      ;;
+    u)
+      UPDATED_NAME="${OPTARG}"
+      ;;
+    h | *)
+      usage
+      ;;
+  esac
+done
+
+# additional vars for script use
+if ! [ -z "$UPDATED_NAME" ]; then
+  COMPONENT_NAME=$UPDATED_NAME
+else
+  COMPONENT_NAME=$ORIGINAL_NAME
+fi
+COMMIT_MESSAGE="migrating PVC use $COMPONENT_NAME"
+PR_TITLE="[PVC Migration] updating component use for $COMPONENT_NAME"
+BRANCH_NAME="migrate-pvc-use/${COMPONENT_NAME//::/_}"
+PR_TEMPLATE="script/migrate-pvc-use.pr.template"
+PR_REVIEW_TEAM="@github/primer-rails-reviewers"
+
+# rename the component
+if ! [ -z "$UPDATED_NAME" ]; then
+  echo "Updating '$ORIGINAL_NAME' instances to '$UPDATED_NAME'"
+  grep -rl $ORIGINAL_NAME $FOLDER_NAME | xargs sed -i "s/$ORIGINAL_NAME/$UPDATED_NAME/g"
+fi
+
+# update named slot use
+if ! [ -z "$SLOT_NAMES" ]; then
+  slot_list=$(echo $SLOT_NAMES | tr "," "\n")
+  for slot_name in $slot_list
+  do
+    echo "Updating slots from '.$slot_name' to '.with_$slot_name'"
+    grep -rl $COMPONENT_NAME $FOLDER_NAME | xargs sed -i "s/\\.$slot_name/.with_$slot_name/g"
+  done
+fi
+
+# update deprecated component counters
+echo "Updating deprecated component counters"
+grep -rl $COMPONENT_NAME $FOLDER_NAME | xargs bin/bundle exec erblint -a --enable-linters deprecated_components_counter
+
+# create the PRs if any files have been updated
+if [[ `git status --porcelain` ]]; then
+  echo "Creating pull requests by code owner teams"
+  script/create-prs-by-codeowners "$COMMIT_MESSAGE" "$PR_TITLE" "$PR_TEMPLATE" "$BRANCH_NAME" "$PR_REVIEW_TEAM"
+else
+  echo "No files in git have been modified. Exiting without creating pull requests"
+fi

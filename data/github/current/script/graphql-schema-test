@@ -1,0 +1,143 @@
+#!/usr/bin/env ruby
+require "fileutils"
+require "yaml"
+require "json"
+require "digest"
+
+ci_mode = ARGV.include?("--ci")
+
+# Copy the current schema dump files into `tmp/`,
+# then regenerate them in `config/`, and compare
+# the newly-generated files to the previous copies.
+#
+# If the newly-generated files don't match the previous ones,
+# raise an error to fail CI and require `bin/dump-graphql-schema`
+# to update the files in the repo.
+
+def each_target_file
+  targets = %w[public internal docs]
+  envs = ENV["ENTERPRISE"] ? ["-enterprise"] : [""]
+  targets.each do |target|
+    envs.each do |env|
+      schema_file = "schema.#{target}#{env}.graphql"
+      upcoming_changes_file = "graphql_upcoming_changes.#{target}#{env}.yml"
+      yield(target, schema_file, upcoming_changes_file)
+    end
+  end
+end
+
+class ArtifactCheck
+  attr_accessor :filename
+
+  def initialize(filename)
+    @filename = filename
+  end
+
+  def new_file
+    "tmp/#{filename}"
+  end
+
+  def old_file
+    "config/#{filename}"
+  end
+
+  def skip?
+    filename.include?("graphql_upcoming_change") && filename.include?("docs")
+  end
+
+  def up_to_date?
+    if old_file.end_with?(".yml") && new_file.end_with?(".yml")
+      # In the case of YAML files, we only care whether they are semantically
+      # matching, not whether they are different at the byte encoding level.
+      YAML.load_file(old_file) == YAML.load_file(new_file)
+    else
+      result = FileUtils.cmp(old_file, new_file)
+      unless result
+        # generate git diff of changes to help orient contributor
+        diff = `git diff -- #{old_file}`
+        unless diff.chomp.empty?
+          puts "git diff output for: '#{old_file}'"
+          puts "---"
+          puts diff
+          puts "---"
+        end
+      end
+      result
+    end
+  end
+
+  def copy_to_tmp
+    puts "[Prepare] Copying #{old_file.inspect} => #{new_file.inspect}"
+    FileUtils.cp(old_file, new_file)
+  end
+
+  def to_failure
+    {
+      suite: filename,
+      name: "graphql_schema_test",
+      location: "#{old_file}:1",
+      message: "The GraphQL schema has changed, but the #{filename} GraphQL artifact hasn't been updated.\nPlease run `bin/dump-graphql-schema` and commit the resulting changes.",
+      fingerprint:  Digest::SHA256.hexdigest(filename),
+      flake: false
+    }
+  end
+end
+
+checks = []
+each_target_file do |_target, schema_file, upcoming_changes_file|
+  checks << ArtifactCheck.new(schema_file)
+  checks << ArtifactCheck.new(upcoming_changes_file)
+end
+
+previews_files = if ENV["ENTERPRISE"]
+  ["graphql_previews.enterprise.yml"]
+else
+  ["graphql_previews.yml"]
+end
+
+previews_files.each do |previews_file|
+  checks << ArtifactCheck.new(previews_file)
+end
+
+checks = checks.reject(&:skip?)
+checks.each do |check|
+  check.copy_to_tmp
+end
+
+puts "[Regenerate] Regenerating GraphQL artifacts..."
+dump_graphql_schema_output = `bin/dump-graphql-schema`
+
+problems = checks.reject(&:up_to_date?)
+
+puts
+if problems.any?
+  if ci_mode
+    problems.each do |problem|
+      puts "===FAILURE==="
+      puts JSON.pretty_generate(problem.to_failure)
+      puts "===END FAILURE==="
+    end
+  else
+    puts "The GraphQL schema has changed, but the following GraphQL artifacts haven't been updated:"
+    puts
+
+    problems.each do |problem|
+      puts "  - #{problem.filename}"
+    end
+
+    puts
+
+    puts "Please run `bin/dump-graphql-schema` and commit the resulting changes."
+
+    puts
+
+    puts "bin/dump-graphql-schema output:"
+    puts dump_graphql_schema_output
+
+    puts
+  end
+
+  exit 1
+else
+  puts "Everything up-to-date!"
+end

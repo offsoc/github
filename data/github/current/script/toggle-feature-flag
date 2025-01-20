@@ -1,0 +1,213 @@
+#!/usr/bin/env ruby
+# typed: true
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "./vexi_setup"
+
+LOG_PREFIX = "=>"
+DEBUG_PREFIX = "==>"
+MODES = %w[silent normal verbose]
+PROXIMA_WARNING = <<~RUBY
+
+WARNING: This utility is not a supported path for enabling/disabling feature flags in production because
+         it does not result in synchronization to Proxima stamps. Use the devtools user interface to make
+         sure your changes are synchronized.
+
+RUBY
+class FeatureFlagToggler
+  extend T::Sig
+
+  def initialize(opts = {})
+    @options = opts
+    @feature_names = opts[:flags].push(opts[:feature_name]).compact
+    @action = normalize_action(opts[:action])
+    @actor_names = opts[:actor_names]
+    @features = []
+
+    @vexi_enabled = VexiSetup::Adapter.enabled?
+    if @vexi_enabled
+      @adapter = VexiSetup::Adapter.create
+    end
+
+    $stderr.sync = true
+  end
+
+  sig { params(action: String).returns(String) }
+  def normalize_action(action)
+    return "enable" if action == "e"
+    return "disable" if action == "d"
+    action
+  end
+
+  def call
+    # Load up rails only if we are executing the command, i.e. we don't need to
+    # load rails for the help message.
+    safe_warn "Loading rails environment..."
+    require File.expand_path("../../config/basic", __FILE__)
+    require_relative "../config/environment"
+
+    @features = find_or_create_flags_with_log
+    return act_globally if @actor_names.empty?
+
+    @actor_names.each do |actor_name|
+      actor = if actor_name.start_with?("business:")
+        Business.find_by(slug: actor_name.gsub("business:", ""))
+      elsif actor_name.start_with?("role:")
+        GitHub::FlipperRole::new(actor_name.gsub("role:", ""))
+      else
+        GitHub::Resources.find_by_uri(actor_name)
+      end
+      unless actor
+        safe_warn "Couldn't find the actor #{actor_name}"
+        exit(1)
+      end
+
+      @features.each do |feature|
+        begin
+          debug("#{@action} #{feature.name} for #{actor_name}")
+          feature.method(@action).call(actor)
+
+          if @vexi_enabled
+            begin
+              unless actor.is_a?(GitHub::VexiActor)
+                safe_warn "The provided actor type does not include GitHub::VexiActor so it will not be enabled in vexi: #{actor.class.name}"
+                next
+              end
+              if @action == "enable"
+                @adapter.add_actor(feature.name, actor.vexi_id)
+                debug("Feature flag #{feature.name} enabled for #{actor_name} in Vexi")
+              elsif @action == "disable"
+                @adapter.remove_actor(feature.name, actor.vexi_id)
+                debug("Feature flag #{feature.name} disabled for #{actor_name} in Vexi")
+              else
+                safe_warn "Vexi does not support action: #{@action}"
+              end
+            rescue => exception # rubocop:disable Lint/GenericRescue
+              safe_warn "Failed to #{@action} #{feature.name} for actor #{actor_name} in Vexi: #{exception.message}"
+            end
+          end
+
+          safe_warn "#{feature.name} #{@action}d for #{actor_name}"
+        rescue Flipper::GateNotFound
+          safe_warn "Something went wrong when trying to #{@action} #{feature.name} for #{actor_name}"
+        end
+      end
+    end
+  end
+
+  private def verbose? = @options[:mode] == "verbose"
+  private def silent? = @options[:mode] == "silent"
+
+  private def debug(msg)
+    puts "#{DEBUG_PREFIX} #{msg}" if verbose?
+  end
+
+  private def safe_warn(msg)
+    warn "#{LOG_PREFIX} #{msg}" unless silent?
+  end
+
+  private def find_or_create_flags_with_log
+    @feature_names.map do |feature_name|
+      feature = FlipperFeature.find_by(name: feature_name)
+      # Check Vexi first because the feature check returns
+      if @vexi_enabled
+        begin
+          @adapter.create(Vexi::FeatureFlag.create_boolean_feature_flag(feature_name, false)) if @adapter.get_feature_flag(feature_name).nil?
+          debug("Feature flag #{feature_name} created in Vexi")
+        rescue => exception # rubocop:disable Lint/GenericRescue
+          safe_warn "Failed to create #{feature_name} in Vexi: #{exception.message}"
+        end
+      end
+
+      if feature
+        debug("#{feature.name} exists")
+        feature
+      else
+        safe_warn "Creating #{feature_name}"
+        FlipperFeature.create(name: feature_name)
+      end
+    end
+  end
+
+  private def act_globally # think locally ;)
+    debug("globally enabling features")
+    @feature_names.each do |feature_name|
+      GitHub.flipper[feature_name].method(@action).call
+
+      if @vexi_enabled
+        begin
+          if @action == "enable"
+            @adapter.enable(feature_name)
+            debug("Feature flag #{feature_name} enabled in Vexi")
+          elsif @action == "disable"
+            @adapter.disable(feature_name)
+            debug("Feature flag #{feature_name} disabled in Vexi")
+          else
+            safe_warn "Vexi does not support action: #{@action}"
+          end
+        rescue => exception # rubocop:disable Lint/GenericRescue
+          safe_warn "Failed to #{@action} #{feature_name} in Vexi: #{exception.message}"
+        end
+      end
+      safe_warn "#{feature_name} globally #{@action}d"
+    end
+    exit(0)
+  end
+end
+
+class String
+  def yellow;         "\e[33m#{self}\e[0m" end
+end
+
+# Run as a single process if this script is run directly
+if $0 == __FILE__
+  options = {
+    flags: []
+  }
+
+  # If no arguments or passed (`ff`) or the first word is just "help" (`ff help`), print the help text
+  ARGV << "--help" if ARGV.empty? || ARGV[0] == "help"
+
+  OptionParser.new do |opts|
+    opts.banner = <<~RUBY
+Usage: #{$0} e[nable]/d[isable] flag actor(s) [options]
+
+Examples:
+bin/toggle-feature-flag enable feature-name monalisa defunkt business:my-business
+bin/toggle-feature-flag enable feature-name --mode=verbose
+bin/toggle-feature-flag enable feature-name org/repo
+bin/toggle-feature-flag disable feature-name monalisa --mode silent -F other_feature -F yet_another
+
+Example with aliases:
+ff e some_feature monalisa
+ff d some_feature defunkt
+
+    RUBY
+
+    opts.on("-F=FLAG", "--flag=FLAG", "Name of a flag to enable/disable") do |v|
+      options[:flags] << v
+    end
+
+    opts.on("-m=MODE", "--mode=MODE", MODES, "") do |v|
+      options[:mode] = v || :normal
+    end
+
+    opts.on("-h", "--help", "Prints this message") do
+      puts opts
+      puts PROXIMA_WARNING.yellow
+      exit
+    end
+  end.parse!
+
+  action, feature_name, *actor_names = ARGV
+  options.merge!(
+    feature_name: feature_name,
+    action: action,
+    actor_names: actor_names,
+  )
+  puts "#{DEBUG_PREFIX} ARGV: #{ARGV}" if options[:mode] == "verbose"
+  puts "#{DEBUG_PREFIX} Options: #{options}" if options[:mode] == "verbose"
+  puts "#{PROXIMA_WARNING}".yellow unless options[:mode] == "silent" || (ENV["CODESPACES"] || "false") == "true"
+  FeatureFlagToggler.new(options).call
+end

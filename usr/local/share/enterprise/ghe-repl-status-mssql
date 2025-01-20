@@ -1,0 +1,313 @@
+#!/bin/bash
+#/
+#/ Usage: ghe-repl-status-mssql [-v|--check|--check-started]
+#/
+#/ Show replication status for MSSQL.
+#/ Normal mode (no arguments): Report several replication statuses, including delay and seeding.
+#/ Quick mode (-v): Print out quick HA status. Return a success exit code regardless of any errors.
+#/ Check mode (--check): Fail fast if replication errors are detected, including any delay, or if seeding is still in progress.
+#/ Check started mode (--check-started): Like check mode, but won't fail in the case of replication seeding or delay, since those problems are expected to auto-resolve eventually.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck disable=SC2155
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. ghe-actions-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-repl-lib
+. ghe-mssql-repl-lib
+
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+ARGS=$(getopt --name "$0" --long help,check,check-started --options h,v -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+quick_mode=false
+check_mode=false
+check_started_mode=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v)
+      quick_mode=true
+      shift
+      ;;
+    --check)
+      check_mode=true
+      shift
+      ;;
+    --check-started)
+      check_started_mode=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+exit_if_check_mode() {
+  if $check_mode; then
+    exit "$1"
+  fi
+}
+
+check_allowed_db_name() {
+  # ensure that the database has a known service's prefix (e.g. 'mps' in 'mps_configuration')
+  local db_name="$1"
+  local db_valid
+  for service in $(action-services); do
+    prefix=$(action-db-prefix "$service")
+    db_name_lower=$(echo "$db_name" | tr '[:upper:]' '[:lower:]')
+    if [[ $db_name_lower == "$prefix"* ]]; then
+      db_valid=true
+    fi
+  done
+
+  if ! $db_valid; then
+    echo "UNKNOWN: ${db_name} should not be in availability group"
+    exit_if_check_mode 3 # UNKNOWN
+  fi
+}
+
+check_sync_state() {
+  local db_name="$1"
+  if [ "$sync_state" != "SYNCHRONIZING" ] && [ "$sync_state" != "SYNCHRONIZED" ] || [ "$sync_health" != "HEALTHY" ]; then
+    echo "CRITICAL: mssql replication synchronization state is $sync_state"
+    exit_if_check_mode 2 # CRITICAL
+  fi
+}
+
+get_delay() {
+  local db_name="$1"
+  local replica_id="$2"
+  local group_database_id="$3"
+  local delay=$(primary_ssh "ghe-mssql-console -y -n -q \"
+    SET NOCOUNT ON;
+
+    DECLARE @Counter INT = 0
+    DECLARE @primary_lsn Numeric(25,0)
+    DECLARE @primary_commit_time datetime
+    DECLARE @group_database_id UNIQUEIDENTIFIER = CONVERT(UNIQUEIDENTIFIER,'$group_database_id')
+
+    SELECT @primary_lsn = last_commit_lsn,
+      @primary_commit_time = last_commit_time
+    FROM sys.dm_hadr_database_replica_states
+    WHERE group_database_id = @group_database_id
+      AND is_primary_replica = 1
+
+    WHILE (@Counter <= 5)
+    BEGIN
+
+      -- Find last_commit_time for this LSN on the replica (or a more recent one)
+      SELECT DATEDIFF(millisecond, last_commit_time, IIF(@primary_commit_time > last_commit_time, @primary_commit_time, last_commit_time))
+      FROM sys.dm_hadr_database_replica_states
+      WHERE group_database_id = @group_database_id
+        AND replica_id = '$replica_id'
+        AND (last_commit_lsn >= @primary_lsn OR @Counter = 5)
+
+      IF @@ROWCOUNT = 1
+        RETURN
+      ELSE
+        BEGIN
+          SET @Counter = @Counter + 1
+          WAITFOR DELAY '00:00:01'
+        END
+    END\"") || true
+
+  echo "$delay" | tr -d '[:space:]'
+}
+
+check_delay() {
+  local db_name="$1"
+  local delay="$2"
+
+  if [ -z "$delay" ] || [[ ! "$delay" =~ ^-?[0-9]+$ ]]; then
+    if [ "$delay" = "NULL" ]; then
+      # Special case where last_commit_time is NULL after creating a new replica db but before any changes are committed.
+      # Rely on the synchronization health and state checks.
+      delay=0
+    else
+      echo "CRITICAL: Synchronization delay could not be determined: $delay"
+      exit 2
+    fi
+  fi
+
+  if [ "$delay" -ge 20000 ] && [ "$delay" -lt 120000 ]; then
+    echo "WARNING: ${db_name} replication delay is ${delay}ms"
+    exit_if_check_mode 1 # WARNING
+  elif [ "$delay" -ge 120000 ]; then
+    echo "CRITICAL: ${db_name} replication delay is ${delay}ms"
+    exit_if_check_mode 2 # CRITICAL
+  fi
+}
+
+show_seeding_info() {
+  local db_name="$1"
+
+  local last_seeding_attempt=$(ghe-mssql-console -r -n -y -q "
+    SET NOCOUNT ON;
+    SELECT TOP 1
+        seeding.current_state,
+        stats.internal_state_desc,
+        stats.transferred_size_bytes,
+        stats.database_size_bytes
+    FROM sys.dm_hadr_automatic_seeding seeding
+    LEFT JOIN sys.availability_groups ag ON ag.group_id = seeding.ag_id
+    LEFT JOIN sys.availability_databases_cluster db ON db.group_id = seeding.ag_id AND db.group_database_id = seeding.ag_db_id
+    LEFT JOIN sys.dm_hadr_physical_seeding_stats stats ON stats.remote_physical_seeding_id = seeding.operation_id
+    WHERE ag.name = 'ha' AND db.database_name = '$db_name'
+    ORDER BY seeding.start_time DESC")
+
+  if [ -z "$last_seeding_attempt" ]; then
+    echo "No seeding information available for $db_name"
+    return
+  fi
+
+  local state=$(echo "$last_seeding_attempt" | awk '{print $1}')
+  local transfer_state=$(echo "$last_seeding_attempt" | awk '{print $2}')
+  local transferred_size_bytes=$(echo "$last_seeding_attempt" | awk '{print $3}')
+  local database_size_bytes=$(echo "$last_seeding_attempt" | awk '{print $4}')
+
+  if [[ "$state" == "COMPLETED" ]]; then
+    echo "Last seeding operation for $db_name completed successfully. If the database is missing from the replica, this may indicate replication was stopped and seeding has not occurred since."
+  elif [[ "$state" == "FAILED" ]]; then
+    echo "Seeding failure occured for $db_name. You can try restarting replication with 'ghe-repl-stop' and 'ghe-repl-start'."
+  else
+    echo "Seeding for $db_name is currently in state $state, transfer state $transfer_state."
+
+    if [[ $database_size_bytes -gt 0 ]]; then
+      local percent=$(( 100 * transferred_size_bytes / database_size_bytes ))
+      echo "Seeding is approximately $percent% complete."
+    fi
+  fi
+
+  echo "Run 'ghe-mssql-diagnostics' for more details."
+}
+
+ensure_mssql_instance_is_replica
+is_cache_replica && exit 0
+
+# Get the output of ghe-mssql-console into `status`, but fail fast if there's an error.
+# See https://stackoverflow.com/questions/43736021/get-exit-code-of-process-substitution-with-pipe-into-while-loop for the trick used here
+shopt -s lastpipe  # run the last segment of a pipeline in the current shell
+shopt -so pipefail # reflect a pipeline's first failing command's exit code in $?
+
+status=()
+ghe-mssql-console -y -n -q "
+  SET NOCOUNT ON;
+  SELECT
+    ar.replica_server_name,
+    dc.database_name,
+    dc.group_database_id,
+    drs.synchronization_state_desc,
+    drs.synchronization_health_desc,
+    ars.role_desc,
+    drcs.is_failover_ready,
+    drs.replica_id,
+    drs.database_id
+  FROM sys.dm_hadr_availability_replica_states AS ars
+  JOIN sys.dm_hadr_database_replica_cluster_states AS drcs
+    ON ars.replica_id = drcs.replica_id
+  JOIN sys.availability_databases_cluster AS dc
+    ON drcs.group_database_id = dc.group_database_id
+  JOIN sys.dm_hadr_database_replica_states AS drs
+    ON dc.group_id = drs.group_id AND dc.group_database_id = drs.group_database_id
+  JOIN sys.availability_groups AS ag
+     ON ars.group_id = ag.group_id
+  JOIN sys.availability_replicas AS ar
+      ON ars.replica_id = ar.replica_id
+  WHERE ag.name = N'ha'" | while read -r record; do
+  status+=("$record")
+done || fail_fast=1
+
+if $quick_mode; then
+  for line in "${status[@]}"; do
+    echo "$line"
+  done
+  exit # Quick mode (-v) exits here and never fails.
+fi
+
+# All other modes besides quick mode will fail fast if we can't poll HA info.
+if [ -n "$fail_fast" ]; then
+  >&2 echo "Error while retrieving mssql database names"
+  for line in "${status[@]}"; do
+    >&2 echo "$line"
+  done
+  exit 3
+fi
+
+declare -A dbs
+for line in "${status[@]}"; do
+  # parse
+  db_name=$(echo "$line" | awk '{print $2}')
+  group_database_id=$(echo "$line" | awk '{print $3}')
+  sync_state=$(echo "$line" | awk '{print $4}')
+  sync_health=$(echo "$line" | awk '{print $5}')
+  replica_id=$(echo "$line" | awk '{print $8}')
+  database_id=$(echo "$line" | awk '{print $9}')
+
+  check_allowed_db_name "$db_name"
+
+  # Don't worry about delay in check-started mode
+  if ! $check_started_mode; then
+    delay=$(get_delay "$db_name" "$replica_id" "$group_database_id")
+    check_delay "$db_name" "$delay"
+  fi
+
+  # If in normal mode, print basic information about replication status
+  if ! $check_mode && ! $check_started_mode; then
+    echo "$db_name State: $sync_state, Health: $sync_health, Delay: ${delay}ms, Replica ID: $replica_id, Database ID: $database_id"
+  fi
+
+  check_sync_state "$db_name" "$sync_state"
+
+  # record this db to check against expected dbs later
+  dbs[$db_name]=1
+done
+
+declare -a expected_dbs
+for service in $(actions-db-prefixes); do
+  expected_dbs_string=$(primary_ssh ". /usr/local/share/enterprise/ghe-actions-lib && get-dbs '$service'")
+  read -r -a expected_dbs <<< "$expected_dbs_string"
+
+  for expected_db in "${expected_dbs[@]}"; do
+    if ! [[ -v dbs[$expected_db] ]]; then
+      echo "CRITICAL: mssql replication is down, didn't find $expected_db!"
+
+      # Database may be missing from replication if seeding is still in progress. Provide additional information if in normal mode,
+      # and get the seeding information if in check-started mode. But we don't need to do the query in check mode.
+      if ! $check_mode; then
+        seeding_info=$(show_seeding_info "$expected_db")
+        echo "$seeding_info"
+        if $check_started_mode && grep -q "No seeding information available" <<< "$seeding_info" ; then
+          exit 2 #CRITICAL
+        fi
+      fi
+
+      exit_if_check_mode 2 # CRITICAL
+    fi
+  done
+done
+
+# if in check mode, we would have exited if something was wrong
+if $check_mode; then
+  echo "OK: mssql replication is in sync"
+fi

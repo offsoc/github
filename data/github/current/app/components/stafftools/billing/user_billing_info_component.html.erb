@@ -1,0 +1,304 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<ul class="status-check-list">
+  <%= render Stafftools::Billing::AddressValidatedStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::PaymentMethodStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::PaymentHistoryStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::LockStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::PaymentStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::AutopayStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::TradeCompliance::TradeRestrictionStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::TradeCompliance::SpammyRestrictionStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::MeteredServicesStatusComponent.new(billable_entity: user) %>
+  <%= render Stafftools::Billing::MeteredViaAzureStatusComponent.new(billable_entity: user) %>
+</ul>
+<div class="summary">
+  <% unless user.invoiced? %>
+    <dl>
+      <dt>Billing Frequency</dt>
+      <dd><%= user.plan_duration.humanize %>ly</dd>
+    </dl>
+  <% end %>
+
+  <dl>
+    <dt><a href="https://github.com/github/gitcoin/blob/main/docs/technical/third-party-services/zuora/billing_dates.md" target="_blank">Bill Cycle Day  <%= render(Primer::Beta::Octicon.new(icon: "question")) %></a></dt>
+    <dd>
+      <% if customer_bill_cycle_day.nil? %>
+        None
+      <% elsif customer_bill_cycle_day.zero? %>
+        Auto Set (Will be set on next invoice)
+      <% else %>
+        <%= customer_bill_cycle_day.ordinalize %> of the month
+        <%= render Stafftools::Billing::ChangeBillCycleDayComponent.new(user: user) %>
+      <% end %>
+    </dd>
+  </dl>
+
+  <% if user.sponsors_invoiced? %>
+    <dl>
+      <dt>Sponsors Bill Cycle Day</dt>
+      <dd>
+        <% if sponsors_bill_cycle_day.nil? %>
+          None
+        <% elsif sponsors_bill_cycle_day.zero? %>
+          Auto Set (Will be set on next invoice)
+        <% else %>
+          <%= sponsors_bill_cycle_day.ordinalize %> of the month
+          <%= render Stafftools::Billing::ChangeBillCycleDayComponent.new(user: user, purpose: :sponsors) %>
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+
+  <% if user.paying_customer? %>
+    <dl>
+      <dt>Next Bill Date</dt>
+      <dd>
+        <% if user.billed_on.nil? %>
+          None
+        <% else %>
+          <%= user.billed_on %>
+        <% end %>
+        <% unless in_business? %>
+          &ndash;
+          <% if can_manual_charge? && !user.has_commercial_interaction_restriction? %>
+            <%= render(Primer::Experimental::Dialog.new(
+              dialog_id: "manual-charge-dialog",
+              header_variant: :large,
+              width: :large,
+              title: "Confirm action",
+              form_url: charge_stafftools_user_path(user),
+              form_method: :post
+            )) do |c| %>
+              <% c.with_show_button(
+                scheme: :link,
+                color: :danger,
+                test_selector: "manual-charge-dialog-button",
+              ) do |s| %>
+                Manual charge
+              <% end %>
+              <% c.with_body do %>
+                <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Woah there!" } %>
+                <p>
+                  This will charge the user’s <%= user.friendly_payment_method_name %>, are you certain?
+                </p>
+              <% end %>
+              <% c.with_button(
+                data: { "close-dialog-id": "manual-charge-dialog" }
+              ) { "Cancel" } %>
+              <% c.with_button(
+                type: :submit,
+                scheme: :danger,
+                data: { "disable-with": "" }
+              ) { "Process payment" } %>
+            <% end %>
+          <% elsif user.has_commercial_interaction_restriction? %>
+            <%= render(Primer::Beta::Button.new(scheme: :link, id: "manual-charge-button", disabled: true, test_selector: "manual-charge-disabled-button")) do |c| %>
+              <% c.with_tooltip(text: "User can’t be manually charged due to commercial interaction restrictions", type: :description, direction: :s, multiline: true) %>
+              <del>Manual charge</del>
+            <% end %>
+          <% else %>
+            <%= render(Primer::Beta::Button.new(scheme: :link, id: "manual-charge-button", disabled: true, test_selector: "manual-charge-disabled-button")) do |c| %>
+              <% c.with_tooltip(text: "User can’t be manually charged at this time.", type: :description, direction: :s, multiline: true) %>
+              <del>Manual charge</del>
+            <% end %>
+          <% end %>
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+
+  <dl>
+    <dt>Metered Quota Resets</dt>
+    <dd>
+      <%= metered_quota_resets_at %>
+      <% if metered_quota_resets_at < GitHub::Billing.now %>
+        &ndash;
+        <details class="details-reset details-overlay details-overlay-dark" style="display:inline">
+          <summary class="color-fg-danger">Advance</summary>
+          <details-dialog class="Box Box--overlay"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3 class="Box-title">Confirm action</h3>
+            </div>
+            <div class="Box-body">
+              <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Woah there!" } %>
+              <p>
+                This option should be used only in cases where the metered billing cycle reset
+                date is obviously incorrect. It will advance the metered billing cycle reset date
+                to <%= calculated_metered_quota_reset_date %>.
+              </p>
+              <%= form_tag stafftools_user_metered_billing_advance_quota_reset_date_path(user), method: :patch do %>
+                <div class="form-actions">
+                  <%= render Primer::Beta::Button.new(type: :submit, block: true, scheme: :danger) do %>
+                    Advance Quota Reset Date
+                  <% end %>
+                </div>
+              <% end %>
+            </div>
+          </details-dialog>
+        </details>
+      <% end %>
+    </dd>
+  </dl>
+
+  <dl>
+    <dt>External Customer</dt>
+    <dd>
+      <% if zuora_account? %>
+        <a href="<%= zuora_account_url_for_customer(customer) %>">
+          View<%= " general-purpose account" if sponsors_only_customer %> on Zuora
+        </a>
+      <% else %>
+        None
+      <% end %>
+
+      <% if sponsors_only_customer %>
+        <br>
+        <a href="<%= zuora_account_url_for_customer(sponsors_only_customer) %>">View sponsorships-only account on Zuora</a>
+      <% end %>
+    </dd>
+  </dl>
+
+  <dl>
+    <dt>External <%= "Subscription".pluralize(plan_subscriptions.count) %></dt>
+    <dd>
+      <% if plan_subscriptions.any? %>
+        <ul class="list-style-none">
+          <% plan_subscriptions.each do |plan_subscription| %>
+            <% if plan_subscription.zuora_subscription_number? %>
+              <li>
+                <a href="<%= zuora_subscription_url_for_plan_subscription(plan_subscription) %>">
+                  <%= plan_subscription.zuora_subscription_number %>
+                </a>
+                (<%= plan_subscription.purpose %>)
+              </li>
+            <% end %>
+          <% end %>
+        </ul>
+      <% else %>
+        None
+      <% end %>
+    </dd>
+  </dl>
+
+  <% if for_organization? %>
+    <dl>
+      <dt>Azure Subscription ID</dt>
+      <dd>
+        <%= user.customer&.azure_subscription_id || "None" %>
+        <% if user.invoiced? %>
+          &ndash;
+          <%= render Stafftools::Billing::UpdateAzureSubscriptionComponent.new(user: user, customer: user.customer) %>
+        <% end %>
+      </dd>
+    </dl>
+    <% unless user.delegate_billing_to_business? %>
+      <dl>
+        <dt>Metered via Azure</dt>
+        <dd>
+          <%= user.customer&.metered_via_azure? || false %>
+          &ndash;
+          <%= render Stafftools::Billing::UpdateMeteredViaAzureComponent.new(user: user, customer: user.customer) %>
+        </dd>
+      </dl>
+    <% end %>
+  <% end %>
+
+  <dl>
+    <dt>Apple IAP Subscription</dt>
+    <dd><%= user.apple_iap_subscription? %></dd>
+  </dl>
+
+  <dl>
+    <dt>Payment Method</dt>
+    <dd>
+      <%= render Billing::Settings::CardDetailsComponent.new(payment_method: user.payment_method) %>
+      <%= render Billing::Settings::PaypalDetailsComponent.new(payment_method: user.payment_method) %>
+      <% if user.invoiced? %>
+        <strong>Invoiced</strong>
+      <% elsif !user.has_credit_card? && !user.has_paypal_account? %>
+        Not set
+      <% end %>
+    </dd>
+    <% unless in_business? %>
+      <dt>&nbsp;</dt>
+      <dd>
+        &ndash;
+        <%= render Stafftools::Billing::RemovePaymentMethodComponent.new(user: user) %>
+        <% if !user.has_commercial_interaction_restriction? %>
+          | <%= render Stafftools::Billing::ChangePaymentMethodComponent.new(
+              user: user,
+              current_term_end_date: current_term_end_date,
+              available_plan_options: available_plan_options,
+          ) %>
+        <% end %>
+        <% if user.payment_method&.card_fingerprint.present? %>
+          | <a href="<%= lookup_stafftools_reused_card_fingerprints_path(card_fingerprint: user.payment_method.card_fingerprint) %>" <%= test_selector("lookup-card-fingerprint-link") %>>Lookup card fingerprint</a>
+        <% end %>
+      </dd>
+    <% end %>
+  </dl>
+
+  <dl>
+    <dt>Extra Billing Info</dt>
+    <dd>
+      <% if user.billing_extra.blank? %>
+        Not set
+      <% else %>
+        <%= truncate user.billing_extra.gsub(/\n/, " ") %>
+      <% end %>
+      &ndash;
+      <details class="details-reset details-overlay details-overlay-dark" style="display:inline">
+        <%= render Primer::Beta::Button.new(
+          tag: :summary,
+          scheme: :link,
+          classes: "ws-normal",
+        ).with_content("Change") %>
+        <%= render Stafftools::Billing::EditExtraBillingInfoComponent.new(user: user) %>
+      </details>
+    </dd>
+  </dl>
+
+  <% if for_organization? %>
+    <dl>
+      <dt>Billing Managers</dt>
+      <dd>
+        <% if total_billing_managers < 1 %>
+          None
+        <% elsif total_billing_managers > 3 %>
+          <%= link_to "#{total_billing_managers} users", billing_managers_stafftools_user_path(user) %>
+        <% else %>
+          <% user.billing_managers.each do |manager| %>
+            <%= link_to manager, stafftools_user_path(manager) %>
+          <% end %>
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+
+  <% if show_billing_audit_log_link? %>
+    <dl>
+      <dt>Billing Audit Log</dt>
+      <dd>
+        <a href="<%= stafftools_billing_audit_log_path(user) %>" <%= test_selector("billing-audit-log-link") %>>
+          View billing related events
+        </a>
+
+        <% if GitHub.sponsors_enabled? %>
+          (<a href="<%= stafftools_billing_audit_log_path(user, include_sponsors: true) %>" <%= test_selector("billing-audit-log-sponsors-link") %>>include Sponsors events</a>)
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+
+  <% if show_patreon_status? %>
+    <dl <%= test_selector("patreon-status") %>>
+      <dt>Patreon</dt>
+      <dd>
+        <%= link_to sponsors_patreon_user.patreon_username, sponsors_patreon_user.patreon_link %>
+      </dd>
+    </dl>
+  <% end %>
+</div>

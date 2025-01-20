@@ -1,0 +1,204 @@
+#!/bin/bash 
+#/ This script is intended to be used to map repoisitory artifacts & logs to their respective S3 buckets & keys.
+#/
+#/ Usage:
+#/          ghe-actions-get-s3-objects <owner_name> <repo_name>
+#/
+#/
+set -e 
+
+function usage() {
+    grep '^#/' < "$0" | cut -c 4-
+}
+
+# Show usage
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage
+  exit 2
+fi
+
+OWNER_NAME=$1
+REPO_NAME=$2
+if [[ -z "$OWNER_NAME" || -z "$REPO_NAME" ]]; then
+    usage
+    exit 2
+fi
+
+# Get bucket name
+BUCKET=$(ghe-config 'secrets.actions.storage.s3.bucket-name') # note: not really a secret
+if [ -z "$BUCKET" ]; then
+    >&2 echo "Failed to find bucket name"
+    exit 1
+fi
+echo "Found bucket $BUCKET"
+
+# Get container prefix
+CONTAINER_PREFIX=$(ghe-config 'secrets.actions.storage.container-prefix') # note: not really a secret
+if [ -z "$CONTAINER_PREFIX" ]; then
+    >&2 echo "Failed to find container prefix"
+    exit 1
+fi
+echo "Found container prefix $CONTAINER_PREFIX"
+
+# Repo -> RepoId
+echo "Finding repo..."
+REPO_ID=$(sudo mysql -se "USE github_enterprise; SELECT r.id FROM repositories r INNER JOIN users u ON r.owner_id = u.id WHERE u.login = '$OWNER_NAME' AND r.name = '$REPO_NAME'")
+if [ -z "$REPO_ID" ]; then
+    >&2 echo "Failed to find repo $OWNER_NAME/$REPO_NAME"
+    exit 1
+fi
+echo "Found repo '$REPO_NAME' (ID $REPO_ID)"
+
+# Get all workflow runs and orchestration_ids for the repository
+echo "Finding all workflow runs for the repository..."
+readarray -t workflow_runs < <(sudo mysql -se "USE github_enterprise; SELECT w.id, cs.external_id FROM workflow_runs w INNER JOIN check_suites cs ON w.check_suite_id = cs.id WHERE w.repository_id = $REPO_ID")
+
+# Create human-readible URLs that map to an internal artifact_uri
+declare -A urlArtifactMap
+for workflow_run in "${workflow_runs[@]}"; do
+    read -r workflow_id orchestration_id <<< "$workflow_run"
+    urlArtifactMap["pipelines://actions/00000000-0000-0000-0000-000000000000/$orchestration_id"]="/$OWNER_NAME/$REPO_NAME/actions/runs/$workflow_id"
+done
+
+# Get all artifacts for the repository
+echo "Finding all artifacts for the repository..."
+readarray -t artifacts < <(sudo mysql -se "USE github_enterprise; SELECT a.name, a.source_url, w.id FROM artifacts a INNER JOIN check_suites cs ON a.check_suite_id = cs.id INNER JOIN workflow_runs w ON cs.id = w.check_suite_id WHERE a.repository_id = $REPO_ID")
+
+# Create human-readible URLs for each artifact name
+declare -A artifactMap
+for artifact in "${artifacts[@]}"; do
+    read -r artifact_name source_url <<< "$artifact"
+    runID=$(grep -oP '(?<=_apis/pipelines/1/runs/).*?(?=/artifacts?)' <<< "$source_url")
+    artifactMap["vstfs:///Build/Build/$runID"]="/$OWNER_NAME/$REPO_NAME/actions/runs/$workflow_id                             artifact-name:$artifact_name"
+done
+
+# RepoId -> Tenant
+echo "Finding Actions tenant..."
+REPO_ENTITY_ID=$(echo -n "010:Repository$REPO_ID" | base64)
+TENANT_NAME=$(sudo mysql -se "USE github_enterprise; SELECT tenant_name FROM azp_resources WHERE entity_id = '$REPO_ENTITY_ID'")
+if [ -z "$TENANT_NAME" ]; then
+    >&2 echo "Failed to find repo in azp_resources with ID $REPO_ENTITY_ID"
+    exit 1
+fi
+echo "Found tenant '$TENANT_NAME' for repo $REPO_NAME ($REPO_ENTITY_ID)"
+
+# Tenant -> ServiceHost
+echo "Finding Actions service host for tenant $TENANT_NAME..."
+SERVICE_HOST_INFO=$(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT HostId, RIGHT(DatabaseName, LEN(DatabaseName) - CHARINDEX(';', DatabaseName))
+    FROM [Pipelines_Configuration].[dbo].tbl_ServiceHost s
+    INNER JOIN [Pipelines_Configuration].[dbo].tbl_Database d on s.DatabaseId = d.DatabaseId
+    WHERE HostType = 4 AND Name = '$TENANT_NAME'
+")
+
+read -r SERVICE_HOST DATABASE_NAME <<< "$SERVICE_HOST_INFO"
+if [[ -z "$SERVICE_HOST" || -z "$DATABASE_NAME" ]]; then
+    >&2 echo "Failed to find service host and database name in tbl_ServiceHost for tenant '$TENANT_NAME'"
+    exit 1
+fi
+echo "Found service host $SERVICE_HOST that should be in $DATABASE_NAME"
+SERVICE_HOST_LOWER=$(echo "$SERVICE_HOST" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+
+# ServiceHost -> PartitionId
+PARTITION_ID=$(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT PartitionId
+    FROM [$DATABASE_NAME].[dbo].tbl_DatabasePartitionMap
+    WHERE ServiceHostId = '$SERVICE_HOST'
+")
+read -r PARTITION_ID <<< "$PARTITION_ID" # trim spaces from sqlcmd
+if [ -z "$PARTITION_ID" ]; then
+    >&2 echo "Failed to find partition ID for service host $SERVICE_HOST in $DATABASE_NAME"
+    exit 1
+fi
+echo "Found partition ID $PARTITION_ID for $SERVICE_HOST"
+
+# Find FCS containers
+readarray -t CONTAINERS < <(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT ContainerId, ArtifactUri
+    FROM [$DATABASE_NAME].[dbo].tbl_Container
+    WHERE PartitionId = '$PARTITION_ID'
+    ORDER BY ContainerId ASC
+")
+
+for container in "${CONTAINERS[@]}"; do
+    read -r container_id artifact_uri <<< "$container"
+    readarray -t items < <(ghe-mssql-console -y -n -q "
+        SET NOCOUNT ON;
+        SELECT ResourceId, CONCAT(ParentPath, LEFT(ChildItem, LEN(ChildItem) - 1)), DateCreated
+        FROM [$DATABASE_NAME].[dbo].tbl_ContainerItem ci
+        INNER JOIN [$DATABASE_NAME].[dbo].tbl_FileReference fr ON ci.PartitionId = fr.PartitionId AND ci.FileId = fr.FileId
+        WHERE ci.PartitionId = '$PARTITION_ID' AND ContainerId = '$container_id' AND ItemType = 2")
+
+    if ((${#items[@]})); then
+      echo ""
+      if [ -z "${artifactMap[$artifact_uri]}" ]
+      then
+        echo "*** LOGS *** $container_id ($artifact_uri) ***  => ${urlArtifactMap[$artifact_uri]}"
+      else
+        echo "*** ARTIFACTS *** $container_id ($artifact_uri) ***  => ${artifactMap[$artifact_uri]}"
+      fi
+      
+      for item in "${items[@]}"; do
+          read -r resource filename _ <<< "$item"
+          resource_lower=$(echo "$resource" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+          echo "s3://$BUCKET/$CONTAINER_PREFIX/$SERVICE_HOST_LOWER/$resource_lower    ($filename)"
+      done
+    fi
+done
+
+## Artifact Cache Data in S3
+echo ""
+echo "**Finding ArtifactCache service host for tenant $TENANT_NAME...**"
+SERVICE_HOST_INFO=$(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT HostId, RIGHT(DatabaseName, LEN(DatabaseName) - CHARINDEX(';', DatabaseName))
+    FROM [ArtifactCache_Configuration].[dbo].tbl_ServiceHost s
+    INNER JOIN [ArtifactCache_Configuration].[dbo].tbl_Database d on s.DatabaseId = d.DatabaseId
+    WHERE HostType = 4 AND Name = '$TENANT_NAME'
+")
+
+read -r SERVICE_HOST DATABASE_NAME <<< "$SERVICE_HOST_INFO"
+if [[ -z "$SERVICE_HOST" || -z "$DATABASE_NAME" ]]; then
+    >&2 echo "Failed to find service host and database name in tbl_ServiceHost for tenant '$TENANT_NAME' in ArtifactCache_Configuration. The repository might not contain any Actions Cache."
+    exit 1
+fi
+echo "Found service host $SERVICE_HOST that should be in $DATABASE_NAME"
+SERVICE_HOST_LOWER=$(echo "$SERVICE_HOST" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+
+# ServiceHost -> PartitionId
+PARTITION_ID=$(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT PartitionId
+    FROM [$DATABASE_NAME].[dbo].tbl_DatabasePartitionMap
+    WHERE ServiceHostId = '$SERVICE_HOST'
+")
+read -r PARTITION_ID <<< "$PARTITION_ID" # trim spaces from sqlcmd
+if [ -z "$PARTITION_ID" ]; then
+    >&2 echo "Failed to find partition ID for service host $SERVICE_HOST in $DATABASE_NAME"
+    exit 1
+fi
+echo "Found partition ID $PARTITION_ID for $SERVICE_HOST"
+
+# Find Caches
+readarray -t CACHES < <(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT FM.ResourceId, FORMAT(FM.DeletedOn,'dd-MM-yyyyThh:mm:ss'), FORMAT(FR.DeletedOn,'dd-MM-yyyyThh:mm:ss'), C.CacheId
+    FROM [$DATABASE_NAME].[dbo].tbl_FileMetadata FM 
+    LEFT JOIN [$DATABASE_NAME].[dbo].tbl_FileReference FR on FM.ResourceId = FR.ResourceId AND FM.PartitionId = FR.PartitionId
+    LEFT JOIN [$DATABASE_NAME].[ArtifactCache].tbl_Cache C on C.FileId = FR.FileId and C.PartitionId = FR.PartitionId
+    WHERE FM.PartitionId = '$PARTITION_ID' AND FM.RemoteStoreId = 3
+")
+echo ""
+if ((${#items[@]})); then
+    echo "*** Actions Caches ***"
+    for file in "${CACHES[@]}"; do
+        IFS=$'\t' read -r resource_id resource_deleted_on file_deleted_on cache_id <<< "$file"
+        resource_lower=$(echo "$resource_id" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+        echo "S3 Object:s3://$BUCKET/$CONTAINER_PREFIX/$SERVICE_HOST_LOWER/$resource_lower    Cache_ID:$cache_id    Cache_Deleted_On:$file_deleted_on    S3_Object_Deleted_On:$resource_deleted_on"
+    done
+else
+    echo "No objects found in S3 for Actions Cache service"
+fi

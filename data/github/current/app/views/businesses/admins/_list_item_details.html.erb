@@ -1,0 +1,124 @@
+<% user_organizations = business.enterprise_organizations_for(member: admin, viewer: current_user) %>
+<% convert_to_member_visible = GitHub.single_business_environment? || user_organizations.any? %>
+<% menu_disabled = GitHub.site_admin_role_managed_externally? || business.enterprise_managed_user_enabled? %>
+
+<div class="d-flex flex-1 flex-items-center flex-justify-end color-fg-muted hide-sm">
+  <% unless this_business.seats_plan_basic? %>
+    <span class="d-flex flex-items-center mr-5 hide-md"
+      <%= test_selector "organizations-count-#{admin.id}" %>>
+      <%= render(Primer::Beta::Octicon.new(:"organization", mr: 1)) %>
+      <%= user_organizations.count %>
+    </span>
+  <% end %>
+
+  <% if any_server_installations %>
+    <% server_installations = business.enterprise_installations_for(member: admin) %>
+    <span class="d-flex flex-items-center mr-5 hide-md"
+      <%= test_selector "server-installations-count-#{admin.id}" %>>
+      <%= render(Primer::Beta::Octicon.new(:"server", ml: 0, mr: 1)) %>
+      <%= server_installations.count %>
+    </span>
+  <% end %>
+  <span class="d-flex flex-items-center mr-5 hide-md" <%= test_selector "two-factor-status-#{admin.id}" %>>
+    <%= render partial: "orgs/people/user_two_factor_details", locals: {
+      user_login: admin.display_login,
+      two_factor_enabled: two_factor_enabled,
+      active_account_two_factor_requirement: active_account_two_factor_requirement,
+      pending_account_two_factor_requirement: pending_account_two_factor_requirement,
+      account_two_factor_required_by_date: account_two_factor_required_by_date,
+    }%>
+  </span>
+
+  <% if GitHub.single_business_environment? && admin.suspended? %>
+    <span class="d-flex mr-4 flex-items-center flex-justify-end text-right"
+      <%= test_selector "admin-suspended-#{admin.id}" %>>
+      <%= render(Primer::Beta::Label.new(scheme: :danger)) { "Suspended" } %>
+    </span>
+  <% end %>
+
+  <span class="d-flex mr-4 flex-items-center flex-justify-end text-right" <% unless GitHub.single_business_environment? %> style="width: 100px" <% end %>>
+    <%= Business.admin_role_for(role) %>
+  </span>
+
+  <div class="d-flex flex-justify-end flex-items-center">
+    <% if menu_disabled %>
+      <%= render(Primer::Alpha::Dialog.new(
+        title: "Manage administrator",
+        id: "manage-admin-dialog-#{admin.id}"
+      )) do |dialog| %>
+        <% dialog.with_show_button(icon: :"kebab-horizontal", "aria-label": "Administrator menu") %>
+        <% dialog.with_body do %>
+          <p>
+            Manually managing enterprise administrators is disabled.
+          </p>
+          <p>
+            <% if business.enterprise_managed_user_enabled? %>
+              Administrator roles are managed through an IdP application.
+            <% elsif GitHub.auth.ldap? %>
+              Remove owners by removing them from the LDAP admin group '<%= GitHub.ldap_admin_group %>'.
+            <% elsif GitHub.auth.saml? %>
+              Remove owners by removing their SAML 'administrator' attribute.
+            <% end %>
+          </p>
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= render(Primer::Alpha::ActionMenu.new) do |menu| %>
+        <% menu.with_show_button(icon: :"kebab-horizontal", "aria-label": "Administrator menu") %>
+
+        <% if GitHub.billing_enabled? && business.owner?(current_user) %>
+          <% menu.with_item(
+            label: "Change role",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "admin-#{admin.id}-change-role-dialog" },
+            value: "",
+            test_selector: "modify-admin-roles-button-enabled-#{admin.id}",
+          ) %>
+        <% end %>
+
+        <% if convert_to_member_visible %>
+          <% menu.with_item(
+            label: "Convert to member",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "admin-#{admin.id}-convert-to-member-dialog" },
+            value: "",
+            scheme: :danger,
+          ) %>
+        <% end %>
+
+        <% if remove_from_enterprise_available?(business, current_user) %>
+          <% menu.with_item(
+            label: "Remove from enterprise",
+            tag: :button,
+            content_arguments: { "data-show-dialog-id": "remove-admin-#{admin.id}-dialog" },
+            value: "",
+            scheme: :danger,
+          ) %>
+        <% end %>
+      <% end %>
+
+      <% if GitHub.billing_enabled? && business.owner?(current_user) %>
+        <%= render "businesses/admins/set_role", \
+          business: business,
+          admin: admin,
+          role: role,
+          dialog_id: "admin-#{admin.id}-change-role-dialog" %>
+      <% end %>
+
+      <% if convert_to_member_visible %>
+        <%= render "businesses/admins/convert_to_member", \
+          business: business,
+          admin: admin,
+          dialog_id: "admin-#{admin.id}-convert-to-member-dialog" %>
+      <% end %>
+
+      <% if remove_from_enterprise_available?(business, current_user) %>
+        <%= render "businesses/admins/remove_user_from_business", \
+          business_slug: business.slug,
+          user: admin,
+          role: :owner,
+          dialog_id: "remove-admin-#{admin.id}-dialog" %>
+      <% end %>
+    <% end %>
+  </div>
+</div>

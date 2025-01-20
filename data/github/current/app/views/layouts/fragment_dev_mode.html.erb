@@ -1,0 +1,141 @@
+<% partial_tags = [] %>
+
+<% head = proc do %>
+  <%= color_mode_bundles %>
+  <% stylesheet_required_bundles.each do |bundle| %>
+    <%= stylesheet_bundle(bundle) %>
+  <% end %>
+  <%= controller_stylesheet_bundles %>
+
+  <%= controller_javascript_bundles %>
+
+  <meta name="viewport" content="width=device-width">
+  <title><%= title_for_page %></title>
+
+  <% if staff_bar_enabled? %>
+    <meta name="fe-hostname" content="<%= GitHub.local_host_name %>">
+    <meta name="ruby" content="<%= RUBY_DESCRIPTION %>">
+    <meta name="user-staff" content="true">
+  <% end %>
+
+  <% if logged_in? && current_user.site_admin? %>
+    <meta name="site-admin-default-url" content="<%= admin_url %>">
+    <% if @stafftools_link %>
+      <meta name="site-admin-url" content="<%= "#{admin_host_url}#{@stafftools_link}" %>" data-turbo-transient>
+    <% end %>
+    <% if @spamurai_url %>
+      <meta name="spamurai-url" content="<%= "#{@spamurai_url}" %>" data-turbo-transient>
+    <% end %>
+  <% end %>
+
+  <% track_render_partial("stafftools/staffbar/current_catalog_service_meta", partial_tags) do %>
+    <%= render partial: "stafftools/staffbar/current_catalog_service_meta" %>
+  <% end %>
+
+  <link rel="assets" href="<%= asset_host_url %>/">
+  <% if logged_in? %><link rel="sudo-modal" href="<%= sudo_modal_path %>"><% end %>
+
+  <%= page_meta_tags %>
+
+  <% if current_page?(home_path) %>
+    <meta name="page-subject" content="GitHub">
+  <% end %>
+
+  <%= sso_prompt_link_tags %>
+
+  <meta name="selected-link" value="<%= @selected_link || request.path_info %>" data-turbo-transient>
+
+  <% if !Rails.env.test? %>
+    <meta name="hostname" content="<%= GitHub.host_name %>">
+  <% end %>
+  <meta name="user-login" content="<%= current_user.display_login if logged_in? %>">
+
+  <meta name="expected-hostname" content="<%= GitHub.host_name %>">
+
+  <% if logged_in? %>
+    <meta name="keyboard-shortcuts-preference" content="<%= current_user.settings.get(:keyboard_shortcuts_preference) %>">
+    <meta name="hovercards-preference" content="<%= current_user.settings.get(:hovercards_enabled) %>">
+  <% end %>
+
+  <% unless GitHub.single_or_multi_tenant_enterprise? %>
+    <%= render "site/seo_head" %>
+  <% end %>
+<% end %>
+
+<%= render layout: "layouts/document", locals: {
+      head: head,
+      html_class_names: (html_classes),
+      body_class_names: (body_classes) } do %>
+
+  <div class="position-relative js-header-wrapper <% if stats_ui_enabled? %>stats-ui-enabled<% end %>">
+    <%= render(Primer::Beta::ProgressBar.new(position: :fixed, w: :full, classes: "progress-pjax-loader")) do |component| %>
+      <% component.with_item(left: 0, top: 0, bg: :accent_emphasis, classes: "progress-pjax-loader-bar") %>
+    <% end %>
+    <%= render partial: "site/impersonated" if session_impersonated? %>
+    <%= render partial: "stafftools/staffbar/serverstats" if staffbar_allowed? %>
+  </div>
+
+  <div
+    class="application-main <% if full_height? || sticky_footer? %>d-flex flex-auto flex-column<% end %>"
+  >
+    <main>
+      <%= content_for?(:main) ? yield(:main) : yield %>
+    </main>
+  </div>
+
+  <% if site_admin? %>
+    <button type="button" hidden
+      data-modal-url="<%= stafftools_modal_path %>"
+      data-hotkey="&#92;,Alt+&#92;"<%# erblint:disable DataHotkey %>
+      class="js-stafftools-toggle-modal">Show site admin modal</button>
+  <% end %>
+
+  <% if Rails.env.development? %>
+    <%= render(Primer::Alpha::Banner.new(
+      full: true,
+      dismiss_scheme: :hide,
+      id: "console-error-notice",
+      hidden: true,
+      scheme: :danger,
+      p: 2)
+    ) do %>
+      <div>Markup errors (<span class="js-console-error-count">0</span>) detected. See console for more details.</div>
+    <% end %>
+    <%= render(Primer::Alpha::Banner.new(
+      full: true,
+      dismiss_scheme: :hide,
+      id: "bundle-error-notice",
+      hidden: true,
+      scheme: :danger,
+      p: 2)
+    ) do %>
+      <div>
+        Error loading JS bundle(s): <span class="js-bundle-error-names"></span>.
+        Run <code>bin/npm run tsc</code> to view syntax errors or <code>overmind connect <%= %w(js assets).join("-") %></code> to inspect the asset server.
+      </div>
+    <% end %>
+  <% end %>
+  <%= render :partial => 'shared/details_dialog_template' %>
+
+  <% if staff_bar_enabled? %>
+    <div style="display:none;" id="page-serverstats">
+      <%= render partial: "stafftools/staffbar/stats" %>
+    </div>
+
+    <% if site_admin_performance_stats_mode_enabled? %>
+      <% if stats_ui_enabled? %>
+        <% if render_graphql_query_trace? %>
+          <%= render partial: "stafftools/staffbar/graphql_stats", locals: { instrumenter: Platform::GlobalScope } %>
+        <% end %>
+
+        <% if render_mysql_query_trace? %>
+          <div id="mysql_performance_pane" class="performance-pane js-mysql-performance-pane" hidden>
+            <div class="inner">
+              <%= render "stafftools/staffbar/mysql_queries_stats", view: create_view_model(Stafftools::Staffbar::MysqlQueriesStatsView, html_id: "mysql_stats", controller: controller) %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

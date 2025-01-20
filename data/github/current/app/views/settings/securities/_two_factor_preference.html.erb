@@ -1,0 +1,60 @@
+<%
+    configured_methods = {}
+    configured_methods[:app] =  current_user.two_factor_configured_with?(:app)
+    configured_methods[:sms] = current_user.two_factor_configured_with?(:sms)
+    configured_methods[:security_keys] = current_user.has_registered_security_key?
+    configured_methods[:passkeys] = current_user.has_registered_passkey?
+    configured_methods[:gh_mobile] = current_user.gh_mobile_auth_available?
+
+    current_preference = get_defaulted_two_factor_preference(configured_methods, user: current_user)
+
+    # build options
+    available_options = []
+    if configured_methods[:app]
+      available_options << ["Authenticator app", "app_preferred"]
+    end
+
+    if configured_methods[:sms]
+      available_options << ["SMS/Text message", "sms_preferred"]
+    end
+
+    if configured_methods[:security_keys] || configured_methods[:passkeys]
+      webauthn_description = current_user.available_u2f_registrations_description(current_device_id, capitalize_first_word: true, pluralize_each: true)
+      available_options << [webauthn_description, "webauthn_preferred"]
+    end
+
+    if configured_methods[:gh_mobile]
+      available_options << ["GitHub Mobile", "github_mobile_preferred"]
+    end
+
+    webauthn_option_is_passkeys_only = available_options.any? { |option| option[0] == "Passkeys" }
+  %>
+
+  <%= render(Primer::Beta::BorderBox.new(mb: 3)) do |component| %>
+    <% component.with_body do %>
+      <%= form_tag settings_user_2fa_login_preference_path(anchor: "two-factor-authentication"), method: :post, "aria-labelledby": "login_preference_label" do %>
+        <dl class="form-group my-0">
+          <dt>
+            <label id="login_preference_label" for="login_preference">Preferred 2FA method</label>
+          </dt>
+
+          <dt class="note mb-2">
+            Set your preferred method to use for two-factor authentication when signing into GitHub.
+          </dt>
+
+          <dd>
+            <select id="login_preference" name="login_preference" class="form-select" data-autosubmit>
+              <%=
+                options_for_select(available_options, selected: current_preference)
+              %>
+            </select>
+
+            <% if current_preference == "webauthn_preferred" && webauthn_option_is_passkeys_only %>
+              <span class="note ml-2"><%= render(Primer::Beta::Octicon.new(:"info")) %> Passkeys should be used primarily for standalone, password-less authentication.</span>
+            <% end %>
+          </dd>
+
+        </dl>
+      <% end %>
+    <% end %>
+  <% end %>

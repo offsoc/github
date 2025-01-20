@@ -1,0 +1,167 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 3 %>
+<%graphql
+  fragment ProjectColumn on ProjectColumn {
+    databaseId
+    name
+    purpose
+
+    cardsResourcePath
+    resourcePath
+    cardsCountProjectColumnView
+
+    cards(archivedStates: $archivedStates) {
+      totalCount
+    }
+
+    workflows(first: 10) {
+      totalCount
+      edges {
+        node {
+          triggerType
+        }
+      }
+    }
+
+    ...Views::ProjectColumns::Menu::ProjectColumn
+  }
+
+  fragment Project on Project {
+    closed
+    viewerCanUpdate
+    previewNoteResourcePath
+
+    ...Views::ProjectColumns::Menu::Project
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_column = Views::ProjectColumns::ProjectColumn::ProjectColumn.new(project_column) %>
+<% project = Views::ProjectColumns::ProjectColumn::Project.new(project) %>
+<% trigger_types = project_column.workflows.edges.map { |edge| edge.node.trigger_type } %>
+<%
+  column_classes = class_names(
+    # Custom
+    "project-column",
+    # Utilities
+    "position-relative d-flex flex-auto flex-column overflow-hidden mr-3 v-align-top rounded-2 border color-border-muted ws-normal",
+    # JS
+    "js-project-column",
+    # Conditional
+    {
+      "js-keyboard-movable" => project.viewer_can_update?,
+      "hide-sm" => mobile?
+    }
+  )
+%>
+<div class="<%= column_classes %>"
+  id="column-<%= project_column.database_id %>"
+  tabindex="0"
+  data-retain-focus
+  data-url="<%= project_column.resource_path %>"
+  data-id="<%= project_column.database_id %>">
+
+  <div class="clearfix js-details-container details-container Details js-add-note-container">
+    <div class="hide-sm position-relative p-sm-2">
+      <%= render partial: "project_columns/menu", locals: {
+          project_column: project_column,
+          project: project,
+        }
+      %>
+      <% if project.viewer_can_update? && !project.closed? %>
+        <button type="button" class="float-right js-details-target btn-octicon p-1 tooltipped tooltipped-w hide-sm column-menu-item"
+          aria-label="Add a note to this column" aria-expanded="false"><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+          <%= primer_octicon(:plus) %>
+        </button>
+
+        <% if enable_drag_by_handle? %>
+          <div class="d-none color-bg-subtle border-left border-bottom flex-items-center project-move-actions position-absolute right-0 top-0 bottom-0 js-project-dragger">
+            <div class="mx-1 px-3 py-2 color-fg-muted">
+              <%= primer_octicon(:grabber) %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+      <%= render Primer::Beta::Counter.new(count: project_column.cards_count_project_column_view, position: :relative, vertical_align: :middle, ml: 1, classes: "js-column-card-count") %>
+      <h3 class="px-1 m-0 f5 d-inline v-align-middle">
+        <span class="js-project-column-name"><%= project_column.name %></span>
+      </h3>
+    </div>
+    <% if project.viewer_can_update? %>
+      <div class="project-note-form mt-sm-1 p-2 Details-content--hidden">
+        <%= form_tag project_column.cards_resource_path.to_s,
+          :class => "js-project-note-form js-length-limited-input-container position-relative",
+          :method => :put do %>
+          <input type="hidden" name="content_type" value="Note">
+          <input type="hidden" name="client_uid" class="js-client-uid-field">
+          <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>">
+            <textarea name="note"
+              required
+              autofocus
+              aria-label="Enter a note"
+              class="form-control input-block js-quick-submit js-size-to-fit js-note-text js-length-limited-input"
+              data-input-max-length="<%= ProjectCard::MAX_NOTE_LENGTH %>"
+              data-warning-length="99"
+              data-warning-text="{{remaining}} remaining"
+              placeholder="Enter a note"></textarea>
+          </text-expander>
+          <p class="js-length-limited-input-warning d-none mt-3 mb-0 text-center"></p>
+          <div class="d-flex mt-2">
+            <button type="submit" class="btn btn-primary flex-1 mr-1" data-disable-invalid>Add</button>
+            <button type="button" class="btn flex-1 ml-1 js-dismiss-note-form-button">Cancel</button>
+          </div>
+        <% end %>
+
+        <%= form_tag project.preview_note_resource_path.to_s,
+          :class => "js-preview-note-form",
+          :method => :get do %>
+          <input type="hidden" name="note">
+        <% end %>
+        <div class="js-note-preview"></div>
+      </div>
+    <% end %>
+  </div>
+
+  <%= render partial: "stafftools/staffbar/project_stats" %>
+
+  <p class="js-filtered-column-card-count mt-2 mb-0 f6 text-center color-fg-muted d-none"></p>
+
+  <% if project_column.cards.total_count >= ProjectColumn::MAX_CARDS %>
+    <%= render Primer::Beta::Flash.new(scheme: :danger, pl: 5, py: 2, mx: 2, mb: 1, position: :relative, font_size: 6) do %>
+      <span class="position-absolute" style="left:10px;"><%= primer_octicon(:alert) %></span> Maximum card limit reached. <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/adding-issues-and-pull-requests-to-a-project-board">Learn more</a><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+    <% end %>
+  <% end %>
+
+  <div id="column-cards-<%= project_column.database_id %>" class="position-relative flex-auto overflow-auto px-2 pb-6 mb-6 mb-sm-0 pb-sm-2 js-project-column-cards <% if enable_dragging?(project) %>js-card-drag-container<% end %> <% if enable_drag_by_handle? %>js-drag-by-handle<% end %>" data-id="<%= project_column.database_id %>">
+    <include-fragment src="<%= project_column.cards_resource_path %>">
+      <div class="text-center pt-4">
+        <%= render(Primer::Beta::Spinner.new) %>
+      </div>
+    </include-fragment>
+  </div>
+
+  <% if project.viewer_can_update? %>
+    <% has_workflows = project_column.purpose.present? && project_column.workflows.total_count > 0 %>
+    <div class="p-2 text-small color-fg-muted border-top color-bg-subtle js-project-column-automation-footer <%= "d-none" unless has_workflows %>">
+      Automated as
+
+      <% label_name = has_workflows ? column_purpose_name(project_column.purpose) : "" %>
+      <%= render Primer::Beta::Label.new(scheme: :secondary, title: "Automation label: #{label_name}", classes: "js-project-column-automation-summary") do %>
+        <%= label_name %>
+      <% end %>
+
+      <button type="button" class="btn-link float-right hide-sm js-project-dialog-button" data-dialog-id="edit-column-automation-<%= project_column.database_id %>" aria-expanded="false">Manage</button>
+    </div>
+
+    <%= form_tag project_column.cards_resource_path.to_s,
+      class: "js-project-content-form js-project-update-card",
+      method: :put do %>
+      <input type="hidden" name="client_uid" class="js-client-uid-field">
+      <input type="hidden" name="card_id">
+      <input type="hidden" name="content_id">
+      <input type="hidden" name="content_type">
+      <input type="hidden" name="previous_card_id">
+      <input type="hidden" name="keyboard_move">
+    <% end %>
+  <% end %>
+</div>

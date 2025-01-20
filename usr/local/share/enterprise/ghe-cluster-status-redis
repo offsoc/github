@@ -1,0 +1,62 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-redis [-hjnv]
+#/
+#/ Check the status of the Redis service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+start_output "redis"
+
+redis_master=$(ghe-config cluster.redis-master)
+redis_master_replica=$(ghe-config cluster.redis-master-replica || true)
+for hostname in $(ghe-cluster-nodes -r redis); do
+  redis_info=$(timeout "$CONNECT_TIMEOUT" ghe-redis-cli --remote --no-raw -h "$hostname" info replication || true)
+  if [ "$hostname" = "$redis_master" ] || [ "$hostname" = "$redis_master_replica" ]; then
+    if [ "$hostname" = "$redis_master" ]; then
+      role="redis-master"
+    elif [ "$hostname" = "$redis_master_replica" ]; then
+      role="redis-master-replica"
+    fi
+    if [ -n "$redis_info" ]; then
+      check_result "$hostname" "$role" "ok"
+    else
+      check_result "$hostname" "$role" "error" "Unable to connect to $hostname"
+    fi
+  else
+    if [ -n "$redis_info" ]; then
+      master_link_status=
+      master_link_down_since_seconds=
+      master_sync_in_progress=
+      master_last_io_seconds_ago=
+      eval "$(echo "$redis_info" | tr -d '\r' | tr ':' '=')"
+      if [ "$master_link_status" = "down" ]; then
+        check_result "$hostname" "redis-replication" "error" "Redis link has been down for ${master_link_down_since_seconds}s"
+      elif [ "$master_sync_in_progress" = "1" ]; then
+        check_result "$hostname" "redis-replication" "warn" "Redis is performing initial sync"
+      elif [[ "$master_last_io_seconds_ago" -lt 12 ]]; then
+        check_result "$hostname" "redis-replication" "ok" "Redis replication is in sync"
+      else
+        check_result "$hostname" "redis-replication" "warn" "Redis delay is ${master_last_io_seconds_ago}s"
+      fi
+    else
+      check_result "$hostname" "redis-replication" "error" "Redis replication has stopped"
+    fi
+  fi
+done
+
+end_output "redis"

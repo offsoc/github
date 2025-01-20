@@ -1,0 +1,114 @@
+#!/bin/bash
+
+#/ ghe-reactivate-admin-login
+#/
+#/ Usage: ghe-reactivate-admin-login [OPTIONS]
+#/
+#/ Reactivates login for the Management Console by resetting the auth log used
+#/ to track failed password attempts.
+#/
+#/ OPTIONS:
+#/   -h | --help       Show this message
+#/   -v | --verbose    Run verbosely
+#/
+set -e
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+log() {
+  if [ -n "$verbose" ]; then
+    echo "$@"
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      verbose=true
+      break
+      ;;
+    -*)
+      echo "Unknown argument: $1" 1>&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# absolute paths to enterprise-manage config and default auth log
+manage_config=/data/enterprise-manage/current/lib/manage.rb
+auth_log_default_path=/data/enterprise-manage/current/log/login_attempts.log
+auth_log_ghes_manage_path=/data/ghes-manage-agent/current/log/root_site_admin_login_attempts.log
+
+log "Searching $manage_config for the location of the authentication log ..."
+
+if [ ! -f "$manage_config" ]; then
+  echo "Could not find manage.rb at $manage_config"
+  exit 1
+fi
+
+# search manage.rb for a relative path to the auth_login file from
+# enterprise-manage project root
+if [ -f "$manage_config" ]; then
+  rel_path="$(grep "self.auth_logger_path = " < "$manage_config" |\
+    grep --invert-match "test" |\
+    tail -1 |\
+    sed -E 's/.+\"(\S+)\".*/\1/g')"
+
+  auth_log_custom_path=/data/enterprise-manage/current/"$rel_path"
+fi
+
+if [ ! -z "$rel_path" ]; then
+  log "Found path to auth log in manage.rb: $rel_path"
+else
+  log "Could not find a path in manage.rb"
+fi
+
+if [ -f "$auth_log_custom_path" ]; then
+  log "Found authentication log at $auth_log_custom_path"
+  auth_log_path="$auth_log_custom_path"
+else
+  log "Did not find authentication log at $auth_log_custom_path"
+  log "Falling back to default location at $auth_log_default_path"
+  auth_log_path="$auth_log_default_path"
+fi
+
+if [ ! -f "$auth_log_path" ] && ! sudo test -f "$auth_log_ghes_manage_path" ; then
+  echo "No failed authentication attempts found for root site administrator in Management Console or Manage API."
+  exit 1
+fi
+
+if [ -f "$auth_log_path" ]; then
+  log "Found failed authentication attempts to Management Console"
+
+  log "Resetting failed Management Console authentication attempts..."
+
+  # reset the auth log
+  sudo rm -f "$auth_log_path"
+fi
+
+if sudo test -f "$auth_log_ghes_manage_path" ; then
+  log "Found failed authentication attempts to Manage API"
+
+  log "Resetting failed Manage API authentication attempts..."
+
+  # reset the auth log
+  sudo rm -f "$auth_log_ghes_manage_path"
+fi
+
+if [ -f "$auth_log_path" ]; then
+  echo "Failure: The Management Console authentication log could not be reset."
+  exit 1
+fi
+
+if sudo test -f "$auth_log_ghes_manage_path" ; then
+  echo "Failure: The Manage API authentication log could not be reset."
+fi
+
+echo "Success. The failed authentication attempts have been reset. The root site administrator account is now unblocked again."

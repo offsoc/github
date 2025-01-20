@@ -1,0 +1,147 @@
+#!/bin/bash
+#/ Usage: ghe-support-upload [options] [path]
+#/
+#/ Upload a specified file or data via STDIN directly to GitHub Enterprise Support.
+#/
+#/ The total size of data piped via STDIN is limited to 100MB, data beyond
+#/ this limit will be truncated. If a file is specified, STDIN will be ignored.
+#/
+#/ OPTIONS:
+#/   -h         | --help                Show this message.
+#/   -t <id>    | --ticket <id>         Upload to Enterprise Support with a ticket ID.
+#/   -d <text>  | --description <text>  Add an optional description to identify the upload.
+#/   -v         | --verbose             Display piped input on the console during collection.
+#/   -s <limit> | --summary <limit>     Display a limited number of lines from the beginning and end of piped input.
+#/
+#/ EXAMPLES:
+#/   Send data from STDIN to support:
+#/     $ echo "example" | ghe-support-upload
+#/
+#/   Send data from STDIN to support and associate it with a support ticket:
+#/     $ echo "example" | ghe-support-upload -t ticket-id
+#/
+#/   Send data from STDIN to support with a name and associate it with a support ticket:
+#/     $ ghe-repl-status | ghe-support-upload -t ticket-id -d "Replication Status"
+#/
+#/   Send a single file to support and associate it with a support ticket:
+#/     $ ghe-support-upload -t ticket-id /path/to/file
+#/
+
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-support-lib
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+MAX_STREAM_SIZE_MB=105
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,verbose,content:,summary:,ticket:,description:,file: --options hvc:s:t:d:f: -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      VERBOSE=1
+      ;;
+    -s|--summary)
+      VERBOSE=1
+      SUMMARY_LIMIT="$2"
+      ;;
+    -t|--ticket)
+      TICKET_ID="$2"
+      shift
+      ;;
+    -c|--content)
+      STREAM_CONTENT=$(echo -n "$2" | tr -sc '[:alnum:]' '-')
+      shift
+      ;;
+
+    -d|--description)
+      UPLOAD_DESC="$2"
+      shift
+      ;;
+    -f|--file)
+      FILE_PATH="$2"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+# Check for a file path if one wasn't specified with '-f|--file'
+if [ -z "$FILE_PATH" ]; then
+  FILE_PATH="$1"
+fi
+
+display_privacy_statement
+
+if [ -n "$FILE_PATH" ]; then
+  [ -f "$FILE_PATH" ] || {
+    echo "Error: File '$FILE_PATH' not found." >&2
+    exit 1
+  }
+
+  if check_connectivity; then
+    upload_file ${UPLOAD_DESC:+-d "$UPLOAD_DESC"} ${TICKET_ID:+-t "$TICKET_ID"} "$FILE_PATH"
+    exit 0
+  else
+    prompt_manual_upload 1
+    manual_upload_help "$(realpath "$FILE_PATH")" 0 "$TICKET_ID"
+    exit 1
+  fi
+else
+  if ! check_connectivity; then
+    if ! prompt_manual_upload; then
+      exit
+    fi
+    MANUAL_UPLOAD=1
+  fi
+
+  temp_file=$(mktemp -p "$TMP_DIR" "$(hostname)_$(date +%Y%m%d-%H%M)_${STREAM_CONTENT:+"${STREAM_CONTENT}_"}XXXXXX.txt")
+  max_stream_size_bytes=$((1024*1024*MAX_STREAM_SIZE_MB))
+
+  message "Collecting data into '$temp_file'... "
+
+  if [ -n "$VERBOSE" ]; then
+    if [ -n "$SUMMARY_LIMIT" ]; then
+      output_method="| tee $temp_file | (head -n $SUMMARY_LIMIT; echo -e '\\n ### Please wait while the rest of the input is processed... ###\\n'; tail -n $SUMMARY_LIMIT; echo)"
+    else
+      output_method="| tee $temp_file"
+    fi
+  else
+    output_method="of=$temp_file"
+  fi
+
+  eval "dd status=none iflag=count_bytes count=$max_stream_size_bytes $output_method 2>/dev/null"
+  size=$(stat -c %s "$temp_file")
+  if [ "$size" -ge $max_stream_size_bytes ]; then
+    message "WARNING: Data stream reached the $(($MAX_STREAM_SIZE_MB - 5))MB limit, any additional input has been discarded."
+  elif [ "$size" -eq 0 ]; then
+    message "ERROR: Data stream is empty, upload cancelled."
+    rm "$temp_file"
+    exit 1
+  fi
+
+  if [ -z "$MANUAL_UPLOAD" ]; then
+    upload_file ${UPLOAD_DESC:+-d "$UPLOAD_DESC"} ${TICKET_ID:+-t "$TICKET_ID"} "$temp_file"
+    rm "$temp_file"
+  else
+    manual_upload_help "$temp_file" 1 "$TICKET_ID"
+  fi
+fi
+
+exit 0

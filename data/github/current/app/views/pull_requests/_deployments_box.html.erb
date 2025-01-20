@@ -1,0 +1,75 @@
+<%-
+  view = PullRequests::DeploymentsBoxView.new(pull: pull, current_user: current_user)
+  gate_requests ||= []
+  pending_gate_requests = pending_requests(gate_requests)
+  environments = approval_pending_environments(pending_gate_requests)
+  data_url = pull_request_deployments_box_partial_path(id: pull)
+-%>
+
+<div class="js-socket-channel js-updatable-content merge-status-list-wrapper" data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.pull_request(pull)) %>" data-url="<%= data_url %>" data-gid="<%= pull.global_relay_id%>">
+  <div class="float-left branch-action-item-icon completeness-indicator circle <%= view.css_class_for_deployment_summary_status %> border">
+    <%= primer_octicon(:rocket) %>
+  </div>
+
+  <h3 class="h4 status-heading"><%= view.deploy_box_header_for_deployment_summary_status(gate_requests) %></h3>
+  <span class="status-meta">
+    <% if environments.any? %>
+      <%= render Actions::Environments::TextComponent.new(environments: environments) %><%= " need".pluralize(environments.length-1) %> your review
+    <% else %>
+      <% summary_info = view.deployment_environment_summary_info %>
+      <% if summary_info.empty? %>
+        No deployments
+      <% else %>
+        <%= summary_info.map(&:first).to_sentence %>
+        <% number_of_deployments = summary_info.map(&:second).sum %>
+        <%= "deployment".pluralize(number_of_deployments) %>
+      <% end %>
+    <% end %>
+  </span>
+  <% if view.latest_deploy_per_environment.any? %>
+    <div class="merge-status-list hide-closed-list">
+      <% view.latest_deploy_per_environment.each do |deployment| %>
+        <div class="merge-status-item d-flex flex-items-center flex-justify-between">
+          <div class="col-9 d-flex color-fg-muted">
+            <div class="merge-status-icon flex-self-center">
+              <%= octicon("rocket", :class => "mx-auto d-block #{view.text_color_for_deployment(deployment)}") %>
+            </div>
+
+            <span class="text-emphasized"><%= deployment.latest_environment %></span>
+            <span class="color-fg-muted">
+              <span class="mx-1">—</span>
+              <code><%= deployment.short_sha %></code>
+              <% if deployment.state == PullRequests::DeploymentsBoxView::PENDING_STATE %>
+                Pending
+              <% elsif deployment.state == PullRequests::DeploymentsBoxView::WAITING_STATE %>
+                Waiting
+              <% elsif log_url = deployment.latest_status&.log_url %>
+                <%= safe_link_to "Deployed", log_url, target: "_blank" %>
+              <% else %>
+                Deployed
+              <% end %>
+
+              <%= time_ago_in_words_js(deployment.created_at) %> by
+
+              <% if deployment.creator %>
+                <a class="color-fg-inherit text-bold" href="<%= deployment.creator.permalink %>"><%= deployment.creator.display_login %></a>
+              <% else %>
+                <%= profile_link(User.ghost, class: "color-fg-inherit text-bold") %>
+              <% end %>
+
+              <% if reason_data = view.reason_data_for_deployment(deployment) %>
+                via <%= safe_link_to reason_data[:text], reason_data[:link], target: "_blank" %>
+              <% end %>
+            </span>
+          </div>
+
+          <div class="d-flex">
+            <% if env_url = deployment.latest_status&.environment_url %>
+              <%= safe_link_to "View deployment", env_url, class: "btn btn-sm btn-outline", target: "_blank" %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+</div>

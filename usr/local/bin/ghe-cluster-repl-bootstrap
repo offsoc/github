@@ -1,0 +1,183 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-repl-bootstrap [options]
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -v                 Run with verbose output
+#/   -p <datacenter>    Primary datacenter name
+#/   -s <datacenter>    Secondary datacenter name
+set -euo pipefail
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+output_next_steps () {
+  echo ""
+  echo "Just a few more steps, and high-availability will be fully configured on your cluster!"
+  echo ""
+  echo "Please do the following:"
+  echo "1. Open cluster.conf, and update each of the ipv4 keys marked 'TBD' to the ip addresses of the newly provisioned nodes."
+  echo "2. Run 'ghe-cluster-config-check'."
+  echo "3. Run 'ghe-cluster-config-init'."
+  echo "4. Run 'ghe-config-apply'."
+  echo ""
+  echo "After configuration completes, high-availability will be enabled on your cluster."
+  echo ""
+}
+
+############################################################################################################
+# CAUTION - Do not change/set any of the following values unless directed to by GitHub Enterprise support. #
+############################################################################################################
+SKIP_CONFIG_CHECK=${SKIP_CONFIG_CHECK:-"false"}
+TMP_DIR=$(mktemp -d)
+############################################################################################################
+
+cleanup() {
+  # Clean up the temporary cluster configuration files.
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+primary_datacenter_param=""
+secondary_datacenter_param=""
+cluster_conf_src="/data/user/common/cluster.conf"
+
+while getopts "hvp:s:" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      exit 0
+      ;;
+    v)
+      set -x
+      ;;
+    p)
+      primary_datacenter_param=$OPTARG
+      ;;
+    s)
+      secondary_datacenter_param=$OPTARG
+      ;;
+    \?)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -n "$primary_datacenter_param" ] && [ -n "$secondary_datacenter_param" ] && [ "$primary_datacenter_param" = "$secondary_datacenter_param" ]; then
+  echo "[ Error ] The specified primary and secondary datacenters are the same. Exiting." >&2
+  exit 3
+fi
+
+# Check if we're on a cluster.
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ] || [ ! -f "/data/user/common/cluster.conf" ]; then
+  echo "[ Error ] Clustering is not configured on this host. Exiting." >&2
+  exit 4
+fi
+
+# Check for configuration errors.
+if [ "$SKIP_CONFIG_CHECK" != "true" ]; then
+  sudo ghe-cluster-config-check "$cluster_conf_src" || {
+    echo "[ Error ] Configuration errors must be fixed before running ghe-cluster-repl-bootstrap. Exiting." >&2
+    exit 5
+  }
+fi
+
+# Check if cluster.conf is already configured for standalone HA.
+if [ -n "$(git config -f "$cluster_conf_src" cluster.ha)" ]; then
+  echo "[ Error ] cluster.conf is already configured for standalone HA. Exiting." >&2
+  exit 6
+fi
+
+# Check if cluster.conf is already configured for cluster HA.
+if [ -n "$(git config -f "$cluster_conf_src" cluster.mysql-master-replica)" ] || [ -n "$(git config -f "$cluster_conf_src" cluster.redis-master-replica)" ]; then
+  echo "[ Error ] cluster.conf is already at least partially configured for cluster HA. Exiting." >&2
+  exit 7
+fi
+
+# Generate an ID to be used for this session.
+repl_bootstrap_id="$(date +%Y%m%d-%H%M%S)"
+
+# Make a tmp copy of the src cluster configuration file.
+cluster_tmp_conf="$TMP_DIR/cluster-$repl_bootstrap_id.conf"
+cp "$cluster_conf_src" "$cluster_tmp_conf"
+
+# Check to see if there is a primary datacenter already specified in the cluster configuration.
+# If the user has passed in a name to use, we'll override it with that.
+# If the user hasn't passed in a name, and there's an existing value, we'll use that.
+# If there's no value, and the user hasn't passed anything in, we'll use the default ("primary").
+primary_datacenter_default="primary"
+primary_datacenter="$primary_datacenter_default"
+existing_primary_datacenter="$(git config -f "$cluster_tmp_conf" cluster.primary-datacenter)" || true
+
+if [ -n "$primary_datacenter_param" ]; then
+  primary_datacenter="$primary_datacenter_param"
+elif [ -n "$existing_primary_datacenter" ]; then
+  primary_datacenter="$existing_primary_datacenter"
+fi
+
+# Set the primary datacenter.
+git config -f "$cluster_tmp_conf" cluster.primary-datacenter "$primary_datacenter"
+
+# Update the datacenter and consul-datacenter KVPs in each node to reflect the primary datacenter.
+existing_hostnames=($(awk -F'"' '/^\[.*\]$/{print $2;}' "$cluster_tmp_conf"))
+for existing_host in "${existing_hostnames[@]}"; do
+  git config -f "$cluster_tmp_conf" "cluster.${existing_host}.datacenter" "$primary_datacenter"
+  git config -f "$cluster_tmp_conf" "cluster.${existing_host}.consul-datacenter" "$primary_datacenter"
+done
+
+# Create a copy of the existing cluster configuration file to use as a base for the replica config.
+cluster_replica_conf="$TMP_DIR/cluster-replica-$repl_bootstrap_id.conf"
+grep -Ev "(?:|ipv|uuid)" "$cluster_tmp_conf" > "$cluster_replica_conf"
+
+# Remove the cluster section from the temporary configuration file that was copied in the previous step.
+git config -f "$cluster_replica_conf" --remove-section cluster
+
+# Set the name for the secondary datacenter, where the replica nodes were provisioned.
+# If the user has passed in a name to use, we'll override it with that.
+# If the user hasn't passed in a name, we'll use the default ("secondary").
+secondary_datacenter_default="secondary"
+secondary_datacenter="$secondary_datacenter_default"
+if [ -n "$secondary_datacenter_param" ]; then
+  secondary_datacenter="$secondary_datacenter_param"
+fi
+
+# Change datacenter and consul-datacenter to the secondary datacenter name.
+sed -i "s/datacenter = $primary_datacenter/datacenter = $secondary_datacenter/g" "$cluster_replica_conf"
+
+# For each replica:
+# Update section names to have a -ha suffix.
+# If hostname present, update to have a -ha suffix.
+# Add a new key named 'replica' with a value of 'enabled'.
+# Add a new key named 'ipv4' with a value of 'TBD'.
+replica_section_names=($(awk -F'"' '/^\[.*\]$/{print $2;}' "$cluster_replica_conf"))
+for name in "${replica_section_names[@]}"; do
+  new_name="${name}-ha"
+  git config -f "$cluster_replica_conf" --rename-section "cluster.${name}" "cluster.${new_name}"
+  git config -f "$cluster_replica_conf" "cluster.${new_name}.hostname" "$new_name"
+  git config -f "$cluster_replica_conf" "cluster.${new_name}.replica" enabled;
+  git config -f "$cluster_replica_conf" "cluster.${new_name}.ipv4" "TBD";
+done
+
+# Append the contents of the temporary replica cluster configuration file to the active configuration file.
+cat "$cluster_replica_conf" >> "$cluster_tmp_conf"
+
+# Get the mysql-master and redis-master hostnames, to serve as our base for their replica equivalents.
+mysql_master="$(git config -f "$cluster_tmp_conf" cluster.mysql-master)"
+redis_master="$(git config -f "$cluster_tmp_conf" cluster.redis-master)"
+
+# Designate the primary MySQL and Redis nodes in the secondary datacenter.
+git config -f "$cluster_tmp_conf" cluster.mysql-master-replica "${mysql_master}-ha"
+git config -f "$cluster_tmp_conf" cluster.redis-master-replica "${redis_master}-ha"
+
+# Back up existing cluster configuration
+echo ""
+echo "Backing up existing cluster configuration"
+cluster_conf_dir="/data/user/common"
+cp "$cluster_conf_dir/cluster.conf" "$cluster_conf_dir/ghe-cluster-repl-bootstrap-$repl_bootstrap_id-cluster.conf.backup"
+
+# Replace existing cluster configuration with the new configuration.
+cp "$cluster_tmp_conf" "$cluster_conf_dir/cluster.conf"
+
+# Output the next steps
+output_next_steps

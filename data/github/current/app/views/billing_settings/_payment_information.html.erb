@@ -1,0 +1,429 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# `view` is BillingSettings::OverviewView %>
+<%# TODO the styling of this whole partial %>
+
+<%
+  SecureHeaders.append_content_security_policy_directives(
+    request,
+    img_src: [GitHub.paypal_checkout_url],
+    connect_src: [GitHub.braintreegateway_url, GitHub.braintree_analytics_url])
+  return_to = if params[:return_to].present?
+    params[:return_to]
+  elsif target.organization?
+    settings_org_billing_tab_path(organization_id: target.display_login, tab: "payment_information")
+  else
+    settings_user_billing_tab_path(tab: "payment_information")
+  end
+%>
+
+<% invoice_checkbox = capture do %>
+  <div class="Box list-style-none d-flex flex-justify-between p-3 mt-4 mb-3">
+    <div <%= test_selector("self-serve-invoice-information") %>>
+      <h3 class="f4 text-bold mb-1" style="display: inline; padding-right: 4px">Invoice</h3>
+      <div>
+        <p> Receive an invoice for your GitHub purchases </p>
+        <%= form_tag target_self_serve_invoicing_path(target), class: "js-setting-toggle d-flex flex-items-center", method: :put do %>
+          <div class="container-lg clearfix">
+            <div class="d-flex flex-items-center form-checkbox m-0">
+              <input type="checkbox" id="send_invoice_with_receipt" name="send_invoice_with_receipt" value="true" class="mr-2" <%= view.account.self_serve_invoice_enabled? ? 'checked' : '' %>>
+              <label class="text-bold" for="send_invoice_with_receipt">
+                Automatically receive an invoice alongside the payment receipt
+              </label>
+            </div>
+
+            <div class="mt-2">
+              <p class="text-small color-fg-muted">
+                * Enables invoices for all NEW payments. Invoices are not available for transactions processed before setting is enabled.
+              </p>
+            </div>
+
+            <div class="col-lg-12 mt-4">
+              <%= render Primer::Beta::Button.new(
+                scheme: :primary,
+                block: true,
+                "data-disable-with": "Saving invoice preference",
+                type: :submit,
+              ).with_content("Save invoice preference") %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<%= render(Primer::Beta::Subhead.new) do |component| %>
+  <% component.with_heading(tag: :h2) do %>
+    <%= link_to "Billing & plans", target_billing_path(view.account), "data-pjax" => true %>
+    / Payment information
+  <% end %>
+<% end %>
+
+<% if view.account.dunning? && !view.account.disabled? %>
+  <p class="color-fg-danger">
+    <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+    Your most recent billing attempt failed.
+    <% unless view.account.over_billing_attempts_limit? %>
+      We will try again on
+      <%= view.account.next_billing_date(with_dunning: true).to_formatted_s(:long) %>.
+    <% end %>
+  </p>
+<% elsif view.account.disabled? %>
+  <% if view.account.billing_disabled_by_authorization_failure? %>
+    <p class="color-fg-danger">
+      <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+      Invalid payment method - authorization hold failed.
+    </p>
+  <% elsif view.account.billing_trouble? %>
+    <p class="color-fg-danger">
+      <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+      Update your payment method to re-enable your account.
+    </p>
+  <% end %>
+<% end %>
+
+<div class="js-update-billing-information-banner border-top py-3" hidden>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(icon: :alert, scheme: :danger, dismiss_scheme: :remove, id: "update-billing-info-banner", tabindex: -1)) do %>
+      Please update your billing information in order to add a payment method.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :danger, id: "update-billing-info-banner", tabindex: -1)) do %>
+      <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+      Please update your billing information in order to add a payment method.
+      <button class="flash-close js-dismiss-flash-message" type="button" aria-label="Dismiss this message">
+        <%= primer_octicon(:x) %>
+      </button>
+    <% end %>
+  <% end %>
+</div>
+
+<% if view.show_billing_information_error_notice? %>
+  <div class="py-3" >
+    <%= render Primer::Alpha::Banner.new(scheme: view.trade_screening_error_data[:scheme], icon: view.trade_screening_error_data[:icon], mt: 2) do %>
+      <h3 class="h5">
+        Sorry, you can't update your billing information at this time
+      </h3>
+      <div <%= test_selector("trade-screening-message") %>>
+        <%= view.trade_screening_error_data[:message] %>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<%# Billing Information %>
+<div class="Box list-style-none pt-3 pr-3 pb 3 pl-3 mb-3">
+  <%= render Billing::Settings::AddressNeedsValidationComponent.new(account: view.account, link_to_user_billing_information: view.show_linking_billing_information?, system_arguments: { mb: 3 }) %>
+  <% if view.show_linking_billing_information? %>
+    <div class="d-flex flex-justify-between">
+      <%= render Billing::Settings::BillingInformationLinkingComponent.new(
+        actor: current_user,
+        target: view.account,
+        form_loaded_from: "BILLING_SETTINGS",
+        return_to_path: return_to,
+      )%>
+    </div>
+  <% else %>
+    <div class="d-flex flex-justify-between">
+      <div <%= test_selector("billing-information") %>>
+        <h3 class="f4 text-bold mb-1">Billing information</h3>
+        <div class="<%= class_names(
+          "js-billing-information-summary-wrapper color-fg-muted mb-1",
+          "js-user-personal-profile-summary" => view.has_saved_trade_screening_record?,
+        ) %>" <%= "hidden" if flash[:address_validation_error] %>>
+          <% if view.has_saved_trade_screening_record? %>
+            <div class="js-billing-information-summary">
+              <%= render Billing::Settings::NameAddressSummaryComponent.new(
+                profile: view.user_billing_information,
+                unbold_profile_name_text_style: true,
+                target: view.account,
+                actor: current_user
+              ) %>
+            </div>
+          <% else %>
+            <div class="js-no-billing-information-message" hidden>
+              <p>You have not added any billing information.</p>
+            </div>
+          <% end %>
+        </div>
+        <div class="js-name-address-collection-wrapper d-flex col-7" <%= "hidden" if view.has_saved_trade_screening_record? && !flash[:address_validation_error] %>>
+          <%= render Billing::Settings::NameAddressFormInputsComponent.new(
+            profile: view.user_billing_information,
+            target: view.account,
+            wrapper_type: :form,
+            payment_flow_loaded_from: "BILLING_SETTINGS",
+            return_to: return_to,
+            actor: current_user,
+            cancellable: flash[:address_validation_error].present?,
+          ) %>
+        </div>
+      </div>
+      <div class="text-right">
+        <% if view.can_update_payment_method? %>
+          <div class="<%= class_names(
+            "f6 color-fg-muted",
+            "js-edit-user-personal-profile-wrapper" => view.has_saved_trade_screening_record?,
+          ) %>" <%= "hidden" if flash[:address_validation_error] %>>
+            <%= render Primer::Beta::Button.new(
+              type: :button,
+              font_size: 6,
+              classes: "js-add-billing-information-btn #{'js-edit-user-personal-profile' if view.has_saved_trade_screening_record?}",
+              hidden: !target.is_allowed_to_edit_trade_screening_information?,
+              "aria-label": view.has_saved_trade_screening_record? ? "Edit billing information" : "Add billing information",
+              test_selector: "edit-billing-info-button") do %>
+              <% if view.has_saved_trade_screening_record? %>
+                Edit
+              <% else %>
+                Add
+              <% end %>
+            <% end %>
+            <% if target.is_allowed_to_remove_billing_information? %>
+              <%= render(Primer::Alpha::Dialog.new(
+                title: "Remove your billing information?",
+                id: "remove-billing-info-dialog",
+                size: :medium,
+              )) do |d| %>
+                <% d.with_header(show_divider: true, text_align: :left) { "" } %>
+                <% d.with_show_button(color: :danger, type: :button, font_size: 6, ml: 2, "aria-label": "Remove billing information", test_selector: "remove-billing-info-button") do %>
+                  Remove
+                <% end %>
+                <% d.with_body(text_align: :left) do %>
+                  <%= render partial: "billing_settings/confirm_remove_trade_screening_record", locals: { target: target, return_to: return_to } %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+</div>
+
+<%# Payment method %>
+<div class="<%= class_names(
+  "Box list-style-none p-3 mb-3",
+  "js-payment-methods-wrapper" => view.has_saved_trade_screening_record?,
+) %>">
+  <div class="d-flex flex-justify-between">
+    <div>
+      <h3 class="f4 text-bold mb-1">Payment method</h3>
+      <div class="js-payment-summary-wrapper">
+        <% if view.payment_method&.valid_payment_token? %>
+          <% if view.payment_method.paypal? %>
+            <% if view.account.autopay_disabled_by_india_rbi? %>
+              <p class="color-fg-muted mb-1"> Manual payments in India must use a credit or debit card. Payment via PayPal is not available for manual payments.</p>
+            <% else %>
+              <p class="color-fg-muted mb-1">
+                <span class="text-bold d-block">PayPal</span>
+                <span class="d-block"><%= view.payment_method.paypal_email %></span>
+              </p>
+            <% end %>
+          <% else %>
+            <p class="color-fg-muted mb-1">
+              <span class="d-block">
+                <span>Credit Card: <%= view.payment_method&.card_type %></span>
+                ending <span><%= view.payment_method&.last_four %></span>
+              </span>
+              <span>expiring <%= view.payment_method&.formatted_expiration_date %></span>
+            </p>
+          <% end %>
+        <% elsif view.account.invoiced? %>
+          <p class="color-fg-muted mb-1 text-italic">Invoiced accounts cannot save payment methods.</p>
+        <% else %>
+          <p class="color-fg-muted mb-1">You have not added a payment method.</p>
+        <% end %>
+      </div>
+    </div>
+    <div class="text-right">
+      <% if view.can_update_payment_method? %>
+        <%= render Primer::Beta::Button.new(
+          type: :button,
+          font_size: 6,
+          classes: "js-edit-payment-method-btn #{'js-skip-billing-info' if target.has_valid_payment_method?}",
+          "aria-label": view.payment_method&.valid_payment_token? ? "Edit payment method" : "Add payment method",
+          test_selector: "payment-method") do %>
+            <% if view.payment_method&.valid_payment_token? %>
+            Edit
+          <% else %>
+            Add
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if view.can_remove_payment_method? %>
+        <%= render(Primer::Alpha::Dialog.new(
+          title: "Remove your #{view.account.friendly_payment_method_name}",
+          id: "remove-payment-method-dialog",
+          size: :medium,
+        )) do |d| %>
+          <% d.with_header(show_divider: true, text_align: :left) { "" } %>
+          <% d.with_show_button(color: :danger, type: :button, font_size: 6, ml: 2, "aria-label": "Remove payment method", test_selector: "remove-payment-method-button") do %>
+            Remove
+          <% end %>
+          <% d.with_body(text_align: :left) do %>
+             <%= render partial: "billing_settings/confirm_remove_payment_method", locals: { target: view.account, return_to: return_to } %>
+          <% end %>
+        <% end %>
+      <%end%>
+    </div>
+  </div>
+  <div class="js-payment-method-section-wrapper ml-2 mr-2" hidden>
+    <%= render Billing::Settings::PaymentMethodFormComponent.new(
+      target: target,
+      new_name_address_design: true,
+      show_payment_method: true,
+      signature_view_context: Billing::Zuora::HostedPaymentsPage::BILLING_SETTINGS_SIGNATURE_VIEW_CONTEXT,
+      return_to: return_to,
+    ) %>
+    <div class="form-group">
+      <input type="reset" value="Cancel" class="btn js-cancel-edit-payment-method-btn js-sponsors-handle-cancel-edit-payment">
+    </div>
+  </div>
+</div>
+<div class="Box list-style-none p-3 mb-3">
+  <h3 class="f4 text-bold mb-1">Last payment</h3>
+  <% if view.last_payment_amount.present? %>
+    <p class="color-fg-muted mb-1">
+      <span class="d-block">
+        <span class="text-bold">
+          $<%= number_with_precision view.last_payment_amount, precision: 2, delimiter: "," %>
+          </span>
+          <%= view.last_payment_status %>
+        </span>
+        <span class="d-block"> on <%= view.last_payment_date.strftime("%m/%d/%Y") %></span>
+      </p>
+    <% view.account.organization? ? history_path = org_payment_history_path : history_path = payment_history_path %>
+    <%= link_to "View all payments", history_path, class: "f6 d-block" %>
+  <% else %>
+    <p class="color-fg-muted mb-1">
+      You have not made any payments.
+    </p>
+  <% end %>
+</div>
+<div class="Box list-style-none d-flex flex-justify-between p-3 mb-3">
+  <div>
+    <h3 class="f4 text-bold mb-1">Coupon</h3>
+    <% if view.account.invoiced? %>
+      <p><em>Invoiced accounts cannot apply coupons</em></p>
+    <% else %>
+      <p class="color-fg-muted mb-1">
+        <%= render "billing_settings/coupon_info", account: view.account, discountable_charges: view.discountable_charges %>
+      </p>
+    <% end %>
+  </div>
+  <div class="text-right">
+    <% unless view.account.invoiced? %>
+      <% unless view.account.has_an_active_coupon? %>
+        <%= link_to find_coupon_path, :class => "btn f6 d-block" do %>
+          Redeem a coupon
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+</div>
+
+<% if view.show_sales_tax_box? %>
+  <%= render(Primer::Beta::BorderBox.new(padding: :default)) do |component| %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center pr-2 pb-1">
+        <%=
+          render(Primer::Beta::Heading.new(tag: :h3, font_size: 4, display: :inline)) do
+            "Additional Information"
+          end
+        %>
+      </div>
+    <% end %>
+
+    <% component.with_row(border: false, pt: 0) do %>
+      <%= render Billing::Settings::CertificateUploadFormComponent.new(account: view.account) %>
+    <% end %>
+
+    <% if view.show_billing_extras? %>
+      <% component.with_row do %>
+        <% render(Primer::Box.new(display: :flex)) do %>
+          <div class="flex-1 pr-8" <%= test_selector("additional-information") %> >
+            <%= render(Primer::Beta::Heading.new(tag: :h4, font_size: 5, display: :inline)) do
+                "Receipt Information"
+              end
+            %>
+            <% if view.has_billing_extra? || view.has_vat_code? %>
+              <% if view.has_vat_code? %>
+                <div>VAT/GST ID</div>
+                <div class="billing-vat-box">
+                  <pre><%= view.account.vat_code %></pre>
+                </div>
+              <% end %>
+              <% if view.has_billing_extra? %>
+                <div>Extra information</div>
+                <div class="billing-extra-box">
+                  <pre style="white-space: pre-wrap;"><%= view.account.billing_extra %></pre>
+                </div>
+              <% end %>
+            <% else %>
+              <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small)) {
+                  "No additional information added to your receipts. Information you add (business name, VAT/GST identification number, address of record, etc.) will show up on every receipt"
+                }
+              %>
+            <% end %>
+          </div>
+          <div>
+            <%= render Billing::Settings::ExtraBillingInfoModalComponent.new(target: view.account) %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% elsif view.show_billing_extras? %>
+  <div class="Box list-style-none d-flex flex-justify-between p-3 mt-4 mb-3">
+    <div <%= test_selector("additional-information") %>>
+      <div class="d-flex inline flex-items-center pr-2 pb-1">
+        <%=
+          render(Primer::Beta::Heading.new(tag: :h3, font_size: 4, display: :inline)) do
+            "Additional Information"
+          end
+        %>
+        <%=
+          render(Primer::Beta::IconButton.new(
+            scheme: :invisible,
+            type: :button,
+            id: "additional-information-button",
+            icon: :question,
+            "aria-label": "Additional information",
+            "aria-description": "Add specific contact or tax information to your receipts, like your full business name, VAT/GST identification number, or address of record here. We’ll make sure it shows up on every receipt.")
+          )
+        %>
+      </div>
+      <% if view.has_billing_extra? || view.has_vat_code? %>
+        <% if view.has_vat_code? %>
+          <div>VAT/GST ID</div>
+          <div class="billing-vat-box">
+            <pre><%= view.account.vat_code %></pre>
+          </div>
+        <% end %>
+        <% if view.has_billing_extra? %>
+          <div>Extra information</div>
+          <div class="billing-extra-box">
+            <pre style="white-space: pre-wrap;"><%= view.account.billing_extra %></pre>
+          </div>
+        <% end %>
+      <% else %>
+        <p class="color-fg-muted mb-1">No additional information added to your receipts.</p>
+      <% end %>
+    </div>
+    <div class="text-right">
+      <%= render Billing::Settings::ExtraBillingInfoModalComponent.new(target: view.account) %>
+    </div>
+  </div>
+
+  <% if view.show_self_serve_invoicing_box? %>
+    <%= invoice_checkbox %>
+  <% end %>
+<% end %>
+
+<% if view.pending_cycle.plan&.per_seat? %>
+  <p class="note mt-3">
+    This organization is signed up for seat based licensing and has no private
+    repository limits. Please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a>
+    if you have any questions about your account.
+  </p>
+<% end %>

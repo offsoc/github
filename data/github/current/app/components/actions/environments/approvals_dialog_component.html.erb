@@ -1,0 +1,115 @@
+
+<%
+  show_button_text =
+    if @in_check_run_logs_page
+      "Review pending deployments"
+    elsif approvable_gate_requests.any?
+      "Review deployments"
+    else
+      "View"
+    end
+
+  title_text = approvable_gate_requests.any? ? "Review pending deployments" : "View pending deployments"
+  subtitle_text = "requested #{@actor ? "by " + @actor.to_s : ""} in #{@check_suite.name} ##{@check_suite.workflow_run.run_number}"
+%>
+
+<%= form_tag @approval_path, method: :post do %>
+  <%= render(Primer::Alpha::Dialog.new(
+      title: title_text,
+      subtitle: subtitle_text,
+      size: :large,
+      style: "max-height: 80vh",
+      classes: "js-gates-dialog"
+    )) do |d| %>
+      <% d.with_header(show_divider: true) do %>
+        <h3 class="Box-title">
+          <div class="h4 text-semibold">
+            <%= title_text %>
+          </div>
+          <div class="text-small text-normal color-fg-muted">
+            <%# we can't use `subtitle_text` var here because we need the extra html styling %>
+            requested
+            <% if @actor %> by <span class="text-semibold"><%= @actor.to_s %></span><% end %>
+            in <span class="text-semibold"><%= @check_suite.name %> #<%= @check_suite.workflow_run.run_number %></span>
+          </div>
+        </h3>
+      <% end %>
+
+      <%# show button as hyperlink when in job logs page %>
+      <% d.with_show_button(
+        scheme: :link,
+        font_family: :mono,
+        font_size: :small,
+        underline: true,
+        display: :flex,
+        classes: "Content-Text",
+        ) { show_button_text } if @in_check_run_logs_page %>
+
+      <%# show button as button everywhere else %>
+      <% d.with_show_button { show_button_text } if !@in_check_run_logs_page %>
+
+      <% d.with_body do %>
+        <% if unapprovable_gate_requests.any? && approvable_gate_requests.any? %>
+          <div class="mb-3">
+            <label class="text-semibold" for="<%= aria_id_prefix %>-approvable-gate-requests">Requested your review to deploy:</label>
+          </div>
+          <%= render Actions::Environments::RequestFormListComponent.new(
+            gate_requests_by_environment: approvable_gate_requests_by_environment,
+            can_break_glass: false) %>
+          <div class="mb-3 mt-3">
+            <label class="text-semibold" for="<%= aria_id_prefix %>-unapprovable-gate-requests">Waiting on other reviewers:</label>
+          </div>
+          <%= render Actions::Environments::RequestFormListComponent.new(
+            gate_requests_by_environment: unapprovable_gate_requests_by_environment,
+            can_break_glass: false) %>
+        <% else %>
+          <%= render Actions::Environments::RequestFormListComponent.new(
+            gate_requests_by_environment: pending_gate_requests_by_environment,
+            can_break_glass: false) %>
+        <% end %>
+        <% if approvable_gate_requests.any? %>
+          <div class="form-group mt-4">
+            <div class="form-group-header">
+              <label class="text-semibold" for="<%= aria_id_prefix %>-comment-textarea">Leave a comment:</label>
+            </div>
+            <div class="form-group-body js-length-limited-input-container">
+              <textarea
+                style="height: 104px; min-height: 104px; resize: none;"
+                class="form-control input-contrast color-bg-default js-length-limited-input"
+                data-warning-text="{{remaining}} remaining"
+                data-input-max-length="1024"
+                data-target="approve-deployments.comment"
+                id="<%= aria_id_prefix %>-comment-textarea"
+                name="comment"
+                ></textarea>
+                <p class="js-length-limited-input-warning d-none"></p>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+
+      <% d.with_footer do %>
+          <%= render(Primer::Beta::Button.new(
+            scheme: :danger,
+            type: :submit,
+            name: "decision",
+            value: "rejected",
+            disabled: "true",
+            classes: "js-gates-approval-dialog-reject-button",
+            )) { "Reject" } %>
+
+          <%= render(Primer::Beta::Button.new(
+            scheme: :primary,
+            type: :submit,
+            name: "decision",
+            value: "approved",
+            disabled: "true",
+            # unfortunately we need class `btn-primary` to get the counter to look right for now
+            classes: "btn-primary js-gates-approval-dialog-approve-button",
+            )) do |b| %>
+              <% b.with_leading_visual_icon(icon: :rocket) %>
+                Approve and deploy<span class="ml-2 Counter js-gates-approval-dialog-count-display" hidden>0</span>
+            <% end %>
+      <% end if approvable_gate_requests.any? %>
+    <% end %>
+<% end %>

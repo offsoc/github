@@ -1,0 +1,353 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%= form_tag url, method: method do |f| %>
+  <dl class="form-group required">
+    <dt>
+      <%= label_tag "business[name]", "Name" %>
+    </dt>
+    <dd>
+      <%= text_field_tag "business[name]", business[:name] || business&.name,
+        placeholder: "e.g. Acme, Inc.", autofocus: true, required: true,
+        class: "js-business-name long" %>
+    </dd>
+  </dl>
+
+  <%# Only offer to edit the slug when creating a new account %>
+  <% unless business&.persisted? %>
+    <%
+      current_slug = business_params[:slug] || business&.slug
+      update_slug_from_name = current_slug.to_s.empty?
+    %>
+    <auto-check src="<%= check_slug_stafftools_enterprises_path %>" required>
+      <dl class="form-group required">
+        <dt class="d-flex">
+          <%= label_tag "business[slug]", "Slug" %>
+          <% if update_slug_from_name %>
+            <%= primer_octicon(:"arrow-down", flex: :auto, classes: "js-name-slug-sync-icon") %>
+          <% end %>
+        </dt>
+        <dd>
+          <%=
+            slug_field_properties = { placeholder: "e.g. acme-inc.", required: true, class: "js-business-slug long" }
+            slug_field_properties["data-auto-update"] = true if update_slug_from_name
+            text_field_tag "business[slug]", current_slug, slug_field_properties
+          %>
+          <p class="note"></p>
+        </dd>
+      </dl>
+      <%= csrf_hidden_input_for check_slug_stafftools_enterprises_path %>
+    </auto-check>
+  <% end %>
+
+  <% unless GitHub.single_business_environment? %>
+    <dl class="form-group">
+      <dt>
+        <%= label_tag "business[staff_owned]", "Staff owned?" %>
+      </dt>
+      <dd>
+        <%= hidden_field_tag "business[staff_owned]", false, id: nil %>
+        <%= check_box_tag "business[staff_owned]", true,
+            business_params[:staff_owned] == "true" || business&.staff_owned? %>
+      </dd>
+    </dl>
+
+    <%# Only allow this flag to be set when creating a new account %>
+    <% unless business&.persisted? %>
+      <dl class="form-group">
+        <dt>
+          <%= label_tag "business[business_type]", "Enterprise managed user enabled? (EMU)" %>
+        </dt>
+        <dd>
+          <%= check_box_tag "business[business_type]", "enterprise_managed",
+              business_params[:business_type] == "enterprise_managed" || business&.enterprise_managed?,
+              class: "js-submit-emucheckbox"
+          %>
+        </dd>
+      </dl>
+    <% end %>
+
+    <dl class="form-group">
+      <dt>
+        <%= label_tag "business[part_of_startup_program]", "Part of GitHub for Startups program?" %>
+        <span class="note d-block">
+          If account belongs to the program, enterprise owners will receive the <strong>GitHub for Startups</strong> welcome email.
+        </span>
+      </dt>
+      <dd>
+        <%
+          # Map each status to an array with a readable selectable title
+          # 'removed' status is displayed as 'No'
+          # The last status is moved to the front of the array to preserve ENUM ordering
+          status_options = BusinessStartupsProgram.statuses.map do |status, _value|
+            status == "removed" ? ["No", "removed"] : [status.to_s.titleize, status]
+          end.rotate(-1)
+
+          # If the business is part of the startup program, the default status is the current status of the business or 'year_1' if it's nil
+          # If the business is not part of the startup program, the default status is 'removed'
+          default_status = if business.part_of_startup_program?
+            business.startups_program&.status || :year_1
+          else
+            :removed
+          end
+        %>
+
+        <%= select_tag("business[part_of_startup_program]", options_for_select(status_options, default_status)) %>
+      </dd>
+    </dl>
+
+    <% if business&.persisted? && business.can_update_trial_expires_at_manually? %>
+      <dl class="form-group" <%= test_selector("business-trial-expires-at") %>>
+        <dt>
+          <%= label_tag "business_trial_expires_at", "Trial expiry date" %>
+        </dt>
+        <dd>
+          <input type="date" pattern="\d\d\d\d-\d\d-\d\d" placeholder="yyyy-mm-dd"
+            class="form-control" id="business_trial_expires_at"
+            name="business[trial_expires_at]"
+            value="<%= business_params[:trial_expires_at] || business&.trial_expires_at&.strftime("%Y-%m-%d") %>">
+        </dd>
+      </dl>
+    <% end %>
+
+    <% unless business&.persisted? %>
+      <auto-check src="<%= shortcode_check_stafftools_enterprises_path %>" required>
+        <dl name="shortcode" class="form-group required" style="display:none;">
+          <dt>
+            <%= label_tag "business[shortcode]", "EMU shortcode (cannot be edited later)" %>
+          </dt>
+          <dd>
+            <%= text_field_tag "business[shortcode]",
+              business_params[:shortcode] || business&.shortcode,
+              placeholder: "e.g. usc for University of Southern California", autofocus: true,
+              disabled: business.nil? || !business.enterprise_managed_user_enabled?
+            %>
+            <p class="note"></p>
+          </dd>
+        </dl>
+        <%= csrf_hidden_input_for shortcode_check_stafftools_enterprises_path %>
+      </auto-check>
+
+      <dl name="seats_plan_type" <%- if GitHub.flipper[:create_basic_enterprise].enabled?(current_user) -%> data-create-basic="true" <%- else -%> style="display:none;" <%- end -%>>
+        <dt>
+          <%= label_tag "business[seats_plan_type]", "Seats plan type" %>
+        </dt>
+        <dd>
+          <% ["full", "basic"].each do |seats_plan_type| %>
+            <%= radio_button_tag "business[seats_plan_type]", seats_plan_type, seats_plan_type == "full", class: "js-submit-emubusinesstype" %>
+            <label for="business_seats_plan_type_<%= seats_plan_type %>"><%= seats_plan_type.capitalize %></label>
+          <% end %>
+          <p class="note">Only set to Basic when creating a Copilot-only enterprise</p>
+        </dd>
+      </dl>
+    <% end %>
+  <% end %>
+
+  <% max_copilot_seats_display = Copilot::Business.new(business).copilot_standalone? ? "block" : "none" %>
+  <dl name="copilot_max_seats" style="display:<%= max_copilot_seats_display %>;">
+    <dt>
+      <%= label_tag "business[copilot_max_seats]", "Maximum Copilot Seats" %>
+    </dt>
+    <dd>
+    <%= number_field_tag "business[copilot_max_seats]",
+                      business_params[:copilot_max_seats] || business&.copilot_max_seats,
+                      placeholder: Copilot::COPILOT_ENTERPRISE_TEAM_MAX_SEATS_DEFAULT %>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "business[support_plan]", "GitHub Support" %>
+    </dt>
+    <dd>
+      <%= select_tag("business[support_plan]",
+        options_for_select(Configurable::SupportPlan::VALID_VALUES, business&.support_plan || Configurable::SupportPlan::STANDARD)) %>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "business[microsoft_support_plan]", "Microsoft Premium Support" %>
+    </dt>
+    <dd>
+      <%= select_tag("business[microsoft_support_plan]",
+        options_for_select(Configurable::MicrosoftSupportPlan::VALID_VALUES, business&.microsoft_support_plan),
+        include_blank: "Nothing selected") %>
+    </dd>
+  </dl>
+
+  <dl
+    class="form-group required" <%= test_selector("seat-count") %>
+    <%= (business&.metered_plan && !business&.metered_ghec_trial?) ? "hidden" : "" %>
+  >
+    <dt>
+      <%= label_tag "business[seats]", "Seats" %>
+    </dt>
+    <dd>
+      <%= number_field_tag "business[seats]",
+                        business_params[:seats] || business&.seats,
+                        required: true,
+                        placeholder: 100,
+                        class: "form-control"
+      %>
+    </dd>
+  </dl>
+
+  <dl class="form-group required">
+    <dt>
+      <%= label_tag "business_billing_end_date", "Invoice term end date" %>
+    </dt>
+    <dd>
+      <input type="date" pattern="\d\d\d\d-\d\d-\d\d" placeholder="yyyy-mm-dd"
+        class="form-control" id="business_billing_end_date"
+        name="business[customer_attributes][billing_end_date]"
+        required
+        value="<%= business_params[:customer_attributes][:billing_end_date] || business&.billing_term_ends_on %>">
+    </dd>
+  </dl>
+
+  <%# Only offer to edit the Zuora account URL when editing an existing account %>
+  <% if business&.persisted? %>
+    <dl class="form-group">
+      <dt>
+        <%= label_tag "zuora_account_url", "Zuora account URL" %>
+      </dt>
+      <dd>
+        <input type="text"
+              class="form-control" id="zuora_account_url"
+              name="zuora_account_url"
+              value="<%= zuora_account_url %>">
+      </dd>
+    </dl>
+  <% end %>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "business_billing_email", "Billing email" %>
+    </dt>
+    <dd>
+      <input type="email"
+             class="form-control" id="business_billing_email"
+             name="business[billing_email]"
+             value="<%= business_params[:billing_email] || business&.billing_email %>">
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "enterprise_web_business_id", "Enterprise Web Business ID" %>
+    </dt>
+    <dd>
+      <input type="text"
+             class="form-control" id="enterprise_web_business_id"
+             name="business[enterprise_web_business_id]"
+             placeholder="Business ID from enterprise.github.com to allow license downloads"
+             value="<%= business_params[:enterprise_web_business_id] || business&.enterprise_web_business_id %>">
+    </dd>
+  </dl>
+
+  <% unless GitHub.single_business_environment? %>
+    <dl class="form-group">
+      <dt>
+        <%= label_tag "business[can_self_serve]", "LFS Self service" %>
+      </dt>
+      <dd>
+        <%= hidden_field_tag "business[can_self_serve]", false, id: nil %>
+        <%= check_box_tag "business[can_self_serve]", true,
+            business_params[:can_self_serve] == "true" || business&.can_self_serve? %>
+      </dd>
+    </dl>
+
+    <% if business&.advanced_security_metered_for_entity? %>
+      <dl class="form-group">
+        <dt>
+          <strong>Advanced security</strong>
+        </dt>
+        <dd>
+          <%= radio_button_tag "business[advanced_security_enabled_type_for_entity]", Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_ENABLED_METERED_BILLING, true %>
+          <%= label_tag "business_advanced_security_enabled_type_for_entity_#{Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_ENABLED_METERED_BILLING}", "Metered via Billing Platform" %>
+        </dd>
+        <dd><p class="note">Offboard Advanced Security metered billing via <%= link_to "vNext Billing Onboarding", stafftools_billing_onboard_billing_platform_customers_path(business.customer.id), class: "Link--inTextBlock" %></p></dd>
+      </dl>
+    <% else %>
+      <dl class="form-group" <%= test_selector("business-advanced-security-options") %>>
+        <dt>
+          <strong>Advanced security</strong>
+        </dt>
+
+        <% advanced_security_option = business_params[:advanced_security_enabled_type_for_entity] || business&.advanced_security_enabled_type_for_entity || Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_OFF %>
+        <dd>
+          <%= radio_button_tag "business[advanced_security_enabled_type_for_entity]", Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_ENABLED, Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_ENABLED == advanced_security_option %>
+          <%= label_tag "business_advanced_security_enabled_type_for_entity_#{Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_ENABLED}", "Purchased" %>
+        </dd>
+        <dd>
+          <%= radio_button_tag "business[advanced_security_enabled_type_for_entity]", Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_OFF, Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_OFF == advanced_security_option %>
+          <%= label_tag "business_advanced_security_enabled_type_for_entity_#{Configurable::AdvancedSecurityBillingConfig::ADVANCED_SECURITY_OFF}", "Off" %>
+        </dd>
+        <% if GitHub.flipper[:ghas_metered_billing_enablement].enabled?(current_user) && !business.advanced_security_purchased_for_entity? %>
+          <% if business&.customer.present? %>
+            <dd>
+              <p class="mt-1 note">Onboard Advanced Security metered billing via <%= link_to "vNext Billing Onboarding", stafftools_billing_onboard_billing_platform_customers_path, class: "Link--inTextBlock" %> using customer ID <%= business.customer.id %>.</p>
+            </dd>
+          <% else %>
+            <dd>
+              <p class="mt-1 note">For Metered Billing, leave 'off' and onboard GHAS via <%= link_to "vNext Billing Onboarding", stafftools_billing_onboard_billing_platform_customers_path, class: "Link--inTextBlock" %> after the business has been created.</p>
+            </dd>
+          <% end %>
+        <% end %>
+      </dl>
+
+      <dl class="form-group">
+        <dt>
+          <%= label_tag "business[advanced_security_seats_for_entity]", "Advanced security seats" %>
+        </dt>
+        <dd>
+          <%= number_field_tag "business[advanced_security_seats_for_entity]",
+              business_params[:advanced_security_seats_for_entity] || business&.advanced_security_seats_for_entity,
+              required: false,
+              placeholder: 0 %>
+        </dd>
+      </dl>
+    <% end %>
+  <% end %>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "business[terms_of_service_company_name]", "Terms of service company name" %>
+    </dt>
+    <dd>
+      <%= text_field_tag "business[terms_of_service_company_name]",
+        business_params[:terms_of_service_company_name] || business&.terms_of_service_company_name,
+        placeholder: "e.g. Acme, Inc.",
+        class: "js-business-tos-company-name long" %>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt>
+      <strong>Terms of service type</strong>
+    </dt>
+    <% terms_of_service_type = business_params[:terms_of_service_type] || business&.terms_of_service_type || "Corporate" %>
+    <% Business::TERMS_OF_SERVICE_TYPES.each do |tos_type| %>
+      <% tos_type_description = Business::TERMS_OF_SERVICE_TYPE_DESCRIPTIONS.at(Business::TERMS_OF_SERVICE_TYPES.index(tos_type)) %>
+      <dd>
+        <%= radio_button_tag "business[terms_of_service_type]", tos_type, terms_of_service_type&.titleize == tos_type %>
+        <%= label_tag "business_terms_of_service_type_#{tos_type}", tos_type_description %>
+      </dd>
+    <% end %>
+  </dl>
+
+  <dl class="form-group">
+    <dt>
+      <%= label_tag "business[terms_of_service_notes]", "Terms of service type notes" %>
+    </dt>
+    <dd>
+      <%= text_field_tag "business[terms_of_service_notes]",
+        business_params[:terms_of_service_notes] || business&.terms_of_service_notes,
+        placeholder: "Including a helpful link to Slack or Zendesk discussion",
+        class: "long" %>
+    </dd>
+  </dl>
+
+  <%= render Primer::ButtonComponent.new(type: :submit, "data-disable-with": "Saving enterprise…", "data-disable-invalid": "") do %>
+    Save enterprise
+  <% end %>
+<% end %>

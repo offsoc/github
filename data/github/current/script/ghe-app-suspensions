@@ -1,0 +1,59 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#
+#/ ghe-app-suspensions: Suspend or unsuspend a GitHub App.
+#/
+#/ Usage: --suspend=<client_id>
+#/        --unsuspend=<client_id>
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: ghe-app-suspensions [options]"
+
+  opts.on("-sCLIENT_ID", "--suspend=CLIENT_ID", "Suspend the GitHub App with CLIENT_ID") do |client_id|
+    options[:suspend] = true
+    options[:client_id] = client_id
+  end
+
+  opts.on("-uCLIENT_ID", "--unsuspend=CLIENT_ID", "Unsuspend the GitHub App with CLIENT_ID") do |client_id|
+    options[:unsuspend] = true
+    options[:client_id] = client_id
+  end
+end.parse!
+
+def show_suspension_summary(app)
+  puts "- #{app.installations.not_suspended.count} active #{'installation'.pluralize(app.installations.not_suspended.count)}"
+  puts "- #{app.installations.suspended.count} suspended #{'installation'.pluralize(app.installations.suspended.count)}"
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+app = Integration.find_by(key: options[:client_id])
+
+if app.nil?
+  abort "Could not find a GitHub App with client ID '#{options[:client_id]}'"
+else
+  puts "App '#{app.name}' (Client ID: #{app.key})"
+  show_suspension_summary(app)
+
+  if options[:suspend] && app.installations.not_suspended.any?
+    puts "Suspending all installations..."
+    app.installations.not_suspended.each { |installation| installation.suspend! }
+  elsif options[:unsuspend] && app.installations.suspended.any?
+    puts "Unsuspending all installations..."
+    app.installations.suspended.each { |installation| installation.unsuspend! }
+  else
+    puts "Nothing to do."
+    exit
+  end
+
+  puts "Done."
+  show_suspension_summary(app)
+end
+
+# vim: set syntax=ruby:

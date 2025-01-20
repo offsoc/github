@@ -1,0 +1,31 @@
+#!/bin/bash
+#/ Usage: ghe-mysql-rebuild-table <tablename>
+set -e
+
+if [ "$(whoami)" != "root" ]; then
+  echo "Run this script as the root user."
+  exit 1
+fi
+
+if [ $# -ne 1 ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 1
+fi
+
+LOG_FILE=/var/log/mysql/mysql-5.6-upgrade.log
+
+tstart=$(date +%s)
+echo "$(date) Upgrading table $1..." >> $LOG_FILE
+
+pt-online-schema-change \
+  --max-load Threads_running=25 \
+  --critical-load Threads_running=500 \
+  h=localhost,D=github_enterprise,t=$1,A=utf8,u=root \
+  --new-table-name '_%T_ghe56_new' \
+  --print \
+  --no-check-replication-filters \
+  --set-vars "lock_wait_timeout=3" \
+  --tries create_triggers:100:6,drop_triggers:100:6,swap_tables:100:6 \
+  --execute >> $LOG_FILE 2>&1
+
+printf "%-0s %s\n" "Table $1 upgraded " "[$(($(date +%s)-$tstart))s]" >> $LOG_FILE

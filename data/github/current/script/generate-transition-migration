@@ -1,0 +1,64 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+#/ Usage: generate-transition-migration <version>
+#/
+#/ This generates the migration that wraps an existing transition.
+#/ NOTE: all transitions do not require migrations.
+#/ Only those that need to be run locally and in enterprise.
+
+require_relative "../config/boot"
+require "active_record"
+require "active_support/all"
+require "erb"
+require "fileutils"
+
+unless (version_number = ARGV.shift)
+  abort "usage: #$0 <version_number>"
+end
+
+unless version_number.match(/\d/)
+  abort "please pass in the version number for the transition you need a migration for"
+end
+
+transition_file_path = Dir["lib/github/transitions/#{version_number}*.rb"][0]
+
+transition_name = transition_file_path.match(/[^\/]+$/).to_s.gsub(".rb", "")
+
+migration_file = "db/migrate/#{transition_name}_transition.rb"
+class_name = transition_name.gsub(/\d/, "").underscore.camelize
+
+if File.exist? migration_file
+  abort "#$0: exists: #{migration_file}"
+end
+
+migration_template = <<END
+# typed: true
+# frozen_string_literal: true
+
+require "github/transitions/#{transition_name}"
+
+# rubocop:disable GitHub/ConnectionClassPresentInMigration
+# requiring a connection class is not necessary for transition migrations
+class <%= class_name %>Transition < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def self.up
+    return if !GitHub.enterprise? && !Rails.env.development?
+
+    arguments = GitHub::Transitions::Arguments.new(dry_run: false)
+    transition = GitHub::Transitions::<%= class_name %>.new(arguments)
+    transition.run
+  end
+
+  def self.down
+  end
+end
+# rubocop:enable GitHub/ConnectionClassPresentInMigration
+END
+
+File.open migration_file, "wb" do |f|
+  erb = ERB.new migration_template
+  erb.filename = migration_file
+  f.write erb.result binding
+end
+
+puts migration_file

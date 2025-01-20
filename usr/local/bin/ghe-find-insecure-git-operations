@@ -1,0 +1,83 @@
+#!/bin/bash
+#/ Usage: ghe-find-insecure-git-operations [-h|--help] [--skip-git] [--all]
+#/
+#/ Analyzes the babeld logs to find entries where a client is using the Git
+#/ protocol or one of the following SSH algorithms:
+#/
+#/ * hmac-sha1
+#/ * hmac-sha1-etm@openssh.com
+#/ * aes128-cbc
+#/ * aes192-cbc
+#/ * aes256-cbc
+#/ * ssh-dss
+#/ * ssh-rsa
+#/
+#/ All of these algorithms and protocols are insecure.
+#/
+#/ Normally, this only lists a client using an insecure SSH algorithm if it
+#/ doesn't report a better algorithm that will be automatically used when
+#/ insecure algorithms are removed.  To list all clients using an insecure
+#/ algorithm, even if they would automatically upgrade, use --all.
+#/
+#/ Each matching log line is printed, precededed by the reason (which is a
+#/ matching algorithm or protocol entry) and a colon.
+#/
+#/ OPTIONS:.
+#/   -h | --help     Show this message.
+#/   --all           Show all clients using insecure algorithms, even if they would upgrade automatically.
+#/   --skip-git      Skip entries for the Git protocol on port 9418.
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-nomad-lib
+source /usr/local/share/enterprise/ghe-nomad-lib
+
+# usage
+#   Display usage information for this script.
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+find_babeld_logs () {
+  journalctl -t babeld --no-pager
+}
+
+all=false
+skip_git=false
+
+# Process command line arguments
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --all)
+      all=true
+      shift
+      ;;
+    --skip-git)
+      skip_git=true
+      shift
+      ;;
+    *)
+      >&2 echo "Unrecognized argument: $1"
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+find_babeld_logs | \
+  ruby -ne "all=$all; skip_git=$skip_git;" -e '
+    # If we want all entries, look for "cipher" or "hmac"; otherwise, look for the "best_cipher" or "best_mac".
+    # Note that the names for the best and current MAC entries differ (the former lacks the "h").
+    cipher = all ? "cipher" : "best_cipher"
+    mac = all ? "hmac" : "best_mac"
+    if !skip_git && $_ =~ /(proto=git)/
+      puts "#{$1}:#{$_}"
+    elsif $_ =~ /creason=/ && $_ =~ /(#{mac}="hmac-sha1\S*"|#{cipher}="aes(?:128|192|256)-cbc"|sigtype="ssh-(?:rsa|dss)")/
+      # Only log an SSH connection when it is closed (and therefore has a close reason) to avoid double logging.
+      puts "#{$1}:#{$_}"
+    end
+  '

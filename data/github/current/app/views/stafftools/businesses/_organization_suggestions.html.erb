@@ -1,0 +1,174 @@
+<ul>
+  <% if organizations.any? %>
+    <% organizations.each do |organization| %>
+      <% view = Stafftools::Businesses::OrganizationSuggestionView.new(
+        organization: organization,
+        business: business
+      ) %>
+        <% if view.org_has_business? %>
+          <% if organization.business == business %>
+            <li class="select-menu-item pl-2 disabled" aria-disabled="true">
+              <%= render(partial: "stafftools/businesses/organization_suggestion", locals: { organization: organization }) %>
+              <p class="non-member-note mt-2">This organization already belongs to <%= business.name %></p>
+            </li>
+          <% else %>
+            <li class="select-menu-item pl-2">
+              <div>
+                <%= render(partial: "stafftools/businesses/organization_suggestion", locals: { organization: organization }) %>
+              </div>
+              <%= form_tag stafftools_enterprise_organization_transfers_path(business) do |f| %>
+                <%= render(Primer::Alpha::Dialog.new(
+                  title: "Confirm transfer of organization",
+                )) do |dialog| %>
+                  <% dialog.with_show_button(size: :small, mt: 2, p: 2) do %>
+                    Transfer from <%= organization.business.name %>
+                  <% end %>
+                  <% dialog.with_body do %>
+                    <p>
+                      Transferring this organization will remove it from <b><%= organization.business.name %></b> and
+                      add it to <b><%= business.name %></b>
+                    </p>
+                    <% internal_repo_count = organization.repositories.internal_scope.size %>
+                    <% unless internal_repo_count.zero? %>
+                      <p class="color-fg-danger">
+                        <%= pluralize(internal_repo_count, "internal repository") %> will be moved to the new enterprise account
+                      </p>
+                    <% end %>
+
+                    <% if business.trial? || organization.business.trial? %>
+                      <p class="color-fg-danger">
+                        This organization transfer is not recommended!
+                      </p>
+                      <p>
+                        The enterprise account(s) listed are currently on an enterprise trial:
+                        <ul>
+                          <% if business.trial? %>
+                            <li class="ml-4">
+                              <b><%= business.name %></b>
+                            </li>
+                          <% end %>
+                          <% if organization.business.trial? %>
+                            <li class="ml-4">
+                              <b><%= organization.business.name %></b>
+                            </li>
+                          <% end %>
+                        </ul>
+                      </p>
+                      <p>
+                        Transferring organizations to and from trial enterprises may increase the risk of actors
+                        extending full enterprise functionality past the trial expiration date.
+                        Are you sure you want to complete this transfer?
+                      </p>
+                    <% end %>
+
+                    <label>
+                      Enter the organization's name to confirm
+                      <input name="verify" type="text" class="form-control input-block mt-1" pattern="<%= case_insensitive_pattern organization.name %>" required autofocus>
+                    </label>
+                    <input type="hidden" name="organization" value="<%= organization.name %>">
+                  <% end %>
+
+                  <% dialog.with_footer do %>
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      scheme: :danger,
+                      mt: 2,
+                      "data-disable-with": "Transfering organization to #{business.name}",
+                      "data-disable-invalid": "") do %>
+                      Transfer organization to <%= business.name %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </li>
+          <% end %>
+        <% elsif view.show_two_factor_confirmation_modal? %>
+          <li class="select-menu-item pl-2">
+            <div>
+              <%= render(partial: "stafftools/businesses/organization_suggestion", locals: { organization: organization }) %>
+            </div>
+            <%= form_tag stafftools_enterprise_organizations_path(business), method: :post do |f| %>
+              <%= render(Primer::Alpha::Dialog.new(
+                title: "Confirm addition of organization",
+              )) do |dialog| %>
+                <% dialog.with_show_button(size: :small, mt: 2, p: 2) do %>
+                  Add organization
+                <% end %>
+                <% dialog.with_body do %>
+                  <p>
+                    Adding this organization will remove all users who do not have two-factor authentication enabled
+                    for their account.
+                  </p>
+                  <p class="color-fg-danger">
+                    <% count = organization.affiliated_users_with_two_factor_disabled_count %>
+                    <%
+                      count_string = if count == Organization::TWO_FA_USER_COUNT_LIMIT
+                        "More than #{Organization::TWO_FA_USER_COUNT_LIMIT - 1} users"
+                      else
+                        pluralize(count, 'user')
+                      end
+                    %>
+                    <%= count_string %> will be removed from this organization
+                  </p>
+
+                  <label>
+                    Enter the organization's name to confirm
+                    <input name="verify" type="text" class="form-control input-block mt-1" pattern="<%= case_insensitive_pattern organization.name %>" required autofocus>
+                  </label>
+                  <input type="hidden" name="organization" value="<%= organization.name %>">
+                <% end %>
+
+                <% dialog.with_footer do %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :danger,
+                    mt: 2,
+                    "data-disable-invalid": ""
+                  ) do %>
+                    Remove <%= pluralize_without_number organization.affiliated_users_with_two_factor_disabled_count, "member" %>
+                    and require two-factor authentication
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </li>
+        <% else %>
+          <li class="select-menu-item pl-2">
+            <div>
+              <%= render(partial: "stafftools/businesses/organization_suggestion", locals: { organization: organization }) %>
+            </div>
+            <%= render(Primer::Alpha::Dialog.new(
+              title: "Confirm addition of organization",
+            )) do |dialog| %>
+              <% dialog.with_show_button(size: :small, mt: 2, p: 2) do %>
+                Add organization
+              <% end %>
+              <% dialog.with_body do %>
+                <p>
+                  Are you sure you want to add the <strong><%= organization.display_login %></strong> organization
+                  to <strong><%= business.name %></strong>?
+                </p>
+              <% end %>
+
+              <% dialog.with_footer do %>
+                <%= form_tag stafftools_enterprise_organizations_path(business), method: :post do |f| %>
+                  <input type="hidden" name="organization" value="<%= organization.display_login %>">
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :danger,
+                    "data-disable-with": ""
+                  ) do %>
+                    Add <%= organization.display_login %> to <%= business.name %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </li>
+        <% end %>
+    <% end %>
+  <% elsif params[:q].present? %>
+    <li class="select-menu-blankslate">
+      <p>Sorry, no results matched "<%= params[:q] %>"</p>
+    </li>
+  <% end %>
+</ul>

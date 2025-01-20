@@ -1,0 +1,176 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<%= render Primer::Beta::Subhead.new(hide_border: true, font_size: :normal, pb: 0) do |component| %>
+  <% component.with_heading(tag: :h3) do %>
+      Prebuild configuration <% if show_beta_badge? %> <%= render(Primer::Beta::Label.new(scheme: :success, vertical_align: :middle)) { "Beta" } %><% end %>
+  <% end %>
+  <% component.with_actions do %>
+    <%= render(
+      Primer::ButtonComponent.new(
+        **toggle_disable_button(args: {
+            tag: :a,
+            href: new_codespaces_prebuild_configuration_path(repo_owner, current_repo),
+            scheme: :primary,
+            test_selector: "setup-prebuild-button",
+        }, disabled: disabled_state?)
+      )
+    ) { "Set up prebuild" } %>
+  <% end %>
+<% end %>
+
+<% if codespaces_disabled? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, mt: 2)) do %>
+    Codespaces are not enabled for your organization. Please contact your org admin to
+    <%= render(Primer::Beta::Link.new(href: setup_docs_url, classes: "Link--inTextBlock")) do %>
+      enable Codespaces
+    <% end %>
+    to use this functionality.
+  <% end %>
+<% end %>
+
+<% if prebuild_usage_message %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, mt: 2, test_selector: "prebuild-usage-message")) do %>
+    <%= prebuild_usage_message %>
+  <% end %>
+<% end %>
+
+<% if actions_disabled? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, mt: 2)) do %>
+    Actions are not enabled for your repository. Please
+    <%= render(Primer::Beta::Link.new(href: GitHub.actions_manage_repo_settings_help_url, classes: "Link--inTextBlock")) do %>
+      enable Actions
+    <% end %>
+    or contact your admin to
+    <%= render(Primer::Beta::Link.new(href: GitHub.actions_manage_org_settings_help_url, classes: "Link--inTextBlock")) do %>
+      enable them
+    <% end %>
+    to use this functionality.
+  <% end %>
+<% end %>
+
+<div class="Box mt-4">
+  <% if prebuild_configurations.empty? %>
+    <div class="Box-body text-center">
+      <%= render(Primer::Box.new(container: :sm)) do %>
+        <div><h4>There are no prebuilds configured for this repository</h4></div>
+        <p class="color-fg-subtle">Prebuild configurations speed up Codespace creations significantly by pre-executing all the tasks required to build your development environment.</p>
+        <div>
+          <%= render(Primer::Beta::Link.new(href: prebuild_docs_url, classes: "Link--inTextBlock")) do %>
+            Learn more about setting up prebuilds
+          <% end %>
+        </div>
+        <%= render(
+          Primer::ButtonComponent.new(
+            **toggle_disable_button(args: {
+                tag: :a,
+                href: new_codespaces_prebuild_configuration_path(repo_owner, current_repo),
+                mt: 4,
+                test_selector: "setup-prebuild-button",
+            }, disabled: disabled_state?)
+          )
+        ) { "Set up prebuild" } %>
+      <% end %>
+    </div>
+  <% else %>
+    <ul>
+      <% visible_prebuild_configurations.each do |config| %>
+        <li class="Box-row d-flex" <%= test_selector "codespaces-prebuild-configuration" %>>
+          <div class="flex-1 color-fg-muted">
+            <div class="branch-name"><%= config.ref_for_display %></div>
+            <% if show_devcontainer_path?(config) %>
+              on <div style="background-color: var(--bgColor-muted, var(--color-canvas-subtle))" class="branch-name css-truncate-target"><%= config.devcontainer_path %></div>
+            <% end %>
+            <% if config.locations.present? %>
+              <div class="color-fg-subtle">
+                Available in
+                <strong><%= render(Primer::Tooltip.new(label: regions_list_for_display(config), direction: :s, test_selector: "available-in")) { regions_number_for_display(config) } %></strong>
+                <% if show_developer_info? %>
+                  <%= render(Primer::Beta::Label.new(scheme: :secondary, test_selector: "vscs-target")) do %>
+                    <%= config.vscs_target %>
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+          <div class="d-flex flex-items-center">
+            <% if show_permissions_granted? %>
+              <% if config.permission_granted? %>
+                <%= render(
+                Codespaces::PrebuildConfigurationRunStatusComponent.new(
+                  configuration: config,
+                  current_repo: current_repo,
+                  repo_owner: repo_owner,
+                  actions_disabled: actions_disabled?,)
+                )%>
+              <% else %>
+                <%= render Primer::Beta::Octicon.new(icon: "alert", mr: 2, color: :muted, test_selector: "permission-granted-warning") %>
+                <%= render(Primer::Beta::Link.new(color: :muted, href: edit_codespaces_prebuild_configuration_path(repo_owner, current_repo, config))) { "Additional Permission Needed" } %>
+              <% end %>
+            <% else %>
+              <%= render(
+                Codespaces::PrebuildConfigurationRunStatusComponent.new(
+                  configuration: config,
+                  current_repo: current_repo,
+                  repo_owner: repo_owner,
+                  actions_disabled: actions_disabled?,)
+                )%>
+            <% end %>
+            <%= render(Primer::Alpha::ActionMenu.new) do |menu| %>
+              <% menu.with_show_button(icon: "kebab-horizontal", scheme: :invisible, "aria-label": "Configuration menu") %>
+              <% menu.with_item(label: "Manually trigger", href: run_workflow_codespaces_prebuild_configuration_path(repo_owner, current_repo, config), disabled: manual_trigger_disabled?(config), form_arguments: { method: :post }, test_selector: "manually-trigger-button") do |item| %>
+                <% item.with_leading_visual_icon(icon: :play) %>
+              <% end %>
+              <% if !actions_disabled? %>
+                <% if config.has_ran? %>
+                  <% menu.with_item(label: "View runs", href: view_runs_url(config), test_selector: "view-runs") do |item| %>
+                    <% item.with_leading_visual_icon(icon: :codespaces) %>
+                  <% end %>
+                <% else %>
+                  <% menu.with_item(
+                      label: "View runs",
+                      disabled: true,
+                      test_selector: "view-runs",
+                      classes: "js-prebuilds-view-runs-menu-item js-socket-channel",
+                      data: {
+                        channel: live_update_view_channel(GitHub::WebSocket::Channels.prebuild_configuration_workflow_run(config))
+                      }
+                    ) do |item| %>
+                    <% item.with_leading_visual_icon(icon: :codespaces) %>
+                  <% end %>
+                  <% menu.with_item(label: "View runs", classes: "config-view-runs-item", href: view_runs_url(config), test_selector: "view-runs", hidden: true) do |item| %>
+                    <% item.with_leading_visual_icon(icon: :codespaces) %>
+                  <% end %>
+                <% end %>
+              <% end %>
+              <% menu.with_item(label: "Edit", href: edit_codespaces_prebuild_configuration_path(repo_owner, current_repo, config), disabled: !editable?(config), test_selector: "edit-button") do |item| %>
+                <% item.with_leading_visual_icon(icon: :pencil) %>
+              <% end %>
+              <% menu.with_item(label: config.disabled? ? "Enable runs" : "Disable runs", href: toggle_state_codespaces_prebuild_configuration_path(repo_owner, current_repo, config), form_arguments: { method: :post }, test_selector: "disable-button") do |item| %>
+                <% item.with_leading_visual_icon(icon: config.disabled? ? :play : :stop) %>
+              <% end %>
+              <% menu.with_item(
+                  label: "Delete",
+                  scheme: :danger,
+                  content_arguments: { "data-show-dialog-id": delete_prebuild_config_id(config) },
+                  test_selector: "delete-button"
+                ) do |item| %>
+                <% item.with_leading_visual_icon(icon: :trash) %>
+              <% end %>
+            <% end %>
+            <%# Delete Confirmation Modal %>
+            <%= render(Primer::Alpha::Dialog.new(id: delete_prebuild_config_id(config), title: "Are you sure?")) do |d| %>
+              <%= form_tag codespaces_prebuild_configuration_path(repo_owner, current_repo, config), method: :delete do %>
+                <%= render(Primer::Alpha::Dialog::Body.new) do %>
+                  <%= delete_configuration_msg %>
+                <% end %>
+                <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+                  <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": delete_prebuild_config_id(config) })) { "Cancel" } %>
+                  <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit)) { "Delete" } %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  <% end %>
+  </div>

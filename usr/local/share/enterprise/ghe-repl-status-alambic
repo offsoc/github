@@ -1,0 +1,54 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-alambic [-v] [--check]
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+process_cluster_ha() {
+  STORAGE_STATUS=${STORAGE_STATUS:-$(ghe-storage replication-status | grep -v ^app=)}
+
+  count="$(total_counts_ha "$STORAGE_STATUS" "under/over-replicated alambic objects")"
+
+  # We can't easily determine the number if above 5000, so add a qualifier to
+  # indicate there are more than 5000 objects.
+  add_qualifier=
+  if [ $count -ge 5000 ]; then
+    add_qualifier="more than "
+  fi
+
+  if [ "$1" = "-v" ]; then
+    echo "$STORAGE_STATUS"
+    return 0
+  elif [ $# -eq 0 ]; then
+    if [ $count -eq 0 ]; then
+      echo "Alambic replication is in sync"
+      return 0
+    else
+      echo "Alambic replication is not in sync, off by ${add_qualifier}${count} objects"
+      return 1
+    fi
+  fi
+
+  if [ "$1" = "--check" ]; then
+    if [ $count -gt 120 ]; then
+      echo "CRITICAL: alambic replication is behind the primary by ${add_qualifier}${count} objects"
+      return 2
+    elif [ $count -lt 120 -a $count -gt 0 ]; then
+      echo "WARNING: alambic replication is behind the primary by $count objects"
+      return 1
+    elif [ $count -eq 0 ]; then
+      echo "OK: alambic replication is in sync"
+      return 0
+    else
+      echo "UNKNOWN: alambic replication is not in sync"
+      return 3
+    fi
+  fi
+}
+
+if [ "$1" != "--source-only" ]; then
+  ensure_replica
+
+  process_cluster_ha "$@"
+fi

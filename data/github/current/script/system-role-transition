@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# Usage: script/system-role-transition <Name>
+#
+# Given a CamelCase name, generate the transition, transition test, and migration files
+# for syncing system_roles.yml to the database.
+
+if [ -z "$1" ]
+  then
+    echo "Usage: script/system-role-transition <Name>"
+    exit 1
+fi
+
+NAME_REGEX="^([a-zA-Z]+)$"
+if [[ ! $1 =~ $NAME_REGEX ]]
+  then
+    echo "Error: Name should be a single word with no numbers or symbols, but was $1"
+    exit 1
+fi
+
+echo "Generating transition files for $1..."
+
+TFILES=$(generate-transition $1)
+TRANSITION_FILE=$(echo "$TFILES" | head --lines 1)
+TEST_FILE=$(echo "$TFILES" | tail --lines 1)
+TIME_REGEX="/([0-9]+)_.*\.rb"
+TIMESTAMP=$(echo $TRANSITION_FILE | grep -oP $TIME_REGEX | cut -d"_" -f1 | cut -d"/" -f2)
+
+if [ -z "$TRANSITION_FILE" ]
+  then
+    echo "Error: Could not parse transition file from $TFILES"
+    exit 1
+  else
+    echo "Created transition file $TRANSITION_FILE"
+fi
+
+if [ -z "$TEST_FILE" ]
+  then
+    echo "Error: Could not parse test file from $TFILES"
+    exit 1
+  else
+    echo "Created transition test file $TEST_FILE"
+fi
+
+if [ -z "$TIMESTAMP" ]
+  then
+    echo "Error: Could not parse timestamp in $TRANSITION_FILE"
+    exit 1
+fi
+
+bin/safe-ruby script/system-role-transition-generator $1 $TRANSITION_FILE $TEST_FILE
+echo "Updated $TRANSITION_FILE and $TEST_FILE"
+
+MIGRATION_FILE=$(generate-transition-migration $TIMESTAMP)
+echo "Created migration file $MIGRATION_FILE"

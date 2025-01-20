@@ -1,0 +1,148 @@
+<% if display_range_info? %>
+  <div class="f6 py-2 px-3 border-bottom d-flex flex-justify-between">
+    <%= render partial: "pull_request_review_threads/range_info", locals: {
+      start_line: start_line_number,
+      start_line_type: start_line_type,
+      end_line: end_line_number,
+      end_line_type: end_line_type
+    } %>
+  </div>
+<% end %>
+
+<% if !rendering_on_files_tab && pull_request_review_thread.on_line? %>
+  <%= render PullRequests::ReviewThreadDiffLinesComponent.new(
+    pull_request_review_thread: pull_request_review_thread,
+    highlighting_mode: highlighting_mode,
+  ) %>
+<% end %>
+
+<div class="js-inline-comments-container">
+  <div class="js-line-comments js-suggested-changes-container js-suggested-changes-contents js-quote-selection-container" data-quote-markdown=".js-comment-body">
+    <div class="js-comments-holder" <%= test_selector('review-thread') %>>
+      <%= render PullRequests::ReviewThreadPagedCommentsComponent.new(
+        pull_request_review_thread: pull_request_review_thread,
+        page_info: page_info,
+        pull_request: pull_request,
+        comment_context: comment_context
+      ) %>
+    </div>
+
+    <% if can_reply? %>
+      <div class="review-thread-reply border-bottom">
+        <div class="inline-comment-form-container js-inline-comment-form-container">
+          <div class="inline-comment-form-actions">
+            <div class="d-table width-full">
+              <div class="d-table-cell">
+                <%= render GitHub::AvatarComponent.new(actor: current_user, size: 24) %>
+              </div>
+              <div class="d-table-cell col-12">
+                <button type="button" class="review-thread-reply-button width-full color-fg-muted text-left form-control js-toggle-inline-comment-form">
+                  Reply...
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="inline-comment-form-box ml-n2 mr-n2">
+            <%= form_tag create_review_comment_path(pull_id: pull_request.number, repository: pull_request.repository, user_id: pull_request.repository.owner), class: "js-inline-comment-form" do %>
+              <input type="hidden" name="comment_context" value="<%= comment_context %>">
+              <%# TODO(dzader): we're using comment.id to look up thread id so just send that instead once controller supports that %>
+              <input type="hidden" name="in_reply_to" value="<%= comment_id %>">
+              <input type="hidden" name="side" value="<%= pull_request_review_thread.async_diff_side.sync %>">
+              <input type="hidden" name="comparison_start_oid" value="<%= current_comparison&.start_commit&.oid %>">
+              <input type="hidden" name="comparison_end_oid" value="<%= current_comparison&.end_commit&.oid %>">
+              <input type="hidden" name="comparison_base_oid" value="<%= current_comparison&.base_commit&.oid %>">
+              <input type="hidden" name="expanded_diff" value="false" class="js-expanded-diff-placeholder-value">
+
+              <%= render Comments::PreviewableCommentFormComponent.new(
+                subject: pull_request,
+                textarea_id: reply_textarea_id,
+                comment_id: comment_id,
+                allows_suggested_changes: allows_suggested_changes?,
+                current_repository: pull_request.repository,
+                slash_commands_enabled: slash_commands_enabled?,
+                autofocus: true,
+                use_fixed_width_font: current_user.use_fixed_width_font?,
+                copilot_text_suggestions_enabled: user_feature_enabled?(:ghost_pilot_pr_autocomplete_comments),
+              ) %>
+
+              <div class="form-actions mt-2">
+                <div class="position-relative float-right ml-1">
+                  <% if rendering_on_files_tab %>
+                    <%= render Primer::Beta::Button.new(float: :right, type: :submit, scheme: :primary, data: { "disable-invalid": "", "disable-with": "" }) do %>
+                      <span class="add-comment-label">Add review comment</span>
+                      <span class="start-review-label">Start a review</span>
+                    <% end %>
+
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      float: :right,
+                      mr: 1,
+                      name: "single_comment",
+                      value: 1,
+                      classes: "review-simple-reply-button js-quick-submit-alternative",
+                      data: { "disable-invalid": "", "disable-with": "" }
+                    ).with_content("Add single comment") %>
+                  <% else %>
+                    <% unless replying_on_conversation_tab_with_pending_review? %>
+                      <input type="hidden" name="single_comment" value="1">
+                    <% end %>
+
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      scheme: :primary,
+                      classes: "review-simple-reply-button",
+                      data: { "disable-invalid": "", "disable-with": "" }
+                    ).with_content("Comment") %>
+                  <% end %>
+                </div>
+
+                <%= render Primer::Beta::Button.new(float: :right, classes: "js-hide-inline-comment-form", "data-confirm-cancel-text": "Are you sure you want to discard your unsaved changes?").with_content("Cancel") %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <% if can_resolve? %>
+    <div class="d-flex flex-justify-between">
+      <%= form_tag resolve_path, class: "js-resolvable-timeline-thread-form d-flex flex-justify-between flex-wrap", method: :put do %>
+        <input type="hidden" name="rendering_on_files_tab" value="<%= rendering_on_files_tab %>">
+        <% hydro_tracking = hydro_click_tracking_attributes("resolvable_threads.resolve", { thread_id: pull_request_review_thread.id, user_id: current_user.id }) %>
+        <div class="d-flex flex-items-center">
+          <%= render Primer::Beta::Button.new(type: :submit, m: 3, data: { "disable-with" => "Resolving conversation…" }.merge(hydro_tracking), classes: resolution_info_deletion_class, test_selector: "resolve-conversation-button").with_content("Resolve conversation") %>
+        </div>
+        <% if user_feature_enabled?(:hadron_comment_fix_generation) %>
+          <%= render Primer::Beta::Button.new(
+            tag: :a,
+            href: repo_copilot_task_edit_path(
+              user_id: pull_request.repository.owner_display_login,
+              repository: pull_request.repository,
+              id: pull_request.number,
+              path: pull_request_review_thread.path,
+              pull_request_review_comment_id: comment_id,
+            ),
+            my: 3
+          ) do |component| %>
+            <% component.with_leading_visual_icon(icon: :copilot) %>
+            Open in editor
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  <% elsif can_unresolve? %>
+    <%= form_tag unresolve_path, class: "js-resolvable-timeline-thread-form", method: :delete do %>
+      <input type="hidden" name="rendering_on_files_tab" value="<%= rendering_on_files_tab %>">
+      <% hydro_tracking = hydro_click_tracking_attributes("resolvable_threads.unresolve", { thread_id: pull_request_review_thread.id, user_id: current_user.id }) %>
+      <%= render Primer::Beta::Button.new(type: :submit, display: :inline_block, m: 3, data: { "disable-with" => "Unresolving conversation…" }.merge(hydro_tracking), classes: resolution_info_deletion_class).with_content("Unresolve conversation") %>
+
+      <% if resolved_by_actor && !rendering_on_files_tab %>
+        <div class="d-lg-inline d-block px-md-0 px-3 pb-md-0 pb-3 <%= resolution_info_deletion_class %>">
+          <strong><%= resolved_by_actor.display_login %></strong> marked this conversation as resolved.
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>

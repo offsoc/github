@@ -1,0 +1,225 @@
+#!/bin/bash
+
+set -e
+
+cd "$(dirname "$0")/.."
+ROOT="$PWD"
+SCRIPT_NAME=$(basename $0)
+
+usage() {
+  cat <<USAGE
+${SCRIPT_NAME} [options] <upload|download> <subproject>
+
+subproject    name of the subproject (usually vendor/<NAME>)
+
+Options:
+  -v  The version of the prebuild cache artifact (default \`cat config/<NAME>-version\`)
+  -d  The directory to cache (default vendor/<NAME>)
+USAGE
+}
+
+while getopts "hv:d:" option; do
+  case $option in
+  v) VERSION=$OPTARG ;;
+  d) TARGET_DIR=$OPTARG ;;
+  h)
+    usage
+    exit 0
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+COMMAND=${1?'missing argument: command (download, upload)'}
+SUBPROJECT=${2?'missing argument: subproject'}
+TARGET_DIR=${TARGET_DIR:-${ROOT}/vendor/$SUBPROJECT}
+
+if [ -n "$VERSION" ]; then
+  SUBPROJECT_VERSION=$VERSION
+elif [ -f "config/$SUBPROJECT-version" ]; then
+  SUBPROJECT_VERSION=$(cat "config/$SUBPROJECT-version" | grep -v ^#)
+else
+  printf >&2 '\e[31m%s\e[0m\n' "ERROR: No $SUBPROJECT project is configured."
+  exit 1
+fi
+
+SUBPROJECT_SHA1="${SUBPROJECT_VERSION%%:*}"
+
+# Handle when we know we're building for Codespaces but CODESPACES isn't set.
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_CODESPACES" ] && [ "$ROOT" == "/workspaces/github" ]; then
+  CODESPACES="true"
+fi
+
+# Cache tarballs for comparison if we're uploading.
+if [ -z "$GITHUB_PACKAGES_SUBPROJECT_TAR_CACHE" ] && [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+  GITHUB_PACKAGES_SUBPROJECT_TAR_CACHE="${ROOT}/tmp/subproject-prebuild"
+fi
+OUTPUT_FOLDER=${GITHUB_PACKAGES_SUBPROJECT_TAR_CACHE:-'/tmp'}
+
+# Read from GitHub Packages subproject prebuild cache
+if [ -n "$DEVCONTAINER" ]; then
+  CACHE_SYSTEM="devcontainer"
+elif [ -n "$HCS" ]; then
+  CACHE_SYSTEM="hcs"
+elif [ -n "$CODESPACES" ]; then
+  CACHE_SYSTEM="codespaces"
+else
+  # e.g. darwin
+  CACHE_SYSTEM="$(uname -s | tr '[:upper:]' '[:lower:]')"
+fi
+
+# e.g. github/alive/darwin:3f4a69aa8b3add44b8feb05be278edfb3bf73bf1
+CACHE_IMAGE_NAME="ghcr.io/github/github/${SUBPROJECT}/${CACHE_SYSTEM}"
+CACHE_IMAGE_TAG="${CACHE_IMAGE_NAME}:${SUBPROJECT_VERSION}"
+# e.g. alive-3f4a69aa8b3add44b8feb05be278edfb3bf73bf1.tgz
+CACHE_TARBALL="${SUBPROJECT}-${SUBPROJECT_VERSION}.tgz"
+
+DOWNLOAD_TAR_PATH="${OUTPUT_FOLDER}/${CACHE_TARBALL}"
+UPLOAD_TAR_PATH="/tmp/${CACHE_TARBALL}"
+
+# Attempt to use GITHUB_TOKEN if GITHUB_PACKAGES_TOKEN is unset.
+if [[ -z "$GITHUB_PACKAGES_TOKEN" && -n "$GITHUB_TOKEN" ]]; then
+  GITHUB_PACKAGES_TOKEN="$GITHUB_TOKEN"
+fi
+if [ -z "$GITHUB_PACKAGES_TOKEN" ]; then
+  echo "${SCRIPT_NAME}: error: no GITHUB_PACKAGES_TOKEN or GITHUB_TOKEN set!"
+  exit 1
+fi
+
+export PATH="$PATH:${ROOT}/vendor/oras"
+
+if ! which oras &>/dev/null; then
+  echo "${SCRIPT_NAME}: downloading oras"
+  (
+    cd /tmp
+    ORAS_VERSION="1.1.0"
+    ORAS_FILENAME="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+    ORAS_SHA256="e09e85323b24ccc8209a1506f142e3d481e6e809018537c6b3db979c891e6ad7"
+    curl -LO "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${ORAS_FILENAME}"
+    if echo "$ORAS_SHA256  $ORAS_FILENAME" | sha256sum --check --status; then
+      echo "${SCRIPT_NAME}: $ORAS_FILENAME: valid download checksum!"
+    else
+      echo "${SCRIPT_NAME}: error: $ORAS_FILENAME: invalid download checksum!"
+      exit 1
+    fi
+
+    cd "$ROOT"
+    mkdir -p vendor/oras
+    tar -xf "/tmp/$ORAS_FILENAME" -C "${ROOT}/vendor/oras"
+    rm -rf "/tmp/$ORAS_FILENAME"
+  )
+fi
+
+if ! grep --quiet '"ghcr.io":' ~/.docker/config.json &>/dev/null; then
+  echo "${SCRIPT_NAME}: login to ghcr.io"
+  echo "${GITHUB_PACKAGES_TOKEN}" | \
+    oras login ghcr.io --username "github" --password-stdin
+  echo
+fi
+
+if [ "$COMMAND" == download ]; then
+  if [ -z "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] && [ -z "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    echo "${SCRIPT_NAME}: error: GITHUB_PACKAGES_SUBPROJECT_CACHE_READ and GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE are both unset!"
+    exit 1
+  fi
+
+  if [ -n "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ]; then
+    echo "${SCRIPT_NAME}: error: GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ is set!"
+    exit 1
+  fi
+
+  mkdir -p "$TARGET_DIR"
+  cd "$TARGET_DIR"
+
+  if [ ! -f "$DOWNLOAD_TAR_PATH" ]; then
+    if echo "${GITHUB_PACKAGES_TOKEN}" | \
+       oras pull --output "${OUTPUT_FOLDER}" "${CACHE_IMAGE_TAG}" &>/dev/null; then
+      echo "${SUBPROJECT}: downloaded prebuild tarball from ${CACHE_IMAGE_NAME}."
+    else
+      echo "${SUBPROJECT}: no prebuild found for ${CACHE_IMAGE_TAG}: building from source."
+      exit 1
+    fi
+  fi
+  echo "${SUBPROJECT}: extracting prebuild tarball from ${DOWNLOAD_TAR_PATH}."
+  tar xf "${DOWNLOAD_TAR_PATH}" --no-same-owner --no-same-permissions
+  if [ -z "${GITHUB_PACKAGES_SUBPROJECT_TAR_CACHE}" ]; then
+    rm -f "$DOWNLOAD_TAR_PATH"
+  fi
+elif [ "$COMMAND" == upload ]; then
+  if [ -z "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    echo "${SCRIPT_NAME}: error: GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE is not set!"
+    exit 1
+  fi
+
+  cd "$TARGET_DIR"
+  if [ -z "$DEVCONTAINER" ] && [ -z "$CODESPACES" ] && [ -z "$HCS" ] &&
+     grep --quiet --exclude "*.log" --recursive --files-with-matches --binary "$ROOT" . 2>/dev/null; then
+    echo "${SCRIPT_NAME}: skipping prebuild upload of ${SUBPROJECT} (hardcoded references to ${ROOT} detected)!"
+  else
+    # Reset to consistent permissions
+    sudo chmod -R u=rwX,g=rX,o=rX .
+
+    # Get the commit time of the subproject version
+    SHA1_TIME="$(git show --no-patch --format=%cI ${SUBPROJECT_SHA1} 2>/dev/null || true)"
+    if [ -n "$SHA1_TIME" ]; then
+      TAR_TIME="$(date -d $SHA1_TIME --utc '+%Y-%m-%d %H:%MZ')"
+    else
+      TAR_TIME="2022-12-01 00:00Z"
+    fi
+    # Use GNU tar settings for (more in the direction of) reproducible builds
+    # https://reproducible-builds.org/docs/archives/
+    tar --sort name \
+      --mtime="${TAR_TIME}" \
+      --owner 0 --group 0 --numeric-owner \
+      --format pax \
+      --pax-option='exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime' \
+      --exclude="*/tmp/*" --exclude="*/gocache/*" \
+      --exclude="*/.git/index" --exclude="*/.git/logs/HEAD" \
+      --exclude="*/.git/ORIG_HEAD" --exclude="*/.git/audit_log" \
+      --exclude="*/gem_make.out" --exclude="*/mkmf.log" --exclude="*/vendor/gems/ruby/*/gems/*" \
+      --numeric-owner --create --gzip --file "${UPLOAD_TAR_PATH}" .
+
+    if [ -n "$GITHUB_PACKAGES_SUBPROJECT_TAR_CACHE" ] &&
+       diff "${DOWNLOAD_TAR_PATH}" "${UPLOAD_TAR_PATH}" &>/dev/null; then
+      echo "${SUBPROJECT}: skipping upload, existing and new tarballs are the same!"
+      rm -f "${UPLOAD_TAR_PATH}"
+      exit 0
+    else
+      echo "${SUBPROJECT}: existing and new tarballs differ!"
+      if [ -n "$GITHUB_PACKAGES_SUBPROJECT_DIFFOSCOPE" ]; then
+        if ! dpkg-query -l diffoscope 2>/dev/null | grep -q "^ii "; then
+          echo "Installing diffoscope..."
+          sudo apt-get update
+          sudo apt-get install -y diffoscope
+          echo
+        fi
+        echo "Running diffoscope..."
+        diffoscope "${OUTPUT_FOLDER}/${CACHE_TARBALL}" "${UPLOAD_TAR_PATH}" || true
+        echo
+      fi
+    fi
+
+    echo "${SUBPROJECT}: uploading prebuild ${CACHE_TARBALL} to ${CACHE_IMAGE_TAG}"
+    (
+      cd /tmp # oras does not allow absolute paths...
+      if echo "${GITHUB_PACKAGES_TOKEN}" |
+         oras push "${CACHE_IMAGE_TAG}" "${CACHE_TARBALL}" &> oras.log; then
+        echo "${SUBPROJECT}: uploaded prebuild tarball to ${CACHE_IMAGE_NAME}."
+        echo
+      else
+        echo "${SUBPROJECT}: failed to upload prebuild to ${CACHE_IMAGE_NAME}:"
+        cat oras.log || echo "no oras.log found!"
+        rm -f oras.log
+        echo
+        exit 1
+      fi
+    )
+    rm -f "${UPLOAD_TAR_PATH}"
+  fi
+else
+  echo "Unknown command: ${COMMAND}"
+fi

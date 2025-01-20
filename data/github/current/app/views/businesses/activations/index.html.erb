@@ -1,0 +1,232 @@
+<% page_info title: "Activate GitHub Enterprise", selected_link: :business_billing_settings,
+  stafftools: stafftools_enterprise_path(this_business) %>
+
+<div class="container-lg p-responsive mt-4">
+  <%= render partial: "settings/header", locals: {
+    current_context: this_business,
+    hide_profile_link: true
+  } %>
+</div>
+
+<div class="my-5">
+  <div class="container-lg p-responsive">
+    <div class="border-bottom pb-3 mb-5">
+      <h2 class="d-inline-block f1 text-normal" <%= test_selector("billing-upgrade-header") %>>
+        Activate GitHub Enterprise
+      </h2>
+    </div>
+
+    <% completed_billing_information = this_business.has_saved_trade_screening_record_with_information? && this_business.trade_screening_record.validated_for_sales_tax? && flash[:address_validation_error].blank?  %>
+    <% completed_shipping_information = this_business.shipping_contact.present? %>
+    <% is_allowed_to_view_shipping_information = completed_shipping_information || this_business.is_allowed_to_edit_trade_screening_information? %>
+    <% completed_payment_method = this_business.has_credit_card? || this_business.has_paypal_account? || this_business.has_valid_azure_subscription? %>
+    <% eligible_for_purchase = !this_business.trial? || (completed_billing_information && completed_payment_method) %>
+    <% can_complete_purchase = trade_screening_error_data.blank? && eligible_for_purchase %>
+    <% completed_billing_and_shipping_information = completed_billing_information && completed_shipping_information %>
+    <% show_payment_method_form = this_business.shipping_information_required? ? completed_billing_and_shipping_information : completed_billing_information %>
+
+    <div class="d-md-flex gutter-md">
+      <div class="col-md-7" <%= test_selector("duration-summary") %>>
+        <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Monthly spending on metered services", icon: :graph)) do |component| %>
+          <% component.with_body do %>
+            <%= render partial: "businesses/activations/monthly_spending", locals: {
+              billed_items: billed_items,
+              } %>
+          <% end %>
+        <% end %>
+
+        <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Billing information", icon: completed_billing_information ? :"check-circle-fill" : :mail)) do |component| %>
+          <% component.with_button(
+            size: :medium,
+            px: 3,
+            font_size: 6,
+            test_selector: "edit-billing-information-button",
+            classes: "js-billing-settings-billing-information-edit-button",
+            hidden: !completed_billing_information || !this_business.is_allowed_to_edit_trade_screening_information?
+          ) do %>
+            Edit
+          <% end %>
+          <% component.with_body do %>
+            <%= render partial: "businesses/billing_settings/payment_information", locals: {business: this_business, show_form: !completed_billing_information, return_to: settings_billing_activations_enterprise_path(this_business)} %>
+          <% end %>
+        <% end %>
+
+        <business-shipping-information>
+          <% if this_business.shipping_information_required? && is_allowed_to_view_shipping_information %>
+            <%= render(
+              Billing::Settings::Upgrade::SectionComponent.new(
+                title: "Shipping information",
+                icon: completed_billing_and_shipping_information ? :"check-circle-fill" : :mail
+              )
+            ) do |component| %>
+              <% if completed_billing_and_shipping_information %>
+                <% component.with_button(
+                  size: :medium,
+                  px: 3,
+                  font_size: 6,
+                  test_selector: "edit-business-shipping-information-button",
+                  hidden: !this_business.is_allowed_to_edit_trade_screening_information?,
+                  data: {
+                    target: "business-shipping-information.editShippingInformationButton",
+                    action: "click:business-shipping-information#showEditShippingInformationForm"
+                  }
+                ) do %>
+                  Edit
+                <% end %>
+              <% end %>
+              <% component.with_body do %>
+                <% if completed_billing_information %>
+                  <%= render partial: "businesses/billing_settings/shipping_information", locals: {
+                    business: this_business,
+                    show_form: (completed_billing_information && this_business.shipping_contact.nil?) || flash[:shipping_address_validation_error].present?
+                  } %>
+                <% else %>
+                  <div class="pt-3">
+                    You have not added billing information for your account.
+                  </div>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        </business-shipping-information>
+
+        <% if trade_screening_error_data.present? %>
+          <div class="py-3" >
+            <%= render Primer::Alpha::Banner.new(scheme: trade_screening_cannot_proceed_error_data(target: this_business)[:scheme] || :default, icon: trade_screening_cannot_proceed_error_data(target: this_business)[:icon], mt: 2) do %>
+              <h3 class="h5">
+                You can't proceed with your payment
+              </h3>
+              <div <%= test_selector("trade-screening-message") %>>
+                <%= trade_screening_cannot_proceed_error_data(target: this_business)[:message] %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+
+        <% if !trade_screening_error_data.present? %>
+          <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "Payment method", icon: completed_payment_method ? :"check-circle-fill" : :"credit-card")) do |component| %>
+            <% component.with_body(pt: 3) do %>
+              <% if show_payment_method_form %>
+                <% if this_business.feature_enabled?(:metered_ghe_cc_paypal_payments) %>
+                  <%= render Billing::Settings::PaymentMethodFormComponent.new(
+                    target: this_business,
+                    new_name_address_design: true,
+                    signature_view_context: Billing::Zuora::HostedPaymentsPage::BUSINESS_SELF_SERVE_SIGNATURE_VIEW_CONTEXT,
+                    return_to: settings_billing_activations_enterprise_path(this_business)
+                  ) %>
+                  <% if this_business.has_valid_payment_method? && current_user.feature_enabled?(:salesforce_trial_event) %>
+                    <div class="color-bg-subtle color-shadow-small rounded p-3 mt-2" <%= test_selector "talk-to-sales" %>>
+                      <input type="checkbox" id="talk_to_sales" name="talk_to_sales" form="activate-business-trial">
+                      <label for="talk_to_sales" class="ml-2">
+                        I want to talk to sales about my payment and term options.
+                      </label>
+                    </div>
+                  <% end %>
+                <% else %>
+                  <%= render partial: "businesses/activations/azure_subscription_information", locals: {
+                    target: this_business,
+                  } %>
+                <% end %>
+              <% else %>
+                <% if this_business.shipping_information_required? %>
+                  <% if completed_billing_information %>
+                    You have not added shipping information for your account.
+                  <% else %>
+                    You have not added billing and shipping information for your account.
+                  <% end %>
+                <% else %>
+                  You have not added billing information for your account.
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+      <div class='col-md-5'>
+        <div class="pb-3">
+          <%= form_tag settings_billing_convert_trial_enterprise_path(this_business), method: :put, id: 'activate-business-trial' do %>
+            <% if this_business.display_sales_tax_on_checkout? %>
+              <div class="pb-1">
+                <div class="d-flex gutter-condensed">
+                  <div class="col-5">
+                    <%= render(Primer::Beta::Heading.new(tag: :h5, font_weight: :normal, color: :muted).with_content("Subtotal")) %>
+                  </div>
+                  <div class="col-8 text-right">
+                    <span class="f5 color-fg-muted text-normal"><%= total_monthly_charge %> / month</span>
+                  </div>
+                </div>
+              </div>
+              <div class="pb-3">
+                <div class="d-flex gutter-condensed">
+                  <div class="col-5">
+                    <%= render(Primer::Beta::Heading.new(tag: :h5, font_weight: :normal, color: :muted, test_selector: "sales-tax-label").with_content("Sales tax")) %>
+                  </div>
+                  <div class="col-8 text-right">
+                    <span class="f5 color-fg-muted text-normal" <%= test_selector("sales-tax-value") %>>(applied to your invoice)</span>
+                  </div>
+                </div>
+              </div>
+            <% end %>
+            <div class="pb-3 border-bottom">
+              <div class="d-flex gutter-condensed">
+                <div class="col-6">
+                  <span class="h4">Estimated monthly total</span>
+                </div>
+                <div class="col-6 text-right mt-n1">
+                  <span class="f2 unstyled-renewal-price">$<%= total_monthly_charge %></span>
+                    <p class="f5 color-fg-muted">
+                      per month
+                    </p>
+                </div>
+              </div>
+              <% if total_monthly_charge == Billing::Money.zero %>
+                <%= render(Primer::Alpha::Banner.new(dismiss_scheme: :none, icon: :info, test_selector: "zero-consumption-notice")) do %>
+                  You are not consuming any user licenses yet. The estimated monthly total will change when you start
+                  consuming services and user licenses.
+                <% end %>
+              <% end %>
+            </div>
+            <% unless can_complete_purchase %>
+              <p class="mt-2">
+                You have added the payment method for your account.
+              </p>
+            <% end %>
+            <div class="pb-3">
+              <p class="f6 color-fg-muted mt-3">
+                By clicking "<%= buy_enterprise_flavor %>", you are accepting the
+                <a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer
+                Agreement</a> and confirming that you have the authority to do so on behalf of your organization. For
+                more information about GitHub's privacy practices, see the
+                <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy
+                Statement</a>.
+              </p>
+            </div>
+            <%= render Primer::Beta::Button.new(
+              scheme: :primary,
+              block: true,
+              type: :submit,
+              classes: "btn-large",
+              disabled: !can_complete_purchase
+            ) do %>
+              <%= buy_enterprise_flavor %>
+            <% end %>
+            <%= render Primer::Beta::Button.new(
+              href: enterprise_path(this_business),
+              block: true,
+              tag: :a,
+              mt: 2,
+              data: {
+                **analytics_click_attributes(
+                  category: "enterprise_trial_account",
+                  action: "cancel_github_enterprise_purchase",
+                  label: "enterprise_id:#{this_business.id};metered_plan:#{this_business.metered_plan?}"),
+              }
+            ) do %>
+              Cancel
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,61 @@
+#!/bin/bash
+#/ Usage: script/vitess-explain <cluster> <query> --help
+#/   <cluster>             : database cluster, e.g. `repositories_pushes`
+#/   <query>               : SQL query
+set -e
+
+[ $# -eq 0 ] && set -- --help
+
+explainQuery() {
+  local cluster=$1
+  local query=$2
+  local vschema=""
+  local schema=""
+
+  case "$cluster" in
+    repositories_pushes)
+      vschema="repositories_pushes"
+
+      # change to `repositories-pushes-structure` once the schema
+      # domain is extracted from `ballast`
+      schema="ballast-structure"
+      ;;
+    token_scanning_service)
+      vschema="token_scanning_service"
+      schema="token-scanning-service-structure"
+      ;;
+    *)
+      echo "Unknown cluster"
+      exit
+      ;;
+  esac
+
+  if [ "$query" == "" ]; then
+    echo "Please provide a query"
+    exit
+  fi
+
+  echo $query > tmp/vtexplain-queries.sql
+  cat "db/$schema.sql" "db/vschema/$vschema.sql" > tmp/vtexplain-schema.sql
+  docker run \
+    -v "$PWD/db/vschema/$vschema.json:/data/vschema.json" \
+    -v "$PWD/tmp/vtexplain-schema.sql:/data/schema.sql" \
+    -v "$PWD/tmp/vtexplain-queries.sql:/data/queries.sql" \
+    -e "OUTPUT=json" \
+    latentflip/vitess-explain
+}
+
+case "$1" in
+  -h|--help)
+    grep ^#/ <"$0" |cut -c4-
+    exit
+    ;;
+  *)
+    if [ -t 0 ]; then
+      query=$2
+    else
+      query=$(cat /dev/stdin)
+    fi
+    explainQuery $1 "$query"
+    ;;
+esac

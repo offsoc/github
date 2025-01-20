@@ -1,0 +1,130 @@
+<%
+  show_filter_bar = !view.new_repo?
+  show_announcements = local_assigns.fetch(:show_announcements, false)
+  show_archived = local_assigns.fetch(:show_archived, false)
+  repo_base_url = "/#{current_repository.owner.display_login}/#{current_repository.name}/issues"
+  fragment_layout = false if fragment_layout.nil?
+  override_pagination_url = fragment_layout && !pulls_only
+%>
+
+<% if show_archived %>
+  <% track_render_partial("layouts/repository/default_container/archived_notice", partial_tags) do %>
+    <% if current_repository&.archived? %>
+      <%= render Repositories::ArchivedNoticeComponent.new(repository: current_repository) %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if show_announcements %>
+  <%= render(Site::EnterpriseBannersComponent.new) %>
+<% end %>
+
+<% track_render_partial("issues/issues_index_root", tags) do %>
+  <h1 class='sr-only'><%= pulls_only ? "Pull requests" : "Issues" %>: <%= current_repository.name_with_display_owner %></h1>
+  <%# never show both banners. in the case where both banner would potentially show, prioritize maintainer label education banner %>
+  <% if show_maintainer_label_education_banner? %>
+    <% track_render_partial("issues/maintainer_label_education_banner", tags) do %>
+      <%= render partial: "issues/maintainer_label_education_banner", locals: { view: view } %>
+    <% end %>
+  <% elsif view.show_first_time_contributor_banner?(is_pull_requests: pulls_only) %>
+    <% if pulls_only %>
+      <% track_render_partial("pull_requests/first_time_contributor_banner", tags) do %>
+        <%= render partial: "pull_requests/first_time_contributor_banner", locals: { view: view } %>
+      <% end %>
+    <% else %>
+      <% track_render_partial("issues/first_time_contributor_banner", tags) do %>
+        <%= render partial: "issues/first_time_contributor_banner", locals: { view: view } %>
+      <% end %>
+    <% end  %>
+  <% end %>
+
+  <% if view.display_recently_touched_branches_list? %>
+    <include-fragment src="<%= show_partial_tree_path(:partial => "tree/recently_touched_branches_list") %>"></include-fragment>
+  <% end %>
+
+  <% if !view.pulls_only && view.pinned_issues.any? %>
+    <div>
+      <%
+        can_pin_issues = current_repository.can_pin_issues?(current_user)
+        track_render_partial("issues/pinned_issues", tags + ["can_pin_issues:#{can_pin_issues}"]) do
+      %>
+        <% if can_pin_issues %>
+          <%= form_for current_repository, :url => prioritize_pinned_issue_path(current_repository.owner, current_repository),
+            :html => {:class => "js-pinned-issues-reorder-form",
+            :id => "user-#{current_repository.id}-pinned-issues-reorder-form"},
+            :method => :put do |f| %>
+              <%= render partial: "issues/pinned_issues", locals: { pinned_issues: view.pinned_issues, can_pin: true } %>
+            <% end %>
+        <% else %>
+            <%= render partial: "issues/pinned_issues", locals: { pinned_issues: view.pinned_issues, can_pin: false } %>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <%
+  if render_issue_react_opt_in
+    url = "#{repo_base_url}?new_issues_experience=true"
+  %>
+  <%= form_with url: url do |f| %>
+    <%= render(Primer::Beta::Label.new(scheme: :success)) { "Beta" } %>
+    <%= render Primer::Beta::Button.new(scheme: :link, type: :submit, mb: 3, mt: 2) do %>
+      <%= emoji_tag(Emoji.find_by_alias("zap"), class: "emoji emoji-icon") %>Try the new experience
+    <% end %>
+  <% end %>
+  <% end %>
+
+  <% track_render_partial("issues/search_bar", tags) do %>
+    <%= render partial: "issues/search_bar", locals: { pulls_only: pulls_only, query: query, milestones_count: milestones_count, labels_count: labels_count } %>
+  <% end %>
+
+  <div class="d-block d-lg-none no-wrap">
+    <%= render partial: "issues/filters/states", locals: { issues: issues, pulls_only: pulls_only, open_count: open_count, closed_count: closed_count } %>
+  </div>
+
+  <div class="Box mt-3 Box--responsive hx_Box--firstRowRounded0">
+    <% if show_filter_bar %>
+      <% track_render_partial("issues/filter_bar", tags) do %>
+        <%= render partial: "issues/filter_bar", locals: { issues: issues, pulls_only: pulls_only, query: query, open_count: open_count, closed_count: closed_count } %>
+      <% end %>
+    <% end %>
+
+    <% if query_error %>
+      <%= render "issues/issues_blankslate", icon: view.query_error_icon, title: view.query_error_title, copy: view.query_error_copy %>
+    <% elsif issues.empty? %>
+      <%= render "issues/issues_blankslate", icon: view.blankslate_icon, title: view.blankslate_title, copy: view.blankslate_copy %>
+    <% else %>
+      <h2 class='sr-only'><%= pulls_only ? "Pull requests" : "Issues" %> list</h2>
+      <div aria-label="Issues" role="group" data-issue-and-pr-hovercards-enabled>
+        <div class="js-navigation-container js-active-navigation-container" data-hpc>
+          <% view.issues.each do |issue| %>
+            <% track_render_partial("issues/issue_index_issue_item", tags) do %>
+              <%= render "issues/issue", view: create_view_model(
+                Issues::IssueListItem,
+                issue: issue,
+                repo: current_repository,
+                reference_location: "REPO_ISSUES_INDEX",
+                reaction_sort: reaction_sort,
+                pulls_only: pulls_only
+              ) %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="paginate-container d-none d-sm-flex flex-sm-justify-center">
+    <% if !issues.empty? %>
+      <%= will_paginate issues, url_override: override_pagination_url ? repo_base_url : nil, :params => { :q => query } %>
+    <% end %>
+  </div>
+
+  <div class="paginate-container d-sm-none mb-5">
+    <% if !issues.empty? %>
+      <%= will_paginate issues, url_override: override_pagination_url ? repo_base_url : nil, page_links: false, :params => { :q => query } %>
+    <% end %>
+  </div>
+
+  <%= render(Issues::TipComponent.new(parsed_issues_query: parsed_issues_query, pulls_only: pulls_only, repo: current_repository)) %>
+<% end %>

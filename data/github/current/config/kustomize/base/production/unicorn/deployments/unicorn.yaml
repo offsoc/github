@@ -1,0 +1,343 @@
+# https://github.com/github/kube/blob/master/docs/kubernetes/resources/deployment.md
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: unicorn
+    annotations:
+        # Transposes all matching values for `image` to refer to the image
+        # corresponding to the SHA deployed at deploy time.
+        heaven.githubapp.com/image-placeholder: "github"
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "unicorn,voltron"
+        # opt into ConfigMap cluster preferences, which can override some parameters
+        # such as replicas if there is a ConfigMap named `cluster-preferences` in
+        # the namespace.
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        heaven.githubapp.com/cluster-preferences: ""
+        # Replaces the master image tag for init containers to a sha256 to prevent the requirement for imagePullPolicy:Always
+        moda.github.net/latest-image-placeholders-for: "geoip"
+        moda.github.net/inject-otel-env-vars-into-containers: "unicorn,voltron"
+spec:
+    # This configuration will allocate the following resources
+    # * 768 workers (48 replicas * 16 workers)
+    # * 504 CPU requests (10.5/Pod * 48 Pods)
+    # * 960Gi memory (20Gi/Pod * 48 Pods)
+    # Bump this number to run more unicorns, but be sure to adjust the
+    # moda.github.net/canary-replicas value to reflect 20% of your
+    # chosen value.
+    replicas: 3
+    # Only keep 2 old replica sets
+    revisionHistoryLimit: 2
+    strategy:
+        # The below options control how many additional pods can be created during
+        # a deploy as well as how many can be unavailable during the process.
+        # https://kubernetes.io/docs/user-guide/deployments/#rolling-update-deployment
+        rollingUpdate:
+            maxSurge: 50%
+            # If you change this value, consider updating the `maxUnavailable` value in any corresponding PDB.
+            # The current value in the PDB is based on the current value of `maxUnavailable` in the deployment.
+            maxUnavailable: 6%
+    selector:
+        matchLabels:
+            service: unicorn
+            role: production
+            deployGroup: production
+    template:
+        metadata:
+            labels:
+                service: unicorn
+                role: production
+                deployGroup: production
+            annotations:
+                ad.datadoghq.com/nginx.checks: |
+                    {
+                      "nginx": {
+                        "instances":[
+                          {
+                            "nginx_status_url": "http://%%host%%:8081/stats"
+                          }
+                        ]
+                      }
+                    }
+                ad.datadoghq.com/unicorn.checks: |
+                    {
+                      "kube_unicorn": {
+                        "instances": [
+                          {
+                            "host_pid": "%%pid%%",
+                            "uid": "%%kube_pod_uid%%",
+                            "worker_regex": "^unicorn .*? worker",
+                            "sockets": ["/build/tmp/sockets/unicorn.sock"]
+                          }
+                        ]
+                      }
+                    }
+                observability.github.com/splunk_index-unicorn: rails
+                observability.github.com/kafka_topic-unicorn: rails
+                fluentbit.io/parser-unicorn: logfmt_sloppy
+                fluentbit.io/parser-voltron: logfmt_sloppy
+                fluentbit.io/exclude-nginx: "true"
+                ad.datadoghq.com/tolerate-unready: "true"
+        spec:
+            dnsPolicy: Default
+            securityContext:
+                sysctls:
+                    # net.core.somaxconn is being explcitly set here until we have a generalised pattern
+                    # to set it everywhere.
+                    # for https://github.com/github/github/issues/111813 (api 502 errors)
+                    # as part of https://github.com/github/k8s-net-debug/issues/18 (sysctl regression)
+                    - name: net.core.somaxconn
+                      value: "10240"
+            volumes:
+                - name: nginx-conf
+                  configMap:
+                    name: unicorn-nginx-conf
+                - name: nginx-pidfile
+                  emptyDir: {}
+                - name: assets
+                  emptyDir: {}
+                - name: geoip2
+                  emptyDir: {}
+                - name: sockets
+                  emptyDir: {}
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            restartPolicy: Always
+            containers:
+                - name: nginx
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/docker-nginx
+                  # Prevent container from shutting down before kube-proxy has converged.
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["sleep", "5"]
+                  ports:
+                    - name: http
+                      containerPort: 80
+                      protocol: TCP
+                    - name: stats
+                      containerPort: 8081
+                      protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                        path: /status
+                        port: stats
+                    periodSeconds: 1
+                    failureThreshold: 1
+                  env:
+                    - name: KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                  volumeMounts:
+                    - mountPath: /etc/nginx/
+                      name: nginx-conf
+                    - mountPath: /assets
+                      name: assets
+                      readOnly: true
+                    - mountPath: /sockets
+                      name: sockets
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                - name: voltron
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/voltron:acb5e526c1b8930ba8bd99aa65fb9b84eb305c23
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["inotifywait", "-e", "delete_self", "/nginx-pidfile/nginx.pid"]
+                  resources:
+                    requests:
+                        cpu: 0.02
+                  readinessProbe:
+                    httpGet:
+                        path: /_ping
+                        port: 8089
+                    periodSeconds: 1
+                    failureThreshold: 1
+                    initialDelaySeconds: 3
+                  volumeMounts:
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                  env:
+                    - name: SERVER_ADDR
+                      value: ':8089'
+                    - name: TARGET
+                      value: 'http://localhost:8080'
+                    - name: GOMAXPROCS
+                      value: '4' # match CPU limit above
+                    - name: STATS_ADDR
+                      value: '$(KUBE_NODE_HOSTNAME):28125'
+                    - name: OTEL_SERVICE_NAME
+                      value: voltron
+                    - name: VOLTRON_HMAC
+                      valueFrom:
+                        secretKeyRef:
+                          key: VOLTRON_HMAC
+                          name: vault-secrets
+                    - name: EXCEPTION_ENDPOINT
+                      valueFrom:
+                        secretKeyRef:
+                          key: VOLTRON_EXCEPTION_ENDPOINT
+                          name: vault-secrets
+                    - name: OTEL_EXPORTER_OTLP_TRACES_HEADERS
+                      valueFrom:
+                        secretKeyRef:
+                          key: OTEL_EXPORTER_OTLP_TRACES_HEADERS
+                          name: vault-secrets
+                    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+                      valueFrom:
+                        secretKeyRef:
+                          key: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+                          name: vault-secrets
+                  envFrom:
+                    - configMapRef:
+                        name: kube-cluster-metadata
+                - name: unicorn
+                  # Replaced with a SHA-tagged image at deploy time by virtue of the
+                  # `heaven.githubapp.com/image-placeholder` annotation.
+                  image: github
+                  # Each pod runs multiple unicorns as specified in config/unicorn.rb
+                  args: ["bin/unicorn_rails", "-c", "config/unicorn.rb", "-E", "production", "--port", "8080", "config.ru"]
+                  # The amount of resources requested and limiting this pod can and should
+                  # be tweaked over time.
+                  # TODO document how to observe OOM-kills and memory throttling events
+                  lifecycle:
+                    # This preStop hook causes the unicorn to avoid any internal shutdown until such a time
+                    # as nginx deletes its pid file from the shared volume, indicating that it has completed
+                    # gracefully shutting down and quiescing active connections. Only at this point will the
+                    # unicorn process gracefully shut down (there should be no user connections by then).
+                    preStop:
+                        exec:
+                            command: ["inotifywait", "-e", "delete_self", "/nginx-pidfile/nginx.pid"]
+                  resources:
+                    requests:
+                        cpu: 10
+                        memory: "24Gi"
+                    limits:
+                        memory: "24Gi"
+                  ports:
+                    - name: http
+                      containerPort: 8080
+                      protocol: TCP
+                  readinessProbe:
+                    initialDelaySeconds: 31
+                    httpGet:
+                        path: /status
+                        port: http
+                  volumeMounts:
+                    - mountPath: /usr/share/GeoIP
+                      name: geoip2
+                    - mountPath: "/build/tmp/sockets"
+                      name: "sockets"
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                    - name: syslog
+                      mountPath: /dev/log
+                      readOnly: true
+                  env:
+                    # By setting `heaven.githubapp.com/inject-app-config-into-containers` to
+                    # `unicorn` above, environment variables from `gh-config github` will
+                    # also be available to this container.
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: '0'
+                    - name: GH_WRITE_PIDFILE
+                      value: '0'
+                    - name: GH_UNICORN_WORKER_COUNT
+                      value: '16'
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    # each kube node runs a local dd-agent - to send data to it
+                    # we need to explicitly set the node hostname rather than 127.0.0.1
+                    # (which points to the *pod*)
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_DEPLOYMENT_NAME
+                      value: unicorn
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:$(KUBE_DEPLOYMENT_NAME)"
+                    - name: GITHUB_CONFIG_ROLE
+                      value: fe
+                    # - name: SMTP_HOST
+                    #   value: smtp.service.github.net
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-$(KUBE_DEPLOYMENT_NAME)"
+                    - name: CPS_NETWORK_SERVICE_HMAC_SECRETS
+                      valueFrom:
+                        secretKeyRef:
+                          key: CPS_NETWORK_SERVICE_HMAC_SECRETS
+                          name: vault-secrets
+                    - name: CPS_NETWORK_SERVICE_URL
+                      value: "https://cps-network-service-production.githubapp.com/api/v1"
+                    - name: ORCA_BASE_URL
+                      value: https://orca-api-production.service.azure-eastus.github.net/twirp
+                    - name: ORCA_ENVIRONMENT
+                      value: production
+                    - name: ORCA_HMAC_KEY
+                      valueFrom:
+                        secretKeyRef:
+                            key: ORCA_HMAC_KEY
+                            name: vault-secrets
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+            initContainers:
+                - name: unicorn-assets
+                  image: github
+                  imagePullPolicy: IfNotPresent
+                  # Copy assets from the container into a directory accessible by the
+                  # nginx container.
+                  command: ["cp", "--recursive", "--no-preserve=mode", "--verbose", "/build/public", "/assets"]
+                  resources:
+                    requests:
+                        cpu: 100m
+                  volumeMounts:
+                    - name: assets
+                      mountPath: "/assets"
+                - name: geoip
+                  image: "octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/geoip2:master"
+                  imagePullPolicy: IfNotPresent
+                  command: ["sh", "-c", "cp /data/geoip2/* /shared-geoip2"]
+                  resources:
+                    requests:
+                        cpu: 50m
+                  volumeMounts:
+                    - name: geoip2
+                      mountPath: "/shared-geoip2"

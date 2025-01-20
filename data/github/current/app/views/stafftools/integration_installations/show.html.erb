@@ -1,0 +1,198 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info :title => view.page_title, :selected_link => view.selected_link %>
+
+<% if view.outdated? %>
+  <%= render(Primer::Beta::Flash.new(spacious: true, icon: :alert, scheme: :warning)) { view.outdated_installation_message } %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(padding: :condensed, mb: 5)) do |c| %>
+  <% c.with_header do |header| %>
+    <% header.with_title(tag: :h3) do %>
+      <a href="<%= stafftools_user_installations_path(this_user) %>" class="color-fg-muted text-normal" style="text-decoration: none" data-pjax="true">Installed GitHub Apps /</a>
+      Details
+    <% end %>
+  <% end %>
+
+  <% c.with_body do %>
+    <div class="summary">
+      <dl>
+        <dt>ID</dt>
+        <dd>
+          <%= view.installation.id %>
+            &ndash;
+            <%= stafftools_selected_link_to "Search audit logs",
+                      stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where data.installation_id == '#{view.installation.id}'" : "data.installation_id:#{view.installation.id}") %>
+        </dd>
+
+        <dt>GitHub App</dt>
+        <dd>
+          <% if view.integration.owner.is_a?(::Business) %>
+            <%= view.integration.name %> owned by the
+            <%= link_to view.integration.owner.name, stafftools_enterprise_path(view.integration.owner), class: "Link--inTextBlock" %>
+            enterprise account
+          <% else %>
+            <%= link_to view.integration.name, stafftools_user_app_path(view.integration.owner, view.integration, class: "Link--inTextBlock") %>
+            <% if view.integration.synchronized_dotcom_app? %>
+              | This app is synchronized from GitHub.com.
+              <%= link_to "View on GitHub.com", view.integration.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+            <% end %>
+          <% end %>
+        </dd>
+
+        <dt>Installed on</dt>
+        <dd><%= view.installed_at.to_formatted_s(:long) %></dd>
+
+        <dt>Repository access</dt>
+        <dd><%= view.repository_access_text %></dd>
+
+        <dt>Version</dt>
+        <dd><%= view.installation.integration_version_number %></dd>
+
+        <% if view.integrator_suspended? %>
+          <dt>Suspended by <%= link_to view.integration.name, stafftools_user_app_path(view.integration.owner, view.integration), class: "Link--inTextBlock" %></dt>
+          <dd><%= view.integrator_suspended_at %></dd>
+        <% end %>
+
+        <% if view.user_suspended? %>
+          <dt>Suspended by <%= link_to view.user_suspended_by, stafftools_user_path(view.user_suspended_by), class: "Link--inTextBlock" %></dt>
+          <dd><%= view.user_suspended_at %></dd>
+        <% end %>
+
+        <% if view.integration.suspended? %>
+          <dt>Integration suspended at</dt>
+          <dd><%= view.integration.suspended_at %></dd>
+
+          <dt>Integration suspended by</dt>
+          <dd><%= link_to view.integration.user_suspended_by, stafftools_user_path(view.integration.user_suspended_by), class: "Link--inTextBlock" %></dd>
+
+          <dt>Integration suspension reason</dt>
+          <dd><%= view.integration.suspended_reason %></dd>
+        <% end %>
+
+        <% if GitHub.rate_limiting_enabled? %>
+          <dt>Rate Limit</dt>
+          <dd><%= view.rate_limit %></dd>
+
+          <dt>GHEC Rate Limit</dt>
+          <% if view.integration.owner.plan.business? || view.integration.owner.plan.business_plus? %>
+            <dd><%= view.ghec_rate_limit %> (runway: <%= view.ghec_rate_limit_runway %>)</dd>
+          <% else %>
+            <dd>Only applies to installations on GHEC organizations</dd>
+          <% end %>
+
+          <dt>Using Temporary Rate Limit</dt>
+          <dd><%= view.using_temporary_rate_limit? %></dd>
+
+          <% if view.using_temporary_rate_limit? %>
+            <dt>Temporary rate limit expires at</dt>
+            <dd><%= view.installation.temporary_rate_limit_expires_at.to_formatted_s(:long) %></dd>
+          <% end %>
+        <% end %>
+      </dl>
+    </div>
+    <% if GitHub.rate_limiting_enabled? %>
+      <%= render partial: "stafftools/applications/rate_limit_form", locals: {
+        view: view,
+        path: stafftools_user_installation_path(view.user, view.installation)
+       } %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% access_group_view = IntegrationInstallations::AccessGroupingsView.new(integration_installation: view.installation) %>
+<div class="boxed-group">
+  <h3>Permissions</h3>
+  <div class="boxed-group-inner">
+    <%= render partial: "integration_installations/requested_permissions_list",
+      locals: {
+        access_group_view: access_group_view,
+        list_class: "boxed-group-list integration-permissions-list standalone"
+    } %>
+  </div>
+</div>
+
+<%= render(Primer::Beta::BorderBox.new(padding: :condensed, mb: 5)) do |c| %>
+  <% c.with_header do |header| %>
+    <% header.with_title(tag: :h3) { "Hook event subscriptions" } %>
+  <% end %>
+
+  <% c.with_body do %>
+    <%= view.subscribed_events_sentence %>
+  <% end %>
+<% end %>
+
+<% options = { padding: :condensed } %>
+<% options[:mb] = 3 if view.installed_on_all_repositories? %>
+
+<%= render(Primer::Beta::BorderBox.new(**options)) do |c| %>
+  <% c.with_header do |header| %>
+    <% header.with_title(tag: :h3) { "Repository access" } %>
+  <% end %>
+
+  <% if view.installed_on_all_repositories? %>
+    <% c.with_body do %>
+      <%= render(Primer::Beta::Text.new(tag: :span)) do %>
+        This GitHub App is installed on all repositories.
+      <% end %>
+    <% end %>
+  <% else %>
+    <% view.repositories.each do |repo| %>
+      <% c.with_row do %>
+        <%= primer_octicon(repo.repo_type_icon, classes: "repo-icon") %>
+        <%= render(Primer::Beta::Truncate.new(tag: :span)) do %>
+          <%= link_to repo.name_with_display_owner, stafftools_repository_path(repo.owner, repo) %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% unless view.installed_on_all_repositories? %>
+  <% if view.repositories.total_pages > 1 %>
+    <div class="paginate-container mb-3">
+      <%= will_paginate view.repositories, class: "d-flex d-md-inline-block pagination" %>
+    </div>
+  <% end %>
+<% end %>
+
+<%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+  <% component.with_heading(tag: :h2, danger: true) do %>Danger zone<% end %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(classes: "Box--danger")) do |component| %>
+  <% unless view.installation.integrator_suspended? %>
+    <% component.with_row(display: :flex, justify_content: :center) do %>
+      <% if view.installation.user_suspended? %>
+        <div class="flex-auto">
+          <strong>Unsuspend this installation</strong>
+          <div class="text-small color-fg-muted">
+            This will allow API activity and webhook events to start
+          </div>
+        </div>
+
+        <%= button_to "Unsuspend", suspend_stafftools_user_installation_path(view.installation.target, view.installation), method: :delete, class: "btn btn-danger" %>
+      <% else %>
+        <div class="flex-auto">
+          <strong>Suspend this installation</strong>
+          <div class="text-small color-fg-muted">
+            This will stop API activity and webhook events from being sent
+          </div>
+        </div>
+
+        <%= button_to "Suspend", suspend_stafftools_user_installation_path(view.installation.target, view.installation), method: :post, class: "btn btn-danger", "data-confirm": "Are you sure you want to suspend this installation?" %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% component.with_row(display: :flex, justify_content: :center) do %>
+    <div class="flex-auto">
+      <strong>Uninstall this integration</strong>
+      <div class="text-small color-fg-muted">
+        This will immediately remove the integration from all repositories on this account.
+      </div>
+    </div>
+
+    <%= button_to "Uninstall", uninstall_stafftools_user_installation_path(view.installation.target, view.installation), method: :delete, class: "btn btn-danger", "data-confirm": "Are you sure you want to uninstall this integration?" %>
+  <% end %>
+<% end %>

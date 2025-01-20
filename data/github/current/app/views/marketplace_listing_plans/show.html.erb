@@ -1,0 +1,104 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 3 %>
+<%
+  listing = marketplace_listing
+  plan = marketplace_listing_plan
+  publish_plan_confirm_message = "Are you sure you want to publish this plan? You will not be able to adjust pricing once this plan is published."
+%>
+<% restrict_paid_plans = is_publisher_from_restricted_region(listing.slug) && plan.paid? %>
+<%= render layout: "marketplace_listings/admin_layout", locals: { marketplace_listing: marketplace_listing, selected_tab: :pricing_plan } do %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Edit plan<% end %>
+  <% end %>
+  <p>
+    More information can be found in
+    <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/marketplace/listing-on-github-marketplace/setting-a-github-marketplace-listing-s-pricing-plan/" target="_blank" rel="noopener noreferrer">our developer documentation</a>.
+  </p>
+  <% if plan.draft? %>
+    <%= form_tag marketplace_listing_plan_path(listing.slug, plan.global_relay_id), method: :put, class: "pb-2" do %>
+    <%= render partial: "marketplace_listing_plans/form", locals: { marketplace_listing: marketplace_listing, marketplace_listing_plan: marketplace_listing_plan } %>
+    <% end %>
+
+    <% if listing.reached_maximum_plan_count? %>
+      <div class="color-fg-muted pl-3 mb-1 mt-1">
+        You’ve reached the maximum number of published plans.
+      </div>
+    <% elsif plan.paid? && !listing.owner.is_a?(Organization) %>
+      <div class="color-fg-muted mb-1 mt-1">
+        Applications published by a personal account on GitHub cannot publish paid plans. You need to transfer the application to an organization and get the publisher verified to publish paid plans. Refer to our <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/marketplace/listing-on-github-marketplace/setting-a-github-marketplace-listing-s-pricing-plan/" target="_blank" rel="noopener noreferrer">documentation</a> to know more.
+      </div>
+    <% elsif plan.paid? && listing.unverified_pending? %>
+      <div class="color-fg-muted mb-1 mt-1">
+        Your listing must be either published or a draft to publish paid plans. You can withdraw your application request to publish this plan.
+      </div>
+    <% else %>
+      <% if plan.paid? && !listing.draft? %>
+        <%= render(Marketplace::ListingPlans::PaidPlanChecklistComponent.new(
+          listing: listing,
+          display_login: listing.owner.display_login,
+          installation_count: listing.cached_installation_count,
+          plan_id: plan.global_relay_id,
+        )) %>
+      <% end %>
+    <% end %>
+
+    <div class="d-inline-flex flex-items-center mt-2">
+      <%=
+        button_to publish_marketplace_listing_plan_path(listing.slug, plan.global_relay_id),
+          method: :put,
+          form_class: "d-inline",
+          class: "btn",
+          data: { confirm: listing.publicly_listed? && plan.can_publish? ? publish_plan_confirm_message : nil },
+          disabled: (!plan.can_publish? || restrict_paid_plans) do
+      %>
+      <%= primer_octicon(:eye) %><span class="pl-1">Publish this plan</span>
+      <% end %>
+
+      <% if restrict_paid_plans %>
+        <div class="color-fg-muted pl-3">
+          <p>Customers from certain regions cannot publish paid plans.</p>
+        </div>
+      <% end %>
+
+      <%= form_tag marketplace_listing_plan_path(listing.slug, plan.global_relay_id), id: "marketplace_remove_plan_form", class: "float-right", method: :delete do %>
+        <button type="submit" form="marketplace_remove_plan_form" class="btn ml-2" data-confirm="Are you sure you want to remove this plan from the listing?">
+          <span class="pl-1" style= "color:red">Delete</span>
+        </button>
+      <% end %>
+
+    </div>
+  <% elsif plan.published? %>
+    <p>
+      The
+      <a class="Link--inTextBlock" href="<%= GitHub.developer_help_url %>/marketplace/integrating-with-the-github-marketplace-api/upgrading-and-downgrading-plans/#about-upgrade-urls" target="_blank" rel="noopener noreferrer">upgrade URL</a>
+      for this plan, where the customer’s account ID from the API replaces <code class="p-1 border rounded-2 color-bg-subtle">CUSTOMER_ACCOUNT_ID</code>, is:
+    </p>
+    <pre class="p-2 mb-3 border rounded-2 color-bg-subtle overflow-x-auto d-block"><code><%= marketplace_plan_upgrade_url(listing_slug: listing.slug, plan_number: plan.number, account_id: "CUSTOMER_ACCOUNT_ID") %></code></pre>
+    <%= form_tag marketplace_listing_plan_path(listing.slug, plan.global_relay_id), id: "marketplace_create_plan_form", method: :put, class: "pb-2" do %>
+      <%= render partial: "marketplace_listing_plans/form", locals: { marketplace_listing: marketplace_listing, marketplace_listing_plan: marketplace_listing_plan } %>
+    <% end %>
+    <button type="submit" class="btn btn-primary" name="commit" form= "marketplace_create_plan_form">Update this plan</button>
+    <% if listing.draft? %>
+      <div class="d-inline-flex flex-items-center">
+        <%= form_tag marketplace_listing_plan_path(listing.slug, plan.global_relay_id), id: "marketplace_remove_plan_form", class: "float-right", method: :delete do %>
+          <button type="submit" form="marketplace_remove_plan_form" class="btn ml-2" data-confirm="Any existing subscriptions will be removed when the plan is deleted, are you sure you want to continue?">
+            <span class="pl-1" style= "color:red">Delete</span>
+          </button>
+        <% end %>
+      </div>
+    <% end %>
+    <div class="d-inline-flex flex-items-center">
+      <% if listing.publicly_listed? && plan.can_be_retired? %>
+        <%= form_tag retire_marketplace_listing_plan_path(listing.slug, plan.global_relay_id), class: "d-inline", method: :put do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, ml: 2, "data-confirm": "Are you sure you want to retire this plan?") do %>
+            <span class="pl-1" style= "color:red">Retire this plan.</span>
+          <% end %>
+        <% end %>
+      <% end %></div>
+  <% elsif plan.retired? %>
+    <div class="border rounded-2 p-4 mb-3 text-small color-fg-muted">
+      <%= render partial: "marketplace_listing_plans/detail", locals: { marketplace_listing: marketplace_listing, marketplace_listing_plan: marketplace_listing_plan } %>
+      This plan has been retired.
+    </div>
+  <% end %>
+<% end %>

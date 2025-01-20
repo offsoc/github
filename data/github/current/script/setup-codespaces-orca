@@ -1,0 +1,95 @@
+#!/bin/bash
+set -e
+
+# This script sets up the github/orca repository for a github/github codespace.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+NC='\033[0m' # No Color
+
+# Function to print help message
+help() {
+   echo "Sets up the github/orca repository for a github/github codespace."
+   echo
+   echo "Usage: setup-codespaces-orca [-b branch] [-d|h] "
+   echo "Options:"
+   echo "-b     Specify the orca branch to clone. Default branch if not provided."
+   echo "-d     Before starting, delete the existing orca directory in the codespace."
+   echo "-w     Add the orca repo as a workspace in VS Code."
+   echo "-h     Print this help message."
+   echo
+}
+
+# Get the options
+while getopts ":b:hdw" opt; do
+   case $opt in
+      h) # display help message
+         help
+         exit;;
+      b) # If a branch was provided, re-set the variable
+         BRANCH=$OPTARG;;
+      d) # Delete the repository if it exists
+         DELETE_REPO=true;;
+      w) # Add the repository as a workspace in VS Code
+         ADD_TO_WORKSPACE=true;;
+     :)
+      echo "Error: Option -$OPTARG requires an argument."
+      exit 1;;
+     \?) # Invalid option
+         echo "Error: Invalid option -$OPTARG"
+         exit 1;;
+   esac
+done
+
+REPOSITORY_PATH="/workspaces/orca"
+REPOSITORY_URL="https://github.com/github/orca"
+
+# If the orca repo already exists and the delete argument hasn't been specified, echo a warning and exit.
+if [[ -d "$REPOSITORY_PATH" && -z "$DELETE_REPO" ]]; then
+  echo -e "${RED}The orca directory already exists in this codespace.${NC} \nYou can rerun the setup script with the -d argument to force the deletion of the existing repository."
+  exit 1
+fi
+
+if [ "$DELETE_REPO" = true ]; then
+  echo -e "\n${GREEN}➡️ Deleting the existing orca repo...\n${NC}"
+  rm -rf $REPOSITORY_PATH
+fi
+
+# Clone the repo
+# A shallow clone will break uses of extensions like GitLens
+# If a branch was supplied, use that branch for the clone.
+if [[ ! -d "$REPOSITORY_PATH/.git" ]]; then
+  CLONE_BRANCH="${BRANCH:-main}"
+  echo -e "\n${GREEN}➡️ Cloning $REPOSITORY_URL at branch $CLONE_BRANCH...\n${NC}"
+  git clone "$REPOSITORY_URL" "$REPOSITORY_PATH" --branch "$CLONE_BRANCH"
+fi
+
+if [ -n "$BRANCH" ]; then
+   echo -e " $BRANCH"
+   ( cd "$REPOSITORY_PATH"; hash -d git; git checkout "$BRANCH" );
+fi
+
+( cd "$REPOSITORY_PATH"; hash -d git; git pull );
+
+# Bootstrap orca
+echo -e "\n${GREEN}➡️ Bootstrapping orca...\n${NC}"
+( cd "$REPOSITORY_PATH" ; script/bootstrap; )
+
+# Add the orca repo as a workspace in VS Code
+if [ "$ADD_TO_WORKSPACE" = true ]; then
+   echo -e "\n${GREEN}➡️ Adding orca to VS Code workspace...\n${NC}"
+   code --add $REPOSITORY_PATH
+fi
+
+echo -e ""
+echo -e "${GREEN}🎉🎉 FINISHED! The orca repo has been set up! 🎉🎉"
+echo -e ""
+echo -e "${GREEN}Start the orca API server by running the following commands:"
+echo -e ""
+echo -e "  ${ORANGE}cd /workspaces/orca; script/bootstrap; script/run; ${NC}"
+echo -e ""
+echo -e "${GREEN}To consume Hydro events, run the stream processor:"
+echo -e ""
+echo -e "  ${ORANGE}bin/orca-processor"
+echo -e ""

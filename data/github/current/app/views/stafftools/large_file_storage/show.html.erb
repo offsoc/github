@@ -1,0 +1,158 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  page_info title: "#{this_user.login} - Large file storage"
+%>
+
+<div class="boxed-group">
+  <h3>
+    Git LFS support
+  </h3>
+  <div class="boxed-group-inner">
+    <% form_method = this_user.git_lfs_enabled? ? :delete : :post %>
+    <%= form_tag preview_lfs_stafftools_user_path(this_user), :method => form_method do %>
+      <div class="billing-section">
+        <div class="section-label">
+          Feature Flag
+        </div>
+        <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, classes: "action-button") do %>
+          <%= this_user.git_lfs_enabled? ? :Disable : :Enable %>
+        <% end %>
+        <div class="section-content">
+          Toggle Git LFS support for all repositories owned by this account.
+        </div>
+      </div>
+    <% end %>
+
+    <%= form_tag rebuild_status_stafftools_user_path(this_user) do %>
+      <div class="billing-section">
+        <div class="section-label">
+          Account Usage
+        </div>
+        <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, classes: "action-button") do %>
+          Rebuild
+        <% end %>
+        <div class="section-content">
+          <%= render :partial => "billing_settings/bandwidth_storage_bars", :locals => { :target => this_user } %>
+        </div>
+      </div>
+    <% end unless GitHub.enterprise? %>
+
+    <p class="help">
+      <%= primer_octicon(:question) %>
+      Usage is calculated daily and only includes Git LFS storage and bandwidth. Releases and image attachments don’t count towards quota.
+    </p>
+  </div>
+</div>
+
+<% if view.lfs_repos&.size && view.lfs_repos&.size > 0 %>
+  <div class="Box Box--condensed">
+    <div class="Box-header d-flex flex-items-center">
+      <h3 class="Box-title flex-auto">
+        Repositories
+        <%= render Primer::Beta::Counter.new(count: view.lfs_repos.size, scheme: :primary) %>
+      </h3>
+      <%= render Primer::Beta::ClipboardCopy.new("aria-label": "Copy current page to clipboard", classes: "btn btn-sm", value: view.lfs_repos_json) %>
+    </div>
+    <% view.lfs_repos.each do |repo| %>
+      <% bw = view.bandwidth_for_repo(repo) %>
+      <div class="Box-row d-flex flex-items-center" id="lfs-repo_<%= repo.id %>">
+        <div class="flex-auto">
+          <%= primer_octicon(repo.private? ? "lock" : "repo", classes: "repo-icon", "aria-label": "Repository") %>
+          <a href="<%= stafftools_repository_large_files_path(repo.owner.login, repo.name) %>">
+            <%= repo.name_with_owner %>
+          </a>
+          <span class="color-fg-muted">
+            <% storage = number_to_human_size(view.lfs_disk_usage[repo.network_id]) %>
+
+            <% if bw %>
+              (<%= storage %> storage, <%= number_to_human_size(bw[:bandwidth_down] * (1024 ** 3)) %> bandwidth)
+            <% else %>
+              (<%= storage %> storage)
+            <% end %>
+          </span>
+        </div>
+        <div class="text-small text-right color-fg-muted">
+          created <%= time_ago_in_words_js(repo.created_at) %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+  <div class="paginate-container">
+    <%= will_paginate view.lfs_repos %>
+  </div>
+<% end %>
+
+<% if view.actor_statuses.any? %>
+  <div class="boxed-group">
+    <h3>
+      Detailed usage breakdown
+      <%= render Primer::Beta::ClipboardCopy.new("aria-label": "Copy current page to clipboard", classes: "btn btn-sm", value: view.actor_status_json) %>
+    </h3>
+    <div class="boxed-group-inner seamless">
+      <table class="boxed-group-table">
+        <thead>
+          <tr>
+            <th>Actor (User or Deploy Key)</th>
+            <th>Bandwidth down (GB) <%= primer_octicon(:"chevron-down") %></th>
+            <th>Bandwidth up (GB)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% view.actor_statuses.each do |status| %>
+            <tr id="actor-status_<%= status.id %>">
+              <td>
+                <b>
+                  <% if status.anonymous_actor? %>
+                    Anonymous
+                  <% elsif status.user_actor? && status.actor.nil? %>
+                    Deleted user: <%= link_to(status.actor_id, stafftools_audit_log_path(
+                                        query: driftwood_ade_query?(current_user) ?
+                                          "webevents | where user_id == #{status.actor_id} or actor_id == #{status.actor_id}" :
+                                          "user_id:#{status.actor_id} OR actor_id:#{status.actor_id}"
+                                        ),
+                                       class: "Link--inTextBlock")
+                                   %>
+                  <% elsif status.user_actor? %>
+                    <%= link_to(status.actor.login, stafftools_user_large_file_storage_path(status.actor)) %>
+                  <% elsif status.key_actor? && status.key.nil? %>
+                    Deleted deploy key
+                  <% elsif status.key_actor? && status.key.repository %>
+                    <%= link_to(
+                          status.key.repository.nwo,
+                          stafftools_audit_log_path(
+                            query: driftwood_ade_query?(current_user) ?
+                              "webevents | where repo_id == #{status.key.repository.id}" :
+                              "repo_id:#{status.key.repository.id}"
+                          )
+                        )
+                    %>
+                  <% else %>
+                    Unknown actor
+                  <% end %>
+                </b>
+              </td>
+              <td><code><%= status.bandwidth_down.round(2) %></code></td>
+              <td><code><%= status.bandwidth_up.round(2) %></code></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <% if view.actor_statuses.total_pages > 1 %>
+    <div class="paginate-container">
+      <%= will_paginate view.actor_statuses %>
+    </div>
+  <% end %>
+
+<% else %>
+  <div class="boxed-group">
+    <h3>Detailed usage breakdown</h3>
+    <div class="boxed-group-inner">
+      <p>
+        No detailed large file storage usage available right now.
+      </p>
+    </div>
+  </div>
+<% end %>

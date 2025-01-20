@@ -1,0 +1,299 @@
+#!/bin/bash
+
+set -e
+
+n=$'\n'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+help() {
+    echo -e "Setup insights services\n
+    OPTIONS:\n
+      --dataplaform   Initialize dataplatform locally\n
+      -c | --clean         Clean up all insights services\n
+      -i|--ingestion-setup
+      -h|--help       Print this help message\n"
+    exit 2
+}
+
+function enable_insights() {
+  sed -i -e "s/^INSIGHTS_HMAC_KEY\=.*/INSIGHTS_HMAC_KEY=${INSIGHTS_HMAC_KEY}/" "$INSIGHTS_CODE_SRC/.env"
+  sed -i -e "s/^ENTITY_NAME\=.*/ENTITY_NAME=${1}/" "$INSIGHTS_CODE_SRC/.env"
+  sed -i -e "s/^ENTITY_ID\=.*/ENTITY_ID=${2}/" "$INSIGHTS_CODE_SRC/.env"
+
+  export CI="1"
+  "$INSIGHTS_CODE_SRC/script/set-partition" "$1"
+
+  /workspaces/github/bin/toggle-feature-flag enable insights_api_local_development
+
+  # enable feature flags for codeblocks
+  /workspaces/github/bin/toggle-feature-flag enable insights_codeblocks "$1"
+  /workspaces/github/bin/toggle-feature-flag enable insights_api_twirp_enabled "$1"
+
+  # enable feature flags for insights common development
+  /workspaces/github/bin/toggle-feature-flag enable insights_twirp "$1"
+  /workspaces/github/bin/toggle-feature-flag enable ospo_insights_enabled "$1"
+}
+
+start_time=$(date +%s)
+
+clean=
+local_dataplatform=
+ingestion_setup=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dataplatform)
+      local_dataplatform=1
+      ;;
+    -c|--clean)
+      clean=1
+      ;;
+    -i|--ingestion-setup)
+      ingestion_setup=1
+      ;;
+    -h|--help)
+      help
+      ;;
+    *)
+      >&2 echo "Unrecognized argument: $1"
+      help
+      ;;
+  esac
+  shift
+done
+
+INSIGHTS_CODE_SRC="/workspaces/insights-code"
+DATAPLATFORM_SRC="/workspaces/insights-dataplatform/src"
+GITHUB_SRC="/workspaces/github"
+
+if [ -n "$clean" ]; then
+  echo -e "${GREEN}Cleaning up ...${NC}"
+  echo -e "${ORANGE}Removing dataplatform${NC}"
+  "$INSIGHTS_CODE_SRC/dataplatform/script/clean"
+  echo -e "${ORANGE} Removing insights services${NC}"
+  docker-compose --env-file "$INSIGHTS_CODE_SRC/.env" -f "$INSIGHTS_CODE_SRC/docker-compose.yml" down --volumes
+  echo -e "${ORANGE}Deleting env files and .insights-cloud folder${NC}"
+  rm -rf $HOME/.insights-cloud /workspaces/insights-code/.env /workspaces/insights-code/dataplaform/.env
+  echo -e "${ORANGE} Removing insights local dev flag ${NC}"
+  /workspaces/github/bin/toggle-feature-flag disable insights_api_local_development
+  echo "✅ Cleanup complete"
+  exit 1;
+fi
+
+echo "💡 Checking containers.pkg.github.com login"
+DOCKER_CONFIG="$HOME/.docker/config.json"
+if [ ! -f "$DOCKER_CONFIG" ] || ! grep -q "containers.pkg.github.com" "$DOCKER_CONFIG"; then
+  docker login containers.pkg.github.com -u username -p $GITHUB_TOKEN
+fi
+echo "✅ Logged into containers.pkg.github.com"
+
+# downgrade docker-compose to 1.29.2 from v2
+if [[ $(docker-compose -v) != *1.29.2* ]]; then
+  # temporary till https://github.com/docker/compose/issues/8763 gets fixed
+  echo Warning : $(docker-compose -v). Reverting to docker-compose version 1.29.2.
+  sudo rm /usr/local/bin/docker-compose
+  sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose
+else
+  echo $(docker-compose -v) is expected.
+fi
+
+# clone insights-code
+if [ -z "$(ls -A $INSIGHTS_CODE_SRC)" ]; then
+  echo -e "${GREEN}Cloning insights-code ...${NC}"
+  git clone https://github.com/github/insights-code $INSIGHTS_CODE_SRC
+fi
+
+# bootstrap insights-code
+echo -e "${GREEN}Running bootstrap for insights-code${NC}"
+"$INSIGHTS_CODE_SRC/script/bootstrap"
+
+# initialize local dataplatform
+if [ -n "$local_dataplatform" ]; then
+
+  if [ -z "$(ls -A $DATAPLATFORM_SRC)" ]; then
+    echo -e "${GREEN}Cloning insights-dataplatform...${NC}"
+    git clone https://github.com/github/insights-dataplatform $DATAPLATFORM_SRC
+  fi
+
+  echo -e "${GREEN}Setting up local dataplatform...${NC}"
+  cd $DATAPLATFORM_SRC
+
+  echo -e "${ORANGE}Initializing local dataplatform${NC}"
+  "$DATAPLATFORM_SRC/init.sh" --non-interactive
+
+  echo -e "${ORANGE}Building Dataplatform${NC}"
+  "$DATAPLATFORM_SRC/init.sh" --non-interactive b
+
+  echo -e "${ORANGE}Creating docker images for Data platform${NC}"
+  "$DATAPLATFORM_SRC/init.sh" --non-interactive bcon
+
+  echo -e "${ORANGE}Update dataplatform .env file to use local dataplatform${NC}"
+  "$INSIGHTS_CODE_SRC/dataplatform/script/configure_image" -d
+
+  cd -
+  echo "✅ Local dataplatform setup complete"
+fi
+
+# setup insights-code
+echo -e "${GREEN}Running setup for insights-code${NC}"
+"$INSIGHTS_CODE_SRC/script/setup"
+
+# enable insights feature flags
+echo -e "${GREEN}Running github/bin/setup-insights${NC}"
+/workspaces/github/bin/setup-insights -i
+
+while read org_id org_slug
+do
+  if [ "$org_id" != "id" ]; then
+    echo "org_id: $org_id, org_slug: $org_slug"
+    enable_insights $org_slug $org_id
+  fi
+done < <(echo "select id, login from github_development.users where type='Organization' and login in ('actions', 'github') order by id desc" | mysql -u root)
+
+# build insights-code services
+"$INSIGHTS_CODE_SRC"/script/build
+
+# disable monolith processes
+echo -e "${GREEN}Updating Procfile ...${NC}"
+sed -i "s/\(^kafka-lite:.\+$\)/# \1/" "${GITHUB_SRC}"/Procfile
+
+if [ -n "$ingestion_setup" ]; then
+  # new user in monolith mysql
+  echo -e "${GREEN}Creating new user in monolith MYSQL DB ...${NC}"
+  echo "CREATE USER 'newUser'@'%' IDENTIFIED BY 'password'; \
+  GRANT ALL PRIVILEGES ON *.* TO 'newUser'@'%';" | mysql -u root
+
+  echo "MONOLITH_MYSQL_PASSWORD=password" >> "$INSIGHTS_CODE_SRC"/.env
+
+  # db config for ingestion
+  echo -e "${GREEN}Adding config to db.local.yaml ...${NC}"
+  cat << EOF > "$INSIGHTS_CODE_SRC"/config/db.local.yaml
+user:
+  addr: host.docker.internal:3306
+  user: newUser
+  passwd: \${MONOLITH_MYSQL_PASSWORD}
+  dbname: github_development
+
+repositories:
+  addr: host.docker.internal:3306
+  user: newUser
+  passwd: \${MONOLITH_MYSQL_PASSWORD}
+  dbname: github_development_issues_pull_requests
+
+issues_pull_requests:
+  addr: host.docker.internal:3306
+  user: newUser
+  passwd: \${MONOLITH_MYSQL_PASSWORD}
+  dbname: github_development_issues_pull_requests
+
+collab:
+  addr: host.docker.internal:3306
+  user: newUser
+  passwd: \${MONOLITH_MYSQL_PASSWORD}
+  dbname: github_development_collab
+
+memex:
+  addr: host.docker.internal:3306
+  user: newUser
+  passwd: \${MONOLITH_MYSQL_PASSWORD}
+  dbname: github_development_memex
+
+insights:
+  addr: host.docker.internal:3316
+  user: \${MYSQL_READWRITE_USERNAME}
+  passwd: \${MYSQL_READWRITE_PASSWORD}
+  dbname: insights_development
+EOF
+
+  # updating schema
+  echo -e "${GREEN}Updating ${RED}repositories${GREEN} MYSQL query ...${NC}"
+  find $INSIGHTS_CODE_SRC/services/ingestion/connectors/querystore/templates/ -type f -name "*.sql" -exec sed -i.bak "s/\brepositories\b/github_development_repositories.repositories/g" {} \;
+
+
+  # setting up hubot
+  HUBOT_SRC="/workspaces/hubot-classic"
+  HUBOT_MYSQL_PORT=33090
+  HUBOT_REDIS_PORT=63790
+
+  echo -e "${GREEN}Cloning into hubot-classic repo ...${NC}"
+  git clone https://github.com/github/hubot-classic.git $HUBOT_SRC
+  # locking to a known safe commit
+  (cd "$HUBOT_SRC"; git reset --hard 6fa983c1130065dbb61e63e043b9de5177362573)
+
+  echo -e "${GREEN}Updating ports in hubot docker-compose.yaml ...${NC}"
+  sed -i -e "/^\s*mysql:$/{:m0;N;/\n\s*ports:$/b m1;b m0;:m1;N;s/\(ports:\n\s*-\s*\"\)[0-9]\+:\([0-9]\+\"$\)/\1${HUBOT_MYSQL_PORT}:\2/;p;d;}" \
+  -e "/^\s*redis:$/ {:r0;N;/\n\s*ports:$/b r1;b r0;:r1;N;s/\(ports:\n\s*-\s*\"\)[0-9]\+:\([0-9]\+\"$\)/\1${HUBOT_REDIS_PORT}:\2/;p;d;}" "$HUBOT_SRC"/docker-compose.yaml
+
+  echo -e "${GREEN}Updating ports in .env.development ...${NC}"
+  sed -i -e "s/\(export HUBOT_DATASTORE_HOST=\).*$/\1127.0.0.1/" \
+  -e "s/\(export HUBOT_DATASTORE_PORT=\).*$/\1${HUBOT_MYSQL_PORT}/" \
+  -e "s/\(export REDIS_URL=redis:\/\/\).*$/\1localhost:${HUBOT_REDIS_PORT}/" $HUBOT_SRC/.env.development
+
+  echo -e "${GREEN}Adding insights chatops config ...${NC}"
+  touch $HUBOT_SRC/config/chatops-rpc/development.yaml
+  cat << EOF > "$HUBOT_SRC"/config/chatops-rpc/development.yaml
+endpoints:
+  - prefix: insights-api
+    url: http://localhost:9912/_chatops
+    owner: github/insights
+    owning_director: sadagopanrajaram
+    methods:
+      ping:
+        risk: miniscule
+      pprof:
+        risk: miniscule
+      ratelimit:
+        risk: low
+      manager:
+        risk: low
+      links:
+        risk: miniscule
+  - prefix: insights-ingestion
+    url: http://localhost:9911/_chatops
+    owner: github/insights
+    owning_director: sadagopanrajaram
+    methods:
+      ping:
+        risk: miniscule
+      pprof:
+        risk: miniscule
+      pipeline:
+        risk: low
+      links:
+        risk: miniscule
+EOF
+
+  echo -e "${GREEN}Removing docker-compose up from script/server${NC}"
+  sed -i 's/\(^\s*\)\(script\/docker-setup\)/\1# \2/' $HUBOT_SRC/script/server
+
+  echo -e "${GREEN}Setting up hubot ...${NC}"
+  ( cd $HUBOT_SRC; \
+  source .env.development; \
+  script/bootstrap; \
+  docker-compose up -d)
+
+  echo -e "${GREEN}Adding aliases ...${NC}"
+  echo "alias start-hubot=\"CHATOPS_AUTH_BASE_URL=http://localhost:9911/_chatops CHATOPS_AUTH_PUBLIC_KEY=\\\$(cat ./test/hubot-test.pub) ./script/server --debug\"" >> ~/.bashrc
+  echo "alias start-hubot=\"CHATOPS_AUTH_BASE_URL=http://localhost:9911/_chatops CHATOPS_AUTH_PUBLIC_KEY=\\\$(cat ./test/hubot-test.pub) ./script/server --debug\"" >> ~/.zshrc
+fi
+
+# installing vscode extensions
+code --install-extension ms-azuretools.vscode-docker
+code --install-extension ms-dotnettools.csharp
+code --install-extension hbenl.vscode-test-explorer
+code --install-extension samirat.csharp-test-adapter
+
+# increasing fsnotify limit to avoid errors (OmniSharp is a bit aggressive)
+sudo tee /etc/sysctl.d/81-vscode.conf > /dev/null <<'EOF'
+fs.inotify.max_user_watches=524288
+fs.inotify.max_user_instances=524288
+EOF
+sudo sysctl -p /etc/sysctl.d/81-vscode.conf
+
+end_time=$(date +%s)
+elapsed=$(( end_time - start_time ))
+echo -e "setup-codespaces-insights took $elapsed seconds"

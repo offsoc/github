@@ -1,0 +1,90 @@
+#!/bin/bash
+#/ Usage: git-last-fsck [-f | --force]
+#/ Run git-fsck and write the result to <GIT_DIR>/fsck unless the
+#/ fsck report file already exists, in which case it is written to
+#/ standard output without running the command.
+#/
+#/ Options
+#/   -f, --force               Force git-fsck and write new file even if exists
+#/   -n, --never               Do not run git-fsck even when file not exists
+#/
+#/ Exits 0 when git-fsck was run or an existing fsck file was found; exits 1
+#/ when no fsck is available and -n was given.
+set -e
+exec 2>&1
+
+# show usage
+if [ "$1" = "--help" ]
+then grep '^#/' <"$0" |cut -c 4-
+     exit 2
+fi
+
+# parse options
+force=false
+never=false
+case "$1" in
+    -f|--force) force=true ;;
+    -n|--never) never=true ;;
+            '') ;;
+             *) echo "$(basename $0): illegal argument - '$1'" 1>&2
+                exit 1 ;;
+esac
+
+# start in the git repo directory
+cd "${GIT_DIR:=$(git rev-parse --git-dir)}"
+
+# run the fsck command and write output to ./fsck file in git directory
+$force || ! test -f fsck && ! $never && {
+    tempnam=.tmp-fsck-$$
+    trap "rm -f $tempnam" 0
+
+    set +e
+    (
+        res=true
+
+        date +'## %Y-%m-%d %H:%M:%S ##'
+        echo "path: $(pwd)"
+        [ -f info/nwo ] && echo "repo: $(cat info/nwo)"
+
+        echo "==> git nw-fsck"
+        git nw-fsck --connectivity-only || res=false
+
+        echo "==> git janitor"
+        git janitor || true
+
+        echo "==> hooks symlink"
+        if [ -L hooks ]; then
+            echo "OK: $(ls -ld hooks)"
+        else
+            echo "error: hooks dir not symlinked:"
+            ls -ld hooks || true
+            res=false
+        fi
+
+
+        echo "==> find objects/??/* | wc -l"
+        (find objects/??/* | wc -l) 2>/dev/null
+
+        echo "==> ls -l objects/pack/*"
+        (cd objects/pack && ls -lh *) 2>/dev/null
+
+        echo "==> du -sh *"
+        du -sh * | grep -v HEAD | grep -v description | grep -v usage
+
+        $res
+    ) >$tempnam 2>&1
+    res=$?
+    set -e
+
+    (
+        echo "==>"
+        if [ $res = 0 ]; then echo "OK repository passed checks"
+        else echo "NOT OK repository checks failed"
+        fi
+    ) >>$tempnam
+
+    grep -v 'contains zero-padded file modes' "$tempnam" >fsck
+}
+
+# write the report to standard output
+test -f fsck && cat fsck

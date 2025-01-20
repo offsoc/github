@@ -1,0 +1,114 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+COMMENT_MAX_SIZE = 60000
+
+def diff_pull_requests(head_descriptions_folder, base_descriptions_folder)
+  openapi_tar_file =
+  if head_descriptions_folder.include?("openapi_next")
+    "openapi_next.tar.gz"
+  else
+    "openapi.tar.gz"
+  end
+
+  diffs = []
+  breaking = false
+
+  for_each_release(base_descriptions_folder) do |release_name|
+    diff = `docker run --rm \
+      -v #{base_descriptions_folder}:/base_description \
+      -v #{head_descriptions_folder}:/head_description \
+      -t ghcr.io/github/openapi-diff/openapi-diff \
+      diff \
+        --breaking \
+        --summary \
+        --format markdown \
+        /base_description/#{release_name}/dereferenced/#{release_name}.deref.json \
+        /head_description/#{release_name}/dereferenced/#{release_name}.deref.json`
+    exit_code = $?.exitstatus
+
+    if exit_code != 0
+      puts "OpenAPI Diff has failed with exit code: #{exit_code}"
+      puts diff
+      next
+    end
+
+    unless diff.end_with?("No changes.")
+      if diff.include?("Breaking changes were detected")
+        breaking = true
+      end
+      diffs << { release: release_name, diff: diff }
+    end
+  end
+
+  if diffs.empty?
+    puts "No differences in any of the versions"
+    return
+  end
+
+  new_comment = generate_pr_comment(diffs, breaking)
+
+  puts new_comment unless new_comment.nil?
+end
+
+def generate_pr_comment(diffs, breaking = false)
+  max = diffs.size
+  content = format_comment(diffs, max_diffs: max, breaking: breaking)
+
+  while content && content.size > COMMENT_MAX_SIZE
+    content = format_comment(diffs, max_diffs: max, breaking: breaking)
+    max = max - 1
+  end
+
+  content
+end
+
+def format_diff(diff)
+  <<~MD
+<details>
+ <summary>Changes for the <strong>#{diff[:release]}</strong> release</summary>
+
+#{diff[:diff]}
+
+</details>
+ MD
+end
+
+def format_comment(diffs, max_diffs:, breaking:)
+  return if max_diffs < 1
+
+  formatted_diffs = diffs[0..max_diffs - 1].map { |d| format_diff(d) }.join("")
+
+  breaking_msg = breaking ? ":warning: Breaking changes were detected!" : ""
+
+  content = <<~MD
+  Hello humans :wave:
+
+  I noticed you made some changes to the REST API. Below is a summary of those changes. To preview the changes on the docs site, run `./script/setup-codespaces-docs-openapi` in Codespaces (see [OpenAPI in the Docs](https://thehub.github.com/engineering/products-and-services/public-apis/rest/openapi/openapi-in-the-docs/) for more details).
+
+  #{breaking_msg}
+  #{formatted_diffs}
+
+  **If some of those changes are unexpected, feel free to ping @github/api-platform-reviewers**
+  MD
+
+  if max_diffs < diffs.size
+    omitted =  diffs[max_diffs - 1, diffs.size - 1].map { |d| d[:release] }
+    content << "\n\n"
+    content << "Note: The following release diffs were omitted due to the large diff size: #{omitted.join(',')}"
+  end
+
+  content
+end
+
+def for_each_release(description_folder)
+  # Assumes a root directory with one folder per release
+  Dir.glob(File.join(description_folder, "**")).map { |folder| File.basename(folder) }.each do |release|
+    yield release
+  end
+end
+
+head_descriptions_folder = ARGV[0]
+base_descriptions_folder = ARGV[1]
+
+diff_pull_requests(head_descriptions_folder, base_descriptions_folder)

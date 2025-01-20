@@ -1,0 +1,68 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-user-csv [options]
+#/
+#/ This utility dumps out a list of all the users in the installation in CSV
+#/ format. This information includes login, email address, permission level
+#/ (admin or user), how many repositories they have, ssh keys, and the last
+#/ logged IP address.
+#/
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -d, --header       Display header row. Defaults to false.
+#/   -o, --stdout       Print output to STDOUT. Optional.
+#/   -a, --admins       Limit to admin users. Optional.
+#/   -u, --users        Limit to non-admin users. Optional.
+#/   -s, --suspended    Limit to suspended users. Optional.
+#/   -b, --builtin      Limit to built-in authentication users. Optional.
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+show_header   = false
+use_stdout    = false
+restrict_type = nil
+
+ARGV.options do |opts|
+  opts.on("-d", "--header")    { show_header = true }
+  opts.on("-o", "--stdout")    { use_stdout = true }
+  opts.on("-a", "--admins")    { restrict_type = :admins }
+  opts.on("-u", "--users")     { restrict_type = :users }
+  opts.on("-s", "--suspended") { restrict_type = :suspended }
+  opts.on("-b", "--builtin")   { restrict_type = :builtin }
+  opts.on_tail("-h", "--help") { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+
+if use_stdout
+  output_io = STDOUT
+else
+  date = Time.now.strftime("%Y%m%d%H%M%S")
+  file = "/tmp/users-#{date}.csv"
+  puts "Saving list of users to '#{file}'..."
+  output_io = File.open(file, "w")
+end
+
+begin
+  UserCSVGenerator.new(
+    show_header: show_header,
+    output_io: output_io,
+    restrict_type: restrict_type).run
+rescue UserListGenerator::Error => e
+  abort e.message
+end
+
+unless use_stdout
+  puts "Done."
+end

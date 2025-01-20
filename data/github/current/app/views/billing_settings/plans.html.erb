@@ -1,0 +1,176 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% view = BillingSettings::PlansView.new target: target, plan_name: params[:plan], actor: current_user, request: request %>
+
+<% page_info \
+  title: "Compare plans for #{target.safe_profile_name}",
+  selected_link: view.selected_link
+%>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle "site" %>
+  <%= stylesheet_bundle "pricing" %>
+<% end %>
+
+<% content = capture do %>
+  <% if target.organization? && target.plan.per_repository? %>
+    <div class="my-3 p-3 clearfix Box d-flex flex-row">
+
+      <%= image_tag "modules/organizations/pull_request.png", :width => 60, :height => 60, :class => "flex-self-center mr-3", :alt => "" %>
+
+      <% callout_content = capture do %>
+        <div class="flex-auto">
+          <h2 class="h4">Advanced tools for teams</h2>
+          <p class="m-0 color-fg-muted">
+          Level up collaboration across organizations with easy <br>
+          <%=link_to "per-seat pricing", "#{GitHub.help_url}/articles/about-per-user-pricing/", class: "Link--inTextBlock" %>, unlimited private repositories, and more.
+          </p>
+        </div>
+      <% end %>
+      <%= callout_content %>
+
+      <div class="text-right">
+        <%= link_to("Upgrade now", view.per_seat_plan_callout_url, class: "btn btn-sm btn-primary", data: view.per_seat_plan_callout_hydro_data(
+          callout_location: "above the plan table",
+          callout_text: view.strip_tags_and_collapse_whitespace(callout_content),
+        )) %>
+      <div class="text-small color-fg-muted mt-1">
+        Questions? <%= link_to "Contact us", enterprise_web_url("contact?utm_source=github&utm_medium=site&utm_campaign=legacy-upgrade-request"), class: "Link--inTextBlock" %>
+    </div>
+      </div>
+    </div>
+
+    <!-- List of plans available to the target -->
+    <div class="boxed-group"><%# erblint:disable DeprecatedCustomCss %>
+      <% unless target.invoiced? %>
+        <% if target.paid_plan? %>
+          <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn btn-sm",
+            details_class: "boxed-group-action",
+            button_text: "Switch to #{target.monthly_plan?? 'yearly' : 'monthly'} billing",
+            title: "Confirm switch to #{view.new_cycle}ly billing"
+          } do %>
+          <%= render partial: "billing_settings/confirm_period_change_lightbox", locals: {
+            target: view.target,
+            plan: view.plan_name,
+            new_cycle: view.new_cycle
+          } %>
+          <% end %>
+        <% else %>
+          <%= form_tag target_cycle_update_path(target), :"data-pjax" => true do %>
+            <%= hidden_field_tag 'plan_duration', (target.monthly_plan? ? 'year' : 'month') %>
+            <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, classes: "boxed-group-action") do %>Show <%= target.monthly_plan? ? 'yearly' : 'monthly' %> billing prices<% end %><%# erblint:disable DeprecatedCustomCss %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <h3>
+        <%= link_to "Billing /", target_billing_path(target), :class => "boxed-group-breadcrumb", "data-pjax" => true %>
+        Plans
+      </h3>
+      <div class="boxed-group-inner seamless currency-container js-details-container Details"><%# erblint:disable DeprecatedCustomCss %>
+        <table class="boxed-group-table billing-plans"><%# erblint:disable DeprecatedCustomCss %>
+          <thead>
+            <tr>
+              <th>Plan</th>
+              <th>
+                Price
+              </th>
+              <th class="num">Private repositories</th>
+              <th class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+
+            <% available_plans(target, actor: current_user).each do |plan| %>
+              <tr class="<%= target.plan.display_name == plan.display_name ? 'current' : '' %>" data-name="<%= plan.display_name %>" data-cost="<%= human_plan_cost(plan) %>">
+                <td class="name"><%= short_plan_name(plan, account_type: target.type).humanize %></td>
+                <td class="pricing">
+                  <span class="default-currency"><%= human_plan_cost(plan, target) %>/<%= target.plan_duration %></span>
+                  <span class="local-currency"><%= human_plan_cost(plan, target) %>/<%= target.plan_duration %></span>
+                </td>
+                <td class="num">
+                  <% if target.organization? %>
+                    <% if plan.free? %>
+                      Unlimited
+                    <% else %>
+                      <%= plan.org_repos(feature_flag: :plans_munich) %>
+                    <% end %>
+                  <% else %>
+                    <% if plan.free? %>
+                      Unlimited
+                    <% else %>
+                      <%= plan.repos(feature_flag: :plans_munich) %>
+                    <% end %>
+                  <% end %>
+                </td>
+                <td class="text-right">
+                  <% if target.plan.display_name == plan.display_name %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "check")) %> Your plan
+                    <% if plan.legacy? %>
+                      (Legacy)
+                    <% end %>
+                  <% elsif !target.invoiced? %>
+                    <%= render partial: "billing_settings/confirm_plan_lightbox", locals: {target: target, plan: plan} %>
+                  <% end %>
+                </td>
+              </tr>
+              <% if target.plan == plan && target.has_an_active_coupon? %>
+                <tr class="coupon <%= 'expiring' if target.coupon_redemption.expires_this_billing_cycle? %>">
+                  <td class="description" colspan="2">
+                    <div class="coupon-label">
+                      Active coupon &mdash; <%= target.coupon.human_discount %> off
+                      <% if target.coupon.plan.present? %>
+                        the <%= target.coupon.plan_display_name %> plan
+                      <% end %>
+                      <% if target.coupon.duration == 30 %>
+                        for one month
+                      <% elsif target.coupon.duration < 30 %>
+                        for <%= target.coupon.human_duration %>
+                      <% else %>
+                        each month for <%= target.coupon.human_duration %>
+                      <% end %>
+                    </div>
+                   </td>
+                   <td class="text-right" colspan="2">
+                    <%= render(Primer::Beta::Octicon.new(icon: "clock")) %>
+                    <% if target.free_trial? %>
+                      Coupon active
+                      <% unless target.coupon.human_duration == "Forever" %>
+                        : <%= distance_of_time_in_words_to_now target.trial_days_left.days.from_now %> left.
+                      <% end %>
+                    <% elsif target.coupon_redemption.expires_this_billing_cycle? %>
+                      Coupon expiring: Your next bill will not get a discount.
+                    <% else %>
+                      Coupon active: Your next bill will get a <%= target.coupon.human_discount %> discount.
+                    <% end %>
+                  </td>
+                </tr>
+              <% end %>
+            <% end %>
+          </tbody>
+        </table>
+        <div class="plan-notice currency-notice local-currency-block">
+          <%= render "billing_settings/currency_notice" %>
+        </div>
+      </div>
+    </div>
+  <% else %>
+    <input type="radio" name="billing_cycle" class="radio-toggle-switch" value="<%= target.plan_duration %>ly" checked id="cycle_monthly" hidden>
+
+    <%= render partial: "site/pricing/compare_features", locals: { account: target, context: target.organization? ? "organization" : "personal" } %>
+  <% end %>
+<% end %>
+
+<% if current_context.is_a?(Organization) %>
+  <%= render layout: "orgs/settings/layout", locals: { hide_sidebar: true, hide_context_switcher: true } do %>
+    <%= content %>
+  <% end %>
+<% else %>
+  <%= render layout: "settings/settings", locals: { hide_sidebar: true, hide_context_switcher: true } do %>
+    <%= content %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "billing" %>
+  <%= javascript_bundle "pricing" %>
+<% end %>

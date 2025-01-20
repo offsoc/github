@@ -1,0 +1,62 @@
+#!/bin/bash
+set -e
+
+cd $(dirname $0)/..
+
+IDP_CNF=$(cat <<EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+[req_distinguished_name]
+CN=0.0.0.0
+O=GitHub Self Signed Certificate
+[v3_req]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+basicConstraints = CA:TRUE
+subjectAltName=IP:0.0.0.0
+EOF
+)
+
+mkdir -p vendor/dev-identity-provider-ruby/config/certs
+
+if [ -f vendor/dev-identity-provider-ruby/config/certs/idp.key ] && [ -f vendor/dev-identity-provider-ruby/config/certs/idp.crt ]; then
+  if [[ "$GITHUB_CI" == "1" ]]; then
+    echo 'Certificate files for dev-identity-provider-ruby already exist'
+  fi
+else
+  openssl req \
+    -newkey rsa:2048 \
+    -days 365 \
+    -nodes \
+    -new \
+    -x509 \
+    -sha256 \
+    -keyout vendor/dev-identity-provider-ruby/config/certs/idp.key \
+    -out vendor/dev-identity-provider-ruby/config/certs/idp.crt \
+    -config <(echo "$IDP_CNF")
+fi
+
+if [[ "$GITHUB_CI" == "1" ]]; then
+  echo "Skipping Docker image pull of dev-identity-provider-ruby in CI"
+  exit 0
+fi
+
+# Avoid logging in if no GITHUB_TOKEN is set
+if [[ -z "$GITHUB_TOKEN" ]]; then
+  echo "Skipping Docker image pull of dev-identity-provider-ruby as no GITHUB_TOKEN set"
+  exit 0
+fi
+
+if ! grep --quiet '"ghcr.io":' ~/.docker/config.json &>/dev/null; then
+  echo "$GITHUB_TOKEN" | docker login ghcr.io --username "${GITHUB_USER:=prebuild}" --password-stdin
+fi
+
+SHA=$(cat config/dev-identity-provider-ruby-version)
+IMAGE="ghcr.io/github/dev-identity-provider-ruby:$SHA"
+if [ -z "$(docker images -q "$IMAGE" 2>/dev/null)" ]; then
+  # Still need to login in some CI scenarios
+  echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_USER:=prebuild}" --password-stdin || true
+  docker pull "$IMAGE"
+fi

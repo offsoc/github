@@ -1,0 +1,171 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-diagnostics [-hqvx]
+#/
+#/ Iterates over all the nodes in the cluster and grabs the diagnostics output.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -q | --quiet       Do not print info messages.
+#/   -v | --verbose     Run in verbose mode.
+#/   -x | --trace       Print bash trace output (debugging).
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+ssh_node(){
+  local ip=$1
+  shift
+
+  ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+             -oLogLevel=quiet \
+             -oStrictHostKeyChecking=no admin@$ip "$@"
+}
+
+debug(){
+  if [ -n "$GHE_DEBUG" ]; then
+    echo "$@" >&2
+  fi
+}
+
+info(){
+  if [ -z "$GHE_QUIET" ]; then
+    echo "$@"
+  fi
+}
+
+cleanup(){
+  kill -9 $(jobs -p) 2> /dev/null || true
+  rm -f /tmp/*.clusterdiag
+}
+
+# Get the IPv4 or IPv6 from the config for a cluster node.
+hostname_ip(){
+  local hostname=$1
+  local ip=""
+
+  if [ -n "$(ghe-config cluster.$hostname.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv6")
+  elif [ -n "$(ghe-config cluster.$hostname.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv4")
+  fi
+
+  if [ -z "$ip" ]; then
+    echo "Warning: IP for the cluster node $hostname not found." >&2
+    return 1
+  fi
+
+  echo $ip
+}
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+}
+
+DIAGNOSTICS_STATUS="/tmp/ghe-diagnostics-status"
+# Keep enterprise-manage in the loop about how the support bundle is going.
+# This also let's us know when a file is ready.
+#
+# Other processes will look for these states:
+# "running"   - bundle is currently in progress
+# "failed"    - bundle has failed
+# "complete"  - bundle has completed successfully
+function update_status () {
+    echo "$1" | sudo -u enterprise-manage dd of=$DIAGNOSTICS_STATUS status=none
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,trace,quiet --options vhxq -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -x|--trace)
+      set -x
+      ;;
+    -v|--verbose)
+      export GHE_DEBUG=1
+      ;;
+    -q|--quiet)
+      export GHE_QUIET=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+export LC_ALL=en_US.UTF-8
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+# Run the NES cluster health check, will not run if NES is disabled
+/usr/local/bin/ghe-nes-cluster-health-check || true
+
+hosts=$(ghe-config --get-regexp cluster.*.hostname)
+hostnames=""
+localhost=$(cat /etc/github/cluster)
+tmpprefix=$(mktemp --dry-run)
+
+cleanup
+trap cleanup EXIT
+
+trap "update_status failed" ERR
+update_status "running"
+
+info "Collecting cluster diagnostics info..."
+for hostname in $hosts; do
+  echo "$hostname" | grep -q ".hostname" && continue
+  debug "Retrieving diagnostics from $hostname"
+
+  # Ignore the nodes that don't have a valid IP
+  if ! ip=$(hostname_ip $hostname); then
+    continue
+  fi
+  debug "Hostname $hostname IP: $ip"
+  hostnames="$hostnames $hostname=$ip"
+
+  tmpfile=$tmpprefix.$hostname.clusterdiag
+  if [ "$hostname" != "$localhost" ]; then
+    # Background the support bundle collection task
+    (
+
+
+      if ! ssh_node $ip ghe-diagnostics >$tmpfile 2>&1; then
+        echo "Warning: failed to retrieve support bundle from $hostname." >&2
+      fi
+      debug "Collecting diagnostics info from $hostname finished ($tmpfile)."
+
+    ) &
+  else
+    ghe-diagnostics >$tmpfile 2>&1
+    debug "Collecting local diagnostics finished."
+  fi
+done
+
+wait
+
+for f in $(ls /tmp/*.clusterdiag | sort); do
+  echo "#"
+  echo "# DIAGNOSTICS for $(echo $f | cut -d '.' -f3)"
+  echo "#"
+  cat $f
+done
+
+update_status "complete"

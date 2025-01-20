@@ -1,0 +1,168 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%= render layout: "stafftools/stafftools" do %>
+  <div class="UnderlineNav UnderlineNav--full UnderlineNav--right mb-3">
+    <div class="container-lg UnderlineNav-container px-3">
+      <span class="UnderlineNav-actions f3">
+        Billing Webhooks /
+        <%= link_to "Zuora webhooks", stafftools_zuora_webhooks_path %>
+      </span>
+
+      <nav class="UnderlineNav-body" aria-label="Other webhooks">
+        <%= link_to "Stripe webhooks", stafftools_stripe_webhooks_path, class: "UnderlineNav-item" %>
+      </nav>
+    </div>
+  </div>
+
+  <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+    Note that webhooks created in the past 5 minutes will not be displayed here. Refer to the <%= link_to "Playbook", "https://github.com/github/gitcoin/blob/main/docs/playbook/alerts/zuora_webhook_errors.md", class: "Link--inTextBlock" %>
+    for more information on how to handle unprocessed webhooks.
+  <% end %>
+
+  <%= render(Primer::Box.new(mb: 2)) do %>
+    <%= form_tag retry_all_stafftools_zuora_webhooks_path, method: :post do %>
+      <%= render Primer::Beta::Button.new(type: :submit, size: :small, mt: 2, "aria-label": "Process", "data-confirm": "Are you sure you want to retry all webhooks? This will make a lot of requests to the Zuora API and should not be run during the daily billing run. This command will only re-run webhooks older than 5 minutes.") do %>
+        Retry All Pending Webhooks
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Beta::BorderBox.new) do |box| %>
+    <% box.with_header do |h| %>
+      <%= render(Primer::Box.new(display: :flex, justify_content: :space_between, align_items: :center)) do |component| %>
+        <%= render(Primer::Beta::Heading.new(tag: :h4)) { "Pending Zuora Webhooks" } %>
+        <%= render(Primer::Experimental::ActionMenu.new(menu_id: "filter")) do |component| %>
+          <% component.with_trigger do |trigger| %>
+            <% trigger.with_trailing_action_icon(icon: :"triangle-down") %>
+            <%= show_status.tr('_', ' ') %>
+          <% end %>
+          <% component.with_item(
+            tag: :a,
+            href: stafftools_zuora_webhooks_path,
+          ) do |item| %>
+            <%= "All" %>
+          <% end %>
+          <% component.with_item(
+            tag: :a,
+            href: stafftools_zuora_webhooks_path + "?webhook_type=pending",
+          ) do |item| %>
+            <%= "Pending" %>
+          <% end %>
+          <% component.with_item(
+            tag: :a,
+            href: stafftools_zuora_webhooks_path + "?webhook_type=investigating",
+          ) do |item| %>
+            <%= "Investigating" %>
+          <% end %>
+          <% component.with_item(
+            tag: :a,
+            href: stafftools_zuora_webhooks_path + "?webhook_type=invoiced",
+          ) do |item| %>
+            <%= "Invoiced" %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% box.with_body(p: 0) do %>
+      <table class="stafftools-table">
+        <% if webhooks.any? %>
+          <thead>
+            <th class="no-wrap billing-table-cell pr-0">ID</th>
+            <th class="no-wrap billing-table-cell pr-0">Zuora Act</th>
+            <th class="no-wrap billing-table-cell pr-0">Created</th>
+            <th class="no-wrap billing-table-cell pr-0">Kind</th>
+            <th class="no-wrap billing-table-cell pr-0">Status</th>
+            <th class="no-wrap billing-table-cell pr-0">Actions</th>
+          </thead>
+
+          <tbody>
+            <% webhooks.each do |webhook| %>
+              <tr>
+                <td class="no-wrap pr-0">
+                  <%= webhook.id %>
+                </td>
+                <td class="no-wrap pr-0">
+                  <% if webhook.account_id %>
+                    <%= link_to "...#{webhook.account_id.last(5)}", webhook.customer_account_url, title: "Open the customer's account (#{webhook.account_id}) in Zuora" %>
+                  <% else %>
+                    N/A
+                  <% end %>
+                </td>
+                <td class="no-wrap tiny"><%= date_with_time_tooltip webhook.created_at %></td>
+                <td class="no-wrap tiny"><%= webhook.kind %></td>
+                <td class="no-wrap tiny"><%= webhook.status %></td>
+                <td class="no-wrap tiny">
+                  <span>
+                    <%= form_tag stafftools_zuora_webhook_investigate_path(webhook), class: "inline-form", method: :put do %>
+                      <%= render(Primer::Alpha::Dialog.new(
+                        title: "Investigation Notes",
+                        id: "invetigation-dialog-#{webhook.id}",
+                      )) do |d| %>
+                        <% d.with_show_button do %>
+                          <%= render(Primer::Beta::Octicon.new(:comment)) %>
+                        <% end %>
+                        <% d.with_body do %>
+                          <textarea
+                            name="investigation_notes"
+                            aria-label="Investigation notes"
+                            placeholder="Notes"
+                            rows="4"
+                            cols="50"
+                          ><%= webhook.investigation_notes %></textarea>
+                        <% end %>
+                        <% d.with_footer do %>
+                          <%= render Primer::Beta::Button.new(scheme: :primary, type: :submit, "aria-label": "Investigate") do %>
+                            Investigate
+                          <% end %>
+                          <%= render(Primer::Beta::Button.new(scheme: :danger, data: { "close-dialog-id": "invetigation-dialog-#{webhook.id}" })) { "Cancel" } %>
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                    <%= form_tag stafftools_zuora_webhook_perform_path(webhook), class: "inline-form", method: :put do %>
+                      <%= render Primer::Beta::Button.new(type: :submit, id: "process_#{webhook.id}", "aria-label": "Process", "data-confirm": "Are you sure you want to process this webhook?") do |component| %>
+                        <% component.with_tooltip(text: "Process webhook") %>
+                        <%= render(Primer::Beta::Octicon.new(:sync)) %>
+                      <% end %>
+                    <% end %>
+                    <%= form_tag stafftools_zuora_webhook_ignore_path(webhook), class: "inline-form", method: :put do %>
+                      <%= render Primer::Beta::Button.new(type: :submit, id: "ignore_#{webhook.id}", "aria-label": "Ignore", "data-confirm": "Are you sure you want to permanently ignore this webhook?") do |component| %>
+                        <% component.with_tooltip(text: "Ignore webhook") %>
+                        <%= render(Primer::Beta::Octicon.new(:archive)) %>
+                      <% end %>
+                    <% end %>
+                  </span>
+
+                  <span class="d-block">
+                    <% if webhook.is_sales_serve_kind? %>
+                      <%= render Stafftools::ZuoraWebhooks::SalesOperationsIssueDetailsComponent.new(
+                        webhook: webhook
+                      ) %>
+                    <% end %>
+                  </span>
+
+                  <span class="d-block">
+                    <% if webhook&.business_account? %>
+                      <%= link_to "#{webhook.account.name} Stafftools", stafftools_enterprise_path(webhook.account), title: "Stafftools page for business account" %>
+                    <% elsif webhook&.account %>
+                      <%= link_to "#{webhook.account.name} Stafftools", billing_stafftools_user_path(webhook.account), title: "Stafftools Billing page for GitHub account" %>
+                    <% end %>
+                  </span>
+                </td>
+              </tr>
+            <% end %>
+          </tbody>
+        <% else %>
+          <%= render Primer::Beta::Blankslate.new(test_selector: "zuora_webhooks_blank_slate") do |c| %>
+            <% c.with_visual_icon(icon: :webhook) %>
+            <% c.with_heading(tag: :h2).with_content("No pending Zuora webhooks found!") %>
+          <% end %>
+        <% end %>
+      </table>
+      <% if webhooks.total_pages > 1 %>
+        <nav class="paginate-container" aria-label="Pagination">
+          <%= will_paginate(webhooks) %>
+        </nav>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

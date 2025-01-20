@@ -1,0 +1,43 @@
+#!/bin/bash
+#/ Usage: ghe-es-upgrade
+#/
+#/ Wrapper script for running the Elasticsearch upgrade process.
+#/ This is called in phase 3 of the config apply run and is guarded to ensure
+#/ it only runs on the MySQL master node.
+set -e
+
+if [ ! -f "/data/user/elasticsearch-upgrade-complete" ]; then
+  /usr/local/bin/github-env bin/rake --trace es:enterprise:upgrade
+
+  # Verify indices
+  for index in code-search users repos gists pull-requests showcases commits projects; do
+    index_status_code=$(curl -qs --head http://localhost:9201/$index -o /dev/null -w '%{http_code}' 2> /dev/null)
+    [ "$index_status_code" = "200" ] || {
+      echo "Failed to fetch $index, got status code: $index_status_code" >&2
+      curl -s -XGET 'http://localhost:9201/_cat/indices?v'
+      curl -s -XGET 'http://localhost:9201/_cat/aliases?v'
+      exit 1
+    }
+  done
+
+  # Set a completion marker for elastic search upgrade
+  touch /data/user/elasticsearch-upgrade-complete
+else
+  echo "Elasticsearch upgrade already completed, skipping es:enterprise:upgrade"
+fi
+
+# Script that imports any JSON indices in /data/user/elasticsearch-restore.
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+mapfile -t indices < <(find /data/user/elasticsearch-restore -maxdepth 1 -iname "*.gz" -exec basename {} .gz \;)
+if [[ -n "${indices[*]}" ]]; then
+  ghe-es-wait-for-green
+  for index in "${indices[@]}"; do
+    {
+      gzip -dc "/data/user/elasticsearch-restore/${index}.gz" |
+      /usr/local/share/enterprise/ghe-es-load-json "http://localhost:9201/${index}"
+    } &&
+    rm -f "/data/user/elasticsearch-restore/${index}.gz"
+  done
+fi

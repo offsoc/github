@@ -1,0 +1,248 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 6 %>
+<%# view is an instance of PullRequests::MergeButtonView %>
+<%
+  pull = view.pull
+  merge_state = view.merge_state
+%>
+<% if view.any_reviews_or_reviewers? %>
+  <div class="merge-status-list" style="overflow-y: visible; max-height: none;">
+    <% merge_state.reviews.sort_by(&:state).group_by(&:state).each do |state, reviews| %>
+      <% if state == PullRequestReview.state_value(:approved) %>
+        <details class="details-reset Details-element js-merge-review-section">
+          <summary class="merge-status-item">
+            <div class="review-status-item d-flex flex-justify-between">
+              <div class="merge-status-icon">
+                <%= primer_octicon(:check, mx: :auto, display: :block, color: :success) %>
+              </div>
+              <div class="color-fg-muted mr-3 css-truncate css-truncate-target flex-auto flex-self-start">
+                <strong class="text-emphasized">
+                  <%= pluralize(reviews.count, "approval") %>
+                </strong>
+              </div>
+              <div class="flex-self-end flex-shrink-0">
+                <span class="Details-content--open color-fg-subtle"><%= primer_octicon(:"chevron-up", 'aria-label': "Hide reviews") %></span>
+                <span class="Details-content--closed"><%= primer_octicon(:"chevron-down", 'aria-label': "Show reviews") %></span>
+              </div>
+            </div>
+          </summary>
+          <% reviews.each do |review| %>
+            <% can_dismiss_review = review.can_be_dismissed_by?(current_user) %>
+            <div class="merge-status-item review-item color-bg-default js-details-container Details">
+              <div class="review-status-item ml-6 <% if responsive? %>d-flex flex-items-center<% end %>">
+                <%= linked_avatar_for(review.user, 20, img_class: "avatar", link_class: "mr-2") %>
+
+                <div class="color-fg-muted css-truncate css-truncate-target <% if responsive? %>flex-auto pr-3<% else %>mr-3<% end %>">
+                  <strong class="text-emphasized">
+                    <%= review.user.display_login %>
+                  </strong>
+                  approved these changes
+
+                  <% unless view.same_pull?(review) %>
+                    in
+                    <a href="<%= pull_request_path(review.pull_request) %>#<%= comment_dom_id(review) %>">
+                      #<%= review.pull_request.number %></a>
+                    <a href="<%= GitHub.help_url %>/articles/about-required-reviews-for-pull-requests/" aria-label="Pull request #<%= review.pull_request.number %> has the same commits as the current pull request – read more about this situation in this help document." target="_blank" rel="noopener noreferrer">
+                      <%= primer_octicon(:question, classes: "Link--secondary") %></a>
+                  <% end %>
+                </div>
+                <details class="float-right dropdown details-reset details-overlay d-inline-block">
+                  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, vertical_align: :middle) do %>
+                    <%= primer_octicon(:"kebab-horizontal", color: :muted, "aria-label": "Show options") %>
+                  <% end %>
+                  <details-menu class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default position-absolute f5" style="width: 145px; right: -12px;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                    <% if view.can_be_quick_approved?(review) %>
+                      <%= form_tag quick_approve_review_path(review.pull_request.repository.owner, review.pull_request.repository, review.pull_request), class: "d-inline-flex" do %>
+                        <button type="submit" class="dropdown-item btn-link" data-disable-with="Approving…" role="menuitem">
+                          Approve changes
+                        </button>
+                      <% end %>
+                    <% else %>
+                      <a class="dropdown-item btn-link" role="menuitem" href="<%= view.review_href(review) %>">See review</a>
+                    <% end %>
+
+                    <% if view.same_pull?(review) && can_dismiss_review %>
+                      <button type="button" class="dropdown-item btn-link js-details-target" role="menuitem" aria-expanded="false">
+                        Dismiss review
+                      </button>
+                    <% end %>
+
+                    <% if issue_permissions(pull.issue, current_user, :review_re_requestable) && !pull.review_requested_for?(review.user) %>
+                      <% hydro_tracking = hydro_click_tracking_attributes("rerequest_review.mergebox", { pull_request_id: review.pull_request.id, subject_id: review.user.id, actor_id: current_user.id, action: "REREQUESTED" }) %>
+                      <%= form_tag re_request_review_path(current_repository.owner, current_repository, review.pull_request), class: "d-inline-flex" do %>
+                        <input type="hidden" name="reviewer_id" value="<%= review.user_id %>">
+                        <%= button_tag(type: "submit", class: "btn-link dropdown-item", data: hydro_tracking, role: "menuitem") do %>
+                          Re-request review
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  </details-menu>
+                </details>
+              </div>
+
+              <% if can_dismiss_review %>
+                <%= form_tag dismiss_review_path(review.pull_request.repository.owner, review.pull_request.repository, review.pull_request, review.id), :class => "dismiss-review-form", :method => "put" do %>
+                  <div class="TableObject">
+                    <div class="TableObject-item TableObject-item--primary">
+                      <% label = "Why are you dismissing #{review.user == current_user ? "your" : "#{review.user}’s"} review?" %>
+                      <input type="text" name="message" class="form-control input-block" autocomplete="off" placeholder="<%= label%>" aria-label="<%= label %>" autofocus required>
+                    </div>
+                    <div class="TableObject-item">
+                      <%= render Primer::ButtonComponent.new(ml: 2, classes: "js-details-target", "aria-label": "Cancel dismissing review", "aria-expanded": "false") do %>Cancel<% end %>
+                      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, "data-confirm": "Are you sure you want to dismiss this review?", "aria-expanded": "false", "data-disable-invalid": "", "data-disable-with": "Dismissing…", disabled: true) do %>
+                        Dismiss review
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+        </details>
+      <% elsif state == PullRequestReview.state_value(:changes_requested) %>
+        <details class="details-reset Details-element js-merge-review-section">
+          <summary class="merge-status-item">
+            <div class="review-status-item d-flex flex-justify-between">
+              <div class="merge-status-icon">
+                <%= review_state_icon("changes_requested", :class => "mx-auto d-block color-fg-danger") %>
+              </div>
+
+              <div class="color-fg-muted mr-3 css-truncate css-truncate-target flex-auto flex-self-start">
+                <strong class="text-emphasized">
+                  <%= pluralize(reviews.count, "change") %> requested
+                </strong>
+              </div>
+
+              <div class="flex-self-end flex-shrink-0">
+                <span class="Details-content--open color-fg-subtle"><%= primer_octicon(:"chevron-up", 'aria-label': "Hide requested reviewers") %></span>
+                <span class="Details-content--closed"><%= primer_octicon(:"chevron-down", 'aria-label': "Show requested reviewers") %></span>
+              </div>
+            </div>
+          </summary>
+          <% reviews.each do |review| %>
+            <div class="merge-status-item review-item color-bg-default js-details-container Details">
+              <div class="review-status-item d-flex flex-self-baseline ml-6 <% if responsive? %>flex-items-center<% end %>">
+                <%= linked_avatar_for(review.user, 20, img_class: "avatar", link_class: "mr-2") %>
+
+                <div class="color-fg-muted css-truncate css-truncate-target <% if responsive? %>flex-auto pr-3<% else %>mr-3<% end %>">
+                  <strong class="text-emphasized">
+                    <%= review.user.display_login %>
+                  </strong>
+                  requested changes
+
+                  <% unless view.same_pull?(review) %>
+                    in
+                    <a href="<%= pull_request_path(review.pull_request) %>#<%= comment_dom_id(review) %>">
+                      #<%= review.pull_request.number %></a>
+                    <a href="<%= GitHub.help_url %>/articles/about-required-reviews-for-pull-requests/" aria-label="Pull request #<%= review.pull_request.number %> has the same commits as the current pull request – read more about this situation in this help document." target="_blank" rel="noopener noreferrer">
+                      <%= primer_octicon(:question, classes: "Link--secondary") %></a>
+                  <% end %>
+                </div>
+                <details class="status-actions dropdown details-reset details-overlay d-inline-block">
+                  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, vertical_align: :middle) do %>
+                    <%= primer_octicon(:"kebab-horizontal", color: :muted, "aria-label": "Show options") %>
+                  <% end %>
+                  <details-menu class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default position-absolute f5" style="width: 145px; right: -12px;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                    <% if view.can_be_quick_approved?(review) %>
+                      <%= form_tag quick_approve_review_path(review.pull_request.repository.owner, review.pull_request.repository, review.pull_request), class: "d-inline-flex" do %>
+                        <button type="submit" class="dropdown-item btn-link" data-disable-with="Approving…" role="menuitem">
+                          Approve changes
+                        </button>
+                      <% end %>
+                    <% else %>
+                      <a class="dropdown-item btn-link" role="menuitem" href="<%= view.review_href(review) %>">See review</a>
+                    <% end %>
+
+                    <% if view.same_pull?(review) && review.can_be_dismissed_by?(current_user) %>
+                      <button type="button" class="dropdown-item btn-link js-details-target" role="menuitem" aria-expanded="false">
+                        Dismiss review
+                      </button>
+                    <% end %>
+
+                    <% if issue_permissions(pull.issue, current_user, :review_re_requestable) && !pull.review_requested_for?(review.user) %>
+                      <% hydro_tracking = hydro_click_tracking_attributes("rerequest_review.mergebox", { pull_request_id: review.pull_request.id, subject_id: review.user.id, actor_id: current_user.id, action: "REREQUESTED" }) %>
+                      <%= form_tag re_request_review_path(current_repository.owner, current_repository, review.pull_request), class: "d-inline-flex" do %>
+                        <input type="hidden" name="reviewer_id" value="<%= review.user_id %>">
+                        <%= button_tag(type: "submit", class: "btn-link dropdown-item", data: hydro_tracking, role: "menuitem") do %>
+                          Re-request review
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  </details-menu>
+                </details>
+              </div>
+
+              <% if review.can_be_dismissed_by?(current_user) %>
+                <%= form_tag dismiss_review_path(review.pull_request.repository.owner, review.pull_request.repository, review.pull_request, review.id), :class => "dismiss-review-form", :method => "put" do %>
+                  <div class="TableObject">
+                    <div class="TableObject-item TableObject-item--primary">
+                      <% label = "Why are you dismissing #{review.user == current_user ? "your" : "#{review.user}’s"} review?" %>
+                      <input type="text" name="message" class="form-control input-block" autocomplete="off" placeholder="<%= label%>" aria-label="<%= label %>" autofocus required>
+                    </div>
+                    <div class="TableObject-item">
+                      <%= render Primer::ButtonComponent.new(ml: 2, classes: "js-details-target", "aria-label": "Cancel dismissing review", "aria-expanded": "false") do %>Cancel<% end %>
+                      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, "data-confirm": "Are you sure you want to dismiss this review?", "aria-expanded": "false", "data-disable-invalid": "", "data-disable-with": "Dismissing…", disabled: true) do %>
+                        Dismiss review
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+        </details>
+      <% end %>
+    <% end %>
+
+    <% if pull.review_requests.pending.reviewers.any? %>
+      <details class="details-reset Details-element js-merge-review-section">
+        <summary class="merge-status-item">
+          <div class="review-status-item d-flex flex-justify-between">
+            <div class="merge-status-icon">
+              <%= primer_octicon(:person, mx: :auto, display: :block, color: :muted) %>
+            </div>
+            <strong class="text-emphasized flex-auto flex-self-start">
+              <%= pluralize(pull.review_requests.pending.reviewers.count, "pending reviewer") %>
+            </strong>
+            <div class="flex-self-end flex-shrink-0">
+              <span class="Details-content--open color-fg-subtle"><%= primer_octicon(:"chevron-up", 'aria-label': "Hide") %></span>
+              <span class="Details-content--closed"><%= primer_octicon(:"chevron-down", 'aria-label': "Show") %></span>
+            </div>
+          </div>
+        </summary>
+        <% pull.review_requests.pending.reviewers.each do |reviewer| %>
+          <div class="merge-status-item review-item color-bg-default js-details-container Details">
+            <div class="review-status-item ml-6 <% if responsive? %>d-flex flex-items-center<% end %>">
+              <% if reviewer.is_a?(Team) && current_repository.in_organization? %>
+                <a href="<%= team_path(reviewer) %>" class="mr-2">
+                  <%= avatar_for reviewer, 20, :class => "avatar" %>
+                </a>
+              <% elsif reviewer.is_a?(User) %>
+                <%= linked_avatar_for reviewer, 20, img_class: "avatar", link_class: "mr-2" %>
+              <% end %>
+
+              <span class="color-fg-muted css-truncate css-truncate-target <% if responsive? %>flex-auto pr-3<% end %>">
+                <strong class="text-emphasized">
+                  <%= reviewer.is_a?(User) ? reviewer.display_login : reviewer %>
+                </strong>
+
+                was requested for review
+
+                <% if view.review_required_as_code_owner?(reviewer) %>
+                  as a code owner
+                <% end %>
+              </span>
+
+              <% if view.review_required_as_code_owner?(reviewer) %>
+                <span class="reviewers-status-icon tooltipped tooltipped-e float-right d-block text-center ml-2"><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                  <%= primer_octicon(:"shield-lock", color: :muted, 'aria-label': "Code owner review required") %>
+                </span>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </details>
+    <% end %>
+  </div>
+<% end %>

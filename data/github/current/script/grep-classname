@@ -1,0 +1,165 @@
+#!/usr/bin/env node
+const {spawn} = require('child_process')
+const split = require('split')
+
+const args = process.argv.slice(2)
+const search = args.shift()
+
+if (!search) {
+  console.warn(`You must provide a search pattern.`)
+  process.exit(1)
+}
+
+const markdown = args.includes('--markdown') || args.includes('-m')
+// FIXME: get this from git??
+const blobRef = 'master'
+
+const path = args.shift() || 'app'
+const grepOptions = [
+  '-r', // search recursively
+  '-n', // print the line number
+  '-o' // only print the matched part
+]
+
+const columns = ['match', 'context', 'path', 'line']
+const formats = markdown
+  ? markdownFormats()
+  : {}
+const delimiter = markdown ? ' | ' : '\t'
+const rowPrefix = markdown ? '| ' : ''
+const rowSuffix = markdown ? ' |' : ''
+
+const quote = `['"]`
+const notQuote = `[^'"]`
+const colon = ':'
+
+// wrap in parens so we can get the matching substr with:
+// str.match(searchRegExp)[1]
+// this should also throw an error if the expression isn't valid?
+const searchRegExp = new RegExp(`(${search})`)
+
+// this finds the pattern within a single- or double-quoted string, e.g.
+// "foo"
+// "foo bar baz"
+// "bar foo #{baz}"
+const quotedPattern = `${quote}(${notQuote}* )?${search}( ${notQuote}*)?${quote}`
+
+// this finds it within ERB delimiters, e.g.
+// <% if foo? %>foo<% end %>
+// <% if foo? %> foo bar baz<% end %>
+// <% if foo? %>baz foo<% end %>
+const bracketedPattern = `%>([^<]* )?${search}( [^<]*)?<%`
+
+// anything that looks classy followed by the quoted value,
+// *or*
+// the bracketed pattern, which sometimes occurs on its own line
+const classPattern = `([_a-z]*class.+${quotedPattern}|${bracketedPattern})`
+
+// Remember the previous match for lines that match the same pattern multiple
+// times, e.g. if the search pattern is "text-[-a-z]+" and the input line is:
+//
+// class="color-fg-muted text-bold"
+//
+// then we should output a result for both "text-gray" and "text-bold"
+let previousMatch
+
+grep(classPattern)
+  .then(rows => {
+    // if we're streaming multiple grep() results, we need to de-dupe lines by
+    // their contents so that they don't show up multiple times in the output
+    const seen = new Set()
+    printRow(columns.join(delimiter))
+    if (markdown) {
+      const divider = '-'.repeat(columns.length).split('').map(() => ':---').join(delimiter)
+      printRow(divider)
+    }
+    for (const row of rows) {
+      if (!seen.has(row.source)) {
+        row.match = getExactMatch(row.context)
+        printRow(columns.map(col => {
+          const val = row[col]
+          const fmt = formats[col]
+          return typeof fmt === 'function'
+            ? fmt(val, row)
+            : val
+        }).join(delimiter))
+        seen.add(row.source)
+      }
+    }
+  })
+  .catch(error => {
+    console.error(error)
+    process.exit(1)
+  })
+
+function printRow(...strings) {
+  console.log([rowPrefix, ...strings, rowSuffix].join(''))
+}
+
+function grep(pattern) {
+  return new Promise((resolve, reject) => {
+    const rows = []
+    spawn('egrep', [...grepOptions, pattern, path])
+      .stdout.pipe(split(parseLine))
+      .on('error', reject)
+      .on('data', row => {
+        if (row) rows.push(row)
+      })
+      .on('end', () => resolve(rows))
+  })
+}
+
+function getExactMatch(str) {
+  const match = str.match(searchRegExp)
+  return match ? match[1] : undefined
+}
+
+function parseLine(str) {
+  if (!str) {
+    return
+  } else {
+    const parts = str.split(colon)
+    if (parts.length < 3) {
+      const context = str.replace(/^\s+/, '')
+      const {path, line} = previousMatch
+      return {
+        path,
+        line,
+        source: `${path}:${line}:${context}`,
+        context
+      }
+    }
+    const [path, line] = parts
+    const context = str.substr([path, line, ''].join(colon).length)
+    previousMatch = {
+      path,
+      line,
+      source: str,
+      context
+    }
+    return previousMatch
+  }
+}
+
+function markdownFormats() {
+  return {
+    match: code,
+    context: str => code(nobr(str)),
+    path: (path, {line}) => link(path, `https://github.com/github/github/blob/${blobRef}/${path}#L${line}`)
+  }
+
+  function nobr(str) {
+    // XXX in lieu of <nobr>, we replace spaces and hyphens with their
+    // non-breaking equivalents (as unicode, because HTML character entities
+    // are escaped in backticks)
+    return str.replace(/ /g, ' ').replace(/-/g, '‑')
+  }
+
+  function code(str) {
+    return `\`${str}\``
+  }
+
+  function link(text, href) {
+    return `[${text}](${href})`
+  }
+}

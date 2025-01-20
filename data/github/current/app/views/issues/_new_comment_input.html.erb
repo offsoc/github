@@ -1,0 +1,138 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%-
+  is_pull_request = issue.pull_request?
+  comments_path = is_pull_request ?
+    "/#{current_repository.name_with_display_owner}/pull/#{issue.number}/comment?sticky=true" :
+    issue_comments_path(current_repository.owner.display_login, current_repository.name)
+
+  tips = PullRequests::TipView.new(issue) if is_pull_request && !local_assigns[:hide_pro_tips]
+  comment_form_shown = false
+
+  viewer_can_comment, viewer_can_push, viewer_can_interact = Promise.all([
+    with_async_database_error_fallback(
+      issue.async_can_comment?(current_user),
+      fallback: false),
+    with_async_database_error_fallback(
+      current_repository.async_pushable_by?(current_user),
+      fallback: false),
+    with_async_database_error_fallback(
+      ::User::InteractionAbility.async_interaction_allowed?(user: current_user, repository: current_repository),
+      fallback: false,
+    ),
+  ]).sync
+
+  # I need to be able to use the preview_comment_form_component header_id in the new_comment_form
+  preview_comment_form_component = Comments::PreviewableCommentFormComponent.new(
+    textarea_id: "new_comment_field",
+    placeholder: "Add your comment here...",
+    required: true,
+    current_repository: current_repository,
+    subject: is_pull_request ? issue.pull_request : issue,
+    allows_suggested_changes: allows_suggested_changes,
+    slash_commands_enabled: slash_commands_enabled?,
+    slash_commands_surface: is_pull_request ? SlashCommands::PULL_REQUEST_COMMENT_SURFACE : SlashCommands::ISSUE_COMMENT_SURFACE,
+    use_fixed_width_font: current_user.use_fixed_width_font?,
+    copilot_summary_enabled: is_pull_request,
+    copilot_text_suggestions_enabled: is_pull_request && user_feature_enabled?(:ghost_pilot_pr_autocomplete_comments),
+  )
+%>
+<div class="<%= class_names(
+    "timeline-comment-wrapper timeline-new-comment js-comment-container js-targetable-element ml-0 pl-0 ml-md-6 pl-md-3",
+    "locked-conversation": !viewer_can_comment,
+  ) %>" id="issuecomment-new">
+  <div class="d-none d-md-block">
+  <%= timeline_comment_avatar_for(user: current_user) %>
+  </div>
+  <% if viewer_can_interact %>
+    <div>
+      <%= form_tag comments_path,
+          id: "new_comment_form",
+          aria: { labelledby: preview_comment_form_component.header_id },
+          :autocomplete => "off",
+          :class => 'js-new-comment-form js-needs-timeline-marker-header' do %>
+        <%= spamurai_form_signals %>
+        <input type="hidden" name="issue" value="<%= issue.number %>">
+        <% if emu_contribution_blocked?(current_repository) %>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+            <%= emu_contribute_block_warning %>
+          <% end %>
+        <% elsif issue.over_comment_limit? %>
+          <% track_render_partial("comments/frozen_comment_form") do %>
+            <%= render "comments/frozen_comment_form" %>
+          <% end %>
+        <% elsif current_user.must_verify_email? %>
+          <% track_render_partial("comments/no_verified_email_message") do %>
+            <%= render "comments/no_verified_email_message" %>
+          <% end %>
+        <% elsif current_repository.archived? %>
+          <% track_render_partial("comments/archived_repository_comment_form") do %>
+            <%= render "comments/archived_repository_comment_form" %>
+          <% end %>
+        <% elsif current_repository.locked_on_migration? %>
+          <% track_render_partial("comments/migrating_repository_comment_form") do %>
+            <%= render "comments/migrating_repository_comment_form" %>
+          <% end %>
+        <% elsif issue.locked? && !viewer_can_push %>
+          <% track_render_partial("comments/locked_comment_form") do %>
+            <%= render "comments/locked_comment_form", reason: issue.active_lock_reason %>
+          <% end %>
+        <% elsif blocked_from_commenting?(issue) %>
+          <%
+            code_of_conduct_url = with_database_error_fallback do
+              current_repository.code_of_conduct.url
+            end
+          %>
+          <% track_render_partial("comments/blocked_from_commenting") do %>
+            <%= render Comments::BlockedFromCommentingComponent.new(
+              repo_owner: current_repository.owner,
+              code_of_conduct_url: code_of_conduct_url,
+            ) %>
+          <% end %>
+        <% else %>
+          <% comment_form_shown = true %>
+          <fieldset class="min-width-0">
+            <% track_render_partial("issues/new_comment_field") do %>
+              <%# I need the id generated from this component to be used in the form above, so rendering a variable after using the id %>
+              <%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+              <%= render(preview_comment_form_component) do |c| %>
+                <% c.with_header %>
+              <% end %>
+            <% end %>
+          </fieldset>
+          <div class="mt-2">
+            <% track_render_partial("issues/form_actions") do %>
+              <%= render "issues/form_actions", issue: issue %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+    <% if comment_form_shown %>
+      <% track_render_partial("repositories/contributor_footer") do %>
+        <%= render Repositories::ContributorFooterComponent.new(repo: current_repository) %>
+      <% end %>
+    <% end %>
+
+    <% if !is_pull_request && GitHub.sponsors_enabled? %>
+      <include-fragment src="<%= repo_sponsors_nudge_path(current_repository.owner, current_repository) %>"></include-fragment>
+    <% end %>
+  <% else %>
+    <% track_render_partial("issues/interaction_ban_copy") do %>
+      <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+        <%= with_database_error_fallback(fallback: "Interaction unavailable") do
+              interaction_ban_copy(current_repository, current_user)
+            end
+        %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if tips %>
+    <div class="protip">
+      <%= primer_octicon(:'light-bulb', color: :muted) %>
+      <strong>ProTip!</strong>
+      <%= tips.selected_tip %>
+    </div>
+  <% end %>
+</div>

@@ -1,0 +1,144 @@
+#!/bin/bash
+#/ Usage: ghe-repl-stop-all [-hv]
+#/
+#/ Stop replication of all major datastores for all replica nodes.
+#/
+#/ OPTIONS:
+#/   -h | --help       Show this message.
+#/   -v | --verbose    Run with verbose output.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+prompt_less=
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,yes --options vhy -- "$@") || {
+  usage
+  exit 2
+}
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      GHE_REPL_VERBOSE=true
+      shift
+      ;;
+    -y|--yes)
+      prompt_less=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+. /usr/local/share/enterprise/ghe-actions-lib
+
+capture_error_on_failure() {
+  ec=$?
+
+  if [ $ec -ne 0 ]; then
+    echo "An error occurred trying to stop replication on all replica nodes."
+
+    replica_ips=$(ghe-cluster-nodes --replica)
+    for replica in $replica_ips; do
+      ip=$(get_node_ip "$replica")
+      if ssh_cmd "$ip" -- "test -f /tmp/repl-running"; then
+        echo "Replica node $replica ($ip) did not stop properly. Reporting ghe-repl-status for $replica..."
+        ssh_cmd "$ip" -- "ghe-repl-status"
+      else
+        echo "Replica node $replica ($ip) stopped successfully."
+      fi
+    done
+  fi
+
+  exit $ec
+}
+
+# Whether to enable set -x debug output.
+: "${GHE_REPL_VERBOSE:=false}"
+export GHE_REPL_VERBOSE
+
+# Turn on shell debugging
+$GHE_REPL_VERBOSE && set -x
+
+echo "Warning: You are about to stop replication on all active replica nodes."
+echo
+if [ -z "$prompt_less" ]; then
+  read -p "Proceed with ghe-repl-stop-all? [y/N] "
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+# Precheck - must be run on HA setup
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Replication is not set up correctly. Please run 'ghe-repl-setup' first."
+  exit 1
+fi
+
+# Precheck - must be run on primary node
+ensure_primary
+
+replicas=$(ghe-cluster-nodes --replica)
+replicas_to_stop=0
+
+# Precheck - ensure at least one replica running
+for replica in $replicas; do
+  if [ "$(ghe-config cluster."$replica".replica|| true)" = "enabled" ]; then
+    replicas_to_stop=$((replicas_to_stop + 1))
+  fi
+done
+
+if [ $replicas_to_stop -eq 0 ]; then
+  echo "No replica nodes are enabled. Nothing to do."
+  exit 0
+fi
+
+# Precheck - no replicas are in starting state
+if ! ghe-cluster-each --replica -- "[ ! -f /tmp/repl-starting ]"; then 
+  echo "At least one replica node is still starting. Please wait until all are fully started."
+  exit 1
+fi
+
+trap capture_error_on_failure EXIT
+
+echo "Disabling each replica node in configuration..."
+for replica in $replicas; do
+  ghe-config "cluster.$replica.replica" disabled
+done
+
+echo "Stopping elasticsearch replication on each replica node..."
+ghe-cluster-each --replica -- "/usr/local/share/enterprise/ghe-repl-stop-es"
+
+echo "Updating configuration..."
+ghe-config-apply
+
+sudo rm -f /etc/cron.hourly/ghe-repl-sync-git-hooks
+
+# Actions cleanup - Still need review on this section
+if actions-ever-enabled; then
+  LOGFILE=/data/user/common/ghe-config.log
+  # Primary MSSQL is stopped at the very end of the process because it is needed at various phases
+  if ! ghe-config --true app.actions.enabled; then
+    echo "Stopping primary MSSQL container, Actions is disabled" >> $LOGFILE
+    . /usr/local/share/enterprise/ghe-mssql-lib && stop-mssql-global >> $LOGFILE || true
+  fi
+fi

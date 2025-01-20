@@ -1,0 +1,53 @@
+#!/bin/bash
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+read -r -a ruby_version <<< "$(bin/safe-ruby -v)"
+vendor_gems="vendor/gems/${ruby_version[1]}"
+bundler_standalone_setup="/workspaces/github/${vendor_gems}/bundler/setup.rb"
+bootstrap_required=0
+
+# If this bunder file does not exist, server config will likely bootstrap the
+# environment before starting the server.
+if ! [ -f $bundler_standalone_setup ]; then
+  bootstrap_required=1
+fi
+
+start_time="$(date  +%s)"
+
+attempts=0
+response_code=0
+while [ $attempts -lt 200 ] && [ $response_code -ne 200 ]; do
+  # If the parent process has exited, we're no longer attempting to start the
+  # server, so we no longer need to collect metrics.
+  if [ -z "$(ps -p $PPID --no-headers)" ]; then
+    # Send a generic exit code in the event, since we don't know whether the
+    # script exited due to user input or a failure.
+    bin/safe-ruby $SCRIPT_DIR/report-script-server-start-event $start_time $bootstrap_required 1
+    exit 0
+  fi
+  sleep 1
+  attempts=$((attempts+1))
+  response_code=$(curl -s -o /dev/null -w ''%{http_code}'' http://github.localhost/status )
+
+  if [ $response_code -eq 200 ]; then
+    # try again, just to be sure
+    sleep 0.05
+    response_code=$(curl -s -o /dev/null -w ''%{http_code}'' http://github.localhost/status )
+  fi
+done
+
+end_time="$(date  +%s)"
+elapsed_seconds=$((end_time - start_time))
+
+if [ $response_code -ne 200 ]; then
+  bin/safe-ruby $SCRIPT_DIR/report-script-server-start-event $start_time $bootstrap_required 1
+  exit 0
+fi
+
+# send metrics on script/server usage to datadog -- only if the server has
+# successfully started up
+bin/safe-ruby $SCRIPT_DIR/report-script-server-start-time $elapsed_seconds
+
+# send event to hydro with details about the startup event
+bin/safe-ruby $SCRIPT_DIR/report-script-server-start-event $start_time $bootstrap_required
+

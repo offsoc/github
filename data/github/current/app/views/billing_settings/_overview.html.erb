@@ -1,0 +1,115 @@
+<%# `view` is BillingSettings::OverviewView %>
+
+<%= render(Billing::Settings::UsageLoaderComponent.new(
+  source: view.account.organization? ? billing_settings_org_usage_notification_path(organization_id: view.account.display_login) : settings_user_billing_usage_notification_path)) %>
+
+<%= render Billing::Settings::DepletedPrepaidCreditsBannerComponent.new(
+  is_enabled: view.show_depleted_prepaid_credits_banner?,
+  is_invoiced: target.invoiced?,
+  has_dismissed_notice: current_user.dismissed_organization_notice?("depleted_prepaid_credits", target),
+  dismissal_path: dismiss_org_notice_path(target, input: { organizationId: target.id, notice: "depleted_prepaid_credits" })) %>
+
+<%= render Billing::Settings::InvalidAzureSubscriptionBannerComponent.new(
+  is_enabled: target.customer&.invalid_azure_subscription_detected?,
+  is_invoiced: target.invoiced?,
+  has_dismissed_notice: current_user.dismissed_organization_notice?("invalid_azure_subscription", target),
+  dismissal_path: dismiss_org_notice_path(target, input: { organizationId: target.id, notice: "invalid_azure_subscription" })) %>
+
+<%= render Billing::Settings::InvoicedOrganizationSetSpendingLimitBannerComponent.new(
+  organization: target,
+  dismissed_notice: current_user.dismissed_organization_notice?("invoiced_customer_set_spending_limit", target)) %>
+
+<%= render Billing::Settings::ManualDunningBannerComponent.new(account: view.account) %>
+
+<%= render Billing::Settings::LfsBillingBannerComponent.new(account: view.account) %>
+
+<div class="mb-3 border-bottom">
+  <%= render(Primer::Beta::Heading.new(tag: :h2, mb: 2, font_weight: :normal)) { "Billing summary" } %>
+</div>
+
+<% if view.account.invoiced? %>
+  <div class="d-flex pb-4 gutter-condensed" <%= test_selector("invoice-overview") %>>
+    <div class="col-5">
+      <div class="color-bg-subtle color-shadow-small p-3 rounded" style="height: 100%">
+        <label class="text-normal text-small color-fg-muted text-uppercase">Spending on metered services</label>
+        <%= render(Billing::Settings::UsageLoaderComponent.new(
+            loading_text: "Loading spending data...",
+            source: billing_settings_org_metered_usage_path(organization_id: view.account.display_login),
+            classes: "mt-2")) %>
+      </div>
+    </div>
+
+    <% if view.show_invoice_overview? %>
+      <%= render Billing::Settings::InvoiceOverviewComponent.new(
+        invoice_balance_dollars: view.invoice.balance,
+        invoice_due_on: view.invoice.due_on,
+        past_invoices_href: settings_org_billing_tab_path(organization_id: view.account.display_login, tab: "past_invoices"),
+        pay_invoice_href: pay_invoice_path(view.account.display_login, view.invoice.number&.downcase),
+        show_invoice_href: target_show_invoice_path(view.account, view.invoice.number&.downcase)) %>
+    <% end %>
+    </div>
+
+    <% if view.show_prepaid_credits? %>
+      <div class="d-inline-flex flex-items-center f5 color-fg-muted pt-2 mb-4 ml-1" <%= test_selector "prepaid-credit-balance" %>>
+        <span class="d-inline-flex circle color-bg-success flex-items-center flex-justify-center mr-2" style="height: 32px; width: 32px"><%= render Primer::Beta::Octicon.new(icon: "credit-card", color: :success) %></span>
+        <span>You have <span class="text-bold"><%= number_to_currency view.prepaid_credit_balance %></span> remaining in prepaid credits. <%= link_to "Contact sales", ent_contact_url, class: "Link--inTextBlock" %> to increase balance.</span>
+      </div>
+    <% end %>
+<% elsif view.display_manual_payment_account_overview_header? %>
+  <%= render Billing::Settings::ManualPaymentAccountOverviewHeaderComponent.new(
+    account_balance_in_cents: view.account.balance_in_cents,
+    account_has_trade_restrictions: view.account.has_any_trade_restrictions?,
+    bill_pay_href: view.manual_bill_pay_path,
+    payment_due_date: view.manual_payment_due_date,
+    manage_spending_limit_href: view.spending_limit_path,
+    payment_information_href: view.payment_information_path,
+    payment_history_href: view.account_payment_history_path,
+    update_payment_method_href: view.update_payment_method_path,
+    payment_method_needs_update: view.payment_needs_update?,
+    redeem_coupon_href: find_coupon_path
+  ) do |c| %>
+    <% c.with_switch_plan_duration_link_tag do %>
+      <% if href = view.change_duration_path && !view.account.pending_cycle_changing_duration? %>
+        <%
+          link_cta = "#{view.account.plan_duration.downcase == 'year' ? "Switch" : "Switch & save" } to #{view.alternative_plan_duration}ly billing"
+          analytics = analytics_click_attributes(
+            category: "#{analytics_account_prefix(view.account)} #{link_cta}",
+            action: "click to upgrade",
+            label: "ref_cta:#{link_cta};ref_loc:billing"
+          )
+        %>
+        <%= link_to link_cta, view.change_duration_path, class: "f6", data: analytics %>
+      <% elsif !view.account.org_free_plan? || !view.account.personal_plan? %>
+        <%= link_to "#{view.account.plan_duration.downcase == 'year' ? "Switch" : "Switch & save" } to #{view.alternative_plan_duration}ly billing", org_plans_path(view.account), class: "f6" %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% else %>
+  <%= render "billing_settings/overview_header", view: view %>
+<% end %>
+
+<%= render Billing::Settings::ZuoraMaintenanceBannerComponent.new(
+  zuora_maintenance_enabled: view.zuora_maintenance_enabled?,
+) %>
+<% if view.zuora_maintenance_enabled? %>
+  <br>
+<% end %>
+
+<% if selected_tab.nil? || selected_tab == "subscriptions" %>
+  <%= render "billing_settings/subscriptions",
+    view: view,
+    target: target,
+    sponsors_tab: sponsors_tab %>
+<% elsif selected_tab == "payment_information" %>
+  <%= render "billing_settings/payment_information",
+    view: view,
+    target: target %>
+<% elsif selected_tab == "spending_limit" %>
+  <%= render "billing_settings/spending_limit", view: view %>
+<% elsif selected_tab == "past_invoices" %>
+  <%= render Billing::Settings::PastInvoicesComponent.new(
+    target: target,
+    invoices: view.invoices,
+    invoice_path_builder: target.business? ? method(:show_invoice_enterprise_path) : method(:show_invoice_org_path),
+  ) %>
+<% end %>

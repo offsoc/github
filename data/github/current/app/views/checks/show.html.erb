@@ -1,0 +1,269 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  pull = local_assigns[:pull]
+  selected_check_suite = nil # No longer used, should be cleaned up
+  check_suite_focus = selected_check_suite.present? || params[:check_suite_focus] == "true"
+  workflows_loading = local_assigns.fetch(:workflows_loading, false)
+  show_check_run_logs = local_assigns.fetch(:show_check_run_logs, false)
+  highlight_tab = local_assigns.fetch(:highlight_tab, :repo_actions)
+  # PRs for repos with GitHub apps (e.g., Dependabot) only have *EMPTY* CheckSuite without any child CheckRuns/Steps.
+  # 60-second threshold "age-check" on the commit's created_at timestamp prevents incorrectly displaying this msg
+  show_waiting_for_checks_info = check_suites.any? && commit && ((Time.now - commit.created_at) < 60)
+%>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "checks" %>
+<% end %>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle :actions %>
+<% end %>
+
+<% if pull # we are rendering from the pull requests page %>
+  <%
+    attribution = pull.user ? " by #{pull.user.display_login}" : ""
+    page_info title: "#{pull.title}#{attribution} · Pull Request ##{pull.number} · #{current_repository.name_with_display_owner}",
+      selected_link: :checks,
+      class: "full-width full-width-p-0",
+      description: pull.body_text,
+      skip_pjax_container: true,
+      full_height: false,
+      footer: true,
+      breadcrumb_object: pull,
+      richweb: {
+        title: "#{pull.title}#{attribution} · Pull Request ##{pull.number} · #{current_repository.name_with_display_owner}",
+        url: "#{GitHub.url}#{issue_permalink_path(pull.issue)}",
+        description: truncate(pull.body_text, length: 240),
+        image: avatar_url_for(pull.safe_user, 400)
+      }
+  %>
+
+<% else # this is coming from the commit view (detached from a pull)%>
+  <%
+    title = "#{commit.short_message} · #{current_repository.name_with_display_owner}@#{commit.abbreviated_oid} "
+    breadcrumb = if selected_check_suite.present?
+      "#{selected_check_suite.workflow_name} ##{selected_check_suite.workflow_run.run_number}"
+    elsif selected_check_run.present? && selected_check_run.check_suite.present? && selected_check_run.check_suite.workflow_run.present?
+      "#{selected_check_run.check_suite.workflow_name} ##{selected_check_run.check_suite.workflow_run.run_number}"
+    end
+    page_info \
+      title: title,
+      breadcrumb: breadcrumb,
+      container_xl: true,
+      selected_link: highlight_tab,
+      class: "full-width full-width-p-0",
+      skip_pjax_container: true,
+      full_height: true,
+      full_height_scrollable: true,
+      footer: false,
+      responsive: false
+  %>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+  <div class="clearfix d-flex flex-column flex-auto d-flex flex-column width-full">
+
+    <% if pull # we are rendering from the pull requests page %>
+      <div class="px-4 mt-4">
+        <%= render :partial => 'comments/title', :locals => {
+          :pull         => pull,
+          :comment      => pull.issue,
+          :issue        => pull.issue,
+          :title        => pull.title.blank? ? "Untitled" : pull.title
+        } %>
+      </div>
+
+      <%= render :partial => "pull_requests/lazy_tabs", :locals => { :pull => pull } %>
+    <% end %>
+
+    <% if blankslate %>
+      <%= render :partial => "checks/checks_blankslate" %>
+    <% elsif pull&.closed? && !pull.merged? && pull.changed_commits.count == 0 %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          <%= pull.head_label %>% was force-pushed and no longer has any new commits.
+        <% end %>
+
+        <% c.with_description do %>
+          Pushing new commits will allow the pull request to be re-opened.
+        <% end %>
+      <% end %>
+    <% elsif pull&.corrupt? %>
+      <%= render Primer::BlankslateComponent.new(
+        icon: "alert",
+        title: "Sorry, commit information is not available for this pull request.",
+      ) do %>
+        <p>The repository may be missing relevant data. Please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> for more information.</p>
+      <% end %>
+    <% elsif commit.nil? %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          No checks information is available
+        <% end %>
+
+        <% c.with_description do %>
+          There are no new commits between the base branch and the head branch.
+        <% end %>
+      <% end %>
+    <% else %>
+      <div class="d-flex flex-column width-full flex-auto">
+        <div class="pt-1" <% unless pull %>style="height: 70px;"<% end %>>
+          <div class="pr-toolbar mx-0 d-flex flex-items-center <% unless pull %>mt-0<% end %>">
+            <%= render "checks/checks_toolbar", view: create_view_model(Checks::ChecksToolbarView, { check_suites: check_suites, selected_check_suite: selected_check_suite, commit: commit, selected_check_run: selected_check_run, pull: pull, commit_check_runs: commit_check_runs }) %>
+          </div>
+          <% if pull %>
+            <div class="gh-header">
+              <div class="js-sticky js-sticky-offset-scroll top-0 gh-header-sticky px-4">
+                <div class="sticky-content">
+                  <div class="d-flex flex-items-center flex-justify-between mt-2">
+                    <div class="d-flex flex-row flex-items-center min-width-0">
+                      <div class="mr-2 flex-shrink-0">
+                        <%= render PullRequests::StateComponent.new(state: pull.state.to_sym, is_draft: pull.draft?) %>
+                      </div>
+                      <div class="min-width-0">
+                        <%= render partial: "comments/title/sticky_title", locals: { title: pull.title.blank? ? "Untitled" : pull.title, number: pull.number } %>
+
+                        <div class="meta color-fg-muted css-truncate css-truncate-target d-block" style="max-width: none">
+                          <span class="d-inline-block color-fg-muted text-bold css-truncate css-truncate-target" style="max-width: 500px;">
+                            <%= commit.short_message_text %>
+                          </span>
+                          <%= render partial: "checks/checks_range_menu", locals: {
+                            pull: pull,
+                            selected_commit: commit,
+                            selected_check_run: selected_check_run,
+                          }
+                          %>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="gh-header-shadow color-shadow-small js-notification-shelf-offset-top"></div>
+            </div>
+          <% end %>
+        </div>
+
+        <% if feature_enabled_globally_or_for_current_user?(:checks_experimental_layout_component) %>
+          <%= render Primer::Alpha::Layout.new(gutter: :none, width: :full) do |c| %>
+            <% c.with_sidebar(border: :top, width: :wide) do %>
+              <% check_suites.each do |check_suite| %>
+                <%=
+                  render Checks::SidebarItemComponent.new(
+                    check_suite: check_suite,
+                    selected_check_run: selected_check_run,
+                    check_suite_selected: check_suite == selected_check_suite,
+                    check_suite_focus: check_suite_focus,
+                    pull: pull,
+                    current_repository: current_repository,
+                    repo_writable: current_user_can_push?
+                  )
+                %>
+              <% end %>
+            <% end %>
+
+            <% c.with_main(width: :full) do %>
+              <% if selected_check_run %>
+                <% checks_name = selected_check_run.check_suite.actions_app? ? "jobs" : "checks" %>
+                <section aria-label="Check run summary" data-hpc class="js-selected-check-run d-flex flex-auto min-width-0 <% if selected_check_run.is_actions_check_run? %>CheckRunContainer<% else %>border-top border-left<% end %>" <%= color_mode_attributes_checks_logs if selected_check_run.is_actions_check_run? %>>
+                  <div class="flex-auto min-width-0">
+                    <%= render :partial => "checks/checks_summary", locals: {
+                      check_suite: selected_check_run.check_suite,
+                      check_run: selected_check_run,
+                      commit: commit,
+                      pull: pull,
+                      annotation_details: annotation_details,
+                      commit_check_runs: commit_check_runs,
+                      show_check_run_logs: show_check_run_logs
+                    } %>
+                  </div>
+                </section>
+                <section aria-label="Check run summary" data-hpc class="js-zen-blankslate d-flex flex-auto CheckRunContainer" hidden <%= color_mode_attributes_checks_logs %>>
+                  <div class="d-flex flex-items-stretch flex-auto">
+                    <%= render partial: "checks/zen_blankslate", locals: { message: "Re-running #{checks_name}...", loading: true } %>
+                  </div>
+                </section>
+              <% else %>
+                <section aria-label="Check run summary" data-hpc class="d-flex flex-auto CheckRunContainer" <%= color_mode_attributes_checks_logs %>>
+                  <div class="d-flex flex-items-stretch flex-auto">
+                    <% if commit_check_runs.any? %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "info", message: "Select a check to view from the sidebar", loading: false } %>
+                    <% elsif workflows_loading %>
+                      <%= render partial: "checks/zen_blankslate", locals: { message: "Starting your workflow runs...", loading: true } %>
+                    <% elsif check_suites.all? { |check_suite| check_suite.completed? } %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "check-circle", message: "Workflow runs completed with no jobs", loading: false } %>
+                    <% elsif show_waiting_for_checks_info %>
+                      <%= render partial: "checks/zen_blankslate", locals: { message: "Waiting for checks information...", loading: true } %>
+                    <% else %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "git-commit", message: "There are no checks for this commit", loading: false } %>
+                    <% end %>
+                  </div>
+                </section>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <div class="d-flex flex-items-stretch flex-auto">
+            <div class="d-flex flex-items-stretch flex-auto overflow-x-auto">
+              <aside class="d-flex flex-column color-bg-subtle border-top overflow-y-auto js-check-suites-sidebar" aria-label="Check suites" style="min-width:340px; max-width:340px;">
+                <% check_suites.each do |check_suite| %>
+                  <%=
+                    render Checks::SidebarItemComponent.new(
+                      check_suite: check_suite,
+                      selected_check_run: selected_check_run,
+                      check_suite_selected: check_suite == selected_check_suite,
+                      check_suite_focus: check_suite_focus,
+                      pull: pull,
+                      current_repository: current_repository,
+                      repo_writable: current_user_can_push?
+                    )
+                  %>
+                <% end %>
+              </aside>
+
+              <% if selected_check_run %>
+                <% checks_name = selected_check_run.check_suite.actions_app? ? "jobs" : "checks" %>
+                <section aria-label="Check run summary" data-hpc class="js-selected-check-run d-flex flex-auto min-width-0 <% if selected_check_run.is_actions_check_run? %>CheckRunContainer<% else %>border-top border-left<% end %>" <%= color_mode_attributes_checks_logs if selected_check_run.is_actions_check_run? %>>
+                  <div class="flex-auto min-width-0">
+                    <%= render :partial => "checks/checks_summary", locals: {
+                      check_suite: selected_check_run.check_suite,
+                      check_run: selected_check_run,
+                      commit: commit,
+                      pull: pull,
+                      annotation_details: annotation_details,
+                      commit_check_runs: commit_check_runs,
+                      show_check_run_logs: show_check_run_logs
+                    } %>
+                  </div>
+                </section>
+                <section aria-label="Check run summary" data-hpc class="js-zen-blankslate d-flex flex-auto CheckRunContainer" hidden <%= color_mode_attributes_checks_logs %>>
+                  <div class="d-flex flex-items-stretch flex-auto">
+                    <%= render partial: "checks/zen_blankslate", locals: { message: "Re-running #{checks_name}...", loading: true } %>
+                  </div>
+                </section>
+              <% else %>
+                <section aria-label="Check run summary" data-hpc class="d-flex flex-auto CheckRunContainer" <%= color_mode_attributes_checks_logs %>>
+                  <div class="d-flex flex-items-stretch flex-auto">
+                    <% if commit_check_runs.any? %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "info", message: "Select a check to view from the sidebar", loading: false } %>
+                    <% elsif workflows_loading %>
+                      <%= render partial: "checks/zen_blankslate", locals: { message: "Starting your workflow runs...", loading: true } %>
+                    <% elsif check_suites.all? { |check_suite| check_suite.completed? } %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "check-circle", message: "Workflow runs completed with no jobs", loading: false } %>
+                    <% elsif show_waiting_for_checks_info %>
+                      <%= render partial: "checks/zen_blankslate", locals: { message: "Waiting for checks information...", loading: true } %>
+                    <% else %>
+                      <%= render partial: "checks/zen_blankslate", locals: { icon: "git-commit", message: "There are no checks for this commit", loading: false } %>
+                    <% end %>
+                  </div>
+                </section>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
+      </div>
+    <% end %>
+  </div>
+<% end %>

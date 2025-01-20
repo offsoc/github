@@ -1,0 +1,163 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Script that will stash any file not owned by the provided codeowner.
+
+require "optparse"
+
+def get_codeowners(filename)
+  `bin/codeowners #{filename}`.split(/\n/)
+end
+
+def get_codeowners_files(**kwargs)
+  arguments = []
+
+  # root dir argument
+  arguments << "-r #{kwargs[:root]}" if kwargs[:root]
+
+  # list owners
+  if kwargs[:owners] && kwargs[:owners].any?
+    arguments << "-o"
+    arguments << kwargs[:owners].join(" ")
+  end
+
+  # Get the files owned by the given owners
+  files = `bin/codeowners-ls-files #{arguments.join(" ")}`.split(/\n/)
+  files.map do |line|
+    line.split(/\t/).map do |owners|
+      owners.split(/,\s/)
+    end
+  end
+end
+
+def group_modified_files_by_codeowner(modified_files)
+  modified_files.each_with_object({}) do |file, groups|
+    codeowners = get_codeowners(file)
+    codeowners.each do |codeowner|
+      if groups[codeowner]
+        groups[codeowner] << file
+      else
+        groups[codeowner] = [file]
+      end
+    end
+  end
+end
+
+def find_first_codeowners(filenames)
+  codeowners = []
+  filenames.find(proc { "" }) do |filename|
+    codeowners = get_codeowners(filename)
+    codeowners.any?
+  end
+  codeowners
+end
+
+# Option parsing
+
+stash_files = []
+options = {
+  "exclude-co-owned": false,
+  "codeowner-type": nil,
+  "root": nil
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "#{'-' * 80}\nScript that will stash any file not owned by a single codeowner.\n#{'-' * 80}\nUsage: bin/codeowners-stash-changes [options] @github/team-reviewers\n\n"
+
+  # Docs: https://thehub.github.com/engineering/products-and-services/dotcom/serviceowners/serviceowners-usage/#bincodeowners-stash-changes
+  # Please update these if adding/changing/removing options!
+
+  opts.on(
+      "-c", "--codeowner-type TYPE",
+      "How to find the codeowner we'll be using to search for files modified.",
+      "\tType options:",
+      "\t  first – First file modified get the owner.",
+      "\t  random – Get a random file in modified files and find the owner.",
+    ) do |owner_type|
+    options["codeowner-type"] = owner_type
+  end
+
+  opts.on("-h", "--help", "Prints this message") do
+    puts opts
+    exit
+  end
+
+  opts.on(
+    "-r", "--root DIR",
+    "Limit results to specific subdirectories."
+  ) do |dir|
+    options["root"] = dir
+  end
+
+  opts.on(
+    "-x", "--exclude-co-owned",
+    "Exclude any files that are owned by more than one team"
+  ) do
+    options["exclude-co-owned"] = true
+  end
+
+  opts.on(
+    "-la", "--list-all",
+    "List all files by codeowners"
+  ) do
+    options["list-all"] = true
+  end
+end
+parser.parse!
+
+# Get all currently modified files.
+modified_files = `git status --porcelain`.lines
+                  .select { |line| line.start_with?(/^\s?M\s+/) }
+                  .map { |line| line.strip.sub(/^M\s+/, "") }
+
+if modified_files.empty?
+  warn "No files have been modified."
+  exit 1
+end
+
+if options["list-all"]
+  warn "Finding codeowners for all modified files. This can take a while."
+  grouped_files = group_modified_files_by_codeowner(modified_files)
+  formatted_groups = grouped_files.map do |codeowner, files|
+    "#{codeowner} (#{files.count}):\n  #{files.join("\n  ")}"
+  end
+  warn formatted_groups.join("\n")
+  exit
+end
+
+case options["codeowner-type"]
+when "first"
+  owners = find_first_codeowners(modified_files)
+  if owners.empty?
+    warn "None of the modified files have codeowners."
+    exit 1
+  end
+when "random"
+  # Get a random file
+  owners = get_codeowners(modified_files.sample)
+else
+  owners = Set.new(ARGV)
+end
+
+if owners.any?
+  warn "Stashing files that don't belong to #{owners.join(' ')}."
+  owners_files = get_codeowners_files(owners: owners, root: options[:root])
+else
+  warn "You must specify at least one team or use the --codeowner-type option.\n\n"
+  warn parser
+  exit 1
+end
+
+if options["exclude-co-owned"]
+  owners_files.reject! { |_file, owners| owners.length > 1 }
+end
+
+# Add files the given owners don't own to the stash array
+stash_files = modified_files - owners_files.map(&:first).flatten
+
+if stash_files.empty?
+  warn "No files to be stashed."
+  exit 1
+else
+  `git stash -- #{stash_files.join(" ")}`
+end

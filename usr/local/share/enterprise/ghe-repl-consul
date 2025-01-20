@@ -1,0 +1,115 @@
+#!/bin/bash
+check_consul_replication(){
+  local errors=0
+
+  # check consul on primary
+  check_consul_status primary || {
+    echo "CRITICAL: Primary Consul Status Error"
+    errors=$((errors+1))
+  }
+  # check consul on replica
+  check_consul_status replica || {
+    echo "CRITICAL: Replica Consul Status Error"
+    errors=$((errors+1))
+  }
+  # check consul-replicate on primary
+  check_consul_replicate_status primary || {
+    echo "CRITICAL: Primary Consul Replicate Status Error"
+    errors=$((errors+1))
+  }
+  # check consul-replicate on replica
+  check_consul_replicate_status replica || {
+    echo "CRITICAL: Replica Consul Replicate Status Error"
+    errors=$((errors+1))
+  }
+  # check consul kv synchronization
+  check_consul_kv_replication || {
+    echo "WARNING: Consul KV Replication Error"
+    errors=$((errors+1))
+  }
+  return "$errors"
+}
+
+check_consul_status(){
+  local errors=0
+  node="$1"
+  [ -n "$node" ] || return 1
+  case $node in
+    primary)
+    primary_ssh systemctl is-active --quiet consul > /dev/null || {
+      echo "Primary Consul Is not Active"
+      errors=$((errors+1))
+      return
+    }
+
+    # note: this is executed over ssh, and so we need to escape the single and double quotes
+    #       in order to preserve the syntax on the ssh target box
+    if [ "$(primary_ssh consul-cli status leader  --template \'{{ eq . \"\" }}\')" = "true" ]; then
+      echo "Primary Consul Lost Leadership"
+      errors=$((errors+1))
+    fi
+    ;;
+
+    replica)
+    systemctl is-active --quiet consul  || {
+      echo "Replica Consul Is not Active"
+      errors=$((errors+1))
+      return
+    }
+    if [ "$(consul-cli status leader  --template '{{ eq . "" }}')" = "true" ]; then
+      echo "Replica Consul Lost Leadership"
+      errors=$((errors+1))
+    fi
+    ;;
+  esac
+  return "$errors"
+}
+
+check_consul_replicate_status(){
+  local errors=0
+  node="$1"
+  [ -n "$node" ] || return 1
+  case $node in
+    primary)
+    ! primary_ssh systemctl is-active --quiet consul-replicate || {
+      echo "Primary Consul-Replicate Is Active"
+      errors=$((errors+1))
+    }
+    ;;
+    replica)
+    systemctl is-active --quiet consul-replicate  || {
+      echo "Replica Consul-Replicate Is not Active"
+      errors=$((errors+1))
+    }
+    ;;
+  esac
+  return "$errors"
+}
+
+check_consul_kv_replication(){
+
+  local errors=0
+  local uuid
+  uuid=$(cat /data/user/common/uuid)
+  local key="ghe/consul_test_key_${uuid}"
+  local value="consul-test-value-check_consul_kv_replication"
+
+  primary_ssh consul-cli kv write "$key" "$value" || {
+    echo "Error Inserting KV to Primary"
+    errors=$((errors+1))
+  }
+  for ((try=0; try<10; try++)); do
+    replicated_value=$(consul-cli kv read "$key")
+    if [ "$value" == "$replicated_value" ] ; then
+      break
+    else
+      if [ "$try" == 9 ] ; then
+        errors=$((errors+1))
+      fi
+      sleep 1
+    fi
+  done
+
+  return "$errors"
+
+}

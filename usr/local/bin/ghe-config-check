@@ -1,0 +1,773 @@
+#!/bin/bash
+#/ Usage: ghe-config-check [-h] [--no-stdin-check] [--error-checks-only] [--warning-checks-only] [file] [json] [match_keys]
+#/
+#/ Validate GitHub Enterprise configuration file and individual options.
+#/ Checks can be authored here as errors (to fail fast before proceeding with ghe-single-config-apply) or warnings (to run in parallel with ghe-single-config-apply).
+#/ However, in the scope of the current script, all errors and warnings are actually treated the same.
+#/ It's up to the caller (ghe-single-config-apply) to supply `--error-checks-only` or `--warning-checks-only`
+#/ to scope to just error checks or warning checks, and react appropriately by blocking or proceeding.
+#/ If you don't supply either `--error-checks-only` or `--warning-checks-only` then we'll run all the checks by default.
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/   --no-stdin-check        Under normal circumstances and for tests, this script can accept stdin, but will hang in a ssh session; this option can be used to avoid that explicitly.
+#/   --error-checks-only     Only run the high severity checks that need to be treated as blocking errors.
+#/   --warning-checks-only   Only run the low severity checks that can be treated as warnings.
+#/   file            The full path to the github.conf file to check.
+#/   json            Output data as json.
+#/   match_keys      The configuration keys to check.
+#/
+#/ EXAMPLES:
+#/  Check the default /data/user/common/github.conf file:
+#/    $ ghe-config-check
+#/
+#/  Check the default /data/user/common/github.conf with JSON output:
+#/    $ ghe-config-check json
+#/
+#/  Check all github-ssl options in the default /data/user/common/github.conf file:
+#/    $ ghe-config-check github-ssl.
+#/
+#/  Check all github-ssl options in the default /data/user/common/github.conf with JSON output:
+#/    $ ghe-config-check json github-ssl.
+#/
+#/  Check the file at /tmp/github.conf
+#/    $ ghe-config-check /tmp/github.conf
+#/
+#/  Check the file at /tmp/github.conf with JSON output
+#/    $ ghe-config-check /tmp/github.conf json
+#/
+#/  Check all github-ssl options in /tmp/github.conf
+#/    $ ghe-config-check /tmp/github.conf github-ssl.
+#/
+#/  Check all github-ssl options in /tmp/github.conf with JSON output
+#/    $ ghe-config-check /tmp/github.conf json github-ssl.
+#/
+set -e
+
+if [ -f "$1" ]; then
+  GHE_CONFIG="$1"
+fi
+export GHE_CONFIG=${GHE_CONFIG:-/data/user/common/github.conf}
+
+json_output=''
+match_keys=''
+do_error_checks='true'
+do_warning_checks='true'
+no_stdin_check=''
+error_count=0
+
+# Magic constant for parallel_limiter; in testing, numbers >6 were *slower*
+parallelization=${parallelization:-6}
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+fi
+
+if [ "$1" = "--no-stdin-check" ]; then
+  no_stdin_check='true'
+  shift 1
+fi
+
+if [ "$1" = "--error-checks-only" ]; then
+  do_warning_checks=''
+  shift 1
+fi
+
+if [ "$1" = "--warning-checks-only" ]; then
+  do_error_checks=''
+  shift 1
+fi
+
+if [ -z "$GHE_MANAGE" ]; then
+  [ "$(whoami)" = "root" ] || [ -n "$GHE_CONFIG" -a -w "$GHE_CONFIG" ] || {
+    exec sudo -u root "$0" "$@"
+    exit 1
+  }
+
+  if [ "$1" = "json" ]; then
+    json_output='1'
+  elif [ ! -f "$1" ]; then
+    match_keys=$1
+  fi
+
+  if [ -z "$no_stdin_check" ]; then
+    if [ -p /dev/stdin ]; then
+      tmp_ghe_config=$(mktemp /tmp/ghe-config-check.XXXXXXXX.conf)
+      echo "Expecting stdin to provide configuration now..."
+      cat > "$tmp_ghe_config"
+      export GHE_CONFIG="$tmp_ghe_config"
+    fi
+  fi
+
+  if [ "$2" = "json" ]; then
+    json_output='1'
+    if [ -n "$3" ]; then
+      match_keys=$3
+    fi
+  elif [ -n "$2" ]; then
+    match_keys=$2
+  fi
+else
+  export GHE_MANAGE=1
+  export GHE_LICENSE_FILE=$GHE_LICENSE_FILE
+  json_output='1'
+  if [ -n "$2" ]; then
+    match_keys=$2
+  fi
+fi
+
+validate() {
+  n=0
+  validator=''
+  validator_args=''
+  for k in "$@"; do
+    n=$(expr $n + 1)
+    if [ "$n" == 1 ]; then
+      validator=$k
+      if echo $validator | grep -q '='; then
+        validator_args=$(echo $validator | cut -d = -f 2)
+        validator=$(echo $validator | cut -d = -f 1)
+      fi
+      continue
+    fi
+    if [ -n "$match_keys" ]; then
+      echo $k | grep -q "$match_keys" || continue
+    fi
+
+    parallel_limiter "$parallelization"
+    (
+      validate_option "$validator" "$k" "$validator_args" || {
+        add_error "$validator" "$k" "$(ghe-config "$k")"
+        exit 1
+      }
+    ) &
+  done
+}
+
+# Validates all available keys except for the ones specified in $2, $3, ...
+validate-all() {
+  # List all the keys available in the config file
+  # Makes the following assumptions:
+  #   * Keys can only contain alphanumeric characters plus '.' and '-'.
+  #   * Keys contain at least one dot (i.e. they're under some section).
+  keys=$(ghe-config -l | egrep '^([a-zA-Z0-9.-])+[[:space:]]*=' | grep '\.' | cut -d = -f 1)
+  n=0
+  validator=''
+  validator_args=''
+  for k in "$@"; do
+    n=$(expr $n + 1)
+    if [ "$n" == 1 ]; then
+      validator=$k
+      if echo $validator | grep -q '='; then
+        validator_args=$(echo $validator | cut -d = -f 2)
+        validator=$(echo $validator | cut -d = -f 1)
+      fi
+      continue
+    fi
+    keys=$(echo $keys | tr ' ' "\n" | grep -v "$k" || true)
+  done
+  for k in $keys; do
+    echo $k | grep -q "\." || continue
+    if [ -n "$match_keys" ]; then
+      echo $k | grep -q "$match_keys" || continue
+    fi
+    v=$(ghe-config "$k") || continue
+    [ -z "$v" ] && continue
+
+    parallel_limiter "$parallelization"
+    (
+      validate_option "$validator" "$k" "$validator_args" "$v" || {
+        add_error "$validator" "$k" "$v"
+        exit 1
+      }
+    ) &
+  done
+}
+
+json_arg() {
+  sep=","
+  if [ -n "$3" ]; then
+    sep=""
+  fi
+  echo "  \"$1\": $2$sep"
+}
+
+add_error() {
+  error_count=$(expr $error_count + 1)
+  value=$(echo "$3" | ruby -e "puts \$stdin.read.chomp.inspect")
+  if [ -n "$json_output" ]; then
+    json_arg "$2" "[\"$1\", $value]"
+  else
+    echo "Error: Validation $1 failed for $2 (\"$3\")"
+  fi
+}
+
+validate_option() {
+  val=${4:-$(ghe-config "$2" || true)}
+  if $1 "$val" "$3"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is-bool() {
+  [ "$1" = "true" -o "$1" = "false" -o "$1" = "" ] || return 1
+}
+
+is-int() {
+  echo "$1" | grep -E -q "^[0-9]+$" || return 1
+}
+
+is-int-or-blank() {
+  [ -z "${1}" ] && return
+  is-int "$1"
+}
+
+int-is-in-range() {
+  is-int "$1" || return 1
+  min="$(echo "$2" | cut -d'-' -f1)"
+  max="$(echo "$2" | cut -d'-' -f2)"
+  if [[ (-n "$min" && "$1" -lt "$min") || (-n "$max" && "$1" -gt "$max") ]]; then
+    return 1
+  fi
+}
+
+
+is-value-or-blank() {
+  [ -z "${1}" ] && return
+  is-value "$1" "$2"
+}
+
+is-value() {
+  for v in $(echo $2 | tr "," "\n"); do
+    [ "$v" == "$1" ] && return
+  done
+  return 1
+}
+
+is-not-blank() {
+  [ -z "${1}" ] && return 1
+  return 0
+}
+
+is-http-uri() {
+  if ruby -ruri -e "begin; exit 1 unless %w(http https).include?(URI(ARGV[0]).scheme); rescue URI::InvalidURIError; exit 1; end" "$1"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is-uri() {
+  if ruby -ruri -e "begin; exit 1 if URI(ARGV[0]).scheme.nil? || URI(ARGV[0]).host.nil?; rescue URI::InvalidURIError; exit 1; end" "$1"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is-http-uri-or-blank() {
+  [ -z "${1}" ] && return
+  is-http-uri "$1"
+}
+
+is-uri-or-blank() {
+  [ -z "${1}" ] && return
+  is-uri "$1"
+}
+
+is-valid-key() {
+  if echo "$1" | openssl pkey -text 2>&1 | grep -q "unable to load"; then
+    rm -f $tmpfile
+    return 1
+  fi
+  rm -f $tmpfile
+  return 0
+}
+
+is-valid-cert() {
+  if echo "$1" | openssl x509 -text 2>&1 | grep -q "unable to load"; then
+    return 1
+  fi
+  return 0
+}
+
+is-matching-cert-key() {
+  cert=$1
+  key=$(ghe-config "$2" || true)
+
+  is-valid-key "$key" || return 0
+  is-valid-cert "$cert" || return 0
+
+  cert_check=$(echo "$cert" | openssl x509 -noout -modulus | openssl md5)
+  key_check=$(echo "$key" | openssl rsa -noout -modulus | openssl md5)
+
+  if [ "$cert_check" == "$key_check" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is-valid-tls-mode() {
+  [ -z "${1}" ] && return
+
+  # Should match values from tls_config_options in vm_files/usr/local/share/enterprise/lib/configapply/view_helpers.rb
+  valid_tls_modes="tlsv12,tlsv13"
+
+  for value in $(echo $1 | tr ";" "\n"); do
+    is-value "$value" "$valid_tls_modes" || return 1
+  done
+}
+
+is-format() {
+  ruby -e "ARGV[0] =~ %r{$2}i ? exit(0) : exit(1)" "$1" || return 1
+}
+
+is-format-grep() {
+  echo "$1" | grep -P -e "$2"
+}
+
+is-valid-email() {
+  is-format "$1" "\\A.+@.+\..+\\Z"
+}
+
+# http://stackoverflow.com/questions/3183444/check-for-valid-link-url
+is-valid-url() {
+  ruby -e "require 'uri'; ARGV[0] =~ URI::regexp ? exit(0) : exit(1)" "$1" || return 1
+}
+
+is-valid-characterset() {
+  is-format "$1" "\\A[a-zA-Z0-9.@:\\/\\-_?&=]*\\z"
+}
+
+# csv with optional spaces too
+is-csv-valid-characterset() {
+  if echo $1 | grep -q ','; then
+    for v in $(echo $1 | sed 's/,\s*/\s/g'); do
+      is-valid-characterset $v
+    done
+  else
+    is-valid-characterset $1
+  fi
+}
+
+is-hostname() {
+  is-format "$1" "\\A(\.?([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])\\z"
+}
+
+is-ip() {
+  is-format "$1" "\\A(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\z"
+}
+
+is-hostname-or-ip() {
+  is-hostname "$1" || is-ip "$1" || return 1
+}
+
+is-valid-tld-list(){
+  IFS=',' read -ra TLD <<< $1
+  for i in "${TLD[@]}"; do
+    # tld should be formed with alphanumeric characters but not pure numerics https://stackoverflow.com/a/53875771
+    is-format "$i" "\\A(?=.*[a-z])([a-z0-9]+)\\z" || return 1
+  done
+}
+
+is-csv-hostname-or-ip-or-blank() {
+  [ -z "${1}" ] && return
+  if echo $1 | grep -q ','; then
+    for v in $(echo $1 | sed 's/,/\n/g'); do
+      is-hostname-or-ip $v
+    done
+  else
+    is-hostname-or-ip $1
+  fi
+}
+
+is-hostname-not-ip() {
+  is-ip "$1" && return 1
+  is-hostname "$1"
+}
+
+is-hostname-not-localhost() {
+  if [ "$1" = "localhost" ]; then
+    return 1
+  fi
+  return 0
+}
+
+is-valid-ldap-server() {
+  config="host:$(ghe-config "ldap.host") port:$(ghe-config "ldap.port") ssl:$([ "$(ghe-config ldap.method)" = 'SSL' ] && echo 'true' || echo 'false')"
+  /usr/local/share/enterprise/ghe-ldap-connection-verify connection-check $config || return 1
+}
+
+actions-storage-provider-auth-type() {
+ auth_type="credential"
+  if ghe-config --present secrets.actions.storage.auth-type; then
+    auth_type=$(ghe-config secrets.actions.storage.auth-type)
+  fi
+  echo $auth_type
+}
+
+is-valid-blob-storage() {
+  storage_provider=$(ghe-config secrets.actions.storage.blob-provider)
+  auth_type=$(actions-storage-provider-auth-type)
+
+  if [[ "$storage_provider" == "azure" ]]; then
+    if [[ "$auth_type" == "oidc" ]]; then
+      connection_string="TenantId=$(ghe-config secrets.actions.storage.azure-oidc.tenant-id);ClientId=$(ghe-config secrets.actions.storage.azure-oidc.client-id);StorageAccount=$(ghe-config secrets.actions.storage.azure-oidc.storage-account);EndpointSuffix=$(ghe-config secrets.actions.storage.azure-oidc.endpoint-suffix);EnterpriseIdentifier=$(ghe-config core.github-hostname);"
+    else
+      connection_string=$(ghe-config secrets.actions.storage.azure.connection-string)
+    fi
+
+  elif [[ "$storage_provider" == "s3" || "$storage_provider" == "minio" ]]; then
+    storage_provider="s3"  # minio is the same as s3
+    if [[ "$auth_type" == "oidc" ]]; then
+      connection_string="BucketName=$(ghe-config secrets.actions.storage.s3-oidc.bucket-name);RoleARN=$(ghe-config secrets.actions.storage.s3-oidc.role-arn);Region=$(ghe-config secrets.actions.storage.s3-oidc.region);EnterpriseIdentifier=$(ghe-config core.github-hostname);"
+        if [[ -n "$(ghe-config secrets.actions.storage.s3-oidc.sts-endpoint)" ]]; then
+          connection_string="${connection_string}STSEndpoint=$(ghe-config secrets.actions.storage.s3-oidc.sts-endpoint);"
+        fi
+    else
+      connection_string="BucketName=$(ghe-config secrets.actions.storage.s3.bucket-name);ServiceUrl=$(ghe-config secrets.actions.storage.s3.service-url);AccessKeyId=$(ghe-config secrets.actions.storage.s3.access-key-id);SecretAccessKey=$(ghe-config secrets.actions.storage.s3.access-secret)"
+    fi
+
+    if [[ "$(ghe-config secrets.actions.storage.s3.force-path-style)" == "true" ]]; then
+      connection_string="${connection_string};ForcePathStyle=true"
+    fi
+  elif [[ "$storage_provider" == "gcs" ]]; then
+    if [[ "$auth_type" == "oidc" ]]; then
+      connection_string="BucketName=$(ghe-config secrets.actions.storage.gcs-oidc.bucket-name);ServiceUrl=$(ghe-config secrets.actions.storage.gcs-oidc.service-url);WorkloadProviderId=$(ghe-config secrets.actions.storage.gcs-oidc.workload-id);ServiceAccount=$(ghe-config secrets.actions.storage.gcs-oidc.service-acc);EnterpriseIdentifier=$(ghe-config core.github-hostname);"
+    else
+      connection_string="BucketName=$(ghe-config secrets.actions.storage.gcs.bucket-name);ServiceUrl=$(ghe-config secrets.actions.storage.gcs.service-url);AccessKeyId=$(ghe-config secrets.actions.storage.gcs.access-key-id);SecretAccessKey=$(ghe-config secrets.actions.storage.gcs.access-secret)"
+    fi
+
+    if [[ "$(ghe-config secrets.actions.storage.gcs.force-path-style)" == "true" ]]; then
+      connection_string="${connection_string};ForcePathStyle=true"
+    fi
+  else
+    echo "Invalid storage provider: $storage_provider"
+    exit 1
+  fi
+
+  if [[ "$auth_type" == "credential" ]]; then
+    ghe-check-blob-connection -s actions -p "$storage_provider" -cs "$connection_string" -at "$auth_type" || return 1
+  else
+    echo "Skipping Actions Blob storage validation. For OIDC based authentication it requires token service"
+  fi
+}
+
+is-valid-packages-blob-store() {
+  /usr/local/bin/ghe-packages-configure || return 1
+}
+
+is-valid-container-enabled-state() {
+  /usr/local/bin/ghe-container-ecosystem-check || return 1
+}
+
+error() {
+  return 1
+}
+
+clear-config() {
+  for k in "$@"; do
+    ghe-config "$k" ""
+  done
+}
+
+# Ensure only N sub-processes are running at once; wait until it simmers down
+parallel_limiter() {
+  while [ "$(jobs -p | wc -l)" -gt "$1" ]; do
+    sleep 0.05
+  done
+}
+
+# Wait for child processes and account for their exit status.
+# `add_error` does increment `error_count`, but the incremented value
+# is lost when called in a subshell.
+wait_for_children() {
+  local retval
+  while true; do
+    wait -n || {
+      # Child process returns 1 if its validation failed
+      retval=$?
+
+      # No children left
+      if [ "$retval" = 127 ]; then break; fi
+
+      # retval will be 1 if there was an error, 0 otherwise
+      error_count=$(( error_count + retval ))
+    }
+  done
+}
+
+if [ -n "$json_output" ]; then
+  echo "{"
+fi
+
+if [ -n "$do_error_checks" ]; then
+
+  # actions blob storage validation
+  if [ "$(ghe-config app.actions.enabled)" = "true" ]; then
+    if ghe-config --blank app.actions.storage-checks-disabled; then
+      validate "is-not-blank" secrets.actions.storage.blob-provider
+      blob_output=$(validate_option "is-valid-blob-storage" secrets.actions.storage.blob-provider) || {
+        add_error "is-valid-blob-storage" "actions.storage" "$blob_output"
+      }
+    fi
+  fi
+
+  # packages blob store validation
+  if ghe-config --true app.packages.enabled; then
+    packages_output="$(validate_option 'is-valid-packages-blob-store')" || {
+      add_error 'is-valid-packages-blob-store' 'packages.storage' "$packages_output"
+    }
+  fi
+
+ # packages container enabled check
+  if ghe-config --true app.packages.enabled; then
+    container_eco_output="$(validate_option 'is-valid-container-enabled-state')" || {
+      add_error 'is-valid-container-enabled-state' 'container.enabled' "$container_eco_output"
+    }
+  fi
+
+  # check hostname is not localhost - added to error_checks since setting hostname to "localhost" causes github_unicorn service to fail
+  validate "is-hostname-not-localhost" core.github-hostname
+
+fi # End if-block for do_error_checks
+
+if [ -n "$do_warning_checks" ]; then
+
+# core validation
+validate-all "is-valid-characterset" license.support-key \
+                   license.expire-at customer.name customer.uuid \
+                   customer.secret-key-data customer.public-key-data \
+                   customer.email smtp.support-address smtp.noreply-address \
+                   smtp.support-address-type \
+                   smtp.enforce-tls-auth \
+                   smtp.password snmp.community core.auth-mode \
+                   core.identicons-host github-ssl.acme.ca-conf github-ssl.acme.domain-conf \
+                   github-ssl.cert github-ssl.key github-ssl.tls-mode \
+                   saml.certificate collectd.password ldap.base \
+                   ldap.profile-uid ldap.profile-name ldap.profile-key ldap.profile-gpg-key\
+                   ldap.profile-mail ldap.bind-dn ldap.user-groups \
+                   ldap.admin-group ldap.password assets.enabled \
+                   github-ssl.enabled smtp.enabled \
+                   snmp.enabled syslog.cert syslog.enabled syslog.server pages.enabled collectd.enabled \
+                   core.private-mode core.subdomain-isolation \
+                   core.signup-enabled core.expire-sessions \
+                   core.configuration-id core.configuration-run-count \
+                   collectd.port ldap.port ldap.user-sync-interval \
+                   ldap.team-sync-interval smtp.port \
+                   ldap.virtual-attribute-enabled ldap.recursive-group-search \
+                   core.http-proxy core.http-noproxy core.public-pages snmp.users \
+                   mysql.external.enabled mysql.external.username mysql.external.port \
+                   mysql.external.address mssql.backup.cadence \
+                   app.github.rate-limiting-exempt-users noproxy.exception-tld-list
+
+validate "is-bool" core.private-mode core.subdomain-isolation \
+                   core.signup-enabled core.expire-sessions \
+                   core.public-pages loadbalancer.proxy-protocol \
+                   loadbalancer.http-forward
+
+validate "is-int"  core.configuration-id core.configuration-run-count
+validate "int-is-in-range=1-2147483647" manage-auth.login-attempt-lockout-minutes manage-auth.login-attempt-limit
+validate "is-int-or-blank"  graphite.gunicorn-workers
+
+validate "is-csv-valid-characterset"  syslog.server mssql.backup.cadence
+
+validate "is-value=default,ldap,saml,cas,github_oauth" core.auth-mode
+validate "is-value=local,dotcom" core.identicons-host
+
+if [ "$(ghe-config core.subdomain-isolation)" = "true" ]; then
+  validate "is-hostname-not-ip" core.github-hostname
+else
+  validate "is-hostname-or-ip" core.github-hostname
+fi
+
+if [ "$(ghe-config core.private-mode)" = "false" -a "$(ghe-config core.public-pages)" = "false" ]; then
+  add_error "pages-must-be-public-when-not-in-private-mode" core.public-pages
+fi
+
+# BYODB validation
+if [ "$(ghe-config mysql.external.enabled)" = "true" ] || [ "$match_keys" = "mysql.external." ]; then
+  validate "is-not-blank" mysql.external.address \
+                          mysql.external.port \
+                          mysql.external.username
+
+  validate "is-hostname-or-ip" mysql.external.address
+  validate "int-is-in-range=1-65535" mysql.external.port
+fi
+
+# proxy validation
+validate "is-uri-or-blank" core.http-proxy
+validate "is-csv-hostname-or-ip-or-blank" core.http-noproxy
+
+# cas validation
+if [ "$(ghe-config core.auth-mode)" = "cas" -o "$match_keys" = "cas." ]; then
+  validate "is-not-blank" cas.url
+fi
+
+# collectd validation
+if [ "$(ghe-config collectd.enabled)" = "true" ]; then
+  validate "is-not-blank" collectd.server
+  validate "int-is-in-range=1-65535" collectd.port
+  validate "is-value-or-blank=Sign,Encrypt" collectd.encryption
+fi
+
+# github-oauth validation
+if [ "$(ghe-config core.auth-mode)" = "github_oauth" -o "$match_keys" = "github-oauth." ]; then
+  validate "is-not-blank" github-oauth.client-id
+  validate "is-not-blank" github-oauth.client-secret
+  validate "is-not-blank" github-oauth.organization-name
+fi
+
+# github-ssl validation
+validate "is-bool" github-ssl.enabled
+if [ "$(ghe-config github-ssl.enabled)" = "true" ]; then
+  if [ -z "$match_keys" -o "$match_keys" = "github-ssl." ]; then
+    validate "is-not-blank" github-ssl.key github-ssl.cert
+    validate "is-valid-key" github-ssl.key
+    validate "is-valid-cert" github-ssl.cert
+    validate_option "is-matching-cert-key" github-ssl.cert github-ssl.key || {
+      add_error "is-matching-cert-key" "github-ssl.key"
+    }
+    validate "is-valid-tls-mode" github-ssl.tls-mode
+  fi
+fi
+
+# ldap validation
+if [ "$(ghe-config core.auth-mode)" = "ldap" -o "$match_keys" = "ldap." ]; then
+  validate "is-not-blank" ldap.host ldap.profile.uid ldap.base
+  validate "int-is-in-range=1-65535" ldap.port
+  validate "is-value=detect,classic,recursive,active_directory" ldap.search-strategy
+  validate "int-is-in-range=1-24" ldap.user-sync-interval ldap.team-sync-interval
+  validate "is-bool" ldap.virtual-attribute-enabled ldap.recursive-group-search \
+                     ldap.posix-support ldap.user-sync-emails ldap.user-sync-keys \
+                     ldap.sync-enabled ldap.external-auth-token-required \
+                     ldap.verify-certificate
+  ldap_output=$(validate_option "is-valid-ldap-server" ldap.host ldap.port "$(ghe-config ldap.host):$(ghe-config ldap.port)") || {
+    add_error "is-valid-ldap-server" "ldap.connection" "$ldap_output"
+  }
+fi
+
+# license validation
+if [ -z "$match_keys" -o "$match_keys" = "license." ]; then
+  license=$(ghe-license check 2>&1) || {
+    if echo $license | grep -q expired; then
+      add_error "is-expired" license.expire-at
+    elif echo $license | grep -q Invalid; then
+      add_error "is-valid" license.file
+    else
+      add_error "is-validation-successful" license.file "$license"
+    fi
+  }
+fi
+
+# ntp validation
+validate "is-not-blank" ntp.primary-server
+
+# pages validation
+validate "is-bool" pages.enabled
+validate "is-not-blank" pages.enabled
+
+# saml validation
+if [ "$(ghe-config core.auth-mode)" = "saml" -o "$match_keys" = "saml." ]; then
+  validate "is-not-blank" saml.sso-url saml.certificate
+  validate "is-valid-cert" saml.certificate
+fi
+
+# smtp validation
+if [ "$(ghe-config smtp.enabled)" = "true" ]; then
+  validate "is-not-blank" smtp.address smtp.noreply-address
+  validate "is-valid-email" smtp.noreply-address
+  validate "is-value-or-blank=plain,login,cram_md5" smtp.authentication
+  validate "int-is-in-range=1-65535" smtp.port
+fi
+
+# support-address validation
+if [ "$(ghe-config smtp.support-address-type)" = "url" ]; then
+  validate "is-valid-url" smtp.support-address
+# not checking for email to support backwards compatability when there was
+# no support-address-type
+elif [ -n "$(ghe-config smtp.support-address)" ]; then
+  validate "is-valid-email" smtp.support-address
+fi
+
+# snmp validation
+if [ "$(ghe-config snmp.enabled)" = "true" ]; then
+  validate "is-format=\\A[^\\s]*\\Z" snmp.community
+fi
+
+# syslog validation
+validate "is-bool" syslog.enabled
+if [ "$(ghe-config syslog.enabled)" = "true" ]; then
+  validate "is-not-blank" syslog.server
+  validate "is-value=udp,tcp,udp6,tcp6" syslog.protocol-name
+  validate "is-bool" syslog.tls-enabled
+  if [ "$(ghe-config syslog.tls-enabled)" = "true" ]; then
+    validate "is-not-blank" syslog.cert
+    validate "is-valid-cert" syslog.cert
+  fi
+fi
+# rate-limiting validation
+validate "is-bool" api-rate-limiting.enabled
+if [ "$(ghe-config api-rate-limiting.enabled)" = "true" ]; then
+  validate "int-is-in-range=1-2147483647" api-rate-limiting.unauthenticated-rate-limit \
+                      api-rate-limiting.default-rate-limit \
+                      api-rate-limiting.search-unauthenticated-rate-limit \
+                      api-rate-limiting.search-default-rate-limit \
+                      api-rate-limiting.lfs-unauthenticated-rate-limit \
+                      api-rate-limiting.lfs-default-rate-limit \
+                      api-rate-limiting.graphql-default-rate-limit
+  validate "int-is-in-range=0-2147483647" api-rate-limiting.graphql-unauthenticated-rate-limit
+fi
+validate "is-bool" abuse-rate-limiting.enabled
+if [ "$(ghe-config abuse-rate-limiting.enabled)" = "true" ]; then
+  validate "int-is-in-range=1-2147483647" abuse-rate-limiting.requests-per-minute \
+                    abuse-rate-limiting.cpu-millis-per-minute \
+                    abuse-rate-limiting.search-cpu-millis-per-minute \
+                    abuse-rate-limiting.graphql-cpu-millis-per-minute
+fi
+
+# governor validation
+validate "is-bool" governor.quotas-enabled
+if [ "$(ghe-config governor.quotas-enabled)" = "true" ]; then
+  validate "int-is-in-range=1-2147483647" governor.limit-user governor.limit-network
+fi
+
+# self defined noproxy tld validation
+if [ -n "$(ghe-config noproxy.exception-tld-list)" ]; then
+  validate "is-valid-tld-list" noproxy.exception-tld-list
+fi
+
+# secret-scannig validation
+validate "is-int-or-blank" secret-scanning.backfill-processor-rate
+validate "is-int-or-blank" secret-scanning.backfill-workers-per-queue
+validate "is-int-or-blank" secret-scanning.content-scan-processor-rate
+validate "is-int-or-blank" secret-scanning.content-scan-workers-per-queue
+validate "is-int-or-blank" secret-scanning.incremental-processor-rate
+validate "is-int-or-blank" secret-scanning.incremental-workers-per-queue
+validate "is-int-or-blank" secret-scanning.udp-backfill-workers-per-queue
+validate "is-int-or-blank" secret-scanning.udp-backfill-workers-per-queue
+validate "is-int-or-blank" app.secret-scanning.scans-api-memory-limit-mb
+
+fi # End if-block for do_warning_checks
+
+wait_for_children
+
+if [ -n "$json_output" ]; then
+  json_arg "num_errors" "$error_count" "1"
+fi
+
+if [ "$error_count" -gt 0 ]; then
+  if [ -z "$json_output" ]; then
+    echo "$error_count configuration errors"
+  fi
+fi
+
+if [ -n "$json_output" ]; then
+  echo "}"
+fi
+
+exit $error_count

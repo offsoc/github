@@ -1,0 +1,74 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "serviceowners"
+require "terminal-table"
+
+show_explanation = false
+show_extended_info = false
+output = nil
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/serviceowners [options] <file> [<file>]"
+  # Docs: https://thehub.github.com/engineering/development-and-ops/dotcom/serviceowners/serviceowners-usage/
+  # Please update these if adding/changing/removing options!
+
+  opts.on("-e", "--explain", "Explain how service was determined") do
+    show_explanation = true
+  end
+
+  opts.on("-x", "--extended", "Show more information from the service definition") do
+    output = []
+    show_extended_info = true
+  end
+
+  opts.on("-h", "--help", "Prints this message") do
+    warn opts
+    exit
+  end
+end
+parser.parse!
+
+if ARGV.empty?
+  warn parser
+  exit 1
+end
+
+serviceowners = Serviceowners::Main.new
+
+ARGV.each do |path|
+  rel_path = File.expand_path(path).delete_prefix("#{GitHub::AppEnvironment.root}/")
+
+  prefix = "#{path}: " if ARGV.length > 1
+
+  if (spec = serviceowners.spec_for_path(rel_path))
+    if show_explanation
+      output = "#{spec.service.name} matched by #{spec.pattern.type} #{spec.pattern.text}"
+    elsif show_extended_info
+      row = [path, spec.service.name]
+      if spec.service.teams&.any?
+        row << spec.service.teams.map { |t| "@github/#{t.name}" }.join(", ")
+        row << spec.service.teams.map { |t| "##{t.slack}" }.join(", ")
+      else
+        row.concat(%w[nobody nowhere])
+      end
+      row << "https://catalog.githubapp.com/services/github/#{spec.service.name}"
+
+      output << row
+    else
+      output = spec.service.name
+    end
+
+    puts "#{prefix}#{output}" unless show_extended_info
+  else
+    warn "#{prefix}no service declared!"
+  end
+end
+
+if show_extended_info
+  table = Terminal::Table.new(headings: ["File", "Service", "Team", "Slack Channel", "Catalog"]) do |t|
+    t.rows = output
+  end
+  puts table
+end

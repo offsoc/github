@@ -1,0 +1,117 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "serviceowners"
+
+show_services = false
+show_unknown = false
+quiet = false
+target_service = nil
+target_team = nil
+glob_pattern = nil
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/serviceowners-ls-files [options] <qualified service name or team>"
+  # Docs: https://thehub.github.com/engineering/development-and-ops/dotcom/serviceowners/serviceowners-usage/
+  # Please update these if adding/changing/removing options!
+
+  opts.on(
+    "-q", "--quiet",
+    "Quiet output for scripting, only show paths"
+  ) do
+    quiet = true
+  end
+
+  opts.on(
+    "-s", "--services",
+    "Display list of services that can be ls'd"
+  ) do
+    show_services = true
+  end
+
+  opts.on(
+    "-u", "--show-unknown",
+    "Display files that have no maintainer"
+  ) do
+    show_unknown = true
+  end
+
+  # Helpful for finding specific types of files, e.g., test files.
+  #
+  #   serviceowners-ls-files -q --glob '{test,packages}/**/*_test.rb' github/issues
+  #
+  opts.on(
+    "-g", "--glob=PATTERN",
+    "Display only files matching the given glob pattern"
+  ) do |pattern|
+    glob_pattern = pattern
+  end
+
+  opts.on("-h", "--help", "Prints this message") do
+    puts opts
+    exit
+  end
+end
+parser.parse!
+
+def serviceowners
+  return @serviceowners if defined?(@serviceowners)
+
+  runtime = Serviceowners::RuntimeEnv.new
+  @serviceowners ||= Serviceowners::Main.new(runtime_env: runtime)
+end
+
+if show_services
+  serviceowners.service_mappings.services.each do |service|
+    puts service.name
+  end
+  exit 0
+end
+
+target = ARGV[0]
+if (!target && !show_unknown) || ARGV.length > 1
+  $stderr.puts "Either need a single service/team to list for or --show-unknown!"
+
+  exit 1
+end
+
+if target.present?
+  service_mappings = serviceowners.service_mappings
+
+  if target.start_with?("github/")
+    target = target.delete_prefix("github/").to_sym
+    target_service = target if service_mappings.service_for(target)
+  elsif service_mappings.team_for(target)
+    target_team = target.to_sym
+  else
+    $stderr.puts "#{target} is not in config/service-mappings.yaml"
+
+    exit 1
+  end
+end
+
+target_description = if show_unknown
+  "unknown"
+elsif target_service
+  "part of #{GitHub::ServiceMapping::SERVICE_PREFIX}/#{target_service}"
+elsif target_team
+  "owned by #{target_team}"
+end
+
+puts "Scanning for files that are #{target_description}..." unless quiet
+puts unless quiet
+
+serviceowners.path_data.path_specs.each do |path, spec|
+  if glob_pattern
+    next unless File.fnmatch?(glob_pattern, path, File::FNM_DOTMATCH | File::FNM_EXTGLOB | File::FNM_PATHNAME)
+  end
+
+  if spec.nil?
+    puts path if show_unknown
+  elsif target_service
+    puts path if spec.service.name == target_service
+  elsif target_team
+    puts path if spec.service.maintainers.name == target_team
+  end
+end

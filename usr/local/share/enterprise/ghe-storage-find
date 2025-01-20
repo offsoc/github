@@ -1,0 +1,151 @@
+#!/bin/bash
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+. /etc/github/enterprise-release
+
+if [ -e /run/virt-what/docker ] || [ -e /run/virt-what/podman ]; then
+  echo "cannot use storage in a docker container"
+  exit 1
+fi
+
+# running under LXC
+if [ -L /dev/ghe-loop0 ]; then
+  readlink -f /dev/ghe-loop0 && exit 0
+fi
+
+# When running on AWS the metadata service will return the storage available.
+# --max-time avoids long waits when the metadata service isn't available
+# and we also retry in case of a network glitch.
+# First attempt IMDSv2, then fall back to IMDSv1
+if [ -f /etc/github/ec2-ami ]; then
+  
+  # Define block device mapping endpoint
+  block_dev_map_endpoint="http://169.254.169.254/latest/meta-data/block-device-mapping/"
+
+  # Attempt to get IMDSv2 token
+  imds_token=$(curl -f -s --retry 1 --max-time 5 --noproxy 169.254.169.254 -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 500" "http://169.254.169.254/latest/api/token" || true )
+  
+  # Use IDMSv2 token if available, else fall back to IDMSv1
+  if [ -n "$imds_token" ]; then
+    dev_listing=$(
+      curl -f -s --retry 1 --max-time 5 --noproxy 169.254.169.254 -H "X-aws-ec2-metadata-token: $imds_token" "$block_dev_map_endpoint" || true )
+  else
+    dev_listing=$(
+      curl -f -s --retry 1 --max-time 5 --noproxy 169.254.169.254 "$block_dev_map_endpoint" || true )
+  fi
+
+  if [ -n "$dev_listing" ]; then # metadata service available
+
+    # Collecting the list of block devices that we want to discard
+    for dev in $(echo $dev_listing); do
+      echo $dev | egrep -q "ephemeral" && {
+        # We expect the metadata to contain "xvd*" or "sd*" and want to
+        # add both to our list of exclusions for thoroughness
+        if [ -n "$imds_token" ]; then
+          aws_instance_store=$(curl -f -s --retry 1 --max-time 5 --noproxy 169.254.169.254 -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/block-device-mapping/"$dev"/)
+        else
+          aws_instance_store=$(curl -f -s --retry 1 --max-time 5 --noproxy 169.254.169.254 http://169.254.169.254/latest/meta-data/block-device-mapping/"$dev"/)
+        fi
+        aws_instance_store_xvd=$(sed 's/sd\(.*\)/xvd\1/' <<< $aws_instance_store)
+        aws_instance_store_sd=$(sed 's/xvd\(.*\)/sd\1/' <<< $aws_instance_store)
+        aws_instance_stores="$aws_instance_stores $aws_instance_store_sd $aws_instance_store_xvd"
+      }
+    done
+  
+  else # metadata service unavailable
+    echo "Warning: unable to contact AWS metadata service" >&2
+  fi
+fi
+
+# When running on Azure, we *may* get a 'resource disk' for temporary use.
+# It is not guaranteed to persist over reboots. We detect the disk by reusing
+# code from walinuxagent's mount_resource_disk to avoid a race condition.
+if [ "$RELEASE_PLATFORM" = "azure" ]; then
+  azure_resource_disk="$(python3 - <<-EOF
+	from azurelinuxagent.common.osutil import default
+	dev = default.DefaultOSUtil().device_for_ide_port(1)
+	if dev is not None:
+	    print('/dev/{}'.format(dev))
+	EOF
+  )"
+  if [[ -z $azure_resource_disk ]]; then
+    echo "No temp resource disk found, not excluding any devices" >&2
+  fi
+fi
+
+gce_temporary_disk=''
+if [ "$RELEASE_PLATFORM" = "gce" ]; then
+  for device in /dev/disk/by-id/*EphemeralDisk*; do
+    gce_temporary_disk+="$(readlink -f $device) "
+  done
+fi
+
+# Try to find a block device, discarding AWS and Azure ephemeral storage
+#
+# This returns the device endpoint where the '/' filesystem is hosted
+major=$(mountpoint -d / | cut -f 1 -d ":")
+minor=$(mountpoint -d / | cut -f 2 -d ":")
+dev_endpoint=$(
+  cat /proc/partitions \
+      | awk {'if ($1 == "'${major}'" && $2 == "'${minor}'") print "/dev/" $4'}
+)
+rootdev=$(echo $dev_endpoint | sed 's/[[:digit:]]*$//g')
+if [ "$RELEASE_PLATFORM" = "ami" ]; then
+  if [[ "$rootdev" =~ /dev/nvme* ]]; then
+    rootdev="$rootdev $(/sbin/ebsnvme-id -b "$dev_endpoint") $(echo "${rootdev::-1}" | awk -F '/' '{print $3}')"
+  else
+    rootdev="$rootdev $(/sbin/ec2udev-vbd "$dev_endpoint")"
+  fi
+elif [ "$RELEASE_PLATFORM" = "gce" ]; then
+  # On GCP NVME hosts, we need to exclude the root device and everything in the same namespace. WE cannot
+  # guarantee which NS the NVMe data disk will be placed in.
+  if [[ "$rootdev" =~ /dev/nvme* ]]; then
+    rootdev="$rootdev $(echo ${rootdev::-1} | awk -F '/' '{print $3}')"
+  fi
+fi
+
+# AWS instance store devices plus the root device will be discarded
+blk_discard=$( echo $aws_instance_stores $azure_resource_disk $gce_temporary_disk $rootdev | tr ' ' '|')
+
+device=$(ls /dev/{hd?,sd?,xvd?,vd?,nvme???} 2>/dev/null | egrep -v "$blk_discard" | head -n1)
+
+# Safety checks
+#
+if [ ! -b "$device" ]; then
+  echo "Error: unable to find a suitable block device" >&2
+  exit 1
+fi
+# refuse to overwrite existing data
+if ! file -sL $device | grep -q "$device: data"; then
+  # todo: add -f flag to force
+  echo -e "Error: detected existing partitions on $(file -sL $device)" >&2
+  exit 1
+fi
+# check size of device
+if [ $(blockdev --getsize64 $device) -lt $((1*1024*1024*1024)) ]; then
+  echo "Error: $device is smaller than 1GB minimum" >&2
+  exit 1
+fi
+# check for premium/ssd data-disk
+if [ "$RELEASE_PLATFORM" = "azure" ]; then
+  file="/tmp/blkdev-iorate-$(echo $device | tr '/' '_')"
+  find $file -cmin +1 -delete 2>/dev/null >/dev/null || true # delete cached value every 1 minute
+  if [ ! -f $file ]; then
+    hdparm -t $device | grep "buffered disk reads" | cut -d= -f2 | tr -d ' ' | grep -Eo '^[[:digit:]]*' > $file
+  fi
+
+  iorate=$(cat $file)
+  if [ $iorate -lt 45 ]; then
+    echo "Error: $device read rate is lower than 45 MB/s minimum ($iorate MB/s)" >&2
+    exit 1
+  fi
+fi
+
+echo $device

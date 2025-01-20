@@ -1,0 +1,85 @@
+<%graphql
+  fragment ProjectColumn on ProjectColumn {
+    id
+    workflows(first: 10) {
+      edges {
+        node {
+          id
+        }
+      }
+    }
+  }
+
+  fragment Project on Project {
+    workflows(first: 10) {
+      edges {
+        node {
+          projectColumn {
+            id
+            name
+          }
+          triggerType
+          id
+        }
+      }
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+
+<% project_column = Views::ProjectWorkflows::Form::ProjectColumn.new(project_column)
+   project = Views::ProjectWorkflows::Form::Project.new(project)
+   workflow_nodes = project.workflows.edges.map(&:node)
+   column_workflow_ids = []
+   if project_column.present?
+     column_workflow_ids = project_column.workflows.edges.map { |edge| edge.node.id }
+   end
+
+   trigger_types_by_resource = {}
+   trigger_types_by_resource[:issues] = case purpose
+              when "TODO"
+                [ProjectWorkflow::ISSUE_PENDING_CARD_ADDED_TRIGGER, ProjectWorkflow::ISSUE_REOPENED_TRIGGER]
+              when "IN_PROGRESS"
+                [ProjectWorkflow::ISSUE_REOPENED_TRIGGER]
+              when "DONE"
+                [ProjectWorkflow::ISSUE_CLOSED_TRIGGER]
+              else
+                []
+              end
+
+   trigger_types_by_resource[:pull_requests] =  case purpose
+              when "TODO"
+                [ProjectWorkflow::PR_PENDING_CARD_ADDED_TRIGGER, ProjectWorkflow::PR_REOPENED_TRIGGER]
+              when "IN_PROGRESS"
+                [ProjectWorkflow::PR_PENDING_CARD_ADDED_TRIGGER, ProjectWorkflow::PR_REOPENED_TRIGGER, ProjectWorkflow::PR_APPROVED_TRIGGER, ProjectWorkflow::PR_PENDING_APPROVAL_TRIGGER]
+              when "DONE"
+                [ProjectWorkflow::PR_MERGED_TRIGGER, ProjectWorkflow::PR_CLOSED_NOT_MERGED_TRIGGER]
+              else
+                []
+              end
+%>
+
+<include-fragment class="js-project-automation-options">
+<% column_workflow_ids.each do |id| %>
+  <input type="hidden" name="project_column[workflow_ids][]" value="<%= id %>">
+<% end %>
+
+<% trigger_types_by_resource.each do |resource, trigger_types| %>
+  <% if trigger_types.present? %>
+    <div class="border-bottom text-bold f5 pb-1 mb-2 mt-4">Move <%= resource == :issues ? "issues" : "pull requests" %> here when&hellip;</div>
+  <% end %>
+
+  <% trigger_types.each do |trigger_type|
+    workflow = workflow_nodes.find { |node| node.trigger_type == trigger_type.upcase }
+    other_column_name = unless column_workflow_ids.include?(workflow&.id)
+      workflow&.project_column&.name
+    end
+  %>
+    <%= render partial: "project_workflows/workflow_form", locals: {
+            workflow_id: workflow&.id,
+            trigger_type: trigger_type,
+            other_column_name: other_column_name
+        }
+    %>
+  <% end %>
+<% end %>
+</include-fragment>

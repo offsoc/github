@@ -1,0 +1,107 @@
+syntax = "proto3";
+package authorizer;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/github/authzd/pkg/proto";
+option ruby_package = "Authzd::Proto";
+
+message Attribute {
+  string id = 1;
+  Value value = 2;
+}
+
+// `Value` represents a dynamically typed value which can be either
+// null, a number, a string, a boolean, a recursive struct value, or a
+// list of values. A producer of value is expected to set one of that
+// variants, absence of any variant indicates an error.
+//
+// The definition of google.protobuf.Value was:
+//
+// message Value {
+//   // The kind of value.
+//   oneof kind {
+//     // Represents a null value.
+//     NullValue null_value = 1;
+//     // Represents a double value.
+//     double number_value = 2;
+//     // Represents a string value.
+//     string string_value = 3;
+//     // Represents a boolean value.
+//     bool bool_value = 4;
+//     // Represents a structured value.
+//     Struct struct_value = 5;
+//     // Represents a repeated `Value`.
+//     ListValue list_value = 6;
+//   }
+// }
+//
+// This representation does not distinguish between integers and doubles.
+// In other words, number_value is always a double. And in our use case, we
+// will send over (very frequently) integers and lists of integers, denoting a list of
+// database ids. We cannot model those with doubles.
+//
+// Last but not least, we don't need to serialize Structs for the moment.
+//
+// For all the above reasons we decided to go with our own Value type that:
+// - Cannot be a struct so far, (but can be extended when needed)
+// - Is not ambiguous because it uses WrappedTypes
+// - Distinguishes between integers and double floating point numbers
+// - Uses 64-bit integers to allow modelling BIGINT database IDs
+//
+message Value {
+  // The kind of value.
+  oneof kind {
+    // Represents a null value.
+    google.protobuf.NullValue null_value = 1;
+    // Represents an integer value.
+    int64 integer_value = 2;
+    // Represents a double value.
+    double double_value = 3;
+    // Represents a string value.
+    string string_value = 4;
+    // Represents a boolean value.
+    bool bool_value = 5;
+    // Represents a `repeated int64`.
+    IntegerList integer_list_value = 6;
+    // Represents a `repeated string`.
+    StringList string_list_value = 7;
+  }
+}
+
+message IntegerList {
+  repeated int64 values = 1;
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+message Request {
+  repeated Attribute attributes = 1;
+}
+
+message Decision {
+  Result result = 1;
+  string reason = 2;
+}
+
+enum Result {
+  DENY = 0;
+  ALLOW = 1;
+  NOT_APPLICABLE = 2;
+  INDETERMINATE = 3;
+}
+
+message BatchRequest {
+  repeated Request requests = 1;
+}
+
+message BatchDecision {
+  repeated Decision decisions = 1;
+}
+
+service Authorizer {
+  rpc Authorize(Request) returns (Decision);
+  rpc BatchAuthorize(BatchRequest) returns (BatchDecision);
+}

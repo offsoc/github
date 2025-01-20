@@ -1,0 +1,139 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%
+  page_info(
+    container_xl: true,
+    title: "Settings · Branches · #{current_repository.name_with_display_owner}",
+    selected_link: :repo_branch_settings
+  )
+%>
+
+<%= render layout: "edit_repositories/edit" do %>
+  <% if heads_count > 0 %>
+    <% branch_updating_enabled = current_repository.can_update_protected_branches?(current_user) %>
+    <% branch_updating_disabled_description = "branch editing was disabled by administrators" %>
+
+    <% if branch_protection_rules.present? %>
+      <%= render_react_partial name: "growth-banner-partial", ssr: true, props: {
+        bannerType: "branch_protection_deprecation_header",
+        childrenProps: {
+          helpUrl: GitHub.help_url,
+          rulesetsPath: repository_rulesets_path
+        }
+      } %>
+    <% end %>
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>Branch protection rules<% end %>
+      <% component.with_actions do %>
+        <% if !branch_updating_enabled %>
+          <%= render(Primer::Beta::Button.new(size: :small, "aria-label": branch_updating_disabled_description, disabled: true, id: "add-rule-button")) do |component| %>
+            <% component.with_tooltip(
+              type: :description,
+              text: branch_updating_disabled_description
+            ) %>
+            Add rule
+          <% end %>
+        <% elsif branch_protection_rules.present? %>
+          <%= link_to "Add rule", new_branch_protection_rule_path, class: "btn btn-sm", "data-pjax": true, data: analytics_click_attributes(category: "Branch protection rules", action: "click to add a rule", label: "ref_page:#{request.fullpath};ref_cta:Add rule;ref_loc:repo branches settings;") %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if branch_protection_rules.present? %>
+      <%= render Branch::BranchProtectionNotEnforcedWarningComponent.new(repository: current_repository, link_to_branch_protections_page: false, feature: MemberFeatureRequest::Feature::ProtectedBranches) %>
+
+      <p>
+        <% if current_repository.heads.size > ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES %>
+          Unable to show count for repositories with <%= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES / 1000 %>k+ branches
+        <% elsif current_repository.heads.size > ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_WILDCARD_MATCHES %>
+          Unable to count wildcard matches for repositories with <%= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_WILDCARD_MATCHES / 1000 %>k+ branches
+        <% end %>
+      </p>
+      <div class="listgroup protected-branches mt-0">
+        <% branch_protection_rules.each do |branch_protection_rule| %>
+          <div class="listgroup-item d-flex flex-md-items-center flex-md-row flex-column">
+            <span class="branch-name flex-self-start flex-md-self-auto css-truncate css-truncate-target"><%= branch_protection_rule.name.dup.force_encoding("UTF-8") %></span>
+            <div class="d-flex flex-items-center flex-md-justify-end flex-auto flex-justify-between">
+              <% if current_repository.supports_protected_branches? %>
+                <span class="f6 mr-2">
+                  <% if current_repository.heads.size <= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_WILDCARD_MATCHES %>
+                    Currently applies to <%= matches_ref_counts_by_rule[branch_protection_rule] %> <%= "branch".pluralize(matches_ref_counts_by_rule[branch_protection_rule]) %>
+                  <% elsif (current_repository.heads.size <= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES) && branch_protection_rule.wildcard_rule? == false%>
+                    <% if matches_ref_counts_by_rule[branch_protection_rule] == 1 %>
+                      Currently applies to 1 branch
+                    <% elsif matches_ref_counts_by_rule[branch_protection_rule] == 0 %>
+                      Currently applies to 0 branches
+                    <% end %>
+                  <% end %>
+                </span>
+              <% else %>
+                <span class="f6 mr-2 color-fg-attention">
+                  Not enforced
+                  <%= render(Primer::Beta::Octicon.new(id: "not-enforced-info", icon: "info", ml: 1)) %>
+                  <%= render(Primer::Alpha::Tooltip.new(for_id: "not-enforced-info", type: :description, text: "Rules on your private repos can't be enforced until you upgrade to GitHub Team or Enterprise.", direction: :ne)) %>
+                </span>
+              <% end %>
+
+              <% if !branch_updating_enabled %>
+                <div class="BtnGroup mt-n5 mt-md-0">
+                  <%= render(Primer::Beta::Button.new(group_item: true, size: :small, "aria-label": branch_updating_disabled_description, disabled: true, id: "edit-rule-button-#{branch_protection_rule.id}")) do |component| %>
+                    <% component.with_tooltip(
+                      type: :description,
+                      text: branch_updating_disabled_description,
+                    ) %>
+                    Edit
+                  <% end %>
+                  <%= render(Primer::Beta::Button.new(size: :small, scheme: :danger, group_item: true, "aria-label": branch_updating_disabled_description, disabled: true, id: "delete-rule-button-#{branch_protection_rule.id}")) do |component| %>
+                    <% component.with_tooltip(
+                      type: :description,
+                      text: branch_updating_disabled_description,
+                    ) %>
+                    Delete
+                  <% end %>
+                </div>
+              <% else %>
+                <div class="BtnGroup mt-n5 mt-md-0">
+                  <a href="<%= branch_protection_rule_path(id: branch_protection_rule.id) %>" class="BtnGroup-item btn btn-sm border-right-0" data-ga-click="Branch Protection Rules, go to branch protection rule settings, from:branches settings">Edit</a>
+                  <div class="BtnGroup-parent">
+                    <%= render partial: "branch_protection_rules/delete_branch_protection_rule_dialog", locals: { branch_protection_rule_id: branch_protection_rule.id } %>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <% if branch_protection_rules.total_pages > 1 %>
+        <div class="paginate-container" <%= test_selector("pagination")%>>
+          <%= simple_paginate branch_protection_rules %>
+        </div>
+      <% end %>
+    <% else %>
+      <%= render_react_partial name: "growth-banner-partial", ssr: true, props: {
+        bannerType: "branch_protection_deprecation_blankslate",
+        childrenProps: {
+          helpUrl: GitHub.help_url,
+          newBranchRulesetPath: new_repository_ruleset_path(target: 'branch'),
+          newClassicBranchProtectionPath: new_branch_protection_rule_path
+        }
+      } %>
+    <% end %>
+  <% else %>
+    <%= render Primer::Beta::Blankslate.new do |c| %>
+      <% c.with_visual_icon(icon: "git-branch") %>
+
+      <% c.with_heading(tag: :h2) do %>
+        You don’t have any branches
+      <% end %>
+
+      <% c.with_description do %>
+        Before you can edit branch settings, you need to add a branch.
+      <% end %>
+
+      <% c.with_secondary_action(href: "#{GitHub.help_url}/articles/creating-and-deleting-branches-within-your-repository/") do %>
+        Learn how to add a branch
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

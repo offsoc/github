@@ -1,0 +1,113 @@
+#!/bin/bash
+#/ Usage: ghe-aqueduct-info [options]
+#/
+#/ When no options are passed this utility displays the distribution of queued
+#/ background jobs across the queues they're contained in along with the jobs
+#/ currently being processed.
+#/
+#/ OPTIONS:
+#/   -h | --help                     Show this message.
+#/   -v | --verbose                  Run in verbose mode.
+#/   -p | --pretty                  Display in table format.
+#/
+set -e
+
+URL=http://localhost:9096
+pretty=false
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+message() {
+  echo " --> ${1}"
+}
+
+connectivity_check(){
+  response=$(curl -s -w "%{http_code}" $URL/admin/health)
+  _healthcheck_status_code=${response:(-3)}
+  _healthcheck_response=${response::(-3)}
+
+  if [ "$_healthcheck_status_code" -ne 200 ]; then
+    echo "Aqueduct lite is not responding to admin API requests"
+    echo "$_healthcheck_response"
+    exit 1
+  fi
+
+  _aq_lite_up=$(echo "$_healthcheck_response" | jq ".status")
+  if [ "$_aq_lite_up" != "\"UP\"" ]; then
+    echo "Aqueduct is not up"
+    echo "$_healthcheck_response"
+    exit 1
+  fi
+
+  _store_up=$(echo "$_healthcheck_response" | jq ".store.status")
+  if [ "$_store_up" != "\"UP\"" ]; then
+    echo "Aqueduct storage is not up"
+    echo "$_healthcheck_response"
+    exit 1
+  fi
+
+  message "aqueduct-lite is up"
+}
+
+display_queue_sizes() {
+  message "Displaying aqueduct job queues at $(date +'%Y-%m-%d %T %z %Z')..."
+  echo
+  if $pretty; then
+    ghe-aqueduct status | jq  --raw-output '.queues | sort_by(-.depth, .queue) | map({ depth, queue, app, scheduled, paused }) | (.[0] | to_entries | map(.key | ascii_upcase)), (.[] | [.[]]) | map("\(.)") | join(",")' | column -ts,
+  else
+    ghe-aqueduct status | jq .
+  fi
+}
+
+display_running_jobs() {
+  _in_progress_jobs=$(ghe-aqueduct in_progress)
+  _in_progress_job_count=$(echo "$_in_progress_jobs" | jq ".in_progress | length")
+
+  if [ "$_in_progress_job_count" != "0" ]; then
+    message "Displaying currently running jobs..."
+    echo
+    if $pretty; then
+      echo "$_in_progress_jobs" | jq  --raw-output '.in_progress | sort_by(.delivered_at | fromdate) | map({ queue, app, job_id, delivered_at }) | (.[0] | to_entries | map(.key | ascii_upcase)), (.[] | [.[]]) | map("\(.)") | join(",")' | column -ts,
+    else
+      echo "$_in_progress_jobs" | jq .
+    fi
+  else
+    message "No jobs running currently."
+  fi
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,verbose,pretty --options hvp -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      set -x
+      ;;
+    -p|--pretty)
+      pretty=true
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+connectivity_check
+
+display_running_jobs
+echo
+echo
+display_queue_sizes

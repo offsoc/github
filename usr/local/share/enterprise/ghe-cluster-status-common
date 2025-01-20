@@ -1,0 +1,206 @@
+#!/bin/bash
+
+set -e
+
+# Seconds to wait for network connections to time out, for MySQL, ES, Git, Metrics, and Redis
+export CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-"5"}
+WORKDIR=${WORKDIR:-$(mktemp -d -t ghe-cluster-status.XXXXXXXXXX)}
+export WORKDIR
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+}
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+}
+
+ssh_node() {
+  local ip=$1
+  shift
+  if [ "$ip" != "$(cat /etc/github/cluster)" ]; then
+    ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+             -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$ip" "$@"
+  else
+    eval "$@"
+  fi
+}
+
+check_result() {
+  local node_hostname=$1
+  local check_name=$2
+  local status=$3
+  local message=$4
+
+  if [ "$status" = "error" ]; then
+    error_count=$(( error_count + 1 ))
+  elif [ "$status" = "warn" ]; then
+    warn_count=$(( warn_count + 1 ))
+  fi
+
+  if [ "$output" = "nagios" ]; then
+    if [ -n "$nagios_message" ]; then
+      nagios_message="$nagios_message, "
+    fi
+    nagios_message="$nagios_message $check_name-$node_hostname"
+    if [ -n "$message" ]; then
+      nagios_message="$nagios_message ($message)"
+    fi
+  fi
+
+  if [ "$output" = "json" ]; then
+    if [ -z "$message" ]; then
+      json_value=$(jq -n --arg a "$status" '$a')
+    else
+      json_value=$(jq -n --arg a "$status" --arg b "$message" '[$a, $b]')
+    fi
+    JSON=$(jq --arg key "$json_key" --arg a "$node_hostname" --arg b "$check_name" --argjson v "$json_value" \
+           '. | .[$key][$b + "-" + $a] = $v' <<<"$JSON")
+  elif [ -z "$output" ]; then
+    if [ -n "$verbose" ] && [ "$node_hostname" != "cluster" ]; then
+      echo "$check_name $node_hostname: $status $message" | awk -Winteractive '$0="  | "$0'
+    fi
+    if [ "$node_hostname" == "cluster" ]; then
+      echo "* ${check_name^}: ${status^^} $message"
+    fi
+  fi
+}
+
+is-port-up() {
+  nc_out=$(nc.openbsd -v -z -w 2 "$1" "$2" 2>&1 || true)
+  echo "$nc_out" | grep -q -e "succeeded\\|refused" || {
+    echo "$nc_out" >&2
+    return 1
+  }
+}
+
+mysql_query() {
+  # github-mysql will send mysql traffic to HA proxy
+  /usr/local/share/enterprise/github-mysql "$1"
+}
+
+start_output() {
+  # ensure we output the result even when we exit early with errors
+  trap end_output EXIT
+
+  error_count=0
+  warn_count=0
+  if [ "$output" = "json" ]; then
+    if [ -n "$1" ]; then
+      # json_key is used in check_result to put values under the needed sub-key
+      json_key="$1"
+      # define a top-level key, whose object will likely remain empty if we throw an error
+      JSON=$(echo "$JSON" | jq --arg key "$json_key" '. | .[$key] = {}')
+    fi
+  fi
+}
+
+end_output() {
+  # release the trap for end_output so we don't duplicate data
+  trap - EXIT
+
+  if [ "$(type -t "$EXISTING_TRAP")" = function ]; then
+    trap "$EXISTING_TRAP" EXIT
+  fi
+
+  if [ -n "$1" ]; then
+    if [ "$error_count" -gt 0 ]; then
+      check_result "cluster" "$1" "error"
+    elif [ "$warn_count" -gt 0 ]; then
+      check_result "cluster" "$1" "warn"
+    else
+      check_result "cluster" "$1" "ok"
+    fi
+  fi
+  if [ "$output" = "nagios" ]; then
+    if [ "$error_count" -gt 0 ]; then
+      prefix="CRITICAL - "
+      echo "${prefix}${nagios_message#"$prefix"}"
+      exit 2
+    elif [ "$warn_count" -gt 0 ]; then
+      prefix="WARNING - "
+      echo "${prefix}${nagios_message#"$prefix"}"
+      exit 1
+    else
+      echo "OK - No errors detected"
+    fi
+  elif [ "$output" = "json" ]; then
+    if [ "$(basename "$0")" != "ghe-cluster-status" ]; then
+      echo "$JSON" | jq '.'
+    fi
+  fi
+  warn_count=0
+  error_count=0
+}
+
+# Get a count for a given label from the output provided in the first argument
+# usage:
+#   extract_error_count ghe-spokes-output label
+# example:
+#   extract_error_count "$(ghe-spokes status)" "FAILED network replicas total"
+extract_error_count() {
+  local status="$1"
+  local count_label="$2"
+  local count
+  count="$(echo "$status" | grep -m  1 "$count_label total:" | tr -d ' ' | cut -d : -f2)"
+  echo "${count:-0}"
+}
+
+# Get the total counts from the output provided in the first argument
+# usage:
+#   total_error_counts ghe-spokes-output label [other labels here]
+# example:
+#   total_error_counts "$(ghe-spokes status)" "FAILED network replicas" "FAILED gist replicas"
+total_error_counts() {
+  local status="$1"; shift
+  local total_count=0
+  for count_label in "$@"; do
+    total_count=$((total_count + $(extract_error_count "$status" "$count_label")))
+  done
+  echo $total_count
+}
+
+export output=
+export nagios_message=
+export verbose=
+export extended=
+export exit_code=0
+
+# needed so this script can run autonomously
+JSON=${JSON:-"{}"}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,json,nagios,verbose,extended,check --options hjnve -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help)
+      usage; exit 2 ;;
+    -j|--json)
+      output="json"; shift ;;
+    -n|--nagios)
+      output="nagios"; shift ;;
+    -v|--verbose)
+      verbose=1; shift ;;
+    -e|--extended)
+      extended=1; shift ;;
+    --check) #Support for old flags in ghes-repl-status-*
+      output="nagios"; shift ;;
+    --)
+      shift; break ;;
+    *)
+      break ;;
+  esac
+done

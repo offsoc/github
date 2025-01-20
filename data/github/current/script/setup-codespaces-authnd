@@ -1,0 +1,120 @@
+#!/bin/bash
+set -e
+
+# This script sets up the github/authnd repository for a github/github codespace.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print help message
+help() {
+   echo "Sets up the github/authnd repository for a github/github codespace."
+   echo
+   echo "Usage: setup-codespaces-authnd [-b branch] [-d|h] "
+   echo "Options:"
+   echo "-b     Specify the authnd branch to clone. Defaults to main if not provided."
+   echo "-d     Before starting, delete the existing authnd directory in the codespace."
+   echo "-h     Print this help message."
+   echo
+}
+
+# Set the branch as main. If a branch is provided as an argument, it will be set to that when we parse the provided options.
+BRANCH=main
+
+# Get the options
+while getopts ":b:hd" opt; do
+   case $opt in
+      h) # display help message
+         help
+         exit;;
+      b) # If a branch was provided, re-set the variable
+         BRANCH=$OPTARG;;
+      d) # Delete the repository if it exists
+         DELETE_REPO=true;;
+     :)
+      echo "Error: Option -$OPTARG requires an argument."
+      exit 1;;
+     \?) # Invalid option
+         echo "Error: Invalid option -$OPTARG"
+         exit 1;;
+   esac
+done
+
+if [ "$DELETE_REPO" = true ]; then
+  echo -e "\n${GREEN}➡️ Deleting the existing authnd repo...\n${NC}"
+  rm -rf /workspaces/authnd
+fi
+
+# Change git user.email if it's a github noreply address
+email_match='@users.noreply.github.com'
+user_email=$(git config user.email)
+if [[ $user_email =~ $email_match ]]; then
+  # Get username from email address
+  if [[ $user_email =~ [0-9]*\+(.*)@ ]]; then
+    # Email format: <DIGITS>+username@users.noreply.github.com
+    eval $(git config user.email "${BASH_REMATCH[1]}@github.com")
+  else
+    # Email format: username@users.noreply.github.com
+    eval $(git config user.email $user_email)
+  fi
+fi
+
+# Do a clone of authnd to the /workspaces/authnd dir
+# If a branch was supplied, use that branch for the clone.
+echo -e "\n${GREEN}➡️ Cloning authnd repo at branch $BRANCH...\n${NC}"
+git clone https://${GITHUB_TOKEN}@github.com/github/authnd /workspaces/authnd --branch $BRANCH
+
+# Bootstrap authnd
+echo -e "\n${GREEN}➡️ Bootstrapping authnd...\n${NC}"
+( cd /workspaces/authnd ; script/bootstrap )
+
+# Setup authnd dependencies
+echo -e "\n${GREEN}➡️ Setting authnd dependencies...\n${NC}"
+( cd /workspaces/authnd ; script/setup --local )
+
+# seed mobile devices for monalisa
+echo -e "\n${GREEN}➡️ Seeding a mobile device for monalisa...\n${NC}"
+
+bin/seed mobile_tokens
+
+# Delete any mobile device keys for monalisa if they exists
+mysql -u root -P 3306 --protocol=tcp -D authnd_development --execute \
+      "DELETE FROM mobile_device_keys WHERE user_id=2" || true
+
+mysql -u root --database github_development -N --execute \
+ "SELECT id FROM oauth_accesses WHERE user_id=2 and description LIKE '%mobile oauth token for iOS%' LIMIT 1;" | while read id; do
+    os='iOS'
+    model='iPhone 14 Pro'
+    name='monalisa iPhone'
+
+    public_key=$(cat /workspaces/authnd/tmp/ec-prime256v1.pub)
+    public_key_fingerprint=$(cat /workspaces/authnd/tmp/ec-prime256v1-pk-fingerprint.txt)
+    rm -f /workspaces/authnd/tmp/monalisa_public_key_fingerprint.txt
+    rm -f /workspaces/authnd/tmp/monalisa_public_key_fingerprint.txt
+    mysql -uroot -P 3306 --protocol=tcp -D authnd_development --execute \
+      "INSERT INTO mobile_device_keys \
+      (user_id, oauth_access_id, device_name, device_model, device_os, is_hardware_backed, public_key, public_key_fingerprint, type, created_at_utc, expires_at_utc) \
+      VALUES \
+      (2, '${id}', '${name}', '${model}', '${os}', true, '${public_key}', '${public_key_fingerprint}', 'auth', NOW(), DATE_ADD(NOW(),INTERVAL 1 YEAR))"
+done
+
+echo -e "\n${GREEN}➡️ Finished seeding a mobile device for monalisa.\n${NC}"
+
+code --install-extension golang.go
+
+echo -e ""
+echo -e "${GREEN}🎉🎉 FINISHED! The authnd repo has been set up! 🎉🎉"
+echo -e "${GREEN}To start authnd for github, run the following commands:${NC}"
+echo -e ""
+echo -e "\t${ORANGE}cd /workspaces/authnd && AUTHND_PORT=8092 script/server${NC}"
+echo -e ""
+echo -e "${GREEN}To start github, run the following commands:${NC}"
+echo -e ""
+echo -e "\t${ORANGE}cd /workspaces/github && SKIP_AUTHND=1 script/server${NC}"
+echo -e ""
+echo -e "After starting the server, you can use the following UI to complete GitHub Mobile authentication requests (2FA, device verification, sudo prompt, etc.):"
+echo -e ""
+echo -e "\t${ORANGE}http://localhost:8003${NC}"

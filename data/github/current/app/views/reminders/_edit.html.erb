@@ -1,0 +1,382 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+
+<%= outdated_slack_installation_warning %>
+<%= render partial: "reminders/header", locals: { title: view.heading } %>
+
+<%
+  form_url = if view.new_record?
+    reminders_url_for(:create)
+  else
+    reminders_url_for(:update, id: view.reminder.id)
+  end
+%>
+  <%= render layout: "shared/details_dialog", locals: {
+    button_text: "Add Slack workspace",
+    title: "Add Slack workspace",
+    button_class: "js-add-slack-workspace-details v-hidden",
+  } do %>
+    <div class="Box-body">
+      <p class="p-3 f5">
+        We have rolled out a new version of the GitHub app in Slack. If you are currently on the old app, please consider switching over to the new app! More info about migration can be found <%= link_to "here.", "https://github.com/integrations/slack/blob/master/README.md#moving-away-from-the-legacy-workspace-app-model-in-slack", class: "Link--inTextBlock" %><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+      <br><br>1. Clicking on 'Add' will configure your Slack workspace with the new GitHub app.
+      <br>2. If you already have the old app in Slack, it will uninstall the legacy app and install the new one.
+      </p>
+    </div>
+    <div class="p-4">
+      <%= button_to "Add workspace",
+        authorize_reminder_slack_workspace_path(view.organization, personal: true),
+        class: "btn btn-primary float-right" %>
+    </div>
+  <% end %>
+<%= form_for view.reminder, url: form_url, html: { class: "js-reminders-form" } do |form| %>
+  <dl class="d-inline">
+    <dt>
+      <%= form.label :reminder_slack_workspace_id, "Slack workspace" %>
+      <% unless view.can_add_slack_workspace? %>
+        <span class="color-fg-muted tooltipped tooltipped-n" aria-label="Slack Workspaces can be added by an organization owner"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+          <%= primer_octicon(:info) %>
+        </span>
+      <% end %>
+    </dt>
+    <dd class="d-inline-block form-group js-slack-form-group">
+      <% if view.slack_workspaces.present? %>
+        <%=
+          render partial: "reminders/form/slack_dropdown", locals: {
+            selected_slack_workspace: view.reminder.slack_workspace,
+            slack_workspaces: view.slack_workspaces,
+            can_add_slack_workspace: view.can_add_slack_workspace?,
+            remindable: view.reminder.remindable,
+            personal: false,
+            class: "d-inline-block"
+          }
+        %>
+      <% else %>
+        <%= button_to authorize_reminder_slack_workspace_path(view.reminder.remindable), class: "btn d-inline-block #{'disabled' unless view.can_add_slack_workspace?}" do %>
+          <%= image_tag "modules/site/integrators/slackhq.png", alt: "Slack", height: 16, class: "v-align-middle px-1 pr-1" %>
+          Add Slack workspace
+        <% end %>
+      <% end -%>
+      <div class="error">You must select a Slack Workspace</div>
+    </dd>
+    <% if view.slack_workspaces.present? %>
+      <dd class="d-inline-block"><%= primer_octicon(:"arrow-right", size: :medium, color: :muted) %></dd>
+      <dd class="d-inline-block form-group js-slack-channel-form-group <% if view.reminder.errors[:slack_channel].present? %>errored<% end %>">
+        <%= form.text_field(
+          :slack_channel,
+          placeholder: "Enter a channel name",
+          class: "input-hide-webkit-autofill js-reminders-slack-channel",
+          autocomplete: "off",
+          "aria-label": "Slack channel input",
+          maxlength: 80,
+          required: true
+        ) %>
+        <div class="error js-slack-channel-error" data-default-error="<%= view.slack_channel_default_error %>">
+          <%= view.reminder.errors[:slack_channel].present? ? view.reminder.errors[:slack_channel].to_sentence : view.slack_channel_default_error %>
+        </div>
+      </dd>
+    <% end %>
+  </dl>
+
+  <hr>
+
+  <%= form.fields_for :delivery_time do |delivery_time| %>
+    <dl class="form-group js-day-form-group">
+      <dt><%= delivery_time.label :days, "Days" %></dt>
+      <dd>
+        <%= render partial: "reminders/form/day_select", locals: { selected: view.selected_days, summary_text: view.days_text, form: delivery_time } %>
+      </dd>
+      <dd class="error">You must select at least one day</dd>
+    </dl>
+
+    <dl class="form-group js-time-form-group">
+      <dt><%= delivery_time.label :times, "Times" %></dt>
+      <dd class="d-flex">
+        <%= render partial: "reminders/form/time_select", locals: { selected: view.selected_times, form: delivery_time } %>
+        <%= render partial: "reminders/form/time_zone_select", locals: { selected: view.reminder.time_zone_name, form: form } %>
+      </dd>
+      <dd class="error">You must select at least one time</dd>
+    </dl>
+  <% end -%>
+
+
+  <hr>
+
+  <dl class="form-group">
+    <dt>
+      <%= form.label :tracked_repository_ids, "Tracked repositories" %>
+      <% unless view.reminder.supports_private_repos? %>
+        <br>
+        <span class="note overflow-hidden">
+          Your current plan only supports reminders for public repositories.
+          <% if !GitHub.enterprise? %>
+            <% if view.organization.adminable_by?(current_user) %>
+              <%= render Primer::ButtonComponent.new(tag: :a, href: "#{ upgrade_path(
+                  plan: GitHub::Plan.business,
+                  target: "organization",
+                  org: view.organization
+                ) }", scheme: :link, "data-upgrade-link": view.organization.name, "data-ga-click": "Orgs, upgrade to team, location:create repo prompt") do %>
+                Upgrade to Team
+              <% end %>
+            <% else %>
+              An administrator can upgrade your plan.
+            <% end %>
+          <% end %>
+        </span>
+      <% end %>
+    </dt>
+    <dd>
+      <%= render partial: "reminders/form/tracked_repositories", locals: { view: view } %>
+    </dd>
+  </dl>
+
+  <hr>
+
+  <div class="form-checkbox">
+    <%= form.label :ignore_draft_prs, "" do %>
+      <%= form.check_box :ignore_draft_prs %>
+      Ignore drafts
+    <% end -%>
+    <p class="note">
+      Only include pull requests that aren't in Draft mode
+    </p>
+  </div>
+
+  <div class="form-checkbox">
+    <input
+      value="0"
+      name="reminder[require_review_request]"
+      checked
+      hidden
+    >
+
+    <input
+      type="checkbox"
+      id="require_review_request"
+      class="form-checkbox-details-trigger"
+      name="reminder[require_review_request]"
+      <% if view.reminder.require_review_request %>checked<% end %>
+    >
+    <label for="require_review_request">Require review requests</label>
+    <p class="note">
+      Only include pull requests that have review requests
+    </p>
+
+    <div class="form-checkbox-details" style="margin-top:15px">
+      <% unless view.locked_to_team? %>
+        <dl class="form-group">
+          <dt><%= form.label :team_ids, "Filter by team assigned to review code" %></dt>
+          <dd class="d-flex">
+            <%= render "reminders/form/team_dropdown", view: view %>
+          </dd>
+        </dl>
+      <% end %>
+
+      <div>
+        <%= form.label :include_reviewed_prs, "Remind authors after review" do %>
+          <%= form.check_box :include_reviewed_prs, class: "js-orgs-include-reviewed-prs-check" %>
+          Remind authors after reviews
+        <% end -%>
+        <p class="note">
+          Show reminders for PR authors when review requests are fulfilled<br>
+          Authors must re-request reviews to switch PRs back to “Waiting for review”
+        </p>
+      </div>
+
+      <details
+        class="details-reset details-overlay js-orgs-remind-authors-menu <% if !view.reminder.include_reviewed_prs %>has-removed-contents<% end %>"
+        id="orgs-remind-authors-menu"
+      >
+        <summary class="btn" title="<%= view.needed_reviews_count_options[:selected] %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+          <span class="js-orgs-remind-authors-summary-text">
+            <%= view.needed_reviews_count_options[:options][view.selected_needed_reviews_option] %>
+          </span>
+          <span class="dropdown-caret"></span>
+        </summary>
+        <details-menu class="SelectMenu" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <div class="SelectMenu-modal">
+            <div class="SelectMenu-list">
+              <% view.needed_reviews_count_options[:options].each do |count, title| %>
+                <label
+                  tabindex="0"
+                  class="SelectMenu-item"
+                  role="menuitemradio"
+                  aria-checked="<%= count == view.selected_needed_reviews_option %>"
+                >
+                  <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                  <input
+                    type="radio"
+                    name="reminder[needed_reviews]"
+                    class="js-orgs-needed-reviews-input"
+                    <% if count == view.selected_needed_reviews_option %>
+                    checked
+                    <% end %>
+                    value="<%= count %>"
+                    hidden
+                    data-title="<%= title %>"
+                  >
+                  <%= title %>
+                </label>
+              <% end %>
+            </div>
+          </div>
+        </details-menu>
+      </details>
+    </div>
+  </div>
+
+  <div class="form-checkbox">
+    <div>
+      <label>
+        <input
+          class="js-orgs-ignore-approvals-check"
+          type="checkbox"
+          <% if view.ignore_after_approval_count_options[:selected] != 0 %>checked<% end %>
+        >
+        Ignore approved pull requests
+      </label>
+      <p class="note">
+        Only include pull requests that haven't been approved
+      </p>
+    </div>
+
+    <!-- This input doesn't need to be a 'radio' because it's 'has-removed-contents' gets toggled instead -->
+    <input
+      value="0"
+      class="js-default-orgs-ignore-approvals-input <%= view.default_ignore_after_approval_count? ? '' : 'has-removed-contents' %>"
+      name="reminder[ignore_after_approval_count]"
+      checked
+      hidden
+    >
+
+    <details
+      class="details-reset details-overlay js-orgs-ignore-approvals-menu <%= view.default_ignore_after_approval_count? ? 'has-removed-contents' : '' %>"
+      id="orgs-ignore-approvals-menu"
+    >
+      <summary class="btn" title="<%= view.ignore_after_approval_count_options[:selected] %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+        <span class="js-orgs-ignore-approvals-summary-text">
+          <%= view.ignore_after_approval_count_options[:options][view.selected_ignore_after_approval_option] %>
+        </span>
+        <span class="dropdown-caret"></span>
+      </summary>
+      <details-menu class="SelectMenu" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+        <div class="SelectMenu-modal">
+          <div class="SelectMenu-list">
+            <% view.ignore_after_approval_count_options[:options].each do |count, title| %>
+              <label
+                tabindex="0"
+                class="SelectMenu-item"
+                role="menuitemradio"
+                aria-checked="<%= count == view.selected_ignore_after_approval_option %>"
+              >
+                <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                <input
+                  type="radio"
+                  name="reminder[ignore_after_approval_count]"
+                  class="js-orgs-ignore-approvals-input"
+                  <% if count == view.selected_ignore_after_approval_option %>
+                  checked
+                  <% end %>
+                  value="<%= count %>"
+                  hidden
+                  data-title="<%= title %>"
+                >
+                <%= title %>
+              </label>
+            <% end %>
+          </div>
+        </div>
+      </details-menu>
+    </details>
+  </div>
+
+  <dl class="form-group">
+    <dt><%= form.label :min_age, "Minimum age" %></dt>
+    <dd>
+      <%= form.number_field(
+        :min_age,
+        placeholder: "0",
+        min: 0,
+        class: "form-control shorter input-hide-webkit-autofill",
+        autocomplete: "off"
+      ) %> hours
+
+      <p class="note">
+        Limit pull requests in reminders by how old they are
+      </p>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt><%= form.label :min_staleness, "Minimum staleness" %></dt>
+    <dd>
+      <%= form.number_field(
+        :min_staleness,
+        placeholder: "0",
+        min: 0,
+        class: "form-control shorter input-hide-webkit-autofill",
+        autocomplete: "off"
+      ) %> hours
+
+      <p class="note">
+        Limit pull requests in reminders by how stale they are
+      </p>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt><%= form.label :ignored_terms %></dt>
+    <dd>
+      <%= form.text_field(
+        :ignored_terms,
+        placeholder: "WIP",
+        class: "input-hide-webkit-autofill",
+        autocomplete: "off"
+      ) %>
+
+      <p class="note">
+        Comma separated terms in titles to ignore e.g. WIP,Dont merge
+      </p>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt><%= form.label :ignored_labels %></dt>
+    <dd>
+      <%= form.text_field(
+        :ignored_labels,
+        placeholder: "wontfix",
+        class: "input-hide-webkit-autofill",
+        autocomplete: "off"
+      ) %>
+
+      <p class="note">
+        Comma separated labels to exclude e.g. WIP,Dont merge
+      </p>
+    </dd>
+  </dl>
+
+  <dl class="form-group">
+    <dt><%= form.label :required_labels %></dt>
+    <dd>
+      <%= form.text_field(
+        :required_labels,
+        placeholder: "Needs Review",
+        class: "input-hide-webkit-autofill",
+        autocomplete: "off"
+      ) %>
+
+      <p class="note">
+        Comma separated labels to require e.g. Needs Review
+      </p>
+    </dd>
+  </dl>
+
+  <input type="submit" class="btn btn-primary" value="<% if view.new_record? %>Create<% else %>Update<% end %> reminder">
+<% end -%>
+
+<% unless view.new_record? %>
+  <hr>
+  <%= render partial: "reminders/delete_section", locals: { url: reminders_url_for(:destroy, id: view.reminder.id) } %>
+<% end %>

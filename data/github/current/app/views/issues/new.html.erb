@@ -1,0 +1,148 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+  highlight ||= :default
+
+  page_info(
+    selected_link: :repo_issues,
+    container_xl: true,
+    title: "New Issue · #{current_repository.name_with_display_owner}"
+  )
+
+  convert_from_task ||= false
+  parent_issue ||= nil
+  position ||= nil
+  warnings ||= []
+  templates_available ||= false
+  render_issue_react_create_opt_in ||= false
+
+  has_error_loading_projects = warnings.any? do
+    |warning| warning[:attribute] == :memex_projects &&
+      warning[:type] == :database_error
+  end
+
+  issue_template = with_database_error_fallback(fallback: nil) { @issue.template }
+%>
+
+<%# Differentiate between templates for session-resume %>
+<% content_for :head do %>
+  <% if issue_template %>
+    <meta name="session-resume-id" content="<%= new_issue_path(current_repository.owner, current_repository, params: { labels: issue_template.labels_string, assignees: issue_template.assignees_string, template: issue_template.filename }) %>">
+  <% end %>
+<% end %>
+
+<% if !templates_available %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+    <div id="templates-unavailable-msg">Issue templates and forms are currently unavailable. Please try again later.</div>
+  <% end %>
+<% end %>
+
+<%= render layout: "issues/issues" do %>
+  <% if render_issue_react_create_opt_in
+    url = "/#{current_repository.owner.display_login}/#{current_repository.name}/issues?new_create_experience=true"
+  %>
+  <%= form_with url: url do |f| %>
+    <%= render(Primer::Beta::Label.new(scheme: :success)) { "Beta" } %>
+    <%= render Primer::Beta::Button.new(scheme: :link, type: :submit, mb: 3, mt: 2) do %>
+      <%= emoji_tag(Emoji.find_by_alias("zap"), class: "emoji emoji-icon") %>Try the new experience
+    <% end %>
+  <% end %>
+  <% end %>
+  <% if convert_from_task && parent_issue %>
+    <% authorized_issues = cap_filter.authorized_resources([parent_issue]) %>
+    <% if authorized_issues.length > 0 %>
+      <%= render partial: "issues/new/title", locals: { parent_issue: parent_issue } %>
+    <% end %>
+  <% end %>
+  <%= form_for @issue do |f| %>
+    <div <%= test_selector("new-issue-form") %>
+      data-discussion-hovercards-enabled
+      data-issue-and-pr-hovercards-enabled
+      data-project-hovercards-enabled
+      data-hpc>
+
+      <%= spamurai_form_signals %>
+
+      <%= hidden_field_tag :enable_tip, params[:enable_tip].presence %>
+
+      <% if convert_from_task && parent_issue %>
+        <input type="hidden" name="position" value="<%= position %>">
+        <input type="hidden" name="convert_from_task" value="true">
+        <% authorized_issues = cap_filter.authorized_resources([parent_issue]) %>
+        <% if authorized_issues.length > 0 %>
+          <input type="hidden" name="parent_issue_number" value="<%= parent_issue.number %>">
+        <% end %>
+      <% end %>
+
+      <% if params[:blob_oid].present? %>
+        <input type="hidden" name="blob_oid" value="<%= params[:blob_oid] %>">
+      <% end %>
+      <% if params[:range_start].present? %>
+        <input type="hidden" name="range_start" value="<%= params[:range_start] %>">
+      <% end %>
+      <% if params[:range_end].present? %>
+        <input type="hidden" name="range_end" value="<%= params[:range_end] %>">
+      <% end %>
+      <% if params[:created_from_discussion_number].present? %>
+        <input type="hidden" name="created_from_discussion_number" value="<%= params[:created_from_discussion_number] %>">
+      <% end %>
+      <%= render(Primer::Alpha::Layout.new(first_in_source: :main)) do |component| %>
+        <% component.with_main do %>
+          <% if current_user.must_verify_email? %>
+            <%= render "issues/no_verified_email_message" %>
+          <% else %>
+            <%= render "issues/composer", issue: @issue, issue_template: issue_template, f: f %>
+          <% end %>
+        <% end %>
+
+        <% component.with_sidebar(col_placement: :end, row_placement: :end, width: :narrow) do %>
+          <div class="position-relative">
+            <% if !current_repository.owner_blocking?(current_user) %>
+              <%= render "issues/sidebar/new/assignees", issue: @issue %>
+              <%= render "issues/sidebar/new/labels", issue: @issue %>
+
+              <% if show_projects_ui?(current_repository) %>
+                <%# We use @issue.projects instead of @issue.visible_projects_for here, because @issue is an unsaved record and @issue.projects has been manually set with proper visibility checking in IssuesController#new. %>
+                <%= render "issues/sidebar/new/projects",
+                  issue: @issue,
+                  projects: (@issue.projects + @issue.memex_projects),
+                  has_error_loading_projects: has_error_loading_projects
+                %>
+              <% end %>
+
+              <%= render "issues/sidebar/new/milestone", issue: @issue %>
+              <%= render "issues/sidebar/new/references", issue: @issue %>
+            <% end %>
+            <% track_render_partial("issues/sidebar/new/contributor_sidebar") do %>
+              <%= render_nothing_if_database_fails do %>
+                <%= render "issues/sidebar/new/contributor_sidebar", view: create_view_model(
+                  Community::ContributorSidebarView,
+                  issue: @issue,
+                  current_repository: current_repository
+                ) %>
+              <% end %>
+            <% end %>
+
+            <div class="discussion-sidebar-item sidebar-assignee js-discussion-sidebar-item">
+              <%  if issue_template&.structured? %>
+                <div class="border rounded-2 d-inline-flex p-1 mt-2">
+                  <div class="mt-3 pl-1"><%= render GitHub::BetaFlagComponent.new(mr: 2) %></div>
+                  <div class="mt-1 pr-1">
+                    <p> You're using an <b><a class="Link--inTextBlock" href="<%= GitHub.help_url %>/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository#creating-issue-forms">issue form</a></b>, a new type of issue template.</p>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+
+            <% if !current_repository.owner_blocking?(current_user) %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, block: true, display: [nil, nil, :none], mt: 4, "data-disable-invalid": "", "data-disable-with": "") do %>
+                Submit new issue
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+  <%= render partial: "issues/label_creation_modal", locals: { model: @issue } %>
+<% end %>

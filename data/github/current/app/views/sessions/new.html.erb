@@ -1,0 +1,137 @@
+<%# erblint:counter FlashMigrationCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%
+# This form is also loaded in on 404.html.
+
+ldap ||= GitHub.auth_mode.to_sym == :ldap
+subtitle = signin_subtitle(ldap)
+login_field_label = signin_login_field_label(ldap)
+sign_in_message =  @preview_message || customized(:sign_in_message)
+show_account_creation = GitHub.signup_enabled? && params[:allow_signup] != "false" && !enterprise_access_improvements? && !Apps::Internal.capable?(:hide_login_signup_button, app: @application)
+utm_params = utm_memo
+proxima_admin_login ||= false
+%>
+
+<% page_info title: subtitle, canonical_url: login_url %>
+
+<div class="auth-form px-3" id="login" <%= test_selector "login-standard-view" %> data-hpc>
+  <% if at_auth_limit_login? -%>
+    <p>There have been several failed attempts to sign in from this account or IP address. Please wait a while and try again later.</p>
+  <% else -%>
+    <% if @tried_signing_into_org %>
+      <div class="org-login">
+        @<%= params[:login] %> is an <b>organization</b>, so you can’t sign in to it directly.
+        Try signing into your personal account and then using the context switcher on your dashboard:
+
+        <img src="<%= image_path "modules/account/org-select.png" %>" alt="">
+
+        Don't have a personal account? Talk to someone in your organization about getting access.
+      </div>
+    <% end %>
+
+    <% unless @application %>
+    <div class="auth-form-header p-0">
+      <h1><%= subtitle %></h1>
+    </div>
+    <% end %>
+
+    <%- unless sign_in_message.blank? %>
+    <div class="auth-form-message mb-3">
+      <%= github_simplified_markdown(sign_in_message) %>
+    </div>
+    <%- end %>
+
+    <%= render "shared/flash" %>
+
+    <div class="flash js-transform-notice" hidden>
+      <button class="flash-close js-flash-close" type="button" aria-label="Dismiss this message">
+        <%= render Primer::Beta::Octicon.new(icon: "x", aria: { label: "Dismiss" }) %>
+      </button>
+    </div>
+
+    <div class="auth-form-body mt-3">
+      <% if @application %>
+      <div class="mb-4 pb-3 border-bottom color-border-muted h4 text-normal text-center">
+        <% unless GitHub.private_mode_enabled? %>
+          <div style="background-color: #<%= @application.preferred_bgcolor %>" class="CircleBadge CircleBadge--medium mx-auto">
+            <%= oauth_application_logo(@application, 60, class: "CircleBadge-icon", alt: "#{@application.name} logo", width: 50, height: 50) %>
+          </div>
+        <% end %>
+
+        <p>
+          Sign in to <strong><%= GitHub.flavor %></strong>
+          <br>
+          to continue to <strong><%= @application.name %></strong>
+        </p>
+      </div>
+      <% end %>
+
+      <%= render partial: "sessions/password_sign_in", locals: {
+        login_field_label: login_field_label,
+        login_scenario: :new_session,
+        proxima_admin_login: proxima_admin_login,
+      } %>
+    </div>
+
+    <% if GitHub.default_password %>
+      <p class="note px-3 my-3 text-center">
+        <strong>Tip:</strong>
+        The default password for all users in development is
+        <strong><%= GitHub.default_password %></strong>
+      </p>
+    <% end %>
+
+    <% if show_account_creation %>
+      <% if logged_in? %>
+        <div class="login-callout mt-3">
+          <%= render partial: "sessions/webauthn/login_hint" %>
+          <div class="mt-1 d-flex flex-items-center flex-justify-center">
+            <p class="mr-1 mb-0">Want to create an account?</p>
+            <%= form_tag kill_session_path, :method => 'post' do %>
+              <input type="submit" value="Sign out" class="Link color-bg-default border-0 p-0">
+            <% end %>
+          </div>
+        </div>
+      <% else %>
+        <h2 class="sr-only">Password login alternatives</h2>
+        <div class="login-callout mt-3">
+          <%= render partial: "sessions/webauthn/login_hint" %>
+          <p class="mt-1 mb-0 p-0">
+            New to <%= GitHub.flavor %>?
+            <% source_label = params[:return_to].to_s.start_with?(oauth_authorize_path) ? "oauth" : "login" %>
+            <% opts = { "data-ga-click": "Sign in, switch to sign up",
+              data: sign_up_link_data_attributes(location_in_page: "sign in switch to sign up") } %>
+            <% if source_label == "oauth" %>
+              <%= link_to(
+                "Create an account",
+                signup_path(return_to: params[:return_to], source: source_label),
+                **opts
+              ) %>
+            <% else %>
+              <%= link_to(
+                "Create an account",
+                nux_signup_index_path(return_to: params[:return_to], source: source_label, **utm_params),
+                **opts
+              ) %>
+            <% end %>
+          </p>
+        </div>
+      <% end %>
+    <% elsif show_passkey_login? || (Rails.env.development?) %>
+    <div class="js-webauthn-hint" hidden>
+      <div class="login-callout mt-3 js-webauthn-hint-emu-control">
+        <%= render partial: "sessions/webauthn/login_hint" %>
+      </div>
+    </div>
+    <% end %>
+
+    <% if !GitHub.single_business_environment? && feature_enabled_for_user_or_current_visitor?(feature_name: :emu_sso_login) %>
+      <div class="mt-6 text-center">
+        <%= link_to(sso_login_path(return_to: return_to), class: "color-fg-default") do %>
+          Other sign in options
+          <%= render Primer::Beta::Octicon.new(icon: "chevron-right", ml: 1) %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end -%>
+</div>

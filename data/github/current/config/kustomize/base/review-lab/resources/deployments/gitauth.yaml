@@ -1,0 +1,170 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: gitauth
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "unicorn"
+        heaven.githubapp.com/image-placeholder: "702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master"
+        moda.github.net/inject-otel-env-vars-into-containers: "unicorn"
+spec:
+    replicas: 1
+    strategy:
+        rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
+    template:
+        metadata:
+            labels:
+                service: gitauth
+            annotations:
+                observability.github.com/splunk_index: rails-gitauth
+                fluentbit.io/parser: logfmt_sloppy
+        spec:
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: "/etc/github/metadata.json"
+                - name: ca-certificates
+                  hostPath:
+                    path: "/etc/ssl/certs"
+            containers:
+                - name: unicorn
+                  image: 702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master
+                  imagePullPolicy: IfNotPresent
+                  args:
+                    - bin/unicorn_rails
+                    - "-c"
+                    - config/unicorn.rb
+                    - "-E"
+                    - production
+                    - "--port"
+                    - '8083'
+                    - gitauth.ru
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["sleep", "5"]
+                  ports:
+                    - name: http
+                      containerPort: 8083
+                      protocol: TCP
+                  readinessProbe:
+                    periodSeconds: 10
+                    initialDelaySeconds: 10
+                    httpGet:
+                        path: "/_ping"
+                        port: http
+                  resources:
+                    requests:
+                        cpu: 0.001
+                        memory: "512M"
+                    limits:
+                        cpu: 1.0
+                        memory: "4G"
+                  volumeMounts:
+                    - mountPath: "/etc/github/metadata.json"
+                      name: github-metadata
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: "/etc/ssl/certs"
+                      readOnly: true
+                  env:
+                    - name: RAILS_ENV
+                      value: production
+                    - name: ALIVE_HOST
+                      valueFrom:
+                        configMapKeyRef:
+                            key: alive-hostname
+                            name: general
+                    - name: MEMCACHED_SERVERS
+                      value: cache:11211
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GPGVERIFY_URL
+                      value: http://gpgverify
+                    - name: REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: rate-limiter-servers
+                    - name: MONOLITH_REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: monolith-rate-limiter-servers
+                    - name: JOB_COORDINATION_REDIS_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: job-coordination-url
+                    - name: SECRET_KEY_BASE
+                      valueFrom:
+                        secretKeyRef:
+                            name: general
+                            key: secret-key-base
+                    - name: GITAUTH
+                      value: '1'
+                    - name: GH_WRITE_PIDFILE
+                      value: '0'
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: '0'
+                    - name: STAFF_ENVIRONMENT
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: staff-environment
+                    - name: STAFF_ENVIRONMENT_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    - name: DATADOG_TRACING_ENABLED
+                      value: '0'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:gitauth"
+                    - name: SPOKESD_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            key: twirp-url
+                            name: spokesd
+                    - name: SPOKESD_CLIENT_ROLE
+                      value: review-lab
+                    # this ends up being redundant but
+                    # consistency with other kube unicorn envs is Good™
+                    - name: GITHUB_CONFIG_ROLE
+                      value: lab
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-gitauth"
+                  envFrom:
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+            restartPolicy: Always
+    selector:
+        matchLabels:
+            service: gitauth

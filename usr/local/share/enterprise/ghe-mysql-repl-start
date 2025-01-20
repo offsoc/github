@@ -1,0 +1,121 @@
+#!/bin/bash
+#/ Usage:
+#/    ghe-mysql-repl-start <primary>  # Configure or start MySQL replication against <primary>
+#/    ghe-mysql-repl-start <primary> --force    # Force the reconfiguration of MySQL replication against <primary>
+#/ Start mysql replication on a configured replica.
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+primary=$1
+
+if [ -z "$primary" ]; then
+  echo "No primary given to setup replication"
+  exit 1
+fi
+
+. ghe-repl-lib
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+[ -n "$LOCKED_GHE_MYSQL_REPL_START" ] || {
+  export LOCKED_GHE_MYSQL_REPL_START=1
+  exec lockrun --lockfile=/run/lock/ghe-mysql-repl-start.lock -- "$0" "$@"
+}
+
+if [ -f /etc/github/cluster ]; then
+  function primary_ssh() {
+    ssh_cmd $primary "$@"
+  }
+else
+  ensure_replica
+fi
+
+wait_for_replication() {
+  tries=0
+  while [ $tries -lt 60 ]; do
+    sleep 1
+    status=$(query "SHOW SLAVE STATUS\G")
+    slave_io_running=$(echo "$status" | grep Slave_IO_Running | head -1 | awk '{print $2}')
+    slave_sql_running=$(echo "$status" | grep Slave_SQL_Running | head -1 | awk '{print $2}')
+    relay_master_log_file=$(echo "$status" | grep Relay_Master_Log_File | head -1 | awk '{print $2}')
+    if [ -n "$relay_master_log_file" ] && [ $slave_io_running = "Yes" ] && [ $slave_sql_running = "Yes" ]; then
+      query "SET GLOBAL read_only = 1;"
+      return 0
+    fi
+    tries=$[tries+1]
+  done
+
+  echo "Replication failed to start, status: $status"
+  ## dump status and gtids
+  sudo mysql -e "SHOW SLAVE STATUS\G; SELECT @@global.gtid_executed\G; SELECT @@global.gtid_purged\G" | sudo tee "/var/log/mysql/replica_status-$(date +%Y-%m-%d-%H-%M).log"
+  ## Stop slave completely to avoid accidentally failover
+  query "STOP SLAVE; RESET SLAVE ALL;"
+  return 1
+}
+
+ghe-service-wait-mysql --local
+
+skip_start_slave=false
+status=$(query "SHOW SLAVE STATUS\G")
+if [ -n "$status" ] && [ "$2" != "--force" ] && [ ! -f "/etc/github/repl-force-mysql" ]; then
+  # Verify the master host is still the same
+  if echo "$status" | grep Master_Host | grep -q "$primary"; then
+    if ghe-config --true 'mysql.backup.binary'; then
+      # If we are in a binary restore, START SLAVE will fail, and there is no way we can start slave without seeding.
+      query "START SLAVE" || skip_start_slave=true
+    else
+      query "START SLAVE"
+    fi
+
+    if ( ! $skip_start_slave ) && wait_for_replication ; then
+      exit 0
+    fi
+  fi
+fi
+
+# Make sure a replication user exists
+repl_creds=$(primary_ssh "sudo /usr/local/share/enterprise/ghe-mysql-repl-user")
+user=$(echo "$repl_creds" | cut -d ' ' -f 1)
+pass=$(echo "$repl_creds" | cut -d ' ' -f 2)
+
+# Save the replication user creds on the replica
+sudo /usr/local/share/enterprise/ghe-mysql-repl-user -f $user $pass >> /dev/null
+
+if ! $skip_start_slave ; then
+  query "STOP SLAVE; RESET SLAVE ALL;"
+  if [ "$2" != "--force" ] && [ ! -f "/etc/github/repl-force-mysql" ] && \
+    /usr/local/share/enterprise/ghe-mysql-prepare-replication $primary $user $pass; then
+    query "START SLAVE;"
+    if wait_for_replication; then
+      exit 0
+    fi
+  fi
+fi
+
+# we skip here instead of before trying to start replication above, because if
+# the replica can be started from the bin logs, there doesn't need to be
+# seeding anyway
+if [ -n "$SKIP_DB_SEED" ]; then
+  echo "Skipping DB seed"
+  exit 0
+fi
+
+# Dump the data into a seed file
+database_seed=$(primary_ssh "sudo /usr/local/share/enterprise/ghe-mysql-generate-seed $2")
+seed_size=($(primary_ssh "sudo wc -c $database_seed"))
+seed_size_human_readable=$(echo "${seed_size[0]}" | numfmt --to=iec-i --round=towards-zero --suffix=B)
+
+# Create a directory for mysql seed files
+MYSQL_SEED_DIR="/data/user/common/mysql"
+mkdir -p $MYSQL_SEED_DIR
+
+echo "Transferring ${seed_size_human_readable} seed file from ${primary}." 1>&2
+primary_ssh "sudo cat $database_seed" | pv -f -w 78 -s "${seed_size[0]}" | sudo dd of=$database_seed bs=1M status=none
+if ! sudo /usr/local/share/enterprise/ghe-mysql-setup-replication $primary $user $pass $database_seed; then
+  echo "Error: ghe-mysql-setup-replication failed" 1>&2
+  exit 1
+fi
+
+sudo rm -f /etc/github/repl-force-mysql

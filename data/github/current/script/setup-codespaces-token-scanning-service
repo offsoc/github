@@ -1,0 +1,71 @@
+#!/bin/bash
+set -e
+
+# Workaround for hyperscan dependency installation issue on codespaces. See https://github.com/github/codespaces/issues/6444
+export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig/
+
+while (($#)); do
+    if [ "$1" = "--help" ]; then
+        help=true
+    elif [ "$1" = "-h" ]; then
+        help=true
+    fi
+    shift
+done
+
+if [ "$help" = true ]; then
+    echo "Usage: setup-codespaces-token-scanning-service [--hcs]"
+    echo "  --hcs  Install Hypercredscan"
+    echo "  --help -h  Print this help"
+    exit 0
+fi
+
+bootstrap_token_scanning_service () {
+  echo -e '\n==== Bootstrapping token-scanning-service ===='
+
+  (cd /workspaces/token-scanning-service && script/bootstrap)
+
+  echo -e '\n==== Setting shared encryption keys for the development environment ===='
+
+  encrypted_secrets_key=$(/workspaces/github/bin/rails runner 'puts GitHub.secret_scanning_encrypted_secrets_delimited_shared_transit_keys')
+  sed -i "s/ENCRYPTED_SECRETS_CURRENT_SHARED_TRANSIT_KEY=.*/ENCRYPTED_SECRETS_CURRENT_SHARED_TRANSIT_KEY=${encrypted_secrets_key}/" /workspaces/token-scanning-service/.env && echo "set encrypted secrets key"
+
+  encrypted_content_key=$(/workspaces/github/bin/rails runner 'puts GitHub.secret_scanning_user_content_delimited_encryption_root_keys')
+  sed -i "s/SECRET_SCANNING_USER_CONTENT_DELIMITED_ENCRYPTION_ROOT_KEYS=.*/SECRET_SCANNING_USER_CONTENT_DELIMITED_ENCRYPTION_ROOT_KEYS=${encrypted_content_key}/" /workspaces/token-scanning-service/.env && echo "set encrypted content key"
+
+  echo "done"
+}
+
+enable_feature_flags () {
+  # Note: toggle-feature-flag supports additional flags via the -F/--flag option
+  bin/toggle-feature-flag enable \
+  placeholder_feature \
+  --mode verbose
+}
+
+setup_token_scanning_service () {
+  if [ -z "$GITHUB_TOKEN" ]; then
+    echo "Could not find GITHUB_TOKEN ! This may indicate an issue with your codespace setup. Refer to https://thehub.github.com/epd/engineering/products-and-services/codespaces/dotcom-development/ for instructions and troubleshooting."
+    exit;
+  fi
+
+  # Give ourselves access to GitHub's private Go modules (see https://aka.ms/AAdtgc8 for more information).
+  echo -e '\n==== Setting Go environment variable GOPRIVATE to "*github.com/github/*" ===='
+  go env -w GOPRIVATE='*github.com/github/*'
+
+  echo -e '\n==== Cloning token-scanning-service into /workspaces/token-scanning-service ===='
+  git clone https://github.com/github/token-scanning-service.git /workspaces/token-scanning-service
+
+  # TSS pulls Docker containers from ghcr.io. Thus, we need to authenticate with GHCR.
+  echo -e '\n==== Authenticating with Docker ===='
+  docker login -u username -p "$GITHUB_TOKEN" ghcr.io
+
+  enable_feature_flags
+  bootstrap_token_scanning_service
+}
+
+setup_token_scanning_service
+
+echo -e ""
+echo -e "🎉🎉 FINISHED! The token-scanning-service repo has been set up at /workspaces/token-scanning-service! 🎉🎉"
+echo -e "To start token-scanning-service, see https://aka.ms/AAe1n2a"

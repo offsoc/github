@@ -1,0 +1,583 @@
+#!/bin/bash
+#/ Usage: ghe-setup-network [options]
+#/
+#/ Configure the primary network interface.
+#/
+#/ Provides a visual interface when run with -v
+#/
+#/ OPTIONS:
+#/   -h | --help         Show this message.
+#/   -v | --visual       Visual mode.
+#/   -c | --update       Update configuration without applying changes.
+#/
+#/  IPv4 Configuration
+#/   -4                               Disable.
+#/   -d | --dhcp                      Use DHCP.
+#/   -g | --gateway <gateway>         Set gateway address.
+#/   -i | --ip <ip>                   Set IP address.
+#/   -s | --subnet <subnet>           Set subnet mask (default: 255.255.255.0).
+#/   -p | --primary <primary>         Primary DNS server.
+#/   -q | --secondary <secondary>     Secondary DNS server.
+#/
+#/ IPv6 Configuration
+#/   -6                               Disable.
+#/   -D | --dhcp6                     Use DHCPv6.
+#/   -A | --slaac                     Use SLAAC.
+#/   -G | --gateway6 <gateway>        Set gateway address.
+#/   -I | --ip6                       Set IP address.
+#/   -S | --subnet6 <subnet>          Set subnet mask (default: 64).
+#/   -P | --primary6 <primary>        Primary DNS server.
+#/   -Q | --secondary6 <secondary>    Secondary DNS server.
+#/
+set -e
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+net4_mode='dhcp'
+net4_ip=''
+net4_gateway=''
+net4_subnet='255.255.255.0'
+net4_dns1=''
+net4_dns2=''
+net6_mode='slaac'
+net6_ip=''
+net6_gateway=''
+net6_subnet='64'
+net6_dns1=''
+net6_dns2=''
+interface='eth0'
+[ -f /data/user/common/network.conf ] && source /data/user/common/network.conf
+visual=''
+title="GitHub Enterprise network setup"
+dialog_args=''
+skip_ifdown=''
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,visual,update,dhcp,dhcp6,gateway:,ip:,ip6:,subnet:,subnet6:,primary:,primary6:,secondary:,secondary6: --options hvc46dDAg:G:i:I:s:S:p:P:q:Q: -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -c|--update)
+      skip_ifdown='1'
+      ;;
+    -d|--dhcp)
+      net4_mode='dhcp'
+      ;;
+    -D|--dhcp6)
+      net6_mode='dhcpv6'
+      ;;
+    -A|--slaac)
+      net6_mode='slaac'
+      ;;
+    -g|--gateway)
+      net4_mode='static'
+      net4_gateway="$2"
+      shift
+      ;;
+    -G|--gateway6)
+      net6_mode='static'
+      net6_gateway="$2"
+      shift
+      ;;
+    -i|--ip)
+      net4_mode='static'
+      net4_ip="$2"
+      shift
+      ;;
+    -I|--ip6)
+      net6_mode='static'
+      net6_ip="$2"
+      shift
+      ;;
+    -p|--primary)
+      net4_mode='static'
+      net4_dns1="$2"
+      shift
+      ;;
+    -P|--primary6)
+      net6_mode='static'
+      net6_dns1="$2"
+      shift
+      ;;
+    -q|--secondary)
+      net4_mode='static'
+      net4_dns2="$2"
+      shift
+      ;;
+    -Q|--secondary6)
+      net6_mode='static'
+      net6_dns2="$2"
+      shift
+      ;;
+    -s|--subnet)
+      net4_mode='static'
+      net4_subnet="$2"
+      shift
+      ;;
+    -S|--subnet6)
+      net6_mode='static'
+      net6_subnet="$2"
+      shift
+      ;;
+    -v|--visual)
+      visual='1'
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -n "$visual" ]; then
+  console=''
+  if [ "`tput longname`" == "linux console" ]; then console='1'; fi
+  if [ -n "$console" ]; then dialog_args='--ascii-lines'; fi
+fi
+
+
+
+if [ -z "$net4_mode" ] && [ -z "$visual" ]; then
+  echo "Nothing to do, please use either -d for DHCP or -i for Static IP setup or -v for the visual setup"
+  exit 0
+fi
+
+function validate_ip6() {
+  echo "$1" | /usr/share/rbenv/versions/current/bin/ruby -ripaddr -e "exit 1 if IPAddr.new(STDIN.read.chomp).family != Socket::AF_INET6" 2>/dev/null && echo '0' || echo '1'
+}
+
+function validate_subnet6() {
+  mask="$1"
+  validation=`echo "$mask" | sed 's/[0-9]\{1,3\}/valid-subnet/'`
+  if [ "$validation" = "valid-subnet" ]; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+function validate_dns6() {
+  if [ -z "$1" ]; then
+    echo 0
+  else
+    validate_ip6 "$1"
+  fi
+}
+
+function validate_gateway6() {
+  if [ -z "$1" ]; then
+    echo 0
+  else
+    ip=${1/\%eth0/}
+    validate_ip6 "$ip"
+  fi
+}
+
+function validate_ip4() {
+  ip="$1"
+  validation=`echo "$ip" | sed 's/[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/valid-ip/'`
+  if [ "$validation" = "valid-ip" ]; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+function validate_subnet4() {
+  validate_ip4 "$1"
+}
+
+function validate_dns4() {
+  if [ -z "$1" ]; then
+    echo 0
+  else
+    validate_ip4 "$1"
+  fi
+}
+
+function validate_gateway4() {
+  validate_ip4 "$1"
+}
+
+function validate_config() {
+  if [ "$1" = "4" ]; then
+    if [ `validate_ip4 "$net4_ip"` != "0" ]; then net4_ip_error='invalid IP'; error=1; fi
+    if [ `validate_subnet4 "$net4_subnet"` != "0" ]; then net4_subnet_error='invalid subnet'; error=1; fi
+    if [ `validate_ip4 "$net4_gateway"` != "0" ]; then net4_gateway_error='invalid gateway IP'; error=1; fi
+    if [ "$net4_dns1" != "---" -a -n "$net4_dns1" ] && [ `validate_ip4 "$net4_dns1"` != "0" ]; then net4_dns1_error='invalid IP'; error=1; fi
+    if [ "$net4_dns2" != "---" -a -n "$net4_dns2" ] && [ `validate_ip4 "$net4_dns2"` != "0" ]; then net4_dns2_error='invalid IP'; error=1; fi
+  elif [ "$1" = "6" ]; then
+    if [ `validate_ip6 "$net6_ip"` != "0" ]; then net6_ip_error='invalid IPv6'; error=1; fi
+    if [ `validate_subnet6 "$net6_subnet"` != "0" ]; then net6_subnet_error='invalid IPv6 Subnet'; error=1; fi
+    if [ `validate_gateway6 "$net6_gateway"` != "0" ]; then net6_gateway_error='invalid IPv6 gateway'; error=1; fi
+    if [ "$net6_dns1" != "---" -a -n "$net6_dns1" ] && [ `validate_ip6 "$net6_dns1"` != "0" ]; then net6_dns1_error='invalid IPv6'; error=1; fi
+    if [ "$net6_dns2" != "---" -a -n "$net6_dns2" ] && [ `validate_ip6 "$net6_dns2"` != "0" ]; then net6_dns2_error='invalid IPv6'; error=1; fi
+  fi
+}
+
+function reset_error_messages() {
+  net4_ip_error=''
+  net4_subnet_error=''
+  net4_gateway_error=''
+  net4_dns1_error=''
+  net4_dns2_error=''
+  net6_ip_error=''
+  net6_subnet_error=''
+  net6_gateway_error=''
+  net6_dns1_error=''
+  net6_dns2_error=''
+  error=''
+}
+
+reset_error_messages
+
+if [ -n "$visual" ]; then
+
+  trap "dialog --clear" EXIT
+
+  SIZE_X=`tput cols`
+  SIZE_Y=`tput lines`
+
+  sx=65
+  sy=12
+
+  dialog_title="GitHub Network setup"
+
+  function prompt_var() {
+    valid_input=''
+    error=''
+    input_val="$2"
+    while [ -z "$valid_input" ]; do
+      set +e
+      dialog $dialog_args --title "$dialog_title" --inputbox "Enter $1\n$error" 8 $sx "$input_val" 3>&1 1>&2 2>menu_tmp
+      retval=$?
+      set -e
+      if [ "$retval" = 0 ]; then
+        val=$(cat menu_tmp)
+        if [ "$($3 "$val")" != "0" ]; then
+          error="Error: Invalid IP"
+          input_val="$val"
+        else
+          valid_input=1
+          echo "$val"
+        fi
+      else
+        valid_input=1
+        echo "$2"
+      fi
+    done
+  }
+
+  function prompt_var_mode() {
+    if [ "$1" = "6" ]; then
+      set +e
+      dialog $dialog_args --title "$dialog_title" --menu "\nSelect the mode for IPv$1" $sy $sx 4 \
+        "Disabled" "Disable IPv$1 on $interface" \
+        "SLAAC" "Automatic configuration" \
+        "DHCPv6" "Automatic configuration" \
+        "Static" "Manual configuration" 3>&1 1>&2 2>menu_tmp
+      retval=$?
+      set -e
+    else
+      set +e
+      dialog $dialog_args --title "$dialog_title" --menu "\nSelect the mode for IPv$1" $sy $sx 3 \
+        "Disabled" "Disable IPv$1 on $interface" \
+        "DHCP" "Automatic configuration" $extra_args \
+        "Static" "Manual configuration" 3>&1 1>&2 2>menu_tmp
+      retval=$?
+      set -e
+    fi
+
+    if [ "$retval" = 0 ]; then
+      case $(cat menu_tmp) in
+        Disabled)
+          echo "disabled"
+          ;;
+        Static)
+          echo "static"
+          ;;
+        DHCP)
+          echo "dhcp"
+          ;;
+        SLAAC)
+          echo "slaac"
+          ;;
+        DHCPv6)
+          echo "dhcpv6"
+          ;;
+      esac
+    else
+      echo 0
+    fi
+  }
+
+  function mode_description() {
+    case "$1" in
+      disabled)
+        echo "Disabled"
+        ;;
+      static)
+        echo "Manual"
+        ;;
+      dhcp)
+        echo "Automatic (DHCP)"
+        ;;
+      slaac)
+        echo "Automatic (SLAAC)"
+        ;;
+      dhcpv6)
+        echo "Automatic (DHCPv6)"
+    esac
+  }
+
+  function network_configure_form() {
+    proto="$1"
+    menu_tmp=''
+    form_done=''
+    error=''
+    while [ -z "$form_done" ]; do
+      if [ "$net_mode" = "static" ]; then
+        set +e
+        dialog $dialog_args --title "$dialog_title" --extra-button --extra-label "Done" \
+          --ok-label "Change" --menu "Configure IPv$proto on $interface\n$error" 14 $sx 6 \
+          "Configuration mode:" "$(mode_description $net_mode)" \
+          "IPv$proto address:" "$net_ip" \
+          "Subnet mask:" "$net_subnet" \
+          "Gateway address:" "$net_gateway" \
+          "Primary DNS:" "$net_dns1" \
+          "Secondary DNS:" "$net_dns2" 3>&1 1>&2 2>menu_tmp
+        retval=$?
+        set -e
+        if [ "$retval" = 3 -a "$net_mode" = "static" ]; then
+          if [ -z "$net_ip" ]; then
+            error="Please enter an address"
+          elif [ -z "$net_subnet" ]; then
+            error="Please enter a subnet mask"
+          else
+            return 0
+          fi
+        elif [ "$retval" != 0 ]; then
+          return 1
+        else
+          error=''
+          selection=$(cat menu_tmp)
+          if [ "$selection"  = "Configuration mode:" ]; then
+            net_mode=$(prompt_var_mode "$proto" "$net_mode")
+            if [ "$net_mode" != "static" ]; then
+              return 0
+            fi
+          fi
+          if [ "$selection" =  "IPv$proto address:" ]; then net_ip=$(prompt_var "$selection" "$net_ip" "validate_ip$proto"); fi
+          if [ "$selection" =  "Subnet mask:" ]; then net_subnet=$(prompt_var "$selection" "$net_subnet" "validate_subnet$proto"); fi
+          if [ "$selection" =  "Gateway address:" ]; then net_gateway=$(prompt_var "$selection" "$net_gateway" "validate_gateway$proto"); fi
+          if [ "$selection" =  "Primary DNS:" ]; then net_dns1=$(prompt_var "$selection" "$net_dns1" "validate_dns$proto"); fi
+          if [ "$selection" =  "Secondary DNS:" ]; then net_dns2=$(prompt_var "$selection" "$net_dns2" "validate_dns$proto"); fi
+        fi
+      else
+        net_mode=$(prompt_var_mode "$proto" "$net_mode")
+        if [ "$net_mode" != "static" ]; then
+          return 0
+        fi
+      fi
+    done
+  }
+
+  function network_selection_menu() {
+    setup_done=''
+    while [ -z "$setup_done" ]; do
+      net4_info=$(mode_description "$net4_mode")
+      [ "$net4_mode" = "static" ] && net4_info+=" ($net4_ip)"
+      net6_info=$(mode_description "$net6_mode")
+      [ "$net6_mode" = "static" ] && net6_info+=" ($net6_ip)"
+      set +e
+      dialog $dialog_args --title "$dialog_title" --extra-button --extra-label "Save" --ok-label "Edit" \
+        --menu "Select Protocol to configure" $sy $sx 2 \
+        "IPv4" "$net4_info" \
+        "IPv6" "$net6_info" 3>&1 1>&2 2>menu_tmp
+      retval=$?
+      set -e
+      if [ "$retval" = 3 ]; then
+        setup_done=1
+      elif [ "$retval" = 0 ]; then
+        val=$(cat menu_tmp)
+        if [ "$val" = "IPv4" ]; then
+          net_mode=$net4_mode
+          net_ip=$net4_ip
+          net_subnet=$net4_subnet
+          net_gateway=$net4_gateway
+          net_dns1=$net4_dns1
+          net_dns2=$net4_dns2
+          network_configure_form 4 && {
+            net4_mode=$net_mode
+            net4_ip=$net_ip
+            net4_subnet=$net_subnet
+            net4_gateway=$net_gateway
+            net4_dns1=$net_dns1
+            net4_dns2=$net_dns2
+          }
+        elif [ "$val" = "IPv6" ]; then
+          net_mode=$net6_mode
+          net_ip=$net6_ip
+          net_subnet=$net6_subnet
+          net_gateway=$net6_gateway
+          net_dns1=$net6_dns1
+          net_dns2=$net6_dns2
+          network_configure_form 6 && {
+            net6_mode=$net_mode
+            net6_ip=$net_ip
+            net6_subnet=$net_subnet
+            net6_gateway=$net_gateway
+            net6_dns1=$net_dns1
+            net6_dns2=$net_dns2
+          }
+        fi
+      elif [ "$retval" != 0 ]; then
+        exit 1
+      fi
+    done
+  }
+
+  network_selection_menu
+
+  dialog --clear
+  trap - EXIT
+else
+  if [ "$net4_mode" = "static" ]; then
+    validate_config 4
+  fi
+  if [ "$net6_mode" = "static" ]; then
+    validate_config 6
+  fi
+
+  if [ -n "$error" ]; then
+    if [ -n "$net4_ip_error" ]; then echo "IPv4 address (-i) \"$net4_ip\": $net4_ip_error"; fi
+    if [ -n "$net4_subnet_error" ]; then echo "Subnet mask (-s) \"$net4_subnet\": $net4_subnet_error"; fi
+    if [ -n "$net4_gateway_error" ]; then echo "Gateway address (-g) \"$net4_gateway\": $net4_gateway_error"; fi
+    if [ -n "$net4_dns1" ] && [ -n "$net4_dns1_error" ]; then echo "Primary DNS (-p) \"$net4_dns1\": $net4_dns1_error"; fi
+    if [ -n "$net4_dns2" ] && [ -n "$net4_dns2_error" ]; then echo "Secondary DNS (-q) \"$net4_dns2\": $net4_dns2_error"; fi
+    if [ -n "$net6_ip_error" ]; then echo "IPv6 address (-I) \"$net6_ip\": $net6_ip_error"; fi
+    if [ -n "$net6_subnet_error" ]; then echo "Subnet mask (-S) \"$net6_subnet\": $net6_subnet_error"; fi
+    if [ -n "$net6_gateway_error" ]; then echo "Gateway address (-G) \"$net6_gateway\": $net6_gateway_error"; fi
+    if [ -n "$net6_dns1" ] && [ -n "$net6_dns1_error" ]; then echo "Primary DNS (-P) \"$net6_dns1\": $net6_dns1_error"; fi
+    if [ -n "$net6_dns2" ] && [ -n "$net6_dns2_error" ]; then echo "Secondary DNS (-Q) \"$net6_dns2\": $net6_dns2_error"; fi
+    echo "Invalid configuration"
+    exit 1
+  fi
+fi
+
+if [ -d /data/user/common ]; then
+  echo "Saving configuration..."
+  cat <<-EOF > /data/user/common/network.conf
+net4_mode=$net4_mode
+net4_ip=$net4_ip
+net4_subnet=$net4_subnet
+net4_gateway=$net4_gateway
+net4_dns1=$net4_dns1
+net4_dns2=$net4_dns2
+net6_mode=$net6_mode
+net6_ip=$net6_ip
+net6_subnet=$net6_subnet
+net6_gateway=$net6_gateway
+net6_dns1=$net6_dns1
+net6_dns2=$net6_dns2
+
+EOF
+else
+  echo "Failed to write configuration."
+fi
+
+case "$net4_mode" in
+  dhcp)
+    echo "Configuring IPv4 with DHCP..."
+    echo "iface $interface inet dhcp" > /tmp/net_ipv4
+    ;;
+  static)
+    echo "Configuring IPv4 with manual configuration..."
+    cat <<-EOF > /tmp/net_ipv4
+iface $interface inet static
+  address $net4_ip
+  netmask $net4_subnet
+EOF
+    if [ -n "$net4_gateway" ]; then
+      echo "  gateway $net4_gateway" >> /tmp/net_ipv4
+    fi
+    if [ -n "$net4_dns1" ]; then
+      echo "  dns-nameservers $net4_dns1 $net4_dns2" >> /tmp/net_ipv4
+    fi
+    ;;
+  disabled)
+    echo "Disabling IPv4..."
+    echo > /tmp/net_ipv4
+    ;;
+esac
+[ "$net4_mode" != "disabled" ] && echo "auto $interface" >> /tmp/net_ipv4
+
+case "$net6_mode" in
+  dhcpv6)
+    echo "Configuring IPv6 with DHCPv6..."
+    echo "iface $interface inet6 dhcp" > /tmp/net_ipv6
+    ;;
+  slaac)
+    echo "Configuring IPv6 with SLAAC..."
+    echo "iface $interface inet6 auto" > /tmp/net_ipv6
+    ;;
+  static)
+    echo "Configuring IPv6 with manual configuration..."
+    cat <<-EOF > /tmp/net_ipv6
+iface $interface inet6 static
+  address $net6_ip
+  netmask $net6_subnet
+  post-up /etc/network/if-up.d/regenerate-ssl-self-signed
+EOF
+    if [ -n "$net6_gateway" ]; then
+      echo "  gateway $net6_gateway" >> /tmp/net_ipv6
+    fi
+    if [ -n "$net6_dns1" ]; then
+      echo "  dns-nameservers $net6_dns1 $net6_dns2" >> /tmp/net_ipv6
+    fi
+    ;;
+  disabled)
+    echo "Disabling IPv6"
+    echo > /tmp/net_ipv6
+esac
+[ "$net6_mode" != "disabled" ] && echo "auto $interface" >> /tmp/net_ipv6
+
+if [ -z "$skip_ifdown" ]; then
+  dhclient_pid=$(ps aux | grep [d]hclient | grep $interface | awk '{print $2}')
+
+  echo "Stopping network..."
+  ifdown -a # >/dev/null 2>&1
+
+  # Kill dhclient when using static mode
+  if [ "$net4_mode" = "static" ]; then
+    kill $dhclient_pid 2>&1 >/dev/null || true
+    rm -f /var/run/resolvconf/interface/$interface.dhclient
+  fi
+fi
+
+mv /tmp/net_ipv4 /etc/network/interfaces.d/$interface-ipv4
+mv /tmp/net_ipv6 /etc/network/interfaces.d/$interface-ipv6
+
+if [ -z "$skip_ifdown" ]; then
+  echo "Starting network..."
+  ifup -a # >/dev/null 2>&1
+fi
+
+echo "Finished network configuration"

@@ -1,0 +1,317 @@
+<%= content_tag(:div, alive_attrs) do %>
+  <%= annotation_wrapper do %>
+    <div <%= test_selector "code-scanning-review-comment-component" %> class="js-comment">
+      <%= render CodeScanning::AnnotationComponent.new(
+        code_scanning_annotation_result: code_scanning_alert,
+        inline: true,
+        annotation_id: code_scanning_review_comment.id,
+        fallback_warning_level: code_scanning_review_comment.warning_level,
+        fallback_tool_name: code_scanning_review_comment.tool_name,
+        fallback_alert_title: code_scanning_review_comment.alert_title,
+        fallback_alert_message: code_scanning_review_comment.alert_message,
+        alert_number: code_scanning_review_comment.alert_number,
+        pull_request_review_thread: thread,
+        repository: repository,
+        refs: code_scanning_alert.present? ? pull_request_refs : nil
+      ) do |component| %>
+        <% component.with_disclaimer do %>
+          <% if suggested_fix_show_not_supported? %>
+            <p class="text-small mb-0" <%= test_selector("cs-not-supported-text") %>>
+              <%= render(Primer::Beta::Octicon.new(icon: :report, size: :small)) %>
+              <%= suggested_fix_not_supported %> is not supported by
+              <%= render Primer::Beta::Link.new(
+                classes: "Link--inTextBlock",
+                muted: false,
+                scheme: :default,
+                href: suggested_fix_autofix_docs_url,
+                font_size: :small,
+                mr: 2
+              ).with_content("autofix")%>
+            </p>
+          <% elsif invalid_suggested_fix? %>
+            <p class="text-small mb-0" <%= test_selector("ai-suggested-fix-invalid") %>>
+              <%= render(Primer::Beta::Octicon.new(icon: :report, size: :small)) %>
+              Copilot Autofix cannot generate an appropriate fix for this alert at this time
+            </p>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% suggested_fix_comment_header = capture do %>
+    <%= render Primer::Box.new(ml: -2, m: 1, display: :flex, justify_items: :start, "data-morpheus-enabled": false) do %>
+      <%= render Primer::Box.new(
+        m: 1,
+        display: :flex,
+        justify_items: :center,
+        justify_content: :center,
+        bg: :subtle,
+        border: true,
+        classes: "circle",
+        "data-morpheus-enabled": false
+      ) do %>
+        <%= render Primer::Beta::Octicon.new(:copilot, color: :muted, m: 1) %>
+      <% end %>
+      <%= render Primer::Beta::Text.new(tag: :p, m: 1, flex: 1) do %>
+        <strong>Copilot Autofix</strong>
+        <%= render(Primer::Beta::Label.new(scheme: :secondary)) { "AI" } %>
+        <span class="color-fg-muted">
+          <% if state_updated_at %>
+            <%= time_ago_in_words(state_updated_at) %> ago
+          <% end %>
+        </span>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if show_suggested_fix? %>
+    <%= render Primer::Beta::Details.new(
+      border: :top,
+      classes: "Details-element",
+      reset: true, # This hiddes the default marker
+      open: !collapse_suggested_fix?,
+    ) do |component|%>
+      <% component.with_summary(
+        hidden: hide_suggested_fix_summary?,
+        button: false,
+        py: 3,
+        px: 3,
+      ) do %>
+        <div class="d-flex flex-items-center" <%= test_selector("ai-suggested-fix-collapsed-summary") %>>
+          <span class="flex-auto mr-3 d-flex flex-items-center">
+            <div class="d-lg-inline d-block px-md-0 px-3 pb-md-0 pb-3">
+              <i><%= collapsed_suggested_fix_message %></i>
+            </div>
+          </span>
+
+          <span class="btn-link color-fg-muted f6 Details-content--closed"><%= primer_octicon(icon: :unfold, mr: 1) %>Show autofix suggestion</span>
+          <span class="btn-link color-fg-muted f6 Details-content--open"><%= primer_octicon(icon: :fold, mr: 1) %>Hide autofix suggestion</span>
+        </div>
+      <% end %>
+      <% component.with_body do %>
+        <div class="review-comment js-code-scanning-apply-autofix-container" <%= test_selector("ai-suggested-fix") %>>
+          <%= suggested_fix_comment_header %>
+
+          <div class="ml-5">
+            <div class="comment-body markdown-body soft-wrap css-overflow-wrap-anywhere user-select-contain d-block" <%= test_selector("ai-suggested-fix-description") %>>
+              <%= suggested_fix_description %>
+            </div>
+          </div>
+
+          <div class="ml-5 mt-4">
+            <div class="mb-2 f6 color-fg-muted soft-wrap css-overflow-wrap-anywhere user-select-contain" <%= test_selector("ai-suggested-fix-footnote") %>>
+              Suggested fixes for CodeQL alerts, powered by Copilot Autofix, may produce inaccurate results. Review carefully before use.
+            </div>
+
+            <div class="soft-wrap<% unless show_suggested_fix_actions? %> rounded overflow-hidden<% end %>">
+              <%= render Suggestions::MultiFileDiffComponent.new(
+                diff_entries: suggested_fix_diff_entries,
+                file_highlighting: suggested_fix_file_highlighting,
+                current_path: pull_request_review_comment.path,
+                hydro_click_tracking_payload: {
+                  repository_id: repository.id,
+                  alert_number: code_scanning_review_comment.alert_number,
+                  pull_request_id: pull_request.id,
+                  pull_request_number: pull_request.number,
+                }
+              ) %>
+            </div>
+
+            <% if suggested_fix_dependency_metadata? %>
+              <%= render CodeScanning::SuggestedFixDependencyMetadataComponent.new(dependency_metadata: suggested_fix_dependency_metadata) %>
+            <% end %>
+
+            <% if show_suggested_fix_actions? %>
+              <div class="d-flex flex-sm-row flex-column mt-2 flex-justify-end" <%= test_selector("ai-suggested-fix-actions") %>>
+                <%= render(Primer::Alpha::Dialog.new(title: "Dismiss suggestion")) do |dialog| %>
+                  <% dialog.with_show_button(size: :small, scheme: :danger, w: [:full, :auto], mr: [0, 2], mb: [2, 0]) { "Dismiss" } %>
+                  <% dialog.with_header(classes: "Overlay-header--large") %>
+
+                  <%= form_tag(pull_request_code_scanning_auto_fix_feedback_path(repository.owner, repository, pull_request, code_scanning_review_comment.alert_number)) do %>
+                    <input type="hidden" name="comment_id" value="<%= pull_request_review_comment.id %>">
+                    <input type="hidden" name="current_oid" value="<%= current_head_oid %>">
+
+                    <%= dialog.with_body do %>
+                      If you dismiss the suggestion, no one else reviewing this pull request will be able to see it, and CodeQL won't suggest a new one.
+
+                      <div class="mt-3">
+                        <%= render Primer::Alpha::TextArea.new(
+                          name: "reason",
+                          label: "Reason (optional feedback)",
+                          placeholder: "Could you share a bit more about why you are dismissing this suggested fix? Your feedback will help us improve this feature.",
+                          required: false,
+                          full_width: true,
+                          maxlength: 280,
+                          style: "resize:vertical; min-height:100px",
+                        ) %>
+                      </div>
+                    <% end %>
+                    <%= dialog.with_footer do %>
+                      <%= render(Primer::Beta::Button.new(scheme: :secondary, type: :button, data: { "close-dialog-id": dialog.id })) { "Cancel" } %>
+                      <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit, name: "thumbs", value: "down")) { "Dismiss suggestion" } %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+
+                <details class="details-reset details-overlay position-relative mb-0 width-full width-sm-auto">
+                  <%= render Primer::Beta::Button.new(tag: :summary, size: :small, w: [:full, :auto], ml: 0, mb: [2, 0]) do |component| %>
+                    <% component.with_trailing_action_icon(icon: "triangle-down") %>
+                    Edit
+                  <% end %>
+                  <div class="p-0 SelectMenu right-0">
+                    <div class="SelectMenu-modal" style="width: 350pt">
+                      <ul class="SelectMenu-list">
+                        <li class="Box-row d-flex flex-justify-between color-fg-default">
+                          <%= render Primer::Beta::Octicon.new(icon: "terminal", mr: 2) %>
+                          <%= render Primer::Box.new(direction: :column, display: :flex, flex: 1, pl: 1, pb: 1) do%>
+                            <%= render Primer::Beta::Text.new(float: :left, font_weight: :bold).with_content(autofix_edit_cli_title) %>
+                            <div class="input-group mt-2 ml-0 pl-0">
+                              <input type="text" class="form-control input-monospace input-sm color-bg-subtle" data-autoselect value="gh autofix view <%= code_scanning_review_comment.alert_number %>" aria-label="<%= autofix_edit_cli_title %>" readonly>
+                              <div class="input-group-button">
+                                <%= content_tag(
+                                  "clipboard-copy",
+                                  render(Primer::Beta::Octicon.new(icon: "copy", classes: "js-clipboard-copy-icon", display: :inline_block)) + render(Primer::Beta::Octicon.new(icon: "check", color: :success, classes: "js-clipboard-check-icon", display: [:inline_block, :none])),
+                                  value: "gh autofix view #{code_scanning_review_comment.alert_number}",
+                                  "aria-label": "Copy to clipboard",
+                                  class: "btn btn-sm js-clipboard-copy ClipboardButton",
+                                  "data-copy-feedback": "Copied!",
+                                ) %>
+                              </div>
+                            </div>
+                            <%= render Primer::Box.new(color: :muted, pt: 1) do%>
+                              <%= render(Primer::Beta::Link.new(href: "https://cli.github.com/manual/gh_pr_checkout", target: "_blank")) { "Checkout the pull request" } %>
+                              <%= render Primer::Beta::Text.new.with_content( "to view this fix with the" ) %>
+                              <%= render(Primer::Beta::Link.new(href: "https://github.com/github/gh-autofix", target: "_blank")) { "CLI autofix extension" } %>
+                            <% end %>
+                          <% end %>
+                        </li>
+                        <% if suggested_fix_diff_entries.length == 1 %>
+                          <li class="Box-row">
+                            <a
+                            href="<%= file_edit_path(repository.owner, repository, pull_request.head_ref_name, suggested_fix_diff_entries[0].path, alert_number: code_scanning_review_comment.alert_number, pull_request_number: pull_request.number, pr: "/#{repository.name_with_display_owner}/pull/#{pull_request.number}") %>"
+                            class="d-flex flex-justify-between color-fg-default text-bold no-underline" target="_blank" <%= test_selector("ai-suggested-fix-edit-button") %>
+                            >
+                              <%= render Primer::Beta::Octicon.new(icon: "pencil", mr: 2) %>
+                              <%= render(Primer::Box.new(direction: :column, display: :flex, flex: 1, pl: 1, pb: 1)) do%>
+                                <%= render Primer::Beta::Text.new(float: :left, font_weight: :bold).with_content("Edit #{suggested_fix_diff_entries[0].path}") %>
+                                <%= render Primer::Beta::Text.new(color: :muted, font_size: :small, float: :left, font_weight: :normal).with_content("Edit file directly on GitHub with this fix applied") %>
+                              <% end %>
+                              <%= render Primer::Beta::Octicon.new(icon: :plus, align_self: :center, mr: 2) %>
+                            </a>
+                          </li>
+                        <% end %>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+                <details class="details-reset details-overlay position-relative mb-0 width-full width-sm-auto" id="<%= commit_suggestion_modal_id %>">
+                  <%= render Primer::Beta::Button.new(tag: :summary, scheme: :primary, size: :small, w: [:full, :auto], ml: [0, 2], mb: [2, 0]) do |component| %>
+                    <% component.with_trailing_action_icon(icon: "triangle-down") %>
+                    Commit fix
+                  <% end %>
+                  <div class="pt-1 SelectMenu right-0">
+                    <div class="SelectMenu-modal" style="max-width: calc(100vw - 32px); width: 420px; height: auto;">
+                      <header class="SelectMenu-header p-2">
+                        <span class="SelectMenu-title">Commit fix</span>
+
+                        <%= render Primer::Beta::IconButton.new(
+                          icon: :x,
+                          type: :button,
+                          scheme: :invisible,
+                          classes: "SelectMenu-closeButton",
+                          "aria-label": "Close commit suggestion dialog",
+                          show_tooltip: false,
+                          data: {
+                            toggle_for: commit_suggestion_modal_id
+                          }
+                        ) %>
+                      </header>
+
+                      <%= form_tag(pull_request_code_scanning_auto_fix_path(repository.owner, repository, pull_request), method: :post, class: "js-code-scanning-apply-autofix-form p-2") do %>
+                        <input type="hidden" name="alert_number" value="<%= code_scanning_review_comment.alert_number %>">
+                        <input type="hidden" name="comment_id" value="<%= pull_request_review_comment.id %>">
+                        <input type="hidden" name="current_oid" value="<%= current_head_oid %>">
+
+                        <input type="text" name="commit_title" class="form-control input-block input-contrast mb-2" aria-label="Commit title" value="<%= autofix_suggestion_commit_title %>" placeholder="Commit title">
+
+                        <textarea rows="2" aria-label="Commit message" autocomplete="off" class="js-suggestion-commit-message js-quick-submit form-control input-block mb-2" type="text" name="commit_message" placeholder="Add an optional extended description…" style="resize: vertical"></textarea>
+
+                        <%= render Repositories::DcoLabelComponent.new(repo: repository) %>
+
+                        <div class="form-actions">
+                          <%= render Primer::Beta::Button.new(type: :submit, size: :small, classes: "js-code-scanning-apply-autofix-submit", data: { disable_invalid: true, disable_with: "Applying commit..." }).with_content("Commit changes") %>
+                        </div>
+                      <% end %>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            <% end %>
+
+            <% if show_suggested_fix_actioned_message? %>
+              <div class="f6 color-fg-muted mt-3" <%= test_selector("ai-suggested-fix-actioned") %>>
+                <% if state_updated_by.present? %>
+                  <%= render GitHub::AvatarComponent.new(actor: state_updated_by, display: [:inline_block], size: 24) %>
+
+                  <strong>
+                    <%= render Comments::CommentActorComponent.new(actor: state_updated_by, show_full_name: false) %>
+                  </strong>
+
+                  <%= suggested_fix_actioned_message %> <%= time_ago_in_words(state_updated_at) %> ago.
+                <% else %>
+                  <%= suggested_fix_actioned_by_unknown_user_message %> <%= time_ago_in_words(state_updated_at) %> ago.
+                <% end %>
+              </div>
+            <% elsif outdated_suggested_fix? %>
+              <div class="f6 color-fg-muted mt-3" <%= test_selector("ai-suggested-fix-outdated-note") %>>
+                Unable to commit as this autofix suggestion is now outdated
+              </div>
+            <% end %>
+
+            <div class="form-group flex-auto warn m-0 mt-2 color-fg-attention js-error-message-placeholder" hidden>
+              <div class="position-relative warning m-0" style="max-width: inherit;">
+                <span class="js-error-message"></span>
+                <span class="text-bold btn-link js-refresh-after-suggestion">Refresh and try again.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% elsif suggested_fix_alert_pending? %>
+    <%= pending_suggested_fix_with_timeout_wrapper do %>
+      <%= suggested_fix_comment_header %>
+
+      <div class="ml-5 f4">
+        <p class="my-1 f6 color-fg-muted">
+          Generating an autofix suggestion, this might take a while&hellip;
+        </p>
+
+        <div class="Skeleton Skeleton--text" style="width:100%">&nbsp;</div>
+        <div class="Skeleton Skeleton--text" style="width:93%">&nbsp;</div>
+        <div class="Skeleton Skeleton--text" style="width:89%">&nbsp;</div>
+      </div>
+    <% end %>
+  <% elsif suggested_fix_alert_error? %>
+     <div class="review-comment border-top" <%= test_selector("ai-suggested-fix-error") %>>
+      <%= suggested_fix_comment_header %>
+
+      <div class="mx-5 mt-5 f4 d-flex flex-column flex-items-center">
+        <%= render(Primer::Beta::Octicon.new(:alert, size: :medium, color: :muted)) %>
+        <p class="my-1 f6">
+          <strong>Copilot could not generate an autofix suggestion</strong>
+        </p>
+        <p class="my-1 f6 text-center color-fg-muted">
+          Copilot could not generate an autofix suggestion for this alert. Try pushing a new commit or if the problem persists
+          <%= render Primer::Beta::Link.new(
+            classes: "Link--inTextBlock",
+            muted: false,
+            scheme: :default,
+            href: GitHub.support_url,
+          ).with_content("contact support") %>.
+        </p>
+      </div>
+    </div>
+  <% end %>
+<% end %>

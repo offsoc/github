@@ -1,0 +1,153 @@
+#!/bin/bash
+#/ Usage: ghe-repl-start-all [-hv]
+#/
+#/ Start replication of all major datastores for all replica nodes.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -v | --verbose     Run with verbose output.
+#/   -y | --yes         Run non-interactively. Answer yes to all prompts.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,yes --options vhy -- "$@") || {
+  usage
+  exit 2
+}
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      GHE_REPL_VERBOSE=true
+      shift
+      ;;
+    -y|--yes)
+      prompt_less=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+. ghe-repl-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+
+capture_error_on_failure() {
+  ec=$?
+
+  if [ $ec -ne 0 ]; then
+    echo "An error occurred trying to start replication on all replica nodes."
+
+    ghe-cluster-each --replica -- "(test -f /etc/github/repl-running && ghe-repl-status > /dev/null 2>&1) || (echo "Replica node "\$(cat /etc/github/cluster)" did not start successfully. Reporting ghe-repl-status for "\$(cat /etc/github/cluster)":"; ghe-repl-status)"
+  fi
+
+  exit $ec
+}
+
+exit_success() {
+  echo "Success: replication is running for all services on all replicas."
+  echo "Run ghe-cluster-each --replica -- \"ghe-repl-status\" to monitor replication health and progress."
+}
+
+# Start git_hooks cron
+start_git_hooks_cron() {
+  echo "Starting cron for git-hooks ..."
+  # hourly resync
+  sudo ln -sf /usr/local/share/enterprise/ghe-repl-sync-git-hooks /etc/cron.hourly/ghe-repl-sync-git-hooks
+  # initial sync
+  /usr/local/share/enterprise/ghe-repl-sync-git-hooks 2>/dev/null
+}
+
+: "${GHE_REPL_VERBOSE:=false}"
+$GHE_REPL_VERBOSE && set -x
+
+echo "Warning: You are about to start replication on all disabled replica nodes."
+echo
+if [ -z "$prompt_less" ]; then
+  read -p "Proceed with ghe-repl-start-all? [y/N] "
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+# Precheck - must be run on primary node
+ensure_primary
+
+# Precheck - must be run on HA setup
+if [ ! "$(ghe-config cluster.ha)" ] || [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Appliance is not configured for HA. Exiting."
+  exit 1
+fi
+
+replicas=$(ghe-cluster-nodes --replica)
+replicas_to_start=0
+
+# Precheck - ensure at least one replica disabled
+for replica in $replicas; do
+  if [ "$(ghe-config cluster."$replica".replica|| true)" = "disabled" ]; then
+    replicas_to_start=$((replicas_to_start + 1))
+  fi
+done
+
+if [ $replicas_to_start -eq 0 ]; then
+  echo "No replica nodes are disabled. Nothing to do."
+  exit 0
+fi
+
+# Precheck - ssh connection check with replicas
+for replica in $replicas; do
+  ip=$(get_node_ip "$replica")
+  if ! ssh_check "$ip"; then
+    echo "Failed to connect to $replica ($ip). Exiting."
+    exit 255
+  fi
+done  
+
+# Precheck - ensure primary and replica are compatible
+ghe-cluster-each --replica -- "source /usr/local/share/enterprise/ghe-repl-lib;ensure_primary_and_replica_compatible"
+
+trap capture_error_on_failure EXIT
+
+echo "Enabling each replica node in configuration..."
+for replica in $replicas; do
+  ghe-config "cluster.$replica.replica" enabled
+# Set repl state file on replica node
+  ip=$(get_node_ip "$replica")
+  ssh_cmd $ip -- sudo touch /tmp/repl-starting
+done
+
+echo "Updating configuration..."
+ghe-config-apply
+
+# Run outside of config apply as it is started from primary and only need to run once
+start_git_hooks_cron
+
+# Actions cleanup 
+if actions-ever-enabled; then
+  LOGFILE=/data/user/common/ghe-config.log
+  # Primary MSSQL is stopped at the very end of the process because it is needed at various phases 
+  if ! ghe-config --true app.actions.enabled; then
+    echo "Stopping primary MSSQL container after replication, Actions is disabled" >> $LOGFILE
+    . /usr/local/share/enterprise/ghe-mssql-lib && stop-mssql-global >> $LOGFILE || true
+  fi
+fi
+
+exit_success

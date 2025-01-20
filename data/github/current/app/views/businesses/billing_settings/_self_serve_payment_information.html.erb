@@ -1,0 +1,276 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+has_billing_information = this_business.has_saved_trade_screening_record_with_information?
+has_billing_and_shipping_information = has_billing_information && this_business.shipping_contact.present?
+show_payment_method_form = this_business.shipping_information_required? ? has_billing_and_shipping_information : has_billing_information
+can_edit_billing_information = has_billing_information && this_business.is_allowed_to_edit_trade_screening_information?
+show_billing_information_cannot_proceed_error = has_billing_information && !this_business.is_allowed_to_edit_trade_screening_information?
+%>
+
+<% if this_business.trial? %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(mt: 4)) do |component| %>
+      To complete your purchase of GitHub Enterprise, enter your payment information below and click <%= link_to buy_enterprise_flavor, billing_settings_upgrade_enterprise_path(this_business), class: "Link--inTextBlock" %>.<br>
+      If you require invoices or are interested in Enterprise Managed Users, <%= link_to "contact our sales team", ent_contact_url, class: "Link--inTextBlock" %>.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(mt: 4)) do |component| %>
+      To complete your purchase of GitHub Enterprise, enter your payment information below and click <%= link_to buy_enterprise_flavor, billing_settings_upgrade_enterprise_path(this_business), class: "Link--inTextBlock" %>.<br>
+      If you require invoices or are interested in Enterprise Managed Users, <%= link_to "contact our sales team", ent_contact_url, class: "Link--inTextBlock" %>.
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if show_billing_information_cannot_proceed_error %>
+  <div class="py-3" >
+    <%= render Primer::Alpha::Banner.new(scheme: trade_screening_cannot_proceed_error_data(target: this_business)[:scheme] || :default, icon: trade_screening_cannot_proceed_error_data(target: this_business)[:icon], mt: 2) do %>
+      <h3 class="h5">
+        Sorry, you can't update your billing information at this time
+      </h3>
+      <div <%= test_selector("trade-screening-message") %>>
+        <%= trade_screening_cannot_proceed_error_data(target: this_business)[:message] %>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<div class="Box mt-4" <%= test_selector("self-serve-payment-information-view") %>>
+  <%= render Billing::Settings::AddressNeedsValidationComponent.new(account: this_business, system_arguments: { mt: 3, mx: 3 }) %>
+  <div class="Box-row d-flex flex-items-stretch border-top-0">
+    <div class="flex-auto">
+      <h3>Billing information</h3>
+
+      <%= render partial: "businesses/billing_settings/payment_information", locals: { business: this_business, show_form: show_form } %>
+    </div>
+    <div>
+      <%= render Primer::Beta::Button.new(size: :medium, classes: "js-billing-settings-billing-information-edit-button", hidden: !can_edit_billing_information, test_selector: "edit-billing-info-button") do %>
+        Edit
+      <% end %>
+      <% if this_business.is_allowed_to_remove_billing_information? %>
+        <%= render(Primer::Alpha::Dialog.new(
+          title: "Remove your billing information?",
+          id: "remove-billing-info-dialog",
+          size: :medium,
+        )) do |d| %>
+          <% d.with_header(show_divider: true, text_align: :left) { "" } %>
+          <% d.with_show_button(ml: 2, "aria-label": "Remove billing information", test_selector: "remove-billing-info-button") do %>
+            Remove
+          <% end %>
+          <% d.with_body(text_align: :left) do %>
+            <%= render partial: "billing_settings/confirm_remove_trade_screening_record", locals: { target: this_business, return_to: return_to } %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+</div>
+<business-shipping-information>
+  <% if this_business.shipping_information_required? %>
+    <div class="Box mt-4" <%= test_selector("business-shipping-information-container") %>>
+      <%= render Billing::Settings::AddressNeedsValidationComponent.new(
+        account: this_business,
+        address_type: Billing::Settings::AddressNeedsValidationComponent::AddressType::Shipping,
+        system_arguments: { mt: 3, mx: 3 })
+      %>
+      <div class="Box-row d-flex flex-items-stretch">
+        <div class="flex-auto">
+          <h3>Shipping information</h3>
+          <% if has_billing_information %>
+            <%= render partial: "businesses/billing_settings/shipping_information", locals: {
+              business: this_business,
+              show_form: has_billing_information && this_business.shipping_contact.nil?
+            } %>
+          <% else %>
+            <div class="pt-3">
+              Add billing information for your account in order to add shipping information.
+            </div>
+          <% end %>
+        </div>
+        <div>
+          <% if has_billing_and_shipping_information %>
+            <%= render Primer::Beta::Button.new(
+              size: :medium,
+              test_selector: "edit-business-shipping-information-button",
+              data: {
+                target: "business-shipping-information.editShippingInformationButton",
+                action: "click:business-shipping-information#showEditShippingInformationForm"
+              }
+            ) do %>
+              Edit
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+</business-shipping-information>
+<div class="Box mt-4">
+  <div class="Box-row flex-items-stretch">
+    <div class="flex-auto">
+      <a name="payment-method"></a>
+      <h3>Payment method</h3>
+      <div class="text-normal color-fg-muted mt-2">
+        <% if !this_business.has_credit_card? && !this_business.has_paypal_account? %>
+          You have not added a payment method.
+        <% end %>
+        <% unless show_payment_method_form %>
+          <p>
+            <% if this_business.shipping_information_required? %>
+              <% if has_billing_information %>
+                Add shipping information for your account in order to add a payment method.
+              <% else %>
+                Add billing and shipping information for your account in order to add a payment method.
+              <% end %>
+            <% else %>
+              Add billing information in order to add a payment method.
+            <% end %>
+          </p>
+        <% end %>
+      </div>
+      <% if show_payment_method_form %>
+        <div class="billing-credit-card js-billing-payment-methods disabled">
+          <noscript>
+            <p class="flash flash-error">
+              Oh no! It looks like JavaScript is disabled in your browser.
+              <strong>Please enable JavaScript</strong> to submit payment details.
+            </p>
+          </noscript>
+          <%= render Billing::Settings::PaymentMethodFormComponent.new(
+            target: this_business,
+            new_name_address_design: true,
+            signature_view_context: Billing::Zuora::HostedPaymentsPage::BUSINESS_SELF_SERVE_SIGNATURE_VIEW_CONTEXT,
+          ) %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<%= render(Primer::Beta::BorderBox.new(mt: 4, test_selector: "billing-settings-coupon-section")) do |component| %>
+  <% trade_screening_error_data = trade_screening_cannot_proceed_error_data(target: this_business) %>
+  <% show_redeem_coupon_ui = current_user.feature_enabled?(:coupon_application_for_existing_ea) &&
+    !this_business.has_an_active_coupon? &&
+    (this_business.has_saved_trade_screening_record? || this_business.has_valid_payment_method?)
+  %>
+  <% component.with_body do %>
+    <div class="d-flex flex-items-center mb-1">
+      <h3 class="flex-1">Coupon</h3>
+      <% if show_redeem_coupon_ui %>
+        <%= render(Primer::Beta::Button.new(test_selector: "redeem-coupon-btn", classes: "js-billing-settings-redeem-coupon-btn")) { "Redeem a coupon" } %>
+      <% end %>
+    </div>
+    <p>
+      <%=
+        render "billing_settings/coupon_info",
+          account: this_business,
+          discountable_charges: [OpenStruct.new(
+            display_name: "GitHub #{this_business.plan.titleized_display_name}",
+            discountable: true
+          )]
+      %>
+    </p>
+    <% if show_redeem_coupon_ui %>
+      <div class="mt-4 js-billing-settings-redeem-coupon-form-wrapper" hidden>
+        <% if this_business.has_commercial_interaction_restriction? %>
+          <%= render Primer::Alpha::Banner.new(scheme: trade_screening_error_data[:scheme], icon: trade_screening_error_data[:icon], mt: 2) do %>
+            <h2 class="h5">
+              You can't redeem your coupon at this time.
+            </h2>
+            <p <%= test_selector("trade-screening-message") %>><%= trade_screening_error_data[:message] %></p>
+          <% end %>
+        <% else %>
+          <%= form_tag billing_settings_redeeem_coupon_enterprise_path, data: { "test-selector" => "redeem-coupon-form" } do %>
+            <%= hidden_field_tag :id, this_business.slug %>
+            <%= hidden_field_tag :return_to, request.original_url %>
+            <div div class="form-group">
+              <div class="form-group">
+                <div class="form-group-header">
+                  <%= label_tag "code", "Enter coupon code" %>
+                </div>
+                <div class="form-group-body">
+                  <%= text_field_tag :code, '', required: true, class: "color-bg-subtle p-2 border rounded-2" %>
+                </div>
+              </div>
+            </div>
+            <div class="d-flex gap-2">
+              <%= render Primer::Beta::Button.new(
+                scheme: :primary,
+                type: :submit
+              ) do %>
+                Redeem
+              <% end %>
+              <%= render Primer::Beta::Button.new(
+                "aria-label": "Cancel",
+                type: :reset,
+                classes: "js-billing-settings-cancel-redeem-coupon-btn",
+                test_selector: "cancel-coupon-btn",
+              ).with_content("Cancel") %>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% unless this_business.billed_via_billing_platform? %>
+  <div class="Box mt-4">
+    <div class="Box-row flex-items-stretch">
+      <div class="flex-auto">
+        <a name="payment-history"></a>
+        <h3>Payment history</h3>
+        <% payment_records =
+          Billing::Settings::PaymentHistory::PaymentRecord.payment_records(target: this_business, limit: 5) %>
+
+        <% if payment_records.present? %>
+          <%= render Billing::Settings::PaymentHistoryComponent.new(
+            payment_records: payment_records,
+            has_payment_method: !!this_business&.payment_method
+          ) %>
+
+          <%= render Primer::ButtonComponent.new(
+            href: billing_settings_payment_history_enterprise_path(this_business),
+            tag: :a,
+            variant: :medium
+          ) do %>
+            View entire payment history
+          <% end %>
+        <% else %>
+          <div class="text-normal color-fg-muted mt-2">
+            You have not made any payments.
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>
+<% if this_business.self_serve_invoice_enabled? %>
+  <div class="Box mt-4">
+    <div class="Box-row d-flex flex-items-stretch">
+      <div class="flex-auto">
+        <a name="invoice-email-preference"></a>
+        <h3>Invoice Email Preference</h3>
+        <% if this_business.self_serve_invoice_enabled? %>
+          <div class="text-normal color-fg-muted mt-2">
+            You are currently receiving invoices by email
+          </div>
+        <% else %>
+          <div class="text-normal color-fg-muted mt-2">
+            You are not currently receiving invoices by email
+          </div>
+        <% end %>
+        <%= render partial: "businesses/billing_settings/invoice_email_preference", locals: { business: this_business, show_form: show_invoice_email_form } %>
+      </div>
+      <div>
+        <%= render Primer::Beta::Button.new(size: :medium, classes: "js-billing-settings-billing-invoice-email-preference-edit-button", hidden: show_invoice_email_form) do %>
+          Edit
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>
+<div class="Box mt-4">
+  <div class="Box-row">
+    <%= render Billing::Settings::CertificateUploadFormComponent.new(account: this_business) %>
+  </div>
+</div>

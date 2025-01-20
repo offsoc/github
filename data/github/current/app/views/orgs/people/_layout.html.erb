@@ -1,0 +1,245 @@
+<%# `view` is a child class of Orgs::OverviewView %>
+
+<% filter_form ||= "" %>
+<% should_show_export_button ||= false %>
+<% only_should_show_guest_collaborators ||= false %>
+<% should_show_role_button ||= false %>
+<% should_show_source_button ||= false %>
+<% hide_add_or_invite_button ||= false %>
+
+<% page_info \
+  title: view.page_title,
+  description: this_organization_meta_description,
+  breadcrumb_owner: this_organization,
+  breadcrumb: "People",
+  container_xl: true,
+  responsive: false,
+  richweb: {
+    title: view.organization.safe_profile_name,
+    url: user_url(view.organization),
+    image: view.organization_avatar_url(280),
+    description: this_organization_meta_description,
+    username: view.organization_login,
+    type: "profile",
+  },
+  selected_link: :people
+%>
+
+<%# rubocop:disable GitHub/ContentFor %>
+<% content_for :site_banner do %>
+  <%= render Billing::SalesTaxBannerComponent.new(account: view.organization, current_user: current_user) %>
+<% end %>
+
+<%# rubocop:disable GitHub/ContentFor %>
+<% content_for :site_banner do %>
+  <%= render Organizations::NewTermsOfServiceRequiredComponent.new(organization: view.organization) %>
+<% end %>
+
+<%= render "orgs/identity_management/banner", organization: view.organization %>
+<%= render Organizations::ArchivedNoticeComponent.new(organization: view.organization) %>
+<%= render Organizations::UpgradeInitiatedNoticeComponent.new(organization: view.organization, viewer: current_user) %>
+<% if current_user && view.organization %>
+  <include-fragment src="<%= organization_onboarding_trial_banner_path(view.organization) %>"></include-fragment>
+<% end %>
+
+<div itemscope itemtype="http://schema.org/Organization">
+  <div class="pagehead orghead border-bottom-0 clearfix pt-0">
+    <div class="container-xl clearfix <% if responsive? %>p-responsive d-none d-lg-block<% else %>px-3<% end %>">
+      <%= render "orgs/header_org_name", view: create_view_model(Orgs::HeaderView, :organization => view.organization) %>
+    </div>
+    <%= render Organizations::HeaderNavComponent.new(
+      organization: view.organization,
+      selected_nav_item: :members,
+    ) %>
+
+    <%= render(Site::EnterpriseBannersComponent.new) %>
+  </div>
+
+  <% if view.show_org_membership_banner? %>
+    <div class="orgs-help-shelf js-notice">
+      <div class="container-xl">
+        <%= form_tag org_people_dismiss_membership_banner_path(view.organization), :class => "js-notice-dismiss orgs-help-dismiss" do %>
+          <%= render Primer::Beta::CloseButton.new(type: :submit, "aria-label": 'Hide this notice forever') %>
+        <% end %>
+
+        <div class="orgs-help-shelf-content">
+          <h2 class="orgs-help-title">
+            <% if view.show_finished_migration_help? %>
+              You’re all done! Check out what’s new.
+            <% else %>
+              Introducing new organization member privileges
+            <% end %>
+          </h2>
+
+          <p class="orgs-help-lead">
+            We’ve made it even easier for you to collaborate, share code, and communicate with the people you work with. Let us show you what’s new.
+          </p>
+
+          <div class="orgs-help-items gutter d-flex flex-shrink-0">
+            <div class="col-4">
+              <div class="orgs-help-item-octicon">
+                <%= primer_octicon(:"comment-discussion", size: :medium) %>
+              </div>
+              <h3 class="orgs-help-item-title">Mention teams</h3>
+              <p class="orgs-help-item-content">Use team @mentions (ex. <strong>@github/design</strong> for the entire team) in any comment, issue, or pull request.</p>
+            </div>
+
+            <% if view.organization.members_can_create_repositories? %>
+              <div class="col-4">
+                <div class="orgs-help-item-octicon">
+                  <%= primer_octicon(:repo, size: :medium) %>
+                </div>
+                <h3 class="orgs-help-item-title">Create repositories</h3>
+                <p class="orgs-help-item-content">Feel free to create repositories and give access to the collaborators and teams you need to work with.</p>
+              </div>
+            <% else %>
+              <div class="col-4">
+                <div class="orgs-help-item-octicon">
+                  <%= primer_octicon(:broadcast, size: :medium) %>
+                </div>
+                <h3 class="orgs-help-item-title">Request to join teams</h3>
+                <p class="orgs-help-item-content">
+                  Members can quickly request to join any team. An owner or team maintainer can approve the request.
+                </p>
+              </div>
+            <% end %>
+
+            <div class="col-4">
+              <div class="orgs-help-item-octicon">
+                <%= primer_octicon(:organization, size: :medium) %>
+              </div>
+              <h3 class="orgs-help-item-title">Build your teams</h3>
+              <p class="orgs-help-item-content">Members can create their own teams and invite other members. You can also request to join any team.</p>
+            </div>
+          </div>
+
+          <div class="orgs-help-divider"></div>
+
+          <%= render Primer::Beta::Button.new(tag: :a, href: "#{ GitHub.help_url }/articles/setting-up-teams-improved-organization-permissions", "data-ga-click": "Orgs, learn more, location:people page help ui") do %>
+            Learn more about organizations
+          <% end %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="container-xl px-3">
+    <%= render Primer::Alpha::Layout.new do |c| %>
+      <% c.with_sidebar(width: :narrow) do %>
+        <%= render partial: "orgs/people/tabs", locals: { view: view } %>
+      <% end %>
+
+      <% c.with_main(width: :lg) do %>
+        <%= render partial: "orgs/onboarding_tasks/invite_user_banner", locals: { view: view } if params[:enable_tip].present? %>
+        <div class="subnav org-toolbar org-toolbar-next">
+          <%= filter_form %>
+
+          <% if view.organization.adminable_by?(current_user) %>
+            <div class="float-right d-flex">
+              <% unless only_should_show_guest_collaborators %>
+                <% if should_show_export_button && view.show_export_button? %>
+                  <%= render(OrganizationMembersExportComponent.new(export_path: view.export_path, mx: 3)) %>
+                <% end %>
+                <% if should_show_role_button %>
+                  <%= render(Primer::Alpha::ActionMenu.new(
+                    select_variant: :single,
+                    mr: 3,
+                    "data-filter-on": "role",
+                  )) do |menu| %>
+                    <% menu.with_show_button do |button|
+                      button.with_trailing_action_icon(icon: :"triangle-down")
+                      "Role"
+                    end %>
+                    <% menu.with_item(
+                      label: "Everyone",
+                      href: url_for(query: ""),
+                      active: view.role_filter_select_class(:all) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": ""
+                    ) %>
+                    <% menu.with_item(
+                      label: "Owners",
+                      href: url_for(query: "role:owner"),
+                      active: view.role_filter_select_class(:owner) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": "role:owner"
+                    ) %>
+                    <% menu.with_item(
+                      label: "Members",
+                      href: url_for(query: "role:member"),
+                      active: view.role_filter_select_class(:member) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": "role:member"
+                    ) %>
+                  <% end %>
+                <% end %>
+                <% if should_show_source_button %>
+                  <%= render(Primer::Alpha::ActionMenu.new(
+                    select_variant: :single,
+                    mr: 3,
+                    "data-filter-on": "source",
+                  )) do |menu| %>
+                    <% menu.with_show_button do |button|
+                      button.with_trailing_action_icon(icon: :"triangle-down")
+                      "Source"
+                    end %>
+                    <% menu.with_item(
+                      label: "All sources",
+                      href: url_for(query: ""),
+                      active: view.invitation_source_filter_select_class(:all) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": ""
+                    ) %>
+                    <% menu.with_item(
+                      label: "Members",
+                      href: url_for(query: "source:member"),
+                      active: view.invitation_source_filter_select_class(:member) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": "source:member"
+                    ) %>
+                    <% menu.with_item(
+                      label: "SCIM",
+                      href: url_for(query: "source:scim"),
+                      active: view.invitation_source_filter_select_class(:scim) == "selected",
+                      classes: "js-member-search-filter",
+                      "data-filter": "source:scim"
+                    ) %>
+                  <% end %>
+                <% end %>
+                <% if !hide_add_or_invite_button && view.can_add_or_invite_users? %>
+                  <%= render(Primer::Alpha::Dialog.new(
+                      title: "Invite Member",
+                      id: "invite-member-dialog",
+                      size: :large,
+                    )) do |d| %>
+                    <% d.with_header(show_divider: false, visually_hide_title: true) { "" } %>
+                    <% invite_cta = invite_or_add_action_word(enterprise_managed: view.organization.enterprise_managed_user_enabled?) %>
+                    <% d.with_show_button(
+                      scheme: :primary,
+                      type: :button, "aria-label": "#{invite_cta} member",
+                      test_selector: "invite-member",
+                      data: analytics_click_attributes(
+                        category: "#{invite_cta} member",
+                        action: "click to #{invite_cta} a member",
+                        label: "ref_cta:#{invite_cta} a member;ref_loc:org_people"
+                      )) do %>
+                      <%= invite_cta %> member
+                    <% end %>
+                    <% d.with_body(text_align: :left) do %>
+                      <%= render :partial => 'orgs/invitations/invite_member_dialog', :locals => {
+                        :organization => view.organization,
+                        :rate_limited => view.rate_limited
+                      } %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <%= yield %>
+      <% end %>
+    <% end %>
+  </div>
+</div>

@@ -1,0 +1,272 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# `view` is an instance of Orgs::OverviewView %>
+
+<%
+  page_info stafftools: stafftools_user_path(view.organization)
+%>
+
+<% if header_redesign_enabled? %>
+  <%= render(Site::EnterpriseBannersComponent.new) %>
+<% end %>
+
+<header class="pagehead orghead border-bottom-0 pt-0 <%= "color-bg-transparent" if header_redesign_enabled? %>">
+  <% if current_user && view.organization %>
+    <include-fragment src="<%= organization_onboarding_trial_banner_path(view.organization) %>"></include-fragment>
+  <% end %>
+  <div class="container-xl pt-4 pt-lg-0 p-responsive clearfix">
+    <%= render Organizations::TransferredToBusinessNoticeComponent.new(organization: view.organization) %>
+    <%= render Organizations::MissingPaymentInfoBannerComponent.new(
+      organization: view.organization,
+      current_user: current_user
+    ) %>
+
+    <% view.business_invitations.each do |invitation| %>
+      <%= render Primer::Beta::Flash.new(
+        scheme: :warning, classes: "invited-banner", mt: 3,
+        test_selector: "org-invitation-to-enterprise-#{invitation.id}") do %>
+        <p>
+          <% if invitation.inviter.present? %>
+            <a class="Link--inTextBlock" href="<%= user_path(invitation.inviter) %>">@<%= invitation.inviter.display_login %></a>
+            has invited your organization to join the
+          <% else %>
+            Your organization has been invited to join the
+          <% end %>
+          <a class="Link--inTextBlock" href="<%= enterprise_path(invitation.business) %>" <%= test_selector "enterprise-link" %>>
+            <strong><%= invitation.business.name %></strong>
+          </a>
+          enterprise account.
+          <%= link_to \
+            "View invitation",
+            settings_org_billing_path(invitation.invitee),
+            class: "btn btn-sm primary" %>
+        </p>
+      <% end %>
+    <% end %>
+
+    <% if view.viewer_invited? && view.viewer_opted_in? %>
+      <%= render Primer::Beta::Flash.new(scheme: :warning, mt: 3, classes: "invited-banner") do %>
+        <p>
+          <% if view.pending_invitation.show_inviter? %>
+            <a href="<%= user_path view.pending_invitation.inviter %>" class="Link--inTextBlock inviter-link"><%= view.pending_invitation.inviter.display_login %></a>
+            invited you to join the
+            <strong><%= view.organization.safe_profile_name %></strong> organization
+            <%= "as a #{view.pending_invitation.role.to_s.humanize.downcase}" if view.show_role? %>
+            <%= time_ago_in_words_js view.pending_invitation.created_at %>.
+          <% else %>
+            You’re invited to join the
+            <strong><%= view.organization.safe_profile_name %></strong> organization.
+          <% end %>
+
+          <a href="<%= view.accept_invitation_path %>" class="btn btn-sm primary">View invitation</a>
+        </p>
+      <% end %>
+    <% end %>
+
+    <% if view.show_new_business_org_message? %>
+      <% business = view.organization.business %>
+      <%= render Primer::Beta::Flash.new(scheme: :success, my: 4) do %>
+        <button class="flash-close js-flash-close" type="button"><%= primer_octicon(:x, :"aria-label" => "Close") %></button>
+        <span class="text-bold"><%= view.organization.safe_profile_name %></span> successfully created as a member of <span class="text-bold"><%= link_to business.name, enterprise_path(business) %></span>.
+      <% end %>
+    <% end %>
+
+    <div class="d-flex flex-wrap flex-items-start flex-self-start <%= header_redesign_enabled? ? "mt-4 mb-3 pb-4 border-bottom" : "my-3" %>">
+      <% if view.show_admin_stuff? %>
+        <%= render(Primer::Beta::Link.new(
+          href: settings_org_profile_path(view.organization),
+          scheme: :default,
+          underline: false,
+          display: :block,
+          "aria-label": "Change your organization’s avatar",
+          id: "upload-avatar-link",
+        )) do |component| %>
+          <% component.with_tooltip(text: "Change your organization’s avatar") %>
+          <%= view.organization_avatar(100, "avatar flex-shrink-0 mb-3 mr-3 mb-md-0 mr-md-4") %>
+        <% end %>
+      <% else %>
+        <div>
+          <%= view.organization_avatar(100, "avatar flex-shrink-0 mb-3 mr-3 mb-md-0 mr-md-4") %>
+        </div>
+      <% end %>
+      <div class="flex-1 d-flex flex-column gap-2">
+        <h1 class="h2 lh-condensed">
+          <%= view.organization.safe_profile_name %>
+        </h1>
+
+        <% if this_organization_description.present? %>
+          <div class="color-fg-muted"><%= this_organization_description %></div>
+        <% end %>
+
+        <ul class="d-flex gap-2 list-style-none">
+          <% if view.show_verified_domains? %>
+            <%= render partial: "orgs/repositories/verified_domains",
+                              locals: {
+                                verified_profile_domains: view.verified_profile_domains_for_organization,
+                                organization: view.organization
+                              } %>
+          <% end %>
+
+          <li>
+            <% trial = Billing::EnterpriseCloudTrial.new(view.organization) %>
+            <% if should_show_enterprise_label?(view.organization, trial, current_user) %>
+              <%= render(
+                Primer::Beta::Label.new(
+                  title: "Label: Trial",
+                  href: settings_org_plans_path(view.organization),
+                  mr: 2, test_selector: "countdown-banner",
+                  size: :large,
+                  tag: :a,
+                  scheme: :primary)
+                ) do %>
+                <% if trial.days_remaining == 0 %>Less than 24 hours<% else %><%= pluralize trial.days_remaining, "day" %><% end %> left in Enterprise trial
+              <% end %>
+            <% end %>
+          </li>
+
+          <% if layout_data.show_github_sponsor_recognition? %>
+            <li>
+              <%= render Primer::Beta::Link.new(href: sponsors_path) do %>
+                <%= render Primer::Beta::Label.new(
+                  tag: :summary,
+                  scheme: :sponsors,
+                  title: "Label: GitHub Sponsor",
+                ).with_content("Sponsor") %>
+              <% end %>
+            </li>
+          <% end %>
+        </ul>
+
+        <div class="d-md-flex flex-items-center mt-2">
+          <% if view.show_header? %>
+            <ul class="d-md-flex list-style-none f6 flex-wrap gap-2 <%= view.meta_classes %>">
+              <% if this_organization_followers_count > 0 %>
+                <li style="max-width: 230px" class="mr-md-3 v-align-middle color-fg-default my-2 my-md-0 css-truncate css-truncate-target" <%= test_selector("organization-followers-count") %>>
+                  <%= link_to "#{org_followers_path(view.organization)}", class: "Link--secondary no-underline no-wrap" do %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "people", text: :muted)) %>
+                    <span class="text-bold color-fg-default"><%= social_count(this_organization_followers_count) %></span>
+                    <%= "follower".pluralize(this_organization_followers_count) %>
+                  <% end %>
+                </li>
+              <% end %>
+              <% if view.organization_location.present? %>
+                <li style="max-width: 230px" class="mr-md-3 v-align-middle color-fg-default my-2 my-md-0 css-truncate css-truncate-target">
+                  <%= primer_octicon(:location, classes: 'flex-shrink-0') %>
+                  <span itemprop="location"><%= view.organization_location %></span>
+                </li>
+              <% end %>
+              <% if view.organization_blog.present? %>
+                <li style="max-width: 230px" class="mr-md-3 v-align-middle color-fg-default my-2 my-md-0 css-truncate css-truncate-target" <%= test_selector("profile-website-url") %>>
+                  <%= primer_octicon(:link, classes: 'flex-shrink-0') %>
+                  <%= safe_autolink(view.organization_blog, "rel" => "nofollow", "itemprop" => "url", "class" => "color-fg-default", "title" => view.organization_blog) %>
+                </li>
+              <% end %>
+              <% if view.show_organization_social_accounts? %>
+                <% view.organization_social_accounts.each do |account| %>
+                  <li style="max-width: 230px" class="mr-md-3 v-align-middle my-2 my-md-0 css-truncate css-truncate-target">
+                    <%= social_account_icon(account, flex_shrink: 0) %>
+                    <%=
+                      safe_link_to(
+                        account.format_account_name,
+                        account.url,
+                        rel: "nofollow me",
+                        class: "Link--primary",
+                      )
+                    %>
+                  </li>
+                <% end %>
+              <% end %>
+              <% if (email = view.organization_profile_email(logged_in: logged_in?)).present? %>
+                <li style="max-width: 230px" class="mr-md-3 color-fg-default my-2 my-md-0 css-truncate css-truncate-target">
+                  <%= primer_octicon(:mail, vertical_align: :middle, classes: "flex-shrink-0") %>
+                  <%= obfuscated_mail_to(email, class: "color-fg-default", itemprop: "email") %>
+                </li>
+              <% end %>
+
+              <% if view.show_organization_enterprise? %>
+                <li style="max-width: 230px" class="mr-md-3 v-align-middle color-fg-default my-2 my-md-0 css-truncate css-truncate-target">
+                  <%= primer_octicon(:organization, classes: "flex-shrink-0") %>
+                  <%= link_to \
+                    "Part of #{view.organization_enterprise.name}",
+                    enterprise_path(view.organization_enterprise),
+                    class: "color-fg-default" %>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+        </div>
+      </div>
+
+      <div class="d-flex flex-items-center flex-self-start mt-3">
+        <% if layout_data.show_sponsor_button? %>
+          <%
+            sponsors_sym = layout_data.sponsored_by_viewer? ? :PROFILE_SPONSORING : :PROFILE_SPONSOR
+            sponsors_button_id = layout_data.sponsored_by_viewer? ? "sponsoring" : "sponsor"
+          %>
+          <%= render Sponsors::SponsorButtonComponent.new(
+            sponsorable: layout_data.login_name,
+            is_sponsoring: layout_data.sponsored_by_viewer?,
+            id: "#{sponsors_button_id}-profile-button",
+            data: sponsors_button_hydro_attributes(sponsors_sym, layout_data.login_name),
+            size: :medium,
+          ) %>
+        <% end %>
+
+        <% if logged_in? && layout_data.sponsorable? && view.organization.adminable_by?(current_user) %>
+          <%= link_to(
+            "Sponsors dashboard",
+            sponsorable_dashboard_path(layout_data.login_name),
+            id: "sponsorships-profile-button",
+            class: "btn ml-1",
+            style: "min-height: 34px",
+            "aria-label": "@#{layout_data.login_name} Sponsors dashboard",
+            data: sponsors_button_hydro_attributes(:PROFILE_SPONSORS_DASHBOARD, layout_data.login_name)
+          ) %>
+        <% end %>
+
+        <% if logged_in? %>
+          <div class="position-relative ml-1">
+            <% if view.show_follow_orgs_notice? %>
+              <%= render Primer::Beta::Popover.new(
+                classes: "js-notice",
+                left: true,
+                position: :absolute,
+                mr: 2,
+                mt: 5,
+                display: [:none, :none, :block, :block],
+                test_selector: "follow-orgs-notice"
+              ) do |component| %>
+                <% component.with_heading do %>
+                  You can now follow organizations
+                <% end %>
+                <% component.with_body(caret: :top_right, large: true) do %>
+                  Organization activity like new discussions, sponsorships,
+                  and repositories will appear in <a class="Link--inTextBlock" href="/">your dashboard feed</a>.
+
+                  <%= form_tag dismiss_notice_path(UserNotice::FOLLOW_ORGS_NOTICE), class: "mt-3 js-notice-dismiss" do %>
+                    <%= render Primer::Beta::Button.new(scheme: :primary, type: :submit, block: true) do %>
+                      OK, got it!
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <%= follow_button view.organization, classes: "btn", style: "min-height: 34px" %>
+          </div>
+        <% end %>
+      </div>
+
+    </div>
+  </div>
+
+  <%= render Organizations::HeaderNavComponent.new(
+    organization: view.organization,
+    selected_nav_item: view.selected_nav_item || :overview,
+  ) %>
+
+  <% unless header_redesign_enabled? %>
+    <%= render(Site::EnterpriseBannersComponent.new) %>
+  <% end %>
+</header>

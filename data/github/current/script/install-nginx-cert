@@ -1,0 +1,60 @@
+#!/bin/bash
+# Installs the github.localhost SSL certificate into the system keychain as a trusted
+# self-signed certificate. This prevents browser certificate warnings while
+# testing https://github.localhost.
+
+# START OF SHARED CODE
+# Shared by `generate-nginx-cert` and `install-nginx-cert`. Please update one if
+# you update the other.
+set -e
+
+function plz_install_deps {
+  echo "Please make sure \`mkcert\` and \`nss\` are installed."
+  echo "Run \`script/bootstrap\` to install."
+  exit 1
+}
+
+which mkcert >/dev/null || plz_install_deps
+
+cert_dir=$(dirname "$0")/../config/dev/ssl
+mkdir -p ${cert_dir}
+cd ${cert_dir}
+
+# IMPORTANT: Here, we tell `mkcert` to work only in the cert folder for the rest
+# of this script. This prevents messing with other uses of `mkcert` on the
+# system.
+export CAROOT="$(pwd)"
+
+leaf_key_file=github.localhost.key
+leaf_cert_file=github.localhost.crt
+root_ca_key_file=rootCA-key.pem
+root_ca_cert_file=rootCA.pem
+# END OF SHARED CODE
+
+if [ ! -e $root_ca_cert_file ]; then
+  echo "Root CA missing. Run \`script/generate-nginx-cert\` first."
+  exit 1
+fi
+
+if [ ! -e $leaf_key_file ]; then
+  echo "Certificate key missing. Run \`script/generate-nginx-cert\` to fix this."
+  exit 1
+fi
+
+if [ ! -e $leaf_cert_file ]; then
+  echo "Certificate missing. Run \`script/generate-nginx-cert\` to fix this."
+  exit 1
+fi
+
+echo "----------------"
+echo "Installing the root CA for the \`github.localhost\` cert."
+echo "This may ask for your permission to modify the operating system."
+echo ""
+mkcert -install
+
+echo "----------------"
+echo "In order to use the newly trusted certificate, you may need to:"
+echo "- Run: brew services restart nginx"
+echo "- Restart: bin/server"
+echo "- Restart your browser(s)."
+echo "- Directly visit https://github.localhost/"

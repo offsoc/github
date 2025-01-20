@@ -1,0 +1,121 @@
+#!/bin/bash
+#/
+#/ Rotate the certificates used for MS SQL replication.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+
+if [ "$REPL_STATE" != "primary" ]; then
+  echo "Error: This command can only be run on the primary node of an instance with replication enabled."
+  exit 1
+fi
+
+key_encryption_password=$(ghe-config "secrets.mssql.key-encryption-password")
+cert_start=$(date --utc --date "-2 days" +"%F %T")
+cert_expiry=$(date --utc --date "+2 years" +"%F %T")
+tmp_cert_name="dbm_certificate_tmp_$RANDOM"
+
+echo "Rotating MSSQL replication certificates on primary and replica(s) ..."
+
+echo "Removing existing MSSQL replication certificate files ..."
+ghe-cluster-each --role mssql -- "sudo rm -f /data/user/mssql/data/endpoint.cer"
+ghe-cluster-each --role mssql -- "sudo rm -f /data/user/mssql/data/endpoint.pvk"
+
+echo "Creating new MSSQL temporary replication certificate ..."
+ghe-mssql-console -y -q "CREATE CERTIFICATE $tmp_cert_name WITH SUBJECT = 'dbm', START_DATE = '$cert_start', EXPIRY_DATE = '$cert_expiry'"
+script-mssql "
+  BACKUP CERTIFICATE $tmp_cert_name
+  TO FILE = '/var/opt/mssql/data/endpoint.cer'
+  WITH PRIVATE KEY (
+    FILE = '/var/opt/mssql/data/endpoint.pvk',
+    ENCRYPTION BY PASSWORD = '$key_encryption_password')
+  GO
+"
+
+echo "Copying temporary MSSQL replication certificate files ..."
+for host in $(ghe-cluster-nodes --role mssql --exclude); do
+  sudo cat /data/user/mssql/data/endpoint.cer | ssh_cmd "$host" -- "sudo -u mssql sponge /data/user/mssql/data/endpoint.cer"
+  sudo cat /data/user/mssql/data/endpoint.pvk | ssh_cmd "$host" -- "sudo -u mssql sponge /data/user/mssql/data/endpoint.pvk"
+done
+
+echo "Importing temporary MSSQL replication certificate ..."
+temp_certificate_import_script="
+  CREATE CERTIFICATE $tmp_cert_name
+  FROM FILE = '/var/opt/mssql/data/endpoint.cer'
+  WITH PRIVATE KEY (
+    FILE = '/var/opt/mssql/data/endpoint.pvk',
+    DECRYPTION BY PASSWORD = '$key_encryption_password'
+  );"
+for host in $(ghe-cluster-nodes --role mssql --exclude); do
+  ssh_cmd "$host" -- "ghe-mssql-console -y -q \"$temp_certificate_import_script\""
+done
+
+echo "Altering MSSQL replication endpoint to use the temporary certificate ..."
+ghe-cluster-each --role mssql -- "ghe-mssql-console -y -q
+  'IF EXISTS ( SELECT name FROM sys.endpoints WHERE name = \"agep\" )
+  ALTER ENDPOINT agep
+  FOR DATABASE_MIRRORING ( AUTHENTICATION = CERTIFICATE $tmp_cert_name )'"
+
+echo "Removing temporary MSSQL replication certificate files ..."
+ghe-cluster-each --role mssql -- "sudo rm -f /data/user/mssql/data/endpoint.cer"
+ghe-cluster-each --role mssql -- "sudo rm -f /data/user/mssql/data/endpoint.pvk"
+
+echo "Dropping existing MSSQL replication certificate ..."
+ghe-cluster-each --role mssql -- "ghe-mssql-console -y -q
+  'IF EXISTS ( SELECT name FROM sys.certificates WHERE name = \"dbm_certificate\" )
+  DROP CERTIFICATE dbm_certificate'"
+
+echo "Creating new MSSQL replication certificate  ..."
+ghe-mssql-console -y -q "CREATE CERTIFICATE dbm_certificate WITH SUBJECT = 'dbm', START_DATE = '$cert_start', EXPIRY_DATE = '$cert_expiry'"
+script-mssql "
+  BACKUP CERTIFICATE dbm_certificate
+  TO FILE = '/var/opt/mssql/data/endpoint.cer'
+  WITH PRIVATE KEY (
+    FILE = '/var/opt/mssql/data/endpoint.pvk',
+    ENCRYPTION BY PASSWORD = '$key_encryption_password')
+  GO
+"
+
+echo "Copying new MSSQL replication certificate files ..."
+for host in $(ghe-cluster-nodes --role mssql --exclude); do
+  sudo cat /data/user/mssql/data/endpoint.cer | ssh_cmd "$host" -- "sudo -u mssql sponge /data/user/mssql/data/endpoint.cer"
+  sudo cat /data/user/mssql/data/endpoint.pvk | ssh_cmd "$host" -- "sudo -u mssql sponge /data/user/mssql/data/endpoint.pvk"
+done
+
+echo "Importing new MSSQL replication certificate ..."
+certificate_import_script="
+  CREATE CERTIFICATE dbm_certificate
+  FROM FILE = '/var/opt/mssql/data/endpoint.cer'
+  WITH PRIVATE KEY (
+    FILE = '/var/opt/mssql/data/endpoint.pvk',
+    DECRYPTION BY PASSWORD = '$key_encryption_password'
+  );"
+for host in $(ghe-cluster-nodes --role mssql --exclude); do
+  ssh_cmd "$host" -- "ghe-mssql-console -y -q \"$certificate_import_script\""
+done
+
+echo "Altering MSSQL replication endpoint to use the new certificate ..."
+ghe-cluster-each --role mssql -- "ghe-mssql-console -y -q
+  'IF EXISTS ( SELECT name FROM sys.endpoints WHERE name = \"agep\" )
+  ALTER ENDPOINT agep
+  FOR DATABASE_MIRRORING ( AUTHENTICATION = CERTIFICATE dbm_certificate )'"
+
+echo "Dropping temporary MSSQL replication certificate ..."
+ghe-cluster-each --role mssql -- "ghe-mssql-console -y -q
+  'IF EXISTS ( SELECT name FROM sys.certificates WHERE name = \"$tmp_cert_name\" )
+  DROP CERTIFICATE $tmp_cert_name'"
+
+echo "Displaying certificate details ..."
+ghe-cluster-each --role mssql -- "ghe-mssql-console -y -n -r -q
+  'SET NOCOUNT ON;
+  SELECT start_date, expiry_date, name
+  FROM master.sys.certificates
+  WHERE name LIKE \"dbm_%\"'"
+
+echo "Certificate rotation complete."

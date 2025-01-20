@@ -1,0 +1,56 @@
+<% if @config["subdomain-isolation"] -%>
+<% pages_hostname = "pages.#{@config["github-hostname"]}" %>
+location ~ ^/pages/([^/]+) {
+  rewrite ^/pages/(.*)$ <%= "$http_x_forwarded_proto://#{pages_hostname}/$1" %> permanent;
+}
+
+location ~ ^/pages(/|$) {
+  return 301 <%= "$http_x_forwarded_proto://#{pages_hostname}/" %>;
+}
+<% else -%>
+location ~ ^/pages/([^/]+) {
+
+  error_page 400 @pages_custom_400;
+
+  # Define the Pages 404 page early so that this 404 page is preferred over
+  # any others from the private mode include files.
+<% if pages_enabled? %>
+  error_page 404 @pages_custom_404;
+<% else %>
+  error_page 404 @pages_disabled_404;
+<% end %>
+
+  <% if !@config["public-pages"] %>
+    # Require private mode authentication.
+    include /etc/nginx/private_mode_location_include.conf;
+  <% end %>
+
+<% if pages_enabled? %>
+  include /etc/nginx/pages_fe_include.conf;
+<% else %>
+  root /data/pages-lua/public;
+<% end %>
+
+  access_log /var/log/nginx/pages.log main;
+  error_log  /var/log/nginx/pages.error.log;
+}
+
+location ~ ^/pages(/|$) {
+  return 301 <%= "$http_x_forwarded_proto://#{@config["github-hostname"]}/" %>;
+}
+
+location @pages_disabled_404 {
+  root /data/pages-lua/public;
+  try_files /404-disabled.html =404;
+}
+
+location @pages_custom_404 {
+  root /data/pages-lua/public;
+  try_files /404-enterprise.html =404;
+}
+
+location @pages_custom_400 {
+  root /data/pages-lua/public;
+  try_files /400-enterprise.html =400;
+}
+<% end -%>

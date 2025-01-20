@@ -1,0 +1,327 @@
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# view is an instance of PullRequests::MergeButtonView %>
+<% pull = view.pull %>
+<% merge_state = view.merge_state %>
+<% conflicts = pull.conflicted_files %>
+<% can_update_branch = view.show_update_branch_button? %>
+<% show_rules = current_repository&.plan_supports?(:protected_branches) && current_repository&.rulesets_for_ref("refs/heads/#{pull.base_ref}").any? %>
+
+<% if merge_state.draft? %>
+  <div class="branch-action-item">
+    <% if pull.can_mark_ready_for_review?(current_user) %>
+      <%= render :partial => "pull_requests/ready_for_review_button", :locals => { :pull => pull } %>
+    <% end %>
+    <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+      <%= primer_octicon(:alert) %>
+    </div>
+    <div class="h4 status-heading">This pull request is still a work in progress</div>
+    <% if pull.can_mark_ready_for_review?(current_user) %>
+      <span class="status-meta">Draft pull requests cannot be merged.</span>
+    <% else %>
+      <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can mark a draft pull request as ready for review.</span>
+    <% end %>
+  </div>
+
+  <% if view.show_conflicts? %>
+    <%= render partial: "statuses/merge_conflicts", locals: { view: view, pull: pull, conflicts: conflicts } %>
+  <% elsif can_update_branch %>
+    <% author_email = current_user.default_author_email(pull.repository, pull.head_sha) %>
+    <div class="branch-action-item">
+      <%= render :partial => "pull_requests/update_branch_button",
+                 :locals => { pull: pull } %>
+      <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+        <%= primer_octicon(:alert) %>
+      </div>
+      <h3 class="h4 status-heading">This branch is out-of-date with the base branch</h3>
+      <span class="status-meta">
+        Merge the latest changes from <span class="branch-name"><%= pull.display_base_ref_name %></span> into this branch.
+        <% if author_email %>
+          <p class="text-small">This merge commit will be associated with <%= author_email %>.</p>
+        <% end %>
+      </span>
+    </div>
+  <% end %>
+<% else %>
+  <% case merge_state.status %>
+  <% when :unknown %>
+    <div class="branch-action-item js-details-container Details">
+      <% if can_update_branch %>
+        <%= render :partial => "pull_requests/update_branch_button",
+                  :locals => { pull: pull } %>
+      <% end %>
+      <div class="branch-action-item-icon completeness-indicator">
+        <%= render :partial => "statuses/loading_circle" %>
+      </div>
+      <div class="h4 status-heading color-fg-attention">Checking for ability to merge automatically&hellip;</div>
+      <span class="status-meta">Hang in there while we check the branch’s status.</span>
+    </div>
+
+
+  <% when :dirty %>
+    <%= render partial: "statuses/merge_conflicts", locals: { view: view, pull: pull, conflicts: conflicts } %>
+
+  <% when :clean, :unstable %>
+    <div class="branch-action-item">
+      <% if can_update_branch %>
+        <%= render :partial => "pull_requests/update_branch_button",
+                  :locals => { pull: pull } %>
+      <% end %>
+      <div class="merging-body-merge-warning">
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+
+        <h3 class="h4 status-heading">The <%= pull.base_label %> branch requires linear history</h3>
+        <span class="status-meta">
+          The base branch does not accept merge commits. Alternate merge methods are preferred.
+          <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/github/administering-a-repository/requiring-a-linear-commit-history">Learn more about required linear history.</a>
+        </span>
+      </div>
+      <div class="merging-body squashing-body">
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-success">
+          <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+        </div>
+
+        <h3 class="h4 status-heading">This branch has no conflicts with the base branch</h3>
+        <% if view.base_branch_pushable? %>
+          <span class="status-meta">
+            <% if view.advisory_workspace? %>
+              Merging must be performed from the <%= link_to view.repository_advisory.ghsa_id,
+                gh_repository_advisory_path(view.repository_advisory), class: "Link--inTextBlock" %> advisory.
+            <% else %>
+              Merging can be performed automatically.
+            <% end %>
+          </span>
+        <% else %>
+          <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+        <% end %>
+      </div>
+
+      <div class="rebasing-body">
+        <% if view.pull.rebase_safe? %>
+          <div class="branch-action-item-icon completeness-indicator completeness-indicator-success">
+            <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+          </div>
+
+          <h3 class="h4 status-heading">This branch has no conflicts with the base branch when rebasing</h3>
+
+          <% if view.base_branch_pushable? %>
+            <span class="status-meta">Rebase and merge can be performed automatically.</span>
+          <% else %>
+            <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+          <% end %>
+        <% elsif view.pull.rebase_prepared? %>
+          <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+            <%= primer_octicon(:alert) %>
+          </div>
+          <h3 class="h4 status-heading">This branch cannot be rebased safely</h3>
+
+          <% if view.base_branch_pushable? %>
+            <span class="status-meta">
+              Rebasing the commits of this branch on top of the base branch cannot
+              be performed automatically as this would create a different result
+              than a regular merge.
+            </span>
+          <% else %>
+            <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+          <% end %>
+        <% else %>
+          <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+            <%= primer_octicon(:alert) %>
+          </div>
+
+          <h3 class="h4 status-heading"><%= view.rebase_error_text %></h3>
+
+          <% unless view.base_branch_pushable? %>
+            <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+
+  <% when :blocked %>
+    <% if can_update_branch %>
+      <%= render "pull_requests/update_branch_container", pull: pull %>
+    <% end %>
+    <div class="branch-action-item">
+      <% if current_user.must_verify_email? %>
+        <div class="branch-action-item-icon completeness-indicator">
+          <%= render :partial => "statuses/pending_circle" %>
+        </div>
+        <div class="h4 status-heading color-fg-attention">Your email address must be verified before merging</div>
+        <span class="status-meta">
+          You will be able to merge this pull request after you
+          <%= link_to "verify your email address", settings_email_preferences_path, class: "Link--inTextBlock" %>.
+        </span>
+      <% elsif merge_state.blocked_by_review_policy? && merge_state.pull_request_review_policy_decision.more_reviews_required? && !merge_state.blocked_by_non_overridable_non_review_policy? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">Merging can be performed automatically with <%= pluralize(merge_state.required_approving_review_count, "approving review") %>.</span>
+      <% elsif merge_state.blocked_by_review_policy? && merge_state.pull_request_review_policy_decision.changes_requested? && !merge_state.blocked_by_non_overridable_non_review_policy? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= review_state_icon("changes_requested") %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">Merging can be performed automatically once the requested changes are addressed.</span>
+      <% elsif merge_state.blocked_by_required_signatures? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          The base branch requires all commits to be signed.
+          <a class="Link--inTextBlock" href="<%= docs_url "authentication/about-commit-signature-verification" %>">Learn more about signing commits.</a>
+        </span>
+      <% elsif merge_state.blocked_by_lock_branch? || merge_state.blocked_by_update_branch? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          The base branch does not allow updates.
+          <a class="Link--inTextBlock" href="<%= docs_url "repositories/about-protected-branches" %>">Learn more about protected branches.</a>
+        </span>
+      <% elsif merge_state.blocked_by_unauthorized_protection? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          The base branch restricts merging to authorized users.
+          <a class="Link--inTextBlock" href="<%= docs_url "repositories/about-protected-branches" %>">Learn more about protected branches.</a>
+        </span>
+      <% elsif merge_state.blocked_by_required_deployments? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          <%= merge_state.rules_engine_evaluation_result.message_for_rule_types([:required_deployments]) %>
+        </span>
+      <% elsif merge_state.blocked_by_required_review_thread_resolution? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          The base branch requires all conversations on code to be resolved.
+        </span>
+      <% elsif merge_state.blocked_by_base_branch_locked_for_merge_queue? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          The base branch is the protected head branch of a queued pull request.
+        </span>
+      <% elsif merge_state.blocked_by_status_check_integrations? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          <%= merge_state.blocked_by_status_check_integrations_message || "Required status checks were not set by the expected GitHub apps." %>
+        </span>
+      <% elsif merge_state.blocked_by_status_checks? %>
+        <div class="branch-action-item-icon completeness-indicator">
+          <%= render :partial => "statuses/pending_circle" %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-attention">Required statuses must pass before merging</div>
+        <span class="status-meta">
+            All required <a class="Link--inTextBlock" href="<%= GitHub.status_check_url %>" data-ga-click="Protected Branches, go to statuses docs, from:pull request merge area">statuses</a> and check runs on this pull request must run successfully to enable automatic merging.
+        </span>
+      <% elsif merge_state.blocked_by_invalid_merge_queue_config? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          <%= merge_state.blocked_by_invalid_merge_queue_config_message %>
+        </span>
+      <% elsif view.base_branch_pushable? %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-error">
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        </div>
+        <% if show_rules %>
+          <a href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>" class="float-right">View rules</a>
+        <% end %>
+        <div class="h4 status-heading color-fg-danger">Merging is blocked</div>
+        <span class="status-meta">
+          <%= merge_state.blocked_by_rules_message || "Some rules are not passing." %>
+        </span>
+      <% else %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+          <%= primer_octicon(:"shield-lock") %>
+        </div>
+        <div class="h4 status-heading color-fg-attention">This pull request can be automatically merged by project collaborators</div>
+        <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+      <% end %>
+    </div>
+
+  <% when :has_hooks %>
+    <div class="branch-action-item">
+      <div class="branch-action-item-icon completeness-indicator completeness-indicator-success">
+        <%= primer_octicon(:check) %>
+      </div>
+      <h3 class="h4 status-heading">This branch has no conflicts with the base branch</h3>
+      <% if view.base_branch_pushable? %>
+        <span class="status-meta">This repository has pre-receive hooks that run on merge.</span>
+      <% else %>
+        <span class="status-meta">Only those with <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/what-are-the-different-access-permissions">write access</a> to this repository can merge pull requests.</span>
+      <% end %>
+    </div>
+
+  <% when :behind %>
+      <% author_email = current_user.default_author_email(pull.repository, pull.head_sha) %>
+      <div class="branch-action-item">
+        <% if can_update_branch %>
+          <%= render :partial => "pull_requests/update_branch_button",
+                    :locals => { pull: pull } %>
+        <% end %>
+        <div class="branch-action-item-icon completeness-indicator completeness-indicator-problem">
+          <%= primer_octicon(:alert) %>
+        </div>
+        <h3 class="h4 status-heading">This branch is out-of-date with the base branch</h3>
+        <% if can_update_branch %>
+          <span class="status-meta">
+            Merge the latest changes from <span class="branch-name"><%= pull.display_base_ref_name %></span> into this branch.
+            <% if author_email %>
+              <p class="text-small">This merge commit will be associated with <%= author_email %>.</p>
+            <% end %>
+          </span>
+        <% end %>
+      </div>
+  <% end %>
+<% end %>

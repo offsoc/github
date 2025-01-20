@@ -1,0 +1,27 @@
+#!/bin/bash
+# Make sure the self-signed cert is available for enterprise-manage before
+# the enterprise-manage service starts.
+#
+# Also makes sure the loading page for the github app is enabled.
+#
+# This script is used by ghe-wait-for-certificates.service
+set -e
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ ! -f /etc/github/configured ]; then
+  wait_for_file /etc/haproxy/ssl.crt+key || {
+    log_message "self-signed cert failed to generate"
+    exit 126
+  }
+  if $(openssl x509 -in /etc/haproxy/ssl.crt -text | grep "Subject:" | grep -q "GitHub Automatic Self Signed Certificate"); then
+    /usr/share/rbenv/versions/current/bin/erb -r openssl -r digest -T - /usr/local/share/enterprise/ssl_warning.html.erb > /data/enterprise-manage/current/public/ssl_warning.html
+  else
+    rm -f /data/enterprise-manage/current/public/ssl_warning.html
+  fi
+fi
+
+# enable loading page for github
+UNICORN=1 /usr/share/rbenv/versions/current/bin/erb /usr/local/share/enterprise/preflight.html.erb > /data/github/current/public/index.html

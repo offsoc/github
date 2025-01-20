@@ -1,0 +1,111 @@
+#!/usr/bin/env ruby
+
+# typed: true
+# frozen_string_literal: true
+
+# This command is designed to help introduce a new RuboCop rule that will affect
+# multiple files/services.
+#
+# Invoke it with the name of the rule you want to introduce, and it will
+# provide a list of RuboCop autofix commands to run, one per service.
+# It will also tell you the total number of affected files and services.
+#
+# The list of services will be only those who have files affected by the rule, and
+# the commands include a list of those files.
+#
+# Invocation: bin/rubocop-per-service --rule=Rule/Here [--quiet]
+#
+# You can pass multiple rules comma-separated (without spaces).
+#
+# You can also provide it with JSON output from RuboCop by using the --json
+# parameter. This approach is primarily intended to save time when developing
+# this script itself. As such, the output in this case does not include a
+# real rule name - you'll need to replace the placeholder.
+
+require "json"
+require "optparse"
+
+def get_json_string_from_rubocop(rule)
+  initial_rubocop_command = "#{__dir__}/../bin/rubocop --cache=true --format=json --only=#{rule}"
+  puts "Running #{initial_rubocop_command}..."
+
+  `#{initial_rubocop_command}`
+end
+
+def get_json_string_from_file(file)
+  puts "Getting JSON from #{file}..."
+
+  File.read(file)
+end
+
+def parse_options
+  option_parser = OptionParser.new do |opts|
+    opts.on "-r", "--rule[=Some/Rule]", "Run RuboCop using the given rule"
+    opts.on "-j", "--json[=filename.json]", "Load RuboCop JSON output from the given file"
+    opts.on "-q", "--quiet", "Don't show progress details"
+    opts.on "-n", "--no_autocorrect", "Don't include the autocorrect flag in output"
+  end
+
+  options = {}
+  option_parser.parse!(into: options)
+
+  if options[:rule].nil? && options[:json].nil?
+    puts "Please provide either a rule to run (--rule=Some/Rule) or a JSON file (--json=filename.json)."
+    exit 1
+  end
+
+  if !options[:rule].nil? && !options[:json].nil?
+    puts "Please provide either a rule to run or a JSON file, but not both."
+    exit 1
+  end
+
+  options
+end
+
+puts "This script takes a while; you might like to get a coffee..."
+
+options = parse_options
+
+rubocop_json = if options[:json].nil?
+  get_json_string_from_rubocop(options[:rule])
+else
+  get_json_string_from_file(options[:json])
+end
+
+puts "Parsing JSON to get file list..."
+
+file_list = []
+
+parsed_json = JSON.parse(rubocop_json)
+offense_count = parsed_json["summary"]["offense_count"]
+parsed_json["files"].each do |file|
+  file_list << file["path"] if file["offenses"].any?
+end
+
+puts "Found #{file_list.size} files with #{offense_count} offenses. Now finding which services they belong to..."
+
+serviceowners = GitHub::Serviceowners.new
+files_by_service = {}
+
+file_list.each do |file|
+  service = serviceowners.service_for_path(file)
+  service = :unowned if service.nil?
+
+  files_by_service[service] ||= []
+  files_by_service[service] << file
+  print "." unless options[:quiet]
+end
+
+puts "\nFound #{files_by_service.size} services."
+
+rule = options[:rule] || "Rule/Here"
+flag = options[:no_autocorrect] ? "" : " -A"
+rubocop_command = "bin/rubocop --cache=true --only=#{rule}#{flag}"
+
+files_by_service.sort.to_h.each do |service, files|
+  service = service.to_s.strip
+  puts "\n# #{service} (#{files.size} file(s))"
+  puts "#{rubocop_command} #{files.join(" ")}"
+end
+
+puts "\n#{offense_count} offenses; #{file_list.size} files; #{files_by_service.size} services."

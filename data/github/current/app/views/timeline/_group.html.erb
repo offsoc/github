@@ -1,0 +1,39 @@
+<%-
+  deferred_comment_actions = local_assigns.fetch(:deferred_comment_actions, false)
+-%>
+<%- tag = "event:#{group.first.class.name.demodulize.downcase}" -%>
+<% track_render_partial("timeline/group", [tag], trace: true) do %>
+  <% if group.first.is_a?(PullRequest::Adapter::PullRequestRevisionMarkerAdapter) %>
+    <%= render layout: "timeline/item" do %>
+      <%= render PullRequests::RevisionMarkerComponent.new(pull_request: group.first.pull_request, last_seen_commit_oid: group.first.last_seen_commit_oid) %>
+    <% end %>
+  <% elsif group.first.is_a?(PlatformTypes::IssueComment) %>
+    <%#
+      IssueComments can be "grouped" together if there are identical consecutive comments,
+      but they still need their own "timeline-item" for certain js actions to work.
+    %>
+    <%= render layout: "timeline/item", locals: { item: group.first } do %>
+      <%= render "timeline/issue_comment", issue_comment: group.first, deferred_comment_actions: deferred_comment_actions, deferred_edit_form: true %>
+    <% end %>
+
+    <% if group.size > 1 %>
+      <%# this group contains repeated comments if it has more than one element. let's collapse them. %>
+      <%= render "timeline/repeated_comments", comment_nodes: group[1..-1], deferred_comment_actions: deferred_comment_actions, deferred_edit_form: true %>
+    <% end %>
+  <% else %>
+    <%= render layout: "timeline/item", locals: { item: group.first } do %>
+      <% case group.first %>
+      <% when PlatformTypes::TimelineEvent, Issue::Adapter::TimelineEventAdapter %>
+        <%= render "timeline/events", events: group %>
+      <% when PullRequest::Adapter::CommitAdapter %>
+        <%= render PullRequests::TimelineEvents::CommitsListComponent.new(commits: group.map(&:commit), pull_request: group.first.pull_request) %>
+      <% when PullRequest::Adapter::LegacyPullRequestReviewThread %>
+        <%= render PullRequests::LegacyReviewThreadComponent.new(review_thread: group.first.pull_request_review_thread) %>
+      <% when PullRequest::Adapter::PullRequestReviewAdapter %>
+        <%= render PullRequests::ReviewComponent.new(pull_request_review: group.first.pull_request_review, pull_request: group.first.pull_request) %>
+      <% else %>
+        <% GitHub.dogstats.increment("timeline.invalid_item_group") %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: aqueduct-worker
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "aqueduct-resqued"
+        heaven.githubapp.com/image-placeholder: "702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master"
+        moda.github.net/inject-otel-env-vars-into-containers: "aqueduct-resqued"
+spec:
+    replicas: 1
+    template:
+        metadata:
+            labels:
+                service: aqueduct-worker
+            annotations:
+                observability.github.com/splunk_index: prod-resque
+                fluentbit.io/parser: logfmt_sloppy
+        spec:
+            restartPolicy: Always
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: resqued-pidfile
+                  emptyDir: {}
+            containers:
+                - name: aqueduct-resqued
+                  image: 702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master
+                  imagePullPolicy: IfNotPresent
+                  args: ["bin/resqued", "--pidfile", "/resqued-pidfile/resqued.pid", "config/resqued/github-environment.rb", "config/resqued/github-staff-aqueduct.rb"]
+                  readinessProbe:
+                    initialDelaySeconds: 31
+                    exec:
+                        command: ["test", "-f", "/resqued-pidfile/resqued.ready"]
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command:
+                                - "bin/resqued"
+                                - "quit-and-wait"
+                                - "/resqued-pidfile/resqued.pid"
+                  resources:
+                    requests:
+                        cpu: 0.01
+                        memory: "3G"
+                    limits:
+                        cpu: 1.0
+                        memory: "8G"
+                  ports:
+                    - name: metrics
+                      containerPort: 9988
+                      protocol: TCP
+                  volumeMounts:
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                    - mountPath: /resqued-pidfile
+                      name: resqued-pidfile
+                  env:
+                    - name: USE_GLB_BALANCED_MAIL
+                      value: '1'
+                    - name: SMTP_PORT
+                      value: '2525'
+                    - name: RAILS_ENV
+                      value: production
+                    - name: ALIVE_HOST
+                      valueFrom:
+                        configMapKeyRef:
+                            key: alive-hostname
+                            name: general
+                    - name: REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: rate-limiter-servers
+                    - name: MONOLITH_REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: monolith-rate-limiter-servers
+                    - name: JOB_COORDINATION_REDIS_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: job-coordination-url
+                    - name: RESQUED_QUEUE_PREFIX
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: DYNAMIC_LAB_NAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: MEMCACHED_SERVERS
+                      value: cache:11211
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GPGVERIFY_URL
+                      value: http://gpgverify
+                    - name: SECRET_KEY_BASE
+                      valueFrom:
+                        secretKeyRef:
+                            name: general
+                            key: secret-key-base
+                    - name: STAFF_ENVIRONMENT
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: staff-environment
+                    - name: GH_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: STAFF_ENVIRONMENT_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: DATADOG_TRACING_ENABLED
+                      value: '0'
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: '0'
+                    - name: GH_WRITE_PIDFILE
+                      value: '0'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:worker"
+                    - name: SMTP_HOST
+                      value: smtp.service.github.net
+                    - name: RESQUED_WORKER_POOL_READY_FILE
+                      value: "/resqued-pidfile/resqued.ready"
+                    - name: RESQUED_METRICS_SERVER_ADDRESS
+                      value: "0.0.0.0:9989"
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-aqueduct-worker"
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+    selector:
+        matchLabels:
+            service: aqueduct-worker

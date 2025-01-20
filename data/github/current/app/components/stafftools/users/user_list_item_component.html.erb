@@ -1,0 +1,150 @@
+<div class="d-flex flex-items-center" <%= test_selector "user-#{user_id}" %>>
+  <%= helpers.avatar_for(account || User.ghost, 32, class: "avatar") %>
+  <div class="flex-auto ml-3">
+    <div>
+      <% if has_name? %>
+        <span class="text-semibold"><%= account.profile_name %></span> &ndash;
+      <% end %>
+      <% if deleted %>
+        <span class="text-mono"><%= login %></span>
+      <% else %>
+        <%= render(
+        Primer::Beta::Link.new(
+          href: stafftools_user_path(login),
+          test_selector: "user-link-#{user_id}",
+          underline: true,
+        )
+        ) { login } %>
+      <% end %>
+
+      <%= render(Primer::Beta::Label.new(
+          test_selector: "#{type_label.downcase}-label-#{user_id}",
+          ml: 1
+        )) { type_label } %>
+
+      <% if deleted %>
+        <%= render(Primer::Beta::Label.new(
+            test_selector: "user-deleted-label-#{user_id}",
+            scheme: :danger,
+            ml: 1
+          )) { "Deleted" } %>
+      <% end %>
+
+      <% if legal_hold %>
+        <%= render(Primer::Beta::Label.new(
+            test_selector: "user-legal-hold-label-#{user_id}",
+            scheme: :danger,
+            ml: 1
+          )) { "Legal hold" } %>
+      <% end %>
+  </div>
+  <div class="mt-1">
+    <span>
+      <% if deleted %>
+        Deleted <%= time_ago_in_words_js user.created_at %>
+      <% else %>
+        Created <%= time_ago_in_words_js account.created_at %>
+      <% end %>
+    </span>
+    <% if deleted %>
+      <span>
+        &middot;
+        <%= render(
+          Primer::Beta::Link.new(
+            href: stafftools_audit_log_path(query: id_query),
+            test_selector: "user-audit-log-link-#{user_id}"
+          )
+        ) { "Search audit logs" } %>
+      </span>
+      <% if GitHub.billing_enabled? %>
+        <span>
+          &middot;
+          <%= render(
+            Primer::Beta::Link.new(
+              href: stafftools_deleted_account_transactions_path(deleted_user_id: user_id, deleted_handle: login),
+              test_selector: "user-payment-history-link-#{user_id}"
+            )
+          ) { "Payment history" } %>
+        </span>
+      <% end %>
+    <% end %>
+  </div>
+</div>
+<% if deleted %>
+  <%= render(Primer::Alpha::ActionMenu.new(test_selector: "user-action-menu-#{user_id}")) do |menu| %>
+    <% menu.with_show_button do
+      render(Primer::Beta::Octicon.new(icon: :"kebab-horizontal", "aria-label": "Show more options"))
+    end %>
+    <% unless belongs_to_a_soft_deleted_business? %>
+      <% menu.with_item(
+        label: restore_or_recreate,
+        test_selector: "account-restore-button-#{user_id}",
+        tag: :button,
+        content_arguments: { "data-show-dialog-id": "account-restore-dialog-#{user_id}"}
+      ) %>
+    <% end %>
+
+    <% if soft_deleted? %>
+      <% menu.with_item(
+        label: "Purge",
+        tag: :button,
+        test_selector: "purge-org-button-#{user_id}",
+        content_arguments: { "data-show-dialog-id": "purge-org-dialog-#{user_id}"}
+      ) %>
+    <% end %>
+    <% menu.with_item(
+      label: user.data["legal_hold"] ? "Remove legal hold" : "Add legal hold",
+      href: stafftools_user_legal_hold_path(user_id),
+      form_arguments: {
+        method: user.data["legal_hold"] ? :delete : :post,
+        inputs: [
+          { name: "deleted_user_id", value: user_id },
+          { name: "login", value: login }
+        ]
+      }
+    ) %>
+  <% end %>
+
+  <% unless belongs_to_a_soft_deleted_business? %>
+    <%= render(Primer::Alpha::Dialog.new(
+      id: "account-restore-dialog-#{user_id}",
+      size: :medium,
+      title: "#{restore_or_recreate} this account?",
+      test_selector: "account-restore-dialog-#{user_id}"
+    )) do |c| %>
+      <% c.with_header(show_divider: true) do %>
+          <%= restore_or_recreate %> this account?
+      <% end %>
+      <% c.with_body(mt: 4) do %>
+        <p>
+          This will <%= restore_or_recreate.downcase %> the <strong><%= login %></strong> account.
+          As a result, all functionality and settings of the account will
+          become accessible again.
+        </p>
+      <% end %>
+      <% c.with_footer(show_divider: true) do %>
+        <%= render(Primer::Beta::Button.new(
+          data: { "close-dialog-id": "account-restore-dialog-#{user_id}" }
+        )) { "Cancel" } %>
+
+        <%= form_with(
+          url: stafftools_user_restorations_path,
+          method: :post) do |form| %>
+          <%= form.hidden_field :was_org, value: was_org? %>
+          <%= form.hidden_field :email, value: email %>
+          <%= form.hidden_field :id, value: user_id %>
+          <%= form.hidden_field :login, value: login %>
+          <%= form.hidden_field :plan, value: user.data["plan"] %>
+          <%= render(Primer::Beta::Button.new(
+            type: :submit,
+            scheme: :danger,
+            "data-disable-invalid": "",
+            "data-disable-with": ""
+          )) { restore_or_recreate } %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render(Stafftools::Organizations::PurgeOrganizationDialogComponent.new(organization: account)) if soft_deleted? %>
+<% end %>

@@ -1,0 +1,115 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status [options]
+#/
+#/ Show replication status for each replication channel to the primary.
+#/
+#/ Exits 0 when replication is OK, 1 when WARNINGs occur, and 2 if replication is CRITICAL.
+#
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/   -v | -vv       Run with increasing verbose output.
+#/   -r             Prints the current server role
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. /usr/local/share/enterprise/lib/ghe-commons
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+
+if [ "$1" = "-r" ]; then
+  repl_role
+  exit
+fi
+
+is_cluster_disaster_recovery_configured && {
+  echo "Appliance is configured with Cluster Disaster Recovery. Please use ghe-cluster-status for replication status."
+  exit 1
+}
+
+ensure_replica_running
+
+PRIMARY_IP=$(ghe-cluster-nodes --primary --ip | cut -f 2)
+if ! ssh_check $PRIMARY_IP; then
+  echo "Error: Primary node $PRIMARY_IP is unavailable." >&2
+  exit 255
+fi
+
+ensure_primary_and_replica_compatible
+
+save_error(){ ret=$?; if [ $ret -gt "$err" ]; then err=$ret; fi }
+err=0
+
+if [ -z "$1" ] || [ "$1" = "--check" ]; then
+  if ! is_service_external "mysql"; then
+    ghe-repl-status-mysql     --check || save_error
+  fi
+  if ghe-config --true app.actions.enabled; then
+    ghe-repl-status-mssql     --check || save_error
+  fi
+
+  ghe-repl-status-redis     --check || save_error
+  ghe-repl-status-es        --nagios || save_error
+  ghe-repl-status-git       --check || save_error
+  ghe-repl-status-pages     --check || save_error
+  ghe-repl-status-alambic   --check || save_error
+  ghe-repl-status-git-hooks --check || save_error
+  ghe-repl-status-consul    --check || save_error
+else
+  [ "$1" = "-v" ] && set --
+  [ "$1" = "-vv" ] && set -- -v
+
+  if ! is_service_external "mysql"; then
+    ghe-repl-status-mysql --check || save_error
+    ghe-repl-status-mysql "$@" | awk -Winteractive '$0="  | "$0'
+  else
+    echo "SKIPPED: mysql replication check skipped because external mysql is enabled."
+  fi
+  echo
+
+  if ghe-config --true app.actions.enabled; then
+    ghe-repl-status-mssql --check || save_error
+    ghe-repl-status-mssql "$@" | awk -Winteractive '$0="  | "$0'
+    echo
+  fi
+
+  ghe-repl-status-redis --check || save_error
+  ghe-repl-status-redis "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-es --nagios || save_error
+  ghe-repl-status-es    "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-git --check || save_error
+  ghe-repl-status-git   "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-pages --check || save_error
+  ghe-repl-status-pages "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-alambic --check || save_error
+  ghe-repl-status-alambic "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-git-hooks --check || save_error
+  ghe-repl-status-git-hooks "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+
+  ghe-repl-status-consul --check || save_error
+  ghe-repl-status-consul "$@" | awk -Winteractive '$0="  | "$0'
+  echo
+fi
+
+if [[ ($err -eq 1 || $err -eq 2) && "$1" != "-v" && "$1" != "-vv" ]]; then
+  echo "WARNING: Some replication components are not in optimal status. Run 'ghe-repl-status -vv' for more details."
+fi
+
+exit $err

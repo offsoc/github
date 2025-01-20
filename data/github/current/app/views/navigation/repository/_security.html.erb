@@ -1,0 +1,136 @@
+<%
+  timer = Timer.start
+  view = Navigation::Repository::SecurityView.new(current_user: current_user, current_repository: current_repository)
+  deferred_counts_path = repository_security_counts_path
+%>
+
+<h2 class='sr-only'>Security Navigation</h2>
+
+<%= render(Primer::Beta::NavList.new(
+    aria: { label: "Security" },
+    selected_item_id: selected_tab,
+    data: { pjax: "#repo-content-pjax-container", "turbo-frame": "repo-content-turbo-frame" }
+  )) do |component| %>
+
+  <% component.with_item(href: repository_security_overview_path, selected_by_ids: :overview) do |item| %>
+    <% item.with_leading_visual_icon(icon: :meter) %>
+    Overview
+  <% end %>
+
+  <% component.with_group do |group| %>
+    <% group.with_heading(title: "Reporting") %>
+
+    <% group.with_item(href: repository_security_policy_path, selected_by_ids: :policy) do |item| %>
+      <% item.with_leading_visual_icon(icon: :law) %>
+      Policy
+    <% end %>
+
+    <% if view.show_advisories? %>
+      <% group.with_item(href: repository_advisories_path, selected_by_ids: :advisories) do |item| %>
+        <% item.with_leading_visual_icon(icon: :shield) %>
+        <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+          Advisories
+          <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "advisories" }) %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render_nothing_if_database_fails do %>
+    <% if view.show_security_campaigns? %>
+      <% component.with_group do |group| %>
+        <% group.with_heading(title: "Campaigns") %>
+
+        <% view.security_campaigns.each do |security_campaign| %>
+          <% group.with_item(href: repository_security_campaign_path(number: security_campaign.number), selected_by_ids: "campaign-#{security_campaign.number}") do |item| %>
+
+            <% render(Primer::Box.new(display: :flex, justify_content: :space_between, align_items: :flex_start)) do %>
+              <%= security_campaign.name %>
+
+              <%= render GitHub::BatchDeferredContentComponent.new(url: repository_security_campaigns_counts_path, inputs: { number: security_campaign.number }) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.show_bypass_requests? %>
+    <% component.with_group do |group| %>
+      <% group.with_heading(title: "Requests") %>
+      <% if view.show_bypass_requests? %>
+        <% group.with_item(href: secret_scanning_bypass_requests_url, selected_by_ids: :bypass_requests) do |item| %>
+          <% item.with_leading_visual_icon(icon: :key) %>
+          <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+            Push protection bypass
+            <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "bypass-requests" }) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.show_dependabot_alerts? || view.show_code_scanning? || view.show_token_scanning? %>
+    <% component.with_group do |group| %>
+      <% group.with_heading(title: "Vulnerability alerts") %>
+
+      <% if view.show_dependabot_alerts? %>
+        <% group.with_item(href: repository_alerts_path, selected_by_ids: :dependabot_alerts) do |item| %>
+          <% item.with_leading_visual_icon(icon: :dependabot) %>
+          <% render(Primer::Box.new(display: :flex, justify_content: :space_between, test_selector: "dependabot-alerts-sidebar")) do %>
+            Dependabot
+            <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "dependabot-alerts" }) %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if view.show_code_scanning? %>
+        <% group.with_item(href: repository_code_scanning_results_path, selected_by_ids: :code_scanning) do |item| %>
+          <% item.with_leading_visual_icon(icon: :codescan) %>
+          <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+            Code scanning
+            <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "code-scanning-alerts" }) %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+
+      <% if view.show_token_scanning? %>
+        <%# Repos for which generic secrets or NPPs are available has a split count where "Secret scanning"
+        is a dropdown, under which are the counts of unresolved high conf patterns and the counts of unresolved
+        other conf patterns %>
+        <% if view.split_secret_scanning_count? %>
+          <% group.with_item(expanded: true) do |item| %>
+            <% item.with_leading_visual_icon(icon: :key) %>
+            <%= render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+              Secret scanning
+            <% end %>
+            <% item.with_item(selected_by_ids: [:secret_scanning], data: {selected_selector: :high}, href: repository_token_scanning_results_path) do |ss_item| %>
+              <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+                High confidence
+                <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "secret-scanning-alerts-nonlow-conf" }) %>
+              <% end %>
+            <% end %>
+            <% item.with_item(selected_by_ids: [:other_confidence], data: {selected_selector: :other}, href: repository_token_scanning_results_path(query: "is:open confidence:other")) do |ss_item| %>
+              <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+                Other
+                <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "secret-scanning-alerts-low-conf" }) %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <%# Free public repos can't enable NPPs or generic secrets %>
+        <% else %>
+          <% group.with_item(href: repository_token_scanning_results_path, selected_by_ids: :secret_scanning) do |item| %>
+            <% item.with_leading_visual_icon(icon: :key) %>
+            <% render(Primer::Box.new(display: :flex, justify_content: :space_between)) do %>
+              Secret scanning
+              <%= render GitHub::BatchDeferredContentComponent.new(url: deferred_counts_path, inputs: { type: "secret-scanning-alerts" }) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% GitHub.dogstats.distribution("repository_security_navigation.dist.time", timer.elapsed_ms) %>

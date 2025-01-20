@@ -1,0 +1,64 @@
+server {
+
+  <% if cluster_ha_primary? -%>
+  listen 9100;
+  listen [::]:9100;
+  <% else -%>
+  listen 127.0.0.1:9100;
+  listen [::1]:9100;
+  <% end -%>
+  server_name <%= "pages.#{@config["github-hostname"]}" %>;
+
+  access_log /var/log/nginx/pages.log main;
+  error_log  /var/log/nginx/pages.error.log;
+
+  client_max_body_size 1g;
+
+  # Define the Pages 404 page early so that this 404 page is preferred over
+  # any others from the private mode include files.
+  <% if pages_enabled? %>
+  error_page 404 /404-enterprise.html;
+  <% else %>
+  error_page 404 /404-disabled.html;
+  <% end %>
+
+  <% if !@config["public-pages"] %>
+    # Setup path for private mode authentication.
+    #
+    # WARNING: This include needs to be above other includes and location blocks
+    # so the auth request locations aren't hijacked by another location.
+    include /etc/nginx/private_mode_server_include.conf;
+
+    # Require private mode authentication.
+    include /etc/nginx/private_mode_location_include.conf;
+  <% end %>
+
+  <% if pages_enabled? %>
+  location / {
+    include /etc/nginx/pages_fe_include.conf;
+  }
+  <% else %>
+  location / {
+    root /data/pages-lua/public;
+  }
+  <% end %>
+
+  location = /404-enterprise.html {
+    more_set_headers "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'";
+    root /data/pages-lua/public;
+  }
+
+  location = /404-disabled.html {
+    more_set_headers "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'";
+    root /data/pages-lua/public;
+  }
+
+  location = /contact {
+    return 301 <%= "$http_x_forwarded_proto://#{@config["github-hostname"]}/contact" %>;
+  }
+
+  location = / {
+    return 301 <%= "$http_x_forwarded_proto://#{@config["github-hostname"]}/" %>;
+  }
+
+}

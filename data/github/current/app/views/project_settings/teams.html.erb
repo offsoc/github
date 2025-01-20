@@ -1,0 +1,114 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    ... on Organization {
+      login
+      viewerIsAMember
+      viewerCanCreateTeams
+
+      resourcePath
+      newTeamResourcePath
+    }
+
+    project(number: $projectNumber) {
+      settingsResourcePath
+      teamsSettingsResourcePath
+      teamsSettingsTeamResultsResourcePath
+      usersSettingsResourcePath
+
+      teams(first: 100) {
+        edges {
+          ...Views::ProjectSettings::Team::ProjectTeamEdge
+        }
+      }
+    }
+
+    ...Views::ProjectSettings::Breadcrumbs::ProjectOwner
+    ...Views::ProjectSettings::Tabs::ProjectOwner
+    ...Views::ProjectSettings::TeamResults::ProjectOwner
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_owner = Views::ProjectSettings::Teams::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<% page_info title: "Teams · Project settings" %>
+
+<%= render partial: "project_settings/breadcrumbs", locals: { project_owner: project_owner } %>
+
+<div class="d-flex flex-column flex-lg-row mt-lg-4">
+  <div class="mb-lg-0 mb-4" role="navigation"><%# erblint:disable GitHub::Accessibility::NavigationHasLabel %>
+    <%= render partial: "project_settings/tabs", locals: { project_owner: project_owner } %>
+  </div>
+
+  <div class="flex-auto">
+    <% if project_owner.viewer_is_a_member? %>
+      <%= render(Primer::Beta::Flash.new(mb: 4, classes: "flash-notice", icon: :info)) do %>
+        Team members can have permissions from multiple sources. If the <a class="Link--inTextBlock" href="<%= project.settings_resource_path %>">organization member permission</a> is set to a higher level of access, or if a team member has been added to this project as a <a class="Link--inTextBlock" href="<%= project.users_settings_resource_path %>">collaborator</a> with a higher level of access, their permission level cannot be lowered by lowering the team’s permission below.
+      <% end %>
+
+      <div class="collaborators boxed-group flush js-repo-access-container"><%# erblint:disable DeprecatedCustomCss %>
+        <% if project_owner.viewer_can_create_teams? %>
+          <a href="<%= project_owner.new_team_resource_path %>" class="btn btn-sm boxed-group-action"><%# erblint:disable DeprecatedCustomCss %>
+            <%= primer_octicon(:plus) %>
+            Create new team
+          </a>
+        <% end %>
+
+        <h3>Teams</h3>
+        <div class="boxed-group-inner repo-access-group js-repo-access-group <%= "is-empty" if project.teams.edges.empty? %>" id="teams"><%# erblint:disable DeprecatedCustomCss %>
+          <ul class="collab-list table-list js-repo-access-list">
+            <% project.teams.edges.each do |team_edge| %>
+              <%= render partial: "project_settings/team", locals: { team_edge: team_edge } %>
+            <% end %>
+          </ul>
+
+          <%= render Primer::Beta::Blankslate.new do |c| %>
+            <% c.with_heading(tag: :h2) do %>
+              No teams have been given access to this project yet.
+            <% end %>
+          <% end %>
+
+          <%= form_tag project.teams_settings_resource_path.to_s, method: :post, class: "js-add-repo-access-form" do %>
+            <div class="access-form-wrapper add-team-form">
+              <!--Temporary. Use partial instead-->
+              <details class="select-menu js-repo-access-team-select details-reset details-overlay">
+                <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button") do %>
+                  <i>Add a team:</i>
+                  <span>Select team</span>
+                <% end %>
+                <details-menu class="select-menu-modal position-absolute js-repo-access-team-select-menu" style="max-width: 80vw; z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                    <div class="select-menu-header">
+                      <span class="select-menu-title">Choose a team</span>
+                    </div>
+                    <remote-input class="select-menu-filters border-bottom p-2" src="<%= project.teams_settings_team_results_resource_path %>" aria-owns="teams-project-picker-results">
+                      <input type="text"
+                             id="addable-teams-filter-field"
+                          class="form-control width-full"
+                          placeholder="Search teams"
+                          aria-label="Search teams…"
+                          autofocus
+                          autocomplete="off">
+                      <%= render(Primer::Beta::Spinner.new(size: :small, position: :absolute, classes: "spinner chooser-spinner", "aria-label": "Loading")) %>
+                    </remote-input>
+                    <div class="select-menu-list" id="teams-project-picker-results">
+                      <%= render partial: "project_settings/team_results", locals: { project_owner: project_owner } %>
+                    </div>
+                </details-menu>
+              </details>
+              <input type="hidden" name="team" class="js-add-repo-access-field">
+            </div>
+          <% end %>
+        </div>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :lock)) do %>
+          To see which teams have access to this project, you must be a member of the <a class="Link--inTextBlock" href="<%= project_owner.resource_path %>"><%= project_owner.login %></a> organization.
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "projects" %>
+<% end %>

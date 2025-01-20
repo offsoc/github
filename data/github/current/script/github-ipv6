@@ -1,0 +1,89 @@
+#!/bin/bash
+#/ Usage: script/github-ipv6 COMMAND [arguments]
+#/
+#/ Available commands are:
+#/  show  - show the current configuration
+#/  set   - set enable ipv6
+#/  clear - disable ipv6
+
+SET_HOSTS="github-releases.githubusercontent.com avatars.githubusercontent.com avatars1.githubusercontent.com \
+avatars2.githubusercontent.com camo.githubusercontent.com github.githubassets.com pkg-containers.githubusercontent.com user-images.githubusercontent.com"
+
+: ${ETC_HOSTS:=/etc/hosts}
+TMP_HOSTS=/tmp/hosts.$$
+cp -f $ETC_HOSTS $TMP_HOSTS
+
+main() {
+  local command="$1"; shift
+  case "$command" in
+    show)
+      cmd_show "$@" ;;
+    set)
+      cmd_set "$@" ;;
+    clear)
+      cmd_clear "$@" ;;
+    *)
+      usage "$@" ;;
+  esac
+  rm -f $TMP_HOSTS
+}
+
+usage() {
+  cat "$0" | grep ^#/ | cut -c4-
+  exit 1
+}
+
+cmd_clear() {
+  clear_hosts
+}
+
+cmd_show() {
+  for name in $SET_HOSTS; do
+    local current_ip=$(get_current_ip $name)
+    local ip_description=$(describe_ip "$current_ip")
+    echo "$name would be IPv6 $ip_description but is $current_ip"
+  done
+}
+
+get_current_ip() {
+  if ! ruby -r socket -e 'puts TCPSocket.gethostbyname(ARGV[0])[3]' "$@" 2>/dev/null; then
+    echo "unknown"
+  fi
+}
+
+describe_ip() {
+  echo "2606:50c0:8000::154"
+}
+
+cmd_set() {
+  case "$1" in
+    system|default|--system|--default)
+      clear_hosts ;;
+    *)
+    set_hosts 2606:50c0:8000::154 ;;
+  esac
+}
+
+clear_hosts() {
+  _clear_hosts
+  _commit_hosts
+}
+
+set_hosts() {
+  _clear_hosts
+  echo "$1 $SET_HOSTS" >>$TMP_HOSTS
+  _commit_hosts
+}
+
+_clear_hosts() {
+  HOSTS=$SET_HOSTS \
+    bin/safe-ruby-quick -i -pe 'ip, *hosts = $_.split(/\s+/); if ip =~ /^(2606:50c0:8000::154)$/; hosts -= ENV["HOSTS"].split(" "); $_ = hosts.empty? ? "" : "#{ip} #{hosts.join(" ")}\n"; end' $TMP_HOSTS
+}
+
+_commit_hosts() {
+  diff $ETC_HOSTS $TMP_HOSTS
+  cp $TMP_HOSTS $ETC_HOSTS || echo "Run 'sudo $ORIG_CMD' to set this for real"
+}
+
+ORIG_CMD="$0 $*"
+main "$@"

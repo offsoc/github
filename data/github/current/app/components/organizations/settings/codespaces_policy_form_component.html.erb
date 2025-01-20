@@ -1,0 +1,305 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<codespaces-policy-form class="codespaces-policy-form" data-owner-type="<%= owner.class %>" data-unsaved-changes-warning="You have unsaved changes to your policy that will be lost. Continue anyway?">
+  <div data-target="codespaces-policy-form.machineTypeConstraintElement" data-value="<%= {allowable_values: JSON.parse(constraints[Codespaces::PolicyConstraint::CODESPACES_ALLOWED_MACHINE_TYPES][:allowable_values].to_json(only: ["display_description", "display_name", "name"]))}.to_json %>"></div>
+  <div data-target="codespaces-policy-form.portPrivacyConstraintElement" data-value="<%= constraints[Codespaces::PolicyConstraint::CODESPACES_ALLOWED_PORT_PRIVACY_SETTINGS].to_json %>"></div>
+  <div data-target="codespaces-policy-form.maximumIdleTimeoutConstraintElement" data-value="<%= constraints[Codespaces::PolicyConstraint::CODESPACES_ALLOWED_MAXIMUM_IDLE_TIMEOUT].slice(:name, :maximum_value).to_json %>"></div>
+  <div data-target="codespaces-policy-form.hostSetupRepoIds" data-value="<%= repo_ids_host_setup.to_json %>"></div>
+  <div data-target="codespaces-policy-form.networkConfigurationRepoIds" data-value="<%= repo_ids_network_configuration.to_json %>"></div>
+  <div data-target="codespaces-policy-form.policyURLNetworkConfigurationAllRepos" data-value="<%= @policy_url_network_configuration_all_repos %>"></div>
+  <div data-target="codespaces-policy-form.addConstraintDropdownUrl" data-value="<%= add_constraint_dropdown_url %>"></div>
+  <%= render(Primer::Box.new(
+    data: {
+      target: "codespaces-policy-form.allReposHostSetupPolicyExists",
+      value: all_repos_host_setup_policy_exists?
+    })) %>
+
+  <%= render(Primer::Box.new(
+    data: {
+      target: "codespaces-policy-form.allReposNetworkConfigurationPolicyExists",
+      value: all_repos_network_configuration_policy_exists?
+    })) %>
+
+  <%= render(Primer::Beta::Flash.new(scheme: :danger, hidden: true, data: {target: "codespaces-policy-form.genericError"})) do
+    "Sorry something went wrong. Please refresh and try again."
+  end %>
+  <div class="form-group" data-target="codespaces-policy-form.policyNameFormGroup">
+    <% props = existing_policy.present? ? { existingPolicyName: existing_policy[:name] } : {} %>
+    <%= render_react_partial name: "codespaces-policy-name-input", props: props, ssr: true %>
+  </div>
+  <div>
+    <%= render Primer::Box.new(display: :flex, justify_content: :space_between, mb: 2) do %>
+      <label for="policyConstraints" class="pt-1">Constraints</label>
+      <%= render Organizations::Settings::CodespacesPolicyForm::AddConstraintComponent.new(
+        owner:,
+        current_policy_constraint_names: current_policy_constraint_names,
+        all_repos_target: existing_policy.nil? || existing_policy[:targets_all_repositories?],
+        all_repos_host_setup_policy_exists: all_repos_host_setup_policy_exists?,
+        all_repos_network_configuration_policy_exists: all_repos_network_configuration_policy_exists?,
+      ) %>
+    <% end %>
+  </div>
+
+  <%# Constraints List %>
+  <%= render Primer::Beta::BorderBox.new(
+    position: :relative,
+    mb: 3,
+    data: {
+      target: "codespaces-policy-form.constraintList",
+      has_existing_policy: existing_policy.present?,
+      existing_policy: existing_policy.to_json(dangerously_allow_all_keys: true),
+      existing_policy_constraints: existing_policy.present? && existing_policy[:current_policy_constraints].as_json(root: false, dangerously_allow_all_keys: true),
+      repo_ids_host_setup: repo_ids_host_setup
+    }
+  ) do |component| %>
+    <%# render when no constraints exist %>
+    <% component.with_body(
+      hidden: hide_add_constraints_info?,
+      data: { target: "codespaces-policy-form.addConstraintInfo" }
+    ) do %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2).with_content("Start by adding constraints") %>
+        <% c.with_description { "Constraints make up a policy defining the set of allowable values for #{child_target_description}." } %>
+      <% end %>
+    <% end %>
+
+    <% constraints.each do |constraint_name, constraint_config| %>
+      <% next if constraint_config[:hidden] %>
+      <% component.with_row(p: 0, hidden: hide_constraint_row?(constraint_name), data: { targets: "codespaces-policy-form.activeConstraintsListRows", added_constraint_name: constraint_name }) do %>
+        <% if constraint_config[:type] == Codespaces::PolicyConstraint::TYPE_ALLOWED_VALUES && constraint_config[:custom_allowed_values] %>
+          <%= render Organizations::Settings::CodespacesPolicyForm::ConstraintRow::AllowedValuesInputComponent.new(
+            constraint: constraint_config,
+            data_key_name: constraint_config[:display_name].split(/\s+/).map(&:capitalize).join,
+            existing_policy:,
+            input_placeholder: constraint_config[:input_placeholder],
+          ) %>
+        <% elsif constraint_config[:type] == Codespaces::PolicyConstraint::TYPE_ALLOWED_VALUES %>
+          <%= render Organizations::Settings::CodespacesPolicyForm::ConstraintRow::AllowedValuesComponent.new(
+            constraint: constraint_config,
+            data_key_name: constraint_config[:display_name].split(/\s+/).map(&:capitalize).join,
+            existing_policy:,
+          ) %>
+        <% elsif constraint_config[:type] == Codespaces::PolicyConstraint::TYPE_MAXIMUM %>
+          <%= render Organizations::Settings::CodespacesPolicyForm::ConstraintRow::MaxValueComponent.new(
+            constraint_config: constraint_config,
+            data_key_name: constraint_config[:display_name].split(/\s+/).map(&:capitalize).join,
+            existing_policy:,
+          ) %>
+        <% elsif constraint_name == Codespaces::PolicyConstraint::CODESPACES_HOST_SETUP %>
+          <%= render Organizations::Settings::CodespacesPolicyForm::ConstraintRow::HostSetupComponent.new(
+            constraint: constraint_config,
+            existing_policy:,
+            owner:,
+          ) %>
+        <% elsif constraint_name == Codespaces::PolicyConstraint::CODESPACES_NETWORK_CONFIGURATION %>
+          <%= render Organizations::Settings::CodespacesPolicyForm::ConstraintRow::NetworkConfigurationComponent.new(
+            constraint: constraint_config,
+            existing_policy:,
+            organization: owner, # TODO: Support compatibility in this component with enterprise owners.
+          ) %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render Primer::Beta::BorderBox.new do |c| %>
+    <% c.with_body(display: :flex, justify_content: :space_between, classes: "flex-column flex-lg-row") do %>
+      <%= render Primer::Box.new(pr: 1) do %>
+        <%= render Primer::Beta::Text.new(tag: :div, font_weight: :bold, data: {target: "codespaces-policy-form.changePolicyText"}).with_content("Change policy target") %>
+        <%= render Primer::Beta::Text.new(
+          tag: :div,
+          font_size: :normal,
+          color: :muted,
+          data: { target: "codespaces-policy-form.allRepositoriesDescriptionEl" },
+          hidden: !hide_selected_repos_count_element?
+        ).with_content("This policy applies to all #{child_target_description}.") %>
+        <%= render Primer::Beta::Text.new(
+          tag: :div,
+          font_size: :normal,
+          color: :muted,
+          data: { target: "codespaces-policy-form.selectedRepositoriesDescriptionEl" },
+          hidden: hide_selected_repos_count_element?
+        ).with_content("This policy applies to the selected #{child_target_description}.") %>
+      <% end %>
+      <%= render Primer::Box.new(display: :flex,  pt: [2, nil, nil, 0, nil], classes: "flex-column flex-sm-row flex-sm-items-center") do %>
+        <%= render Primer::Box.new(
+          display: :flex,
+          pr: 2,
+          classes: "js-policy-repos-container",
+          hidden: hide_selected_repos_count_element?,
+          data: { target: "codespaces-policy-form.dynamicRepositorySelectionEl" }
+        ) do %>
+          <%= render Primer::Box.new(
+            display: :flex,
+            align_items: :center
+          ) do %>
+
+            <%= render(GitHub::DialogComponent.new(
+              title: "#{child_target_type} under policy",
+              src: policy_member_target_list_url,
+              preload: true,
+              details_classes: "js-repository-items-dialog",
+              onclose: "codespaces-policy-form#select#{child_target_type}",
+              )
+            ) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+              <% dialog.with_summary do %>
+                <%= render Primer::Beta::Button.new(tag: :summary) do %>
+                  <%= render Primer::Beta::Text.new(color: :muted) do %>
+                    <%= child_target_type %>:
+                  <% end %>
+                  <%= render Primer::Beta::Text.new(
+                    data: {
+                      target: "codespaces-policy-form.selectedTargetsCountTextElement"
+                    },
+                  ) do %>
+                    <%= "#{selected_repos_count} selected" %>
+                  <% end %>
+                <% end %>
+              <% end %>
+              <% dialog.with_body do %>
+                <include-fragment class="SelectMenu-loading" aria-label="Loading">
+                  <%= render(Primer::Beta::Spinner.new) %>
+                </include-fragment>
+              <% end %>
+            <% end %>
+            <%= form_tag "/no_reference",
+              class: "overflow-hidden js-policy-repos-form",
+              id: "codespaces-policy-group-repos-form",
+              data: { form_field_name: "codespaces-policy-group-target-ids" },
+              method: :put do %>
+              <% if existing_policy.present? %>
+                <% existing_policy[:targeted_repository_ids].each do |repository_id| %>
+                  <input
+                    type="hidden"
+                    name="enable[]"
+                    value="<%= repository_id %>"
+                    data-form-field-name="codespaces-policy-group-target-ids"
+                  >
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+        <%= render(Primer::Alpha::ActionMenu.new(
+          dynamic_label: :true,
+          select_variant: :single,
+          anchor_align: :end,
+          data: {
+            target: "codespaces-policy-form.targetSelector",
+          }
+        )) do |menu|
+          menu.with_show_button(data: {selector: "policy-selection"}) do |button|
+            button.with_trailing_action_icon(icon: :"triangle-down")
+          end
+          menu.with_item(
+            label: "All #{child_target_type.downcase}",
+            active: existing_policy.nil? || existing_policy[:targets_all_repositories?],
+            name: track_when_policy_targets_all_repositories? ? "policy-target-#{child_target_type.downcase}" : "policy_target",
+            value: owner_model_type,
+            data: {
+              action: "click:codespaces-policy-form#updateRepositoriesTargetType",
+              target: "codespaces-policy-form.targetSelectorAll",
+            }
+          ) do |item|
+            item.with_description.with_content(content_tag(:span, "Policy is active for all #{child_target_description}"))
+          end
+
+          menu.with_item(
+            label: "All #{child_target_type.downcase}",
+            data: {
+              target: "codespaces-policy-form.targetSelectorDisabledAll",
+            },
+            disabled: true,
+            hidden: true,
+          ) do |item|
+            description = content_tag(:span, "Policy is active for all #{child_target_description}")
+            warning = content_tag(:p, "Note: Some constraints cannot be used with multiple 'All #{child_target_type.downcase}' policies, but are already used elsewhere", class: "pt-3")
+            item.with_description.with_content(description + warning)
+          end
+
+          menu.with_item(
+            label: "Selected #{child_target_type.downcase}",
+            active: existing_policy.present? && !existing_policy[:targets_all_repositories?],
+            name: "policy-target-selected-#{child_target_type.downcase}",
+            value: child_target_model_type,
+            data: {
+              action: "click:codespaces-policy-form#updateRepositoriesTargetType",
+              target: "codespaces-policy-form.targetSelectorSelected",
+            }
+          ) do |item|
+            item.with_description.with_content(content_tag(:span, "Policy is active for specifically selected #{child_target_description}"))
+          end
+
+          menu.with_item(
+            label: "Selected #{child_target_type.downcase}",
+            data: {
+              target: "codespaces-policy-form.targetSelectorDisabledSelected",
+            },
+            disabled: true,
+            hidden: true,
+          ) do |item|
+            constraint_name = Codespaces::PolicyConstraint::CONSTRAINT_CONFIGURATION.dig(Codespaces::PolicyConstraint::CODESPACES_ALLOWED_MAXIMUM_CREATIONS, :display_name)
+            description = content_tag(:span, "Policy is active for specifically selected #{child_target_type.downcase}")
+            warning = content_tag(:p, "Note: The '#{constraint_name}' constraint cannot be used with \"selected #{child_target_type.downcase}\"", class: "pt-3")
+            item.with_description.with_content(description + warning)
+          end
+        end %>
+
+      <% end %>
+    <% end %>
+  <% end %>
+  <%= render Primer::ButtonComponent.new(
+    scheme: :primary,
+    mt: 3,
+    disabled: !existing_policy.present?,
+    data: {
+      target: "codespaces-policy-form.saveButton",
+      action: "click:codespaces-policy-form#savePolicy",
+      organization_name: owner.is_a?(Organization) ? owner.display_login : owner.slug,
+      csrf: csrf_token,
+      submit_url: submit_url,
+      redirect_url: redirect_url,
+    }
+  ) do |c| %>
+    <%= render Primer::Box.new(display: :flex) do %>
+      Save
+      <%= render Primer::Box.new(display: :flex, align_items: :center, ml: 2, hidden: true, data: {target: "codespaces-policy-form.spinnerElement"}) do %>
+        <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+      <% end %>
+    <% end %>
+  <% end %>
+  <%= render(Primer::Beta::Text.new(tag: :p, color: :danger, hidden: true, data: {target: "codespaces-policy-form.saveErrorElement"}, style: "margin-top: 10px;")) { "Something went wrong. Could not save policy." } %>
+
+  <% if all_repos_host_setup_policy_exists? %>
+    <%= render(Primer::Box.new(
+        data: { target: "codespaces-policy-form.selectReposHostSetupWarning" },
+        mt: 2,
+        # Only show on page load if we're editing a policy that targets host setup on a particular repo
+        # We'll show otherwise via JS
+        hidden: !(
+          existing_policy &&
+          !existing_policy[:targets_all_repositories?] &&
+          current_policy_constraint_names.include?(Codespaces::PolicyConstraint::CODESPACES_HOST_SETUP))
+      )) do
+      description = render(Primer::Beta::Text.new) { "Note: This policy overrides the default constraint set " }
+      link = render(Primer::Beta::Link.new(href: edit_url(existing_all_repos_host_setup_policy), target: "_blank")) { "here" }
+      description + link
+    end %>
+  <% end %>
+
+  <% if all_repos_network_configuration_policy_exists? %>
+    <%= render(Primer::Box.new(
+        data: { target: "codespaces-policy-form.selectReposNetworkConfigurationWarning" },
+        mt: 2,
+        # Only show on page load if we're editing a policy that targets network configuration on a particular repo
+        # We'll show otherwise via JS
+        hidden: !(
+          existing_policy &&
+          !existing_policy[:targets_all_repositories?] &&
+          current_policy_constraint_names.include?(Codespaces::PolicyConstraint::CODESPACES_NETWORK_CONFIGURATION))
+      )) do
+      description = render(Primer::Beta::Text.new) { "Note: This policy overrides the default constraint set " }
+      link = render(Primer::Beta::Link.new(href: edit_url(existing_all_repos_network_configuration_policy), target: "_blank")) { "here" }
+      description + link
+    end %>
+  <% end %>
+</codespaces-policy-form>

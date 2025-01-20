@@ -1,0 +1,373 @@
+#!/usr/bin/env ruby
+
+require "github/config/active_record"
+require "github/pages/management/delegate"
+require "github/sql"
+
+require "github/pages/management/set_fileserver_attribute"
+
+def resolve_page_id(nwo_or_page_id)
+  if nwo_or_page_id =~ /\A\d+\z/
+    nwo_or_page_id.to_i
+  else
+    owner, name = nwo_or_page_id.split("/", 2)
+
+    owner_id = ApplicationRecord::Domain::Users.connection.select_value(Arel.sql(<<-SQL, owner: owner)) or abort "Could not resolve user #{owner}"
+      SELECT id FROM users WHERE login = :owner
+    SQL
+
+    ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql(<<-SQL, owner_id: owner_id, name: name)) or abort "Could not resolve #{nwo_or_page_id}"
+      SELECT pages.id FROM pages
+      INNER JOIN repositories ON repositories.id = pages.repository_id
+      WHERE repositories.owner_id = :owner_id
+        AND repositories.name = :name
+        AND repositories.active = 1
+    SQL
+  end
+end
+
+def resolve_page_deployment_id(page_id, git_ref_or_page_deployment_id)
+  return nil if git_ref_or_page_deployment_id.nil?
+
+  if git_ref_or_page_deployment_id =~ /\A\d+\z/
+    git_ref_or_page_deployment_id.to_i
+  else
+    ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql(<<-SQL, page_id: page_id, git_ref: git_ref_or_page_deployment_id)) or abort "Could not resolve #{git_ref_or_page_deployment_id}"
+      SELECT page_deployments.id FROM page_deployments
+      WHERE page_deployments.page_id = :page_id
+      AND page_deployments.ref_name = :git_ref
+    SQL
+  end
+end
+
+class DPagesCommand < Struct.new(:name, :description, :proc)
+  def describe(ljust = 0)
+    "#{usage.ljust(ljust)} - #{description}"
+  end
+
+  def usage
+    "#{name} #{describe_parameters}"
+  end
+
+  def describe_parameters
+    proc.parameters.map do |type, name|
+      if type == :req
+        "<#{name}>"
+      else
+        "[<#{name}>]"
+      end
+    end.join(" ")
+  end
+end
+
+def perform(command, **args)
+  command.new(delegate: GitHub::Pages::Management::Delegate.new, **args).perform
+end
+
+PROGRAM_NAME = ENV["PROGRAM_NAME"] || "dpages"
+
+COMMANDS = [
+  DPagesCommand.new(
+    "add-replica",
+    "Add a new copy of a pre-existing site to a new host. Adds a voting replica unless otherwise specified.",
+    lambda { |nwo_or_page_id, git_ref_or_page_deployment_id = nil, voting = true, host = nil|
+      require "github/pages/management/add_replica"
+
+      page_id = resolve_page_id(nwo_or_page_id)
+
+      perform(GitHub::Pages::Management::AddReplica,
+        page_id: page_id,
+        page_deployment_id: resolve_page_deployment_id(page_id, git_ref_or_page_deployment_id),
+        host: host,
+        voting: voting,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "attributes",
+    "Set attributes on a given host. Allowed attributes: #{GitHub::Pages::Management::SetFileserverAttribute::ALLOWED_ATTRIBUTES.join(", ")}",
+    lambda { |host, *attributes|
+
+      successes = attributes.map do |attribute_and_value|
+        attribute, value = *attribute_and_value.split("=")
+        value = nil if value.to_s.downcase == "null"
+        perform(GitHub::Pages::Management::SetFileserverAttribute,
+          host: host,
+          attribute: attribute.to_sym,
+          value: value,
+        )
+      end
+
+      successes.all? { |success| success }
+    },
+  ),
+  DPagesCommand.new(
+    "check-replicas",
+    "Check whether all the replicas are in place.",
+    lambda { |nwo_or_page_id, git_ref_or_page_deployment_id = nil|
+      require "github/pages/management/check_replicas"
+
+      page_id = resolve_page_id(nwo_or_page_id)
+
+      perform(GitHub::Pages::Management::CheckReplicas,
+        page_id: page_id,
+        page_deployment_id: resolve_page_deployment_id(page_id, git_ref_or_page_deployment_id),
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "embargo",
+    "Mark a host as embargoed such that it will not take in new sites.",
+    lambda { |host|
+      require "github/pages/management/set_embargoed"
+
+      perform(GitHub::Pages::Management::SetEmbargoed,
+        host: host,
+        embargoed: true,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "evacuate",
+    "Mark this host as evacuating such that it will begin to shed old sites.",
+    lambda { |host|
+      require "github/pages/management/set_evacuating"
+
+      perform(GitHub::Pages::Management::SetEvacuating,
+        host: host,
+        evacuating: true,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "list-replicas",
+    "Display all replica information for a given page, including host and path.",
+    lambda { |nwo_or_page_id, git_ref_or_page_deployment_id = nil|
+      require "github/pages/management/list_replicas"
+
+      page_id = resolve_page_id(nwo_or_page_id)
+
+      perform(GitHub::Pages::Management::ListReplicas,
+        page_id: page_id,
+        page_deployment_id: resolve_page_deployment_id(page_id, git_ref_or_page_deployment_id),
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "manually-evacuate",
+    "Evacuate site replicas from the host in this process in your terminal.",
+    lambda { |host|
+      require "github/pages/management/evacuate"
+
+      perform(GitHub::Pages::Management::Evacuate,
+        host: host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "non-voting",
+    "Mark a host as non-voting such that its replicas don't count toward the replica count.",
+    lambda { |host|
+      require "github/pages/management/set_voting"
+
+      perform(GitHub::Pages::Management::SetVoting,
+        host: host,
+        voting: false,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "offline",
+    "Mark a host as offline such that it does not serve sites or receive new sites.",
+    lambda { |host|
+      require "github/pages/management/set_fileserver_attribute"
+
+      perform(GitHub::Pages::Management::SetFileserverAttribute,
+        host: host,
+        attribute: :online,
+        value: 0,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "online",
+    "Mark a host as online such that it serves sites.",
+    lambda { |host|
+      require "github/pages/management/online"
+
+      perform(GitHub::Pages::Management::Online,
+        host: host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "reallocate-replicas",
+    "Reallocate replicas to a given host.",
+    lambda { |host, voting, datacenter, target_disk_usage, start_replica_id = nil, source_host = nil|
+      require_relative "../config/environment"
+      require "github/pages/management/reallocate_replicas"
+
+      abort "Parameter 'voting' is required to be true or false. The input value is #{voting}" unless %w[true false].include?(voting)
+
+      begin
+        Float(target_disk_usage)
+      rescue ArgumentError
+        abort "Parameter 'target_disk_usage' is required to be float. The input value is #{target_disk_usage}"
+      end
+
+      perform(GitHub::Pages::Management::ReallocateReplicas,
+        host: host,
+        voting: voting == "true",
+        datacenter: datacenter,
+        target_disk_usage: target_disk_usage.to_f,
+        start_replica_id: start_replica_id,
+        source_host: source_host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "remove",
+    "Remove an offlined host from the list of Pages fileservers.",
+    lambda { |host|
+      require "github/pages/management/remove"
+
+      perform(GitHub::Pages::Management::Remove,
+        host: host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "remove-replica",
+    "Remove a site replica from the given host.",
+    lambda { |nwo_or_page_id, git_ref_or_page_deployment_id = nil, host|
+      require "github/pages/management/remove_replica"
+
+      page_id = resolve_page_id(nwo_or_page_id)
+
+      perform(GitHub::Pages::Management::RemoveReplica,
+        page_id: page_id,
+        page_deployment_id: resolve_page_deployment_id(page_id, git_ref_or_page_deployment_id),
+        host: host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "repair",
+    "Find all sites with fewer than #{GitHub.pages_replica_count} voting replicas & #{GitHub.pages_non_voting_replica_count} non-voting replicas and create the missing replicas.",
+    lambda {
+      require "github/pages/management/repair"
+
+      perform(GitHub::Pages::Management::Repair)
+    },
+  ),
+  DPagesCommand.new(
+    "replication-status",
+    "Display a summary of all repositories whose pages have above or below the required number of replicas, or a message saying all is OK if all pages have the expected number of replicas.",
+    lambda {
+      require "github/pages/management/replication_status"
+
+      perform(GitHub::Pages::Management::ReplicationStatus)
+    },
+  ),
+  DPagesCommand.new(
+    "show",
+    "Show all the attributes for a host.",
+    lambda { |host|
+      require "github/pages/management/show_fileserver"
+
+      perform(GitHub::Pages::Management::ShowFileserver,
+        host: host,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "status",
+    "Display status of each of the dpages hosts.",
+    lambda {
+      require "github/pages/management/status"
+
+      perform(GitHub::Pages::Management::Status)
+    },
+  ),
+  DPagesCommand.new(
+    "unembargo",
+    "Mark a host as unembargoed such that it begins receiving new site replicas.",
+    lambda { |host|
+      require "github/pages/management/set_embargoed"
+
+      perform(GitHub::Pages::Management::SetEmbargoed,
+        host: host,
+        embargoed: false,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "unevacuate",
+    "Mark this host as unevacuating such that it will cease shedding old sites.",
+    lambda { |host|
+      require "github/pages/management/set_evacuating"
+
+      perform(GitHub::Pages::Management::SetEvacuating,
+        host: host,
+        evacuating: false,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "voting",
+    "Mark a host as voting such that its replicas count toward the replica count.",
+    lambda { |host|
+      require "github/pages/management/set_voting"
+
+      perform(GitHub::Pages::Management::SetVoting,
+        host: host,
+        voting: true,
+      )
+    },
+  ),
+  DPagesCommand.new(
+    "migrate",
+    "create migrate task for iad host to migrate all sites to azure-eastus host",
+    lambda { |host, start_replica_id = nil|
+      require_relative "../config/environment"
+      require "github/pages/management/migrate_host"
+      perform(GitHub::Pages::Management::MigrateHost,
+        source_host: host,
+        start_replica_id: start_replica_id,
+      )
+    }
+  ),
+  DPagesCommand.new(
+    "migrate_reset",
+    "reset migration task that stuck in running progress",
+    lambda { |batch_size|
+      require_relative "../config/environment"
+      require "github/pages/management/migrate_host"
+      batch_size = batch_size || 500
+      GitHub::Pages::Management::MigrateHost.new(delegate: GitHub::Pages::Management::Delegate.new, source_host: nil, start_replica_id: nil).reset_migration(batch_size.to_i)
+    }
+  ),
+]
+
+unless command_name = ARGV.shift
+  $stderr.puts "Usage: #{PROGRAM_NAME} <subcommand...>"
+  $stderr.puts
+  $stderr.puts "Valid subcommands are:"
+  usage_ljust = COMMANDS.map { |command| command.usage.size }.max
+  COMMANDS.each do |command|
+    $stderr.puts "  #{command.describe(usage_ljust)}"
+  end
+  exit false
+end
+
+if command = COMMANDS.find { |command| command.name == command_name }
+  required_params = command.proc.parameters.count { |type, _name| type == :req }
+
+  if ARGV.count < required_params
+    abort "Usage: #{PROGRAM_NAME} #{command.usage}"
+  end
+
+  exit command.proc.call(*ARGV)
+else
+  abort "Unknown command: #{command_name}"
+end

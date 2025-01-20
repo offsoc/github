@@ -1,0 +1,125 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-block-ips [-h]
+#/
+#/ Adds GHES firewall rules to all current cluster nodes that block all traffic to and from
+#/ all IPs found in /data/user/common/cluster-ip-blocklist.
+#/ Currently only supports ipv4 addresses.
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/
+set -euo pipefail
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+get_opts() {
+  while getopts "h" OPTION; do
+    case $OPTION in
+      h)
+        usage
+        exit 0
+        ;;
+      \?)
+        usage
+        exit 2
+        ;;
+    esac
+  done
+}
+
+main() {
+
+  get_opts "$@"
+
+  # Check if we're on a cluster.
+  if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ] || [ ! -f "/data/user/common/cluster.conf" ]; then
+    echo "[ Error ] Clustering is not configured on this host. Exiting." >&2
+    exit 3
+  fi
+
+  # Check if cluster.conf is configured for standalone HA.
+  if [ -n "$(ghe-config --true cluster.ha)" ]; then
+    echo "[ Error ] ghe-cluster-block-ips is not supported on standalone HA. Exiting." >&2
+    exit 7
+  fi
+
+  cluster_ip_blocklist="/data/user/common/cluster-ip-blocklist"
+  if [ ! -f "$cluster_ip_blocklist" ]; then
+    echo "[ Exit ] '$cluster_ip_blocklist' is missing. Exiting." >&2
+    exit 4
+  fi
+
+  all_current_cluster_ips="$(ghe-cluster-nodes -oi | awk {'print $2'} | sort)"
+  declare -iA cluster_ips_to_block
+  # Process the file, line by line
+  while IFS= read -r line; do
+    trimmed_line=$(echo "$line" | tr -d '[:space:]')
+    # Check if it is a valid IPv4 address
+    if [[ ! $trimmed_line =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "[ Warning ] '$trimmed_line' is not a valid IPv4 address. Skipping..." >&2
+        continue
+    fi
+
+    # Add the valid IPv4 address to the dictionary if it is not one of the current cluster nodes.
+    if ! [[ ${all_current_cluster_ips[*]} =~ "$trimmed_line" ]]; then
+      cluster_ips_to_block["$trimmed_line"]+=1
+    else
+      echo "[ Warning ] '$trimmed_line' specifies one of the current cluster nodes in use. Ignoring." >&2
+    fi;
+
+  done < "$cluster_ip_blocklist"
+
+  if [[ -z "${cluster_ips_to_block[@]}" ]]; then
+    echo "No valid IPs found to block. Exiting.";
+    exit 5
+  fi
+
+  # If current IP is in the list of cluster ips to block, exit and tell them to run this on a different node
+  current_host_ip=$(hostname -I | tr -d '[:blank:]')
+  if [[ ${cluster_ips_to_block[*]} =~ "$current_host_ip" ]]; then
+    echo "[ Error ] $cluster_ip_blocklist specifies the current host '$current_host_ip'. Please re-run this command on a cluster node that is not in the blocklist. Exiting." >&2
+    exit 6
+  fi
+
+  # Sync all the current nodes in the cluster conf, except the local host
+  sync_hosts=$(ghe-cluster-nodes -oix | awk '{print $2}')
+  # ghe-cluster-nodes -oix may report hosts that should be available, but aren't.
+  # gnu parallel requires all hosts be reachable, otherwise it will fail.
+  reachable_sync_hosts=()
+  for host in $sync_hosts; do
+    ssh_check=$(ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$host" exit || echo 1)
+    if [[ -z "$ssh_check" ]]; then
+      reachable_sync_hosts+=("$host")
+    else
+      echo "[ Warning ] '$host' is not reachable. It may be blocked through the firewall or otherwise offline. Skipping..." >&2
+    fi
+  done
+
+  files="$cluster_ip_blocklist"
+  # Copy over the blocklist to all the other nodes, so they're all in sync
+  ssh_sync_files() {
+    remote_machine="$1"
+    files_to_transfer="$2"
+
+    # Use tar to create a compressed archive of the specified file with its absolute path
+    # The first tar command creates the archive and sends it to stdout:
+    # --acls preserves the ACLs of the files, -c creates a new archive, -p preserves file permissions, -P preserves absolute path names, -J compresses with xz (slightly faster)
+    # -f - specifies output should be sent to stdout, ls $files_to_transfer expands the list of files to transfer
+    # The output is streamed over ssh to the second tar command, which extracts items in the archive to their original location and preserves ACLs and file permissions.
+    sudo tar --acls -cpPJf - $(ls $files_to_transfer 2>/dev/null) |
+      ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$remote_machine" "sudo tar --acls -xpPJf - 2>/dev/null"
+  }
+
+  export -f ssh_sync_files
+  parallel ssh_sync_files {} ::: ${reachable_sync_hosts[@]} :::: <(echo "$files")
+  unset ssh_sync_files
+
+  # Block each of the IPs on the blocklist on all the current cluster nodes
+  for cluster_ip_to_block in ${!cluster_ips_to_block[*]}; do
+    ghe-cluster-each -o -- ghe-cluster-block-ip "$cluster_ip_to_block"
+  done
+}
+
+main "$@"

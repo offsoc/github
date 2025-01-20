@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+# Common functions used by GitHub MSSQL scripts.
+# Usage: . ghe-mssql-lib
+#
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. ghe-actions-lib
+
+# get-servername
+#   Retrieve the servername property of the current MSSQL instance.
+get-servername() {
+    ghe-mssql-console -y -n -q "SET NOCOUNT ON; SELECT SERVERPROPERTY('servername')" | sed -r 's/\s+$//g'
+}
+
+# get-local-mssql-alloc
+#   Prints the allocation id of the locally running MSSQL instance.
+get-local-mssql-alloc() {
+  # Note that this returns the abbreviated allocation ID
+  nomad node status -self | sed '1,/^Allocations$/d' | grep "mssql" | grep "running" | cut -d ' ' -f 1
+}
+
+# start-mssql-global
+#   Starts the MSSQL Nomad job (all allocations). Must be run from the nomad delegate.
+start-mssql-global() {
+  /usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/mssql/mssql.hcl
+}
+
+# stop-mssql-global
+#   Stops the MSSQL Nomad job (all allocations). Can be run from anywhere.
+stop-mssql-global() {
+  nomad stop mssql
+  wait-for 10 mssql-shutdown check-mssql-shutdown
+}
+
+check-local-mssql-alloc-stopped() {
+  alloc_to_stop="$1"
+  local_alloc="$(get-local-mssql-alloc)"
+  if [ -n "$alloc_to_stop" ] && [ "$alloc_to_stop" == "$local_alloc" ]; then
+    echo "MSSQL alloc detected, but it should be stopped: $alloc_to_stop vs. $local_alloc on $(hostname)" >&2
+    return 1
+  fi
+}
+
+# stop-mssql-local
+#   Stops the local MSSQL Nomad allocation.
+stop-mssql-local() {
+  local_alloc="$(get-local-mssql-alloc)"
+  nomad alloc stop "$local_alloc"
+  wait-for 4 "MSSQL alloc $local_alloc stop" check-local-mssql-alloc-stopped "$local_alloc"
+}
+
+wait-mssql-local-with-restart-alloc() {
+  local attempts=4
+  local interval=2
+
+  for i in $(seq 1 "$attempts"); do
+    echo "wait-mssql-local-with-restart-alloc: waiting for console to print aliveness"
+    ghe-actions-check -s mssql --force-on-replica
+    if sudo test -d /data/user/mssql/secrets && sudo test -d /data/user/mssql/data; then
+      echo "wait-mssql-local-with-restart-alloc: directories exist as expected. Attempt $i/$attempts"
+      break
+    fi
+    echo "wait-mssql-local-with-restart-alloc: directories don't exist as expected. Attempt $i/$attempts; $(sudo ls -ltr /data/user/mssql)"
+    if [[ "$i" == "$attempts" ]]; then
+      >&2 echo "wait-mssql-local-with-restart-alloc: failing."
+      exit 1
+    else
+      # We've seen sometimes the mssql container doesn't start cleanly and these directories don't get created correctly. A simple nomad alloc restart should fix it.
+      local_mssql_alloc="$(get-local-mssql-alloc)"
+      echo "wait-mssql-local-with-restart-alloc: restarting alloc $local_mssql_alloc"
+      nomad alloc restart "$local_mssql_alloc"
+      echo "wait-mssql-local-with-restart-alloc: waiting $interval seconds..."
+      sleep $interval
+    fi
+  done
+}
+
+# restart-mssql-global
+#   Restarts the Nomad job, which restarts all MSSQL instances.  This can be used,
+#   for example, to pick up new settings in the Nomad config file.
+restart-mssql-global() {
+  stop-mssql-global
+  start-mssql-global
+  ghe-actions-check -s mssql --force-on-replica
+}
+
+# restart-mssql-local
+#   Restarts the local MSSQL instance
+restart-mssql-local() {
+  nomad alloc restart "$(get-local-mssql-alloc)"
+}
+
+# script-mssql <script>
+#   Executes the given MSSQL script against the local MSSQL instance.  The script,
+#   given as a string, will be saved to a temp file.
+script-mssql() {
+  local temp_file
+  local exit_code=0
+
+  temp_file="$(mktemp)"
+  echo "$1" > "$temp_file"
+  chmod 644 "$temp_file"
+
+  ghe-mssql-console -y -i "$temp_file" || exit_code=$?
+
+  rm -f "$temp_file"
+  return $exit_code
+}
+
+# get-ag-role
+#   Get the AG role (PRIMARY or SECONDARY) of the MSSQL instance on current appliance
+get-ag-role() {
+  ghe-mssql-console -y -n -q "
+    SELECT ar.replica_server_name, ars.role_desc
+    FROM sys.availability_replicas ar, sys.dm_hadr_availability_replica_states ars
+    WHERE ar.replica_id = ars.replica_id AND ar.replica_server_name = N'$(hostname)'"
+}
+
+# clear-mssql-data-with-global-stop
+#   Deletes the data in the MSSQL data folder. This could be for tearing down actions or just cleaning up
+#   any old data when setting up a replica.  In addition to deleting any existing databases,
+#   this also wipes out the existing logins, allowing the replica to be setup with the same logins
+#   as the primary.
+clear-mssql-data-with-global-stop() {
+  echo "Clearing MSSQL data on $(hostname)..."
+  # Stop any existing mssql containers best effort
+  stop-mssql-global || true
+
+  # Note: we don't need flip_mssql_replica_eligibility here.  stop-mssql-global should disable mssql completely
+  clear-mssql-data-local
+}
+
+clear-mssql-data-local() {
+  echo "Clearing MSSQL data on $(hostname)..."
+
+  # Delete everything under /data/user/mssql except the backups directory.  The log/mssql-xevent-trace directory is recreated so that it can be mounted into actions containers at startup
+  sudo find "/data/user/mssql" -mindepth 1 -maxdepth 1 | grep -v backups |
+  while read -r file; do
+    sudo rm -rf "$file"
+  done
+
+  sudo mkdir -p /data/user/mssql/log/mssql-xevent-trace
+  sudo chown -R mssql:mssql /data/user/mssql/log
+}
+
+# flip_mssql_replica_eligibility
+#  Allows disabling (and re-enabling) starting mssql allocation the current node.
+#  Does not automatically stop running allocations.
+flip_mssql_replica_eligibility() {
+  if [ "$1" = "disable" ]; then
+    # Back out this node from available mssql nodes of nomad jobs
+    # so it won't be started accidentally by other replica restores
+    sudo sed -i -e 's/disable_mssql_replica = "false"/disable_mssql_replica = "true"/' /etc/nomad.d/config.hcl
+    nomad node meta apply disable_mssql_replica=true # manually sync the node metadata with the nomad node api to avoid a nomad restart
+  elif [ "$1" = "enable" ]; then
+    # Put this node back to available mssql nodes of nomad job
+    sudo sed -i -e 's/disable_mssql_replica = "true"/disable_mssql_replica = "false"/' /etc/nomad.d/config.hcl
+    nomad node meta apply disable_mssql_replica=false # manually sync the node metadata with the nomad node api to avoid a nomad restart
+  else
+    echo "Expecting disable or enable" >&2
+    return 1
+  fi
+}

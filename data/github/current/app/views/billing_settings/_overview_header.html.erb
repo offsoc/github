@@ -1,0 +1,106 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# `view` is a BillingSettings::OverviewView %>
+<% if view.account.user? %>
+  <%= render(Primer::Box.new(border: true, border_radius: 2, display: :flex, direction: :row, p: 3,  mb: 3)) do %>
+    <%= render(Primer::Box.new(flex: 1, border: :right, display: :flex, direction: :column, justify_content: :space_between, pr: 5)) do %>
+      <%= render(Primer::Beta::Text.new(tag: :p, font_weight: :bold, mb: 2)) { "Your next payment" } %>
+      <p>
+        <%= render(Primer::Beta::Text.new(classes: "h2", test_selector: "billing-overview-current-bill")) { view.next_payment_amount.format } %>
+        <% if view.next_charge_date %>
+          <%= render(Primer::Beta::Text.new(font_size: :normal, color: :muted, pl: 2, test_selector: "billing-next-payment-due")) {
+            "Due by #{view.next_charge_date.strftime("%B %d, %Y")}"
+          } %>
+        <% end %>
+      </p>
+      <p class="text-small color-fg-muted mb-0">
+        This amount does not include the spend on usage of metered service. View your <%= link_to "usage this month", target_billing_path(view.account, anchor: "usage"), class: "Link--inTextBlock" %> below.
+      </p>
+    <% end %>
+    <%= render(Primer::Box.new(flex: 1, pl: 4)) do %>
+      <%= render "billing_settings/frequent_actions", view: view %>
+    <% end %>
+  <% end %>
+<% else %>
+
+<div class="d-flex flex-column flex-md-row mb-4" <%= test_selector("billing-overview-header") %>>
+  <%= render Billing::Settings::CurrentOrUpcomingBillComponent.new(account: view.account) %>
+
+  <div class="col-md-4 mr-md-3 col-12 py-3 px-4 mb-md-0 mb-3 color-bg-subtle rounded-2">
+    <%= render "billing_settings/next_payment_due", view: view, next_charge_amount: view.pending_cycle(include_addons: false).payment_amount(use_balance: true).to_d %>
+  </div>
+
+  <div class="col-md-4 col-12 py-3 px-4 mb-md-0 mb-3 color-bg-subtle rounded-2">
+    <%= render "billing_settings/frequent_actions", view: view %>
+  </div>
+</div>
+<% end %>
+
+<% if view.account.user? && view.recurring_charge_item_list.any? %>
+  <%= render(Primer::Box.new(border: true, border_radius: 2, p: 3, mb: 4, test_selector: "billing-recurring-charge-section")) do %>
+    <%= render(Primer::Beta::Text.new(tag: :p, font_weight: :bold, mb: 2)) { "Your recurring charges & discounts" } %>
+    <% view.recurring_charge_item_list.each_with_index do |charge, idx| %>
+      <% is_last_item = idx == view.recurring_charge_item_list.length - 1 %>
+      <div class="d-table col-12 <%= is_last_item ? "pt-2" : "border-bottom py-2"%>" <%= test_selector("billing-recurring-charge-list") %>>
+        <div class="col-4 d-table-cell">
+          <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, font_weight: :bold, mb: 0)) { charge.display_name } %>
+        </div>
+        <div class="col-4 d-table-cell">
+          <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, mb: 0)) { "#{charge.renewal_amount.format}/#{charge.billing_interval}" } %>
+        </div>
+        <div class="col-4 d-table-cell">
+          <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, mb: 0)) { "On #{charge.renewal_date.strftime("%b %d, %Y")}" } %>
+        </div>
+      </div>
+    <% end %>
+    <% if view.coupon_summary %>
+      <div class="border-top pt-2 mt-2" <%= test_selector("billing-coupon-item") %>>
+        <div class="d-table col-12">
+          <div class="col-4 d-table-cell">
+            <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, font_weight: :bold, mb: 0)) { view.coupon_summary.display_name } %>
+          </div>
+          <div class="col-4 d-table-cell">
+            <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, mb: 0)) { "#{view.coupon_summary.human_discount} off / #{view.coupon_summary.billing_interval}" } %>
+          </div>
+          <div class="col-4 d-table-cell">
+            <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, mb: 0)) { view.coupon_summary.human_expiration } %>
+          </div>
+        </div>
+        <%= render(Primer::Beta::Text.new(tag: :p, color: :muted, font_size: :small, mb: 0, mt: 1)) { "* Discount applies for #{view.discountable_charges.map(&:display_name).to_sentence}" } %>
+      </div>
+    <% end%>
+  <% end %>
+<% end %>
+
+<% if view.pending_cycle.changing_duration? %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :warning, mb: 4, icon: "clock")) do |component| %>
+      <strong>
+        Switch to <%= view.pending_cycle.plan_duration.downcase %>ly billing effective on <%= view.pending_cycle.active_on.strftime("%b %d, %Y") %>
+      </strong>
+      <% component.with_action_content do %>
+        <%= form_tag update_pending_plan_change_path(view.account.display_login), class: "float-right", method: :put do %>
+          <%= hidden_field_tag :cancel_plan_duration, true %>
+          <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, "data-confirm": "Are you sure you want to cancel this pending billing duration change?") do %>
+            Cancel changes
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, mb: 4, icon: "clock")) do |component| %>
+      <strong>
+        Switch to <%= view.pending_cycle.plan_duration.downcase %>ly billing effective on <%= view.pending_cycle.active_on.strftime("%b %d, %Y") %>
+      </strong>
+      <% component.with_action do %>
+        <%= form_tag update_pending_plan_change_path(view.account.display_login), class: "float-right", method: :put do %>
+          <%= hidden_field_tag :cancel_plan_duration, true %>
+          <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, "data-confirm": "Are you sure you want to cancel this pending billing duration change?") do %>
+            Cancel changes
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render "billing_settings/iap_banners", user: view.account %>

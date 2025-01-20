@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/storage"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+require "github/config/kv"
+
+MAX_BAD_REP_COUNT = 20
+
+def main
+  total_bad_replica_counts = []
+  GitHub::Storage::Allocator.get_non_voting_datacenters.each do |dc|
+    total_bad_replica_counts += GitHub::Storage::ClusterRepair.get_bad_replica_counts(slice: false, non_voting: true, datacenter: dc)
+  end
+  total_bad_replica_counts += GitHub::Storage::ClusterRepair.get_bad_replica_counts slice: false
+  total_bad_replica_counts += GitHub::Storage::ClusterRepair.get_bad_cache_replica_counts slice: false
+
+  if total_bad_replica_counts.size == 0
+    puts "Everything looks OK!"
+  else
+    puts "under/over-replicated alambic objects"
+    puts total_bad_replica_counts.take(MAX_BAD_REP_COUNT).map { |row| "  #{row[1]} (alambic) - #{row[2]} #{"replica".pluralize(row[2])}" }
+    puts "... and #{total_bad_replica_counts.size - MAX_BAD_REP_COUNT} more" if total_bad_replica_counts.size > MAX_BAD_REP_COUNT
+    puts "under/over-replicated alambic objects total: #{total_bad_replica_counts.size}"
+    puts
+  end
+end
+
+main

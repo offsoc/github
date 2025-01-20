@@ -1,0 +1,199 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% if @runners.none? && !hosted_runner_group.present? %>
+  <% if !@owner_settings.self_hosted_runners_disabled_by_admin? %>
+    <div class="Box">
+      <%= render Primer::BlankslateComponent.new(
+        title: "There are no runners configured",
+        test_selector: "no-runners-blankslate",
+      ) do %>
+      <p><%= link_to "Learn more about using runners", helpers.docs_url("actions/hosting-your-own-runners"), class: "Link--inTextBlock" %> to run actions on your own servers.</p>
+    <% end %>
+    </div>
+  <% end %>
+<% else %>
+  <div class="Box Box--condensed mt-1" id="runner-list">
+    <div class="Box-header d-flex text-small color-fg-muted">
+      <span class="flex-1">Runners</span>
+      <span class="col-1">Status</span>
+      <span class="col-1"></span>
+    </div>
+    <ul>
+      <% if hosted_runner_group.present? %>
+        <li class="Box-row d-flex flex-items-center">
+          <span class="flex-1 d-flex">
+            <div class="pr-2">
+              <%= render Primer::Beta::Octicon.new(icon: "mark-github") %>
+            </div>
+            <div>
+              <div
+                class="h4 color-fg-default"
+                id="github-hosted-runners">
+
+                <% if !viewing_from_a_repository? %>
+                  <%= render(Primer::Beta::Link.new(href: @owner_settings.hosted_runners_path(@owner_settings.settings_owner), scheme: :primary, mr: 2)) { "Standard GitHub-hosted runners" } %>
+                <% else %>
+                  Standard GitHub-hosted runners
+                <% end %>
+              </div>
+              <div class="color-fg-muted text-small mt-1">
+                Ready-to-use runners managed by GitHub. <%= render(Primer::Beta::Link.new(href: helpers.docs_url("actions/about-github-hosted-runners"), classes: "Link--inTextBlock")) { "Learn more." } %>
+              </div>
+            </div>
+          </span>
+          <span class="col-1 d-flex no-wrap flex-items-center">
+              <%= render Primer::Beta::Octicon.new(icon: "dot-fill", color: :success) %>
+            <span class="mr-4 color-fg-default f5"><%= "#{hosted_job_count} active #{'job'.pluralize(hosted_job_count)}" %></span>
+          </span>
+          <span class="col-1"></span>
+        </li>
+      <% end %>
+      <% @runners.each_with_index do |runner, index| %>
+        <li class="Box-row d-flex flex-items-center" <%= test_selector("runner-list-item") %>>
+          <span class="flex-1 d-flex <% if !runner.group_name.present? %>my-1<% end %>">
+            <div class="pr-2">
+              <%= primer_octicon(runner_icon(runner)) %>
+            </div>
+            <div>
+              <div
+                class="h4 color-fg-default"
+                id="runner-<%= runner.id %>">
+                <% if can_navigate_to_runner?(runner) %>
+                  <%= render(Primer::Beta::Link.new(href: details_path(runner), scheme: :primary, mr: 2, classes: "css-truncate css-truncate-target", style: "max-width: 500px", test_selector: "runner-name")) { runner.name } %>
+                  <% runner.labels.each do |label| %>
+                    <% runner_label = render Primer::Beta::Label.new(mb: 1, mr: 1, scheme: :secondary, classes: "css-truncate css-truncate-target", style: "max-width: 250px", title: "Label: #{ label.name }") do %>
+                      <%= label.name %>
+                    <% end %>
+                    <%= can_search_with_labels? ? render(Primer::Beta::Link.new(href: "?qr=#{filter_value(:label, label.name)}",  underline: false)) { runner_label } : runner_label %>
+                  <% end %>
+                <% else %>
+                  <div class="d-flex flex-wrap">
+                    <div class="mr-2 css-truncate css-truncate-target" style="max-width: 500px" <%= test_selector("runner-name") %>>
+                      <%= runner.name %>
+                    </div>
+                    <% if viewing_from_a_repository? && inherited_from_org?(runner) %>
+                      <%= render Primer::Beta::Label.new(mb: 1, mr: 1, scheme: :info, vertical_align: :top, test_selector: "runner-list-label", title: "Your organization has made this runner available to this repository. The runner cannot be moved and labels cannot be modified.") do %>
+                        Organization
+                      <% end %>
+                    <% elsif inherited_from_enterprise?(runner) %>
+                      <% enterprise_label = render Primer::Beta::Label.new(mb: 1, mr: 1, scheme: :info, vertical_align: :top, test_selector: "runner-list-label", title: "Your enterprise has made this runner available to this #{viewing_from_a_repository? ? "repository" : "organization"}. The runner cannot be moved and labels cannot be modified.") do %>
+                        Enterprise
+                      <% end %>
+                      <%= can_search_with_labels? ? render(Primer::Beta::Link.new(href: "?qr=#{filter_value(:level, "Enterprise")}",  underline: false)) { enterprise_label } : enterprise_label %>
+                    <% end %>
+                    <% runner.labels.each do |label| %>
+                      <% runner_label = render Primer::Beta::Label.new(mb: 1, mr: 1, scheme: :secondary, classes: "css-truncate css-truncate-target", style: "max-width:250px", test_selector: "runner-list-label", title: "Label: #{ label.name }") do %>
+                        <%= label.name %>
+                      <% end %>
+                      <%= can_search_with_labels? ? render(Primer::Beta::Link.new(href: "?qr=#{filter_value(:label, label.name)}",  underline: false)) { runner_label } : runner_label %>
+                    <% end %>
+                  </div>
+                <% end %>
+              </div>
+
+              <div class="d-flex">
+                <% if runner.group_name.present? %>
+                  <div class="pr-2 color-fg-muted text-small" <%= test_selector("runner-group-name") %>>
+                    Runner group:
+                      <% if viewing_from_a_repository? %>
+                        <%= runner.group_name %>
+                      <% else %>
+                        <%= render(Primer::Beta::Link.new(href: runner_group_path(runner), scheme: :primary, classes: "Link--inTextBlock")) { runner.group_name } %>
+                      <% end %>
+                  </div>
+                <% end %>
+
+                <% if runner.is_a?(Actions::LargerRunner) %>
+                  <div class="color-fg-muted text-small">
+                      Public IP:
+                      <%= render(Primer::Beta::Link.new(href: "?qr=#{filter_value(:public_ip, public_ip_state(runner))}",  scheme: :primary, classes: "Link--inTextBlock")) { public_ip_state(runner).capitalize } %>
+                  </div>
+                <% end %>
+              </div>
+
+              <% if runner_group = runner.try(:group) %>
+                <% workflows = runner_group.selected_workflow_refs %>
+                <% workflows_count = workflows&.count || 0 %>
+                <% if runner_group.restricted_to_workflows && workflows_count > 0 %>
+                  <div class="d-flex mt-1" <%= test_selector("runner-group-workflow-restrictions")%>>
+                    <div class="color-fg-muted text-small">
+                      Usage restricted to
+                    </div>
+                    <%= render(GitHub::DialogComponent.new(title: "Workflow access", variant: :wide, details_classes: "ml-1", header_classes: 'p-3', body_classes: 'p-3')) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+                      <% dialog.with_summary do %>
+                        <summary role="button" class="Link--muted text-bold text-small" aria-haspopup="dialog">
+                          <%= workflows_count %> workflow <%= "file".pluralize(workflows_count) %>
+                        </summary>
+                      <% end %>
+                      <% dialog.with_body do %>
+                        <div class="mb-3 text-normal">
+                          Runner <span class="text-bold"><%= runner.name %></span> is allowed to use the following workflow files:
+                        </div>
+                        <pre class="rounded text-small color-bg-subtle color-fg-muted border color-border-default p-3 overflow-x-scroll"><%= workflows.join(",\n") -%></pre>
+                        <div class="text-small lh-condensed-ultra color-fg-muted mt-3 mb-1">
+                        Learn more about
+                        <%= render(Primer::Beta::Link.new(href: helpers.docs_url("actions/access-self-hosted-runners"), classes: "Link--inTextBlock")) { "restricted workflows" } %>
+                      </div>
+                      <% end %>
+                    <% end %>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          </span>
+          <span class="col-2 d-flex flex-justify-between flex-items-center">
+            <div class="d-none d-md-block">
+              <%= render Primer::Beta::Octicon.new(icon: "dot-fill", color: runner_status_color(runner)) %>
+              <span class="ml-1 color-fg-default f5">
+                <% if runner.status&.match("^Shutdown")%>
+                  Shutdown
+                <% else %>
+                  <%= runner.status.capitalize %>
+                <% end %>
+              </span>
+            </div>
+
+            <% if can_edit_runner?(runner) || can_delete_runner?(runner) %>
+              <div class="d-flex col-2 flex-justify-end">
+                <% if @owner_settings.self_hosted_runners_disabled_by_admin? %>
+                  <%= render(Actions::DisabledRunnerRemoveButtonComponent.new(runner_id: runner.id, os: runner.os, owner_settings: @owner_settings, delete_from_list: true)) %>
+                <% else %>
+                  <details class="details-overlay details-reset position-relative">
+                    <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, classes: "timeline-comment-action", "aria-haspopup": "menu") do %>
+                      <%= render Primer::Beta::Octicon.new(icon: "kebab-horizontal", aria: { label: "Show options", hidden: false }) %>
+                    <% end %>
+                    <details-menu class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default anim-scale-in" style="width: 288px"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                      <% if runner.is_a?(Actions::LargerRunner) %>
+                        <% if can_edit_runner?(runner) %>
+                          <%= render(Actions::LargerRunners::LargerRunnerEditButtonComponent.new(
+                            larger_runner: runner,
+                            owner_settings: @owner_settings,
+                            edit_from_list: true,
+                            viewing_from_runner_group: @viewing_from_runner_group))
+                          %>
+                        <% end %>
+                        <% if can_delete_runner?(runner) %>
+                          <%= render(Actions::LargerRunners::LargerRunnerRemoveButtonComponent.new(
+                            larger_runner: runner,
+                            owner_settings: @owner_settings,
+                            delete_from_list: true,
+                            viewing_from_runner_group: @viewing_from_runner_group))
+                          %>
+                        <% end %>
+                      <% else %>
+                        <%= render(Actions::RunnerRemoveButtonComponent.new(
+                          runner_id: runner.id,
+                          os: runner.os,
+                          owner_settings: @owner_settings,
+                          delete_from_list: true)) %>
+                      <% end %>
+                    </details-menu>
+                  </details>
+                <% end %>
+              </div>
+            <% end %>
+          </span>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

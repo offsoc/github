@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#/
+#/ This script runs virt-what, and touches a file in /run/virt-what
+#/ for each line of output. These files are primarily intended for
+#/ use with the ConditionPathExists directive in systemd unit files,
+#/ in order to work around deficiences in systemd's virtualization
+#/ detection algorithms.
+#/
+#/ The files that this script creates are not intended as a general
+#/ purpose replacement for the RELEASE_PLATFORM variable found in
+#/ /etc/github/enterprise-release. In particular, if a container is
+#/ in use, virt-what may report both the container runtime and the
+#/ underlying virtualization technology. If a container technology
+#/ is detected, that should be considered to take precedence over any
+#/ virtualization technologies that are detected. RELEASE_PLATFORM
+#/ should still be considered the canonical authority on what platform
+#/ the GHES appliance was built for.
+set -euo pipefail
+
+VIRT_WHAT_RUNDIR=${VIRT_WHAT_RUNDIR:-/run/virt-what}
+
+# create the VIRT_WHAT_RUNDIR
+rm -rf "$VIRT_WHAT_RUNDIR"
+mkdir -p "$VIRT_WHAT_RUNDIR"
+
+VIRT_WHAT_CONTAINER_FILE="$VIRT_WHAT_RUNDIR/container"
+VIRT_WHAT_CLOUD_FILE="$VIRT_WHAT_RUNDIR/cloud"
+VIRT_WHAT_HYPERVISOR_FILE="$VIRT_WHAT_RUNDIR/hypervisor"
+VIRT_WHAT_PLATFORM_FILE="$VIRT_WHAT_RUNDIR/platform"
+
+# touch a file for every detected platform
+while IFS= read -r platform ; do
+  echo "$platform"
+  touch "$VIRT_WHAT_RUNDIR/$platform"
+
+  if echo $platform | grep -q "\(docker\|lxc\|podman\)" ; then
+    ln -Tsf "$VIRT_WHAT_RUNDIR/$platform" "$VIRT_WHAT_CONTAINER_FILE"
+  fi
+  if echo "$platform" | grep -q "\(aws\|azure\|gcp\)"; then
+    ln -Tsf "$VIRT_WHAT_RUNDIR/$platform" "$VIRT_WHAT_CLOUD_FILE"
+  fi
+  if echo "$platform" | grep -q "\(kvm\|hyperv\|qemu\|vmware\|xen\)"; then
+    ln -Tsf "$VIRT_WHAT_RUNDIR/$platform" "$VIRT_WHAT_HYPERVISOR_FILE"
+  fi
+done < <(virt-what)
+
+if [ -f "$VIRT_WHAT_CONTAINER_FILE" ]; then
+  ln -s "$VIRT_WHAT_CONTAINER_FILE" "$VIRT_WHAT_PLATFORM_FILE"
+elif [ -f "$VIRT_WHAT_CLOUD_FILE" ]; then
+  ln -s "$VIRT_WHAT_CLOUD_FILE" "$VIRT_WHAT_PLATFORM_FILE"
+elif [ -f "$VIRT_WHAT_HYPERVISOR_FILE" ]; then
+  ln -s "$VIRT_WHAT_HYPERVISOR_FILE" "$VIRT_WHAT_PLATFORM_FILE"
+fi

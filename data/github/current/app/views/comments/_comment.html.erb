@@ -1,0 +1,174 @@
+<%# erblint:counter DeprecatedInPrimerCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  deferred_comment_actions = local_assigns.fetch(:deferred_comment_actions, false)
+  deferred_edit_form = local_assigns.fetch(:deferred_edit_form, false)
+
+  first_comment = false unless local_assigns.key?(:first_comment)
+  legacy_commit_comment = nil unless local_assigns.key?(:legacy_commit_comment)
+  comment_context = nil unless local_assigns.key?(:comment_context)
+  caret_location = nil unless local_assigns.key?(:caret_location)
+  form_path = nil unless local_assigns.key?(:form_path)
+  delete_enabled = local_assigns.fetch(:delete_enabled, true)
+  show_datestamp = true unless local_assigns.key?(:show_datestamp)
+  prerender_all_comment_versions = true unless local_assigns.key?(:prerender_all_comment_versions)
+
+  can_update = !deferred_edit_form && comment.is_a?(PlatformTypes::Updatable) && with_database_error_fallback(fallback: false) { comment.viewer_can_update? } && form_path
+  minimizable_comment = comment.is_a?(PlatformTypes::Minimizable)
+  comment_is_minimized = minimizable_comment && comment.is_minimized?
+  can_minimize = minimizable_comment && comment.viewer_can_minimize?
+
+  comment_is_internal = comment.is_a?(PlatformTypes::MayBeInternal) && comment.is_internal?
+
+  render_minimized_comment = prerender_all_comment_versions || comment_is_minimized
+  render_unminimized_comment = prerender_all_comment_versions || !comment_is_minimized
+
+  convert_to_issue_button_enabled = comment.is_a?(PlatformTypes::Issue) && can_update && !comment.is_a?(PullRequest::Adapter::PullRequestAdapter)
+
+  convert_to_block_button_enabled = comment.is_a?(PlatformTypes::Issue) && can_update && comment.repository.convert_to_tasklist_block_enabled && !comment.is_a?(PullRequest::Adapter::PullRequestAdapter)
+
+  render_add_task_pill = dom_id && comment.respond_to?(:issue) && comment.issue.is_a?(Issue) && comment.issue.can_add_tasklist?
+
+  comment_classes = class_names({
+    "d-none": comment_is_minimized,
+    "editable-comment": can_update,
+    "js-comment": !comment_is_minimized,
+    "timeline-comment--caret": !legacy_commit_comment || (legacy_commit_comment && first_comment),
+    "timeline-comment--caret-nw": caret_location == "nw",
+    "reorderable-task-lists": logged_in?,
+    "current-user": comment.viewer_did_author?,
+    "#{unread_comment_class}": !comment.viewer_did_author?,
+    "is-internal": comment_is_internal,
+  })
+%>
+<div class="<% if convert_to_issue_button_enabled %>js-convert-task-to-issue-enabled convert-to-issue-enabled<% end %> <% if convert_to_block_button_enabled %>js-convert-tasklist-to-block-enabled<% end %> timeline-comment-group js-minimizable-comment-group js-targetable-element<% if legacy_commit_comment %> mb-3<% if first_comment %> ml-n5<% end %><% else %> TimelineItem-body my-0<% end %> " id="<%= dom_id %>">
+  <% if convert_to_issue_button_enabled %>
+    <div class="js-convert-task-to-issue-spinner loading-spinner ml-1 d-inline-block" hidden>
+      <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+    </div>
+    <%= form_tag issues_path(:repository => comment.repository.name, :user_id => comment.repository.owner.display_login), remote: true, class: "js-inline-convert-to-issue-form" do %>
+      <input hidden id="js-inline-convert-to-issue-title" name="issue[title]" value="">
+      <input hidden name="convert_from_task" value="true">
+      <input hidden name="id" value="<%= comment.number %>">
+      <input id="js-inline-convert-to-issue-position" type="hidden" name="position" value="">
+    <% end %>
+    <button class="js-convert-to-issue-button convert-to-issue-button btn-link d-block position-absolute tooltipped tooltipped-n tooltipped-no-delay" aria-label="Convert to issue" type="button" hidden><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+      <%= primer_octicon(:"issue-opened", vertical_align: :top, classes: "open") %>
+    </button>
+
+    <% if convert_to_block_button_enabled %>
+      <template class="js-convert-to-block-template">
+        <li class="task-list-item-convert-container">
+          <div class="task-list-item-convert-button-container dropdown-menu dropdown-menu-sw anim-scale-in">
+            <%= render Primer::IconButton.new(icon: :checklist, "aria-label": "Convert tasklist to block", classes: "js-convert-to-block-button convert-to-block-button" ) %>
+          </div>
+        </li>
+      </template>
+    <% end %>
+    <%= render Primer::ButtonComponent.new(hidden: true, display: :block, type: :button, classes: "js-convert-to-block-button convert-to-block-button btn-link show-on-focus tooltipped tooltipped-n tooltipped-no-delay", aria: { label: "Convert task list to block" } ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+      <%= primer_octicon(:checklist) %>
+    <% end %>
+
+    <% new_issue_path = new_issue_path(:repository => comment.repository.name, :user_id => comment.repository.owner.display_login) %>
+    <div class="js-convert-task-to-issue-data" data-tooltip-label-inline="Convert to issue" data-tooltip-label-open="Open convert to issue" data-tooltip-label-open-same-tab="Open convert to issue in current tab" data-url="<%= new_issue_path %>" data-parent-issue-number="<%= comment.number %>" hidden></div>
+  <% end %>
+  <% if minimizable_comment && render_minimized_comment %>
+    <div class="<% if !legacy_commit_comment %>ml-n3<% end %> minimized-comment position-relative <%= " d-none" unless comment_is_minimized %> <%= "js-comment" if comment_is_minimized %>">
+      <%= render partial: "comments/minimized_comment", locals: {
+            comment: comment,
+            dom_id: dom_id,
+            comment_context: comment_context,
+            form_path: form_path,
+            action_text: action_text,
+            deferred_comment_actions: deferred_comment_actions,
+            deferred_edit_form: deferred_edit_form,
+          } %>
+    </div>
+  <% end %>
+
+  <% if render_unminimized_comment %>
+    <div class="<% if !legacy_commit_comment %>ml-n3<% end %> timeline-comment unminimized-comment comment previewable-edit js-task-list-container <%= comment_classes %>"
+        data-body-version="<%= comment.body_version %>">
+      <% permalink = local_assigns[:permalink] || "##{dom_id}" %>
+      <%= render Comments::CommentHeaderComponent.new(
+        action_menu_path: comment_header_action_menu_path(comment, permalink: permalink),
+        action_text: action_text,
+        classes: "timeline-comment-header",
+        comment: comment,
+        dom_id: dom_id,
+        permalink_url: permalink,
+        repository: comment.repository,
+        show_datestamp: show_datestamp,
+      ) %>
+
+      <div class="edit-comment-hide">
+        <% if can_minimize %>
+          <div class="js-minimize-comment d-none <%= prerender_all_comment_versions ? "" : "js-update-minimized-content" %>">
+            <%= render partial: "comments/minimize_comment_form", locals: { comment: comment } %>
+          </div>
+        <% end %>
+
+        <%= render partial: "comments/comment_body", locals: { comment: comment, dom_id: dom_id } %>
+
+        <div class="d-flex">
+          <% if render_add_task_pill %>
+            <% add_tasks_component = render(Comments::AddTasksComponent.new(comment.issue, "#{dom_id}-edit-form", current_user, "js-tasklist-submit", mb: 3, mr: 2)) %>
+            <%= add_tasks_component %>
+          <% end %>
+
+          <% if comment.is_a?(PlatformTypes::Reactable) %>
+            <div class="pr-review-reactions<%= " pr-review-reactions-no-margin" if render_add_task_pill && add_tasks_component.present? %>">
+              <%= render Comments::ReactionsComponent.new(target: comment) %>
+            </div>
+          <% end %>
+        </div>
+      </div>
+
+      <%= form_tag form_path, :method => :put, :class => "js-comment-update", :id => "#{dom_id}-edit-form" do %>
+        <% if deferred_edit_form %>
+          <% track_render_partial("issues/show/comments/edit_form_deferred") do %>
+            <%= render Comments::DeferredEditFormComponent.new(form_path: form_path, comment_context: comment_context, textarea_id: "#{dom_id}-body") %>
+          <% end %>
+        <% else %>
+          <% if can_update %>
+            <%
+              saved_reply_context = if comment.is_a?(PlatformTypes::PullRequest)
+                "pull_request"
+              elsif comment.is_a?(PlatformTypes::Issue)
+                "issue"
+              elsif comment.is_a?(PlatformTypes::IssueComment)
+                comment.pull_request ? "pull_request_comment" : "issue"
+              end
+            %>
+            <% track_render_partial("issues/show/comment_edit_form", trace: true) do %>
+              <%= render Comments::EditForm::EditFormComponent.new(
+                comment: comment,
+                comment_context: comment_context,
+                textarea_id: "#{dom_id}-body",
+                saved_reply_context: saved_reply_context,
+                slash_commands_enabled: current_user&.slash_commands_enabled?,
+                slash_commands_surface: SlashCommands.surface_for_issue_adapter(comment),
+                tasklist_blocks_enabled: current_repository&.owner&.feature_enabled?(:tasklist_block),
+                current_repository: try(:current_repository)
+              ) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if convert_to_issue_button_enabled %>
+        <template class="js-convert-to-issue-save-error-toast">
+          <% track_render_partial("issues/show/convert_to_issue_error") do %>
+            <%= render partial: "shared/toast", locals: { text: "We are unable to convert the task to an issue at this time. Please try again.", state: "error", icon: "stop" } %><%# erblint:disable A11yToastMigration %>
+          <% end %>
+        </template>
+        <% convert_to_issue_update_error_toast_text = content_tag(:span, safe_join([content_tag(:span, "The issue "), content_tag(:a), content_tag(:span, " was successfully created but we are unable to update the comment at this time.")])) %>
+        <template hidden class="js-convert-to-issue-update-error-toast">
+          <% track_render_partial("issues/show/convert_to_issue_error") do %>
+            <%= render partial: "shared/toast", locals: { text: convert_to_issue_update_error_toast_text, state: "warning", icon: "alert" } %><%# erblint:disable A11yToastMigration %>
+          <% end %>
+        </template>
+      <% end %>
+    </div>
+  <% end %>
+</div>

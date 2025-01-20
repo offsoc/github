@@ -1,0 +1,22 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require "ruby_kafka_monkey_patch"
+
+abort "this is for development use only!" unless Rails.env.development?
+
+processor = GitHub::StreamProcessors::AqueductHydroMessageBridge.new
+consumer = GitHub.hydro_consumer(processor.options)
+
+HydroMessageBridgeError = Class.new(StandardError)
+
+begin
+  GitHub.logger.info("start", { "code.namespace" => processor.class.name })
+  GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+  GitHub.logger.info("finish", { "code.namespace" => processor.class.name })
+rescue => e # rubocop:todo Lint/GenericRescue
+  GitHub.logger.error("failed to run stream processor", { "code.namespace" => processor.class.name, :exception => e })
+  Failbot.report(HydroMessageBridgeError.new)
+  raise
+end

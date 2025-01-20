@@ -1,0 +1,71 @@
+#!/bin/bash
+#/ github-env [-h]
+#/
+#/ Load the GitHub application environment.
+#/
+#/ Typically, you will only execute this if you've contacted support and they've asked you to do so.
+#/
+#/ OPTIONS:
+#/   -h | --help         Show this message.
+#/   -i | --interactive  Force interactive mode
+#/                       If github-env is invoked without arguments
+#/                       interactive mode is assumed
+#/
+#/ NOTE: this runs the given command or console a dedicated Github container.
+#/       the container is active on all nodes, and exists only to perform
+#/       exec'd
+set -e
+
+if [ "$1" = "./bin/dgit-cluster-restore-routes" ]; then
+  # backup-utils may try to run dgit-cluster-restore-routes, but it doesn't
+  # exist anymore.
+  shift
+  exec /usr/local/share/enterprise/ghe-restore-network-routes "$@"
+fi
+
+if [ "$1" = "./bin/gist-cluster-restore-routes" ]; then
+  # backup-utils may try to run gist-cluster-restore-routes, but it doesn't
+  # exist anymore.
+  shift
+  exec /usr/local/share/enterprise/ghe-restore-gist-routes "$@"
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-nomad-lib
+source /usr/local/share/enterprise/ghe-nomad-lib
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+interactive=
+if [ "$1" = "-i" ] || [ "$1" == "--interactive" ]; then
+  interactive=1
+  shift
+fi
+# If StdIn is not a TTY then force-disable interactive mode - this will be the case
+# where input is piped to github-env.
+if [ ! -t 0 ]; then
+  interactive=
+fi
+
+hostname=
+if [[ -f /etc/github/cluster ]]; then
+  hostname=$(cat /etc/github/cluster)
+fi
+
+alloc_id=$(find_allocation "github-env" "$hostname")
+
+if [[ -z "$*" ]]; then
+  run_in_allocation "$alloc_id" "/bin/bash"
+elif [[ -n "$interactive" ]]; then
+  run_in_allocation "$alloc_id" "$@"
+else
+  container=$(docker ps --format '{{.Names}}' --filter name=github-env --filter status=running) || true
+  if [ -n "$container" ]; then
+    cmd="$(quote_args "$@")"
+    docker exec -i "${container}" /bin/bash -c "$cmd"
+  else
+    run_in_allocation "$alloc_id" "$@"
+  fi
+fi

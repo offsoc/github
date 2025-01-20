@@ -1,0 +1,280 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info :title => "#{this_user} - Organizations" %>
+
+<div class="site-admin-unboxed">
+  <div class="site-admin-subhead ruleless" data-hpc>
+    <h2 class="site-admin-subhead-heading">
+      Enterprises & organizations
+    </h2>
+  </div>
+
+  <h3 class="site-admin-subhead-heading">
+    Audit log
+  </h3>
+  <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+    <include-fragment src="<%= stafftools_user_audit_log_teaser_path(this_user) %>">
+      <%= render(Primer::Beta::Spinner.new) %>
+      <p class="color-fg-muted my-2 mb-0">Loading audit log events...</p>
+    </include-fragment>
+  <% else %>
+    <p><%= stafftools_not_authorized_html %></p>
+  <% end %>
+
+  <% unless GitHub.single_business_environment? %>
+    <h3 class="site-admin-subhead-heading" name="enterprise-memberships">
+      Enterprise account membership
+    </h3>
+    <p>
+      These are the enterprise accounts this user account is a member of. Does not
+      include pending invitations or repository collaborator access.
+    </p>
+
+    <% if businesses.none? %>
+      <p class="site-admin-blankstate">
+        This user is not affiliated with any Enterprise accounts.
+      </p>
+    <% else %>
+      <table class="site-admin-table">
+        <% businesses.each do |business| %>
+          <tr class="text-small text-normal color-fg-muted" <%= test_selector("enterprise-affiliations") %>>
+            <td>
+              <%= avatar_for business, 24, class: "avatar" %>
+              <%= link_to business.slug, stafftools_enterprise_path(business.slug) %>
+            </td>
+            <td><%= GitHub::Plan.business_plus.titleized_display_name if business.plan.business_plus? %></td>
+            <td><%= business.name %></td>
+            <td>
+              <% if business.owner?(this_user) %>
+                Owner
+              <% elsif business.billing_manager?(this_user) %>
+                Billing manager
+              <% elsif business.support_entitled?(this_user) %>
+                Support entitled
+              <% elsif this_user.guest_collaborator? %>
+                Guest collaborator
+              <% end %>
+            </td>
+          </tr>
+        <% end %>
+      </table>
+    <% end %>
+
+    <% if unaffiliated_businesses.any? %>
+      <h3 class="site-admin-subhead-heading" name="enterprise-memberships">
+        Unaffiliated Enterprise account membership
+      </h3>
+      <p>
+        These are the enterprise accounts this user account is an unaffiliated  member of.
+      </p>
+
+      <table class="site-admin-table">
+        <% unaffiliated_businesses.each do |business| %>
+          <tr class="text-small text-normal color-fg-muted" <%= test_selector("enterprise-unaffiliations") %>>
+            <td>
+              <%= avatar_for business, 24, class: "avatar" %>
+              <%= link_to business.slug, stafftools_enterprise_path(business.slug) %>
+            </td>
+            <td><%= GitHub::Plan.business_plus.titleized_display_name if business.plan.business_plus? %></td>
+            <td><%= business.name %></td>
+            <td>
+              <% if business.owner?(this_user) %>
+                Owner
+              <% elsif business.billing_manager?(this_user) %>
+                Billing manager
+              <% elsif business.support_entitled?(this_user) %>
+                Support entitled
+              <% elsif this_user.guest_collaborator? %>
+                Guest collaborator
+              <% end %>
+            </td>
+          </tr>
+        <% end %>
+      </table>
+    <% end %>
+  <% end %>
+
+  <h3 class="site-admin-subhead-heading" name="organization-affiliations">
+    Organization affiliations
+  </h3>
+
+  <p>
+    These are the organizations that this user is associated with.
+    Organizations are listed whether this user is a direct member,
+    <% unless GitHub.enterprise? %>billing manager,<% end %>
+    or only holds "<%= GitHub.outside_collaborators_flavor.singularize %>" rights on the
+    organization’s repositories. Those repositories are listed on
+    <%= link_to "collaborating repositories",
+                stafftools_user_repositories_collaborations_path(this_user),
+                class: "Link--inTextBlock" %>.
+  </p>
+
+  <% if orgs.none? %>
+    <p class="site-admin-blankstate">
+      This user is not a member of any organizations.
+    </p>
+  <% else %>
+    <div class="site-admin-table org-affiliations-table">
+      <table>
+        <% orgs.each_with_index do |org, i| %>
+          <% org_permissions = orgs_permissions[i] %>
+          <tr class="text-small text-normal color-fg-muted" <%= test_selector("org-affiliations") %>>
+            <td>
+              <%= avatar_for org, 20, class: :avatar %>
+              <%= link_to org, stafftools_user_path(org) %>
+            </td>
+
+            <td>
+              <% if org.spammy? %>
+                <%= link_to "spammy", stafftools_user_administrative_tasks_path(org) %>
+              <% elsif org.disabled? %>
+                <%= link_to "disabled", billing_stafftools_user_path(org) %>
+              <% elsif org.billing_attempts > 0 %>
+                <%= link_to "card declined", billing_stafftools_user_path(org) %>
+              <% end %>
+            </td>
+
+            <td>
+              <% unless org.org_free_plan? %>
+                <%= emoji_tag(Emoji.find_by_alias("moneybag")) %>
+                <%= "#{org.plan.titleized_display_name} plan" %>
+              <% end %>
+            </td>
+
+            <td>
+              <% if GitHub.sponsors_enabled? && sponsors_listing = org.sponsors_listing %>
+                <%= primer_octicon(:heart) %>
+                <a href="<%= stafftools_sponsors_member_path(org.login) %>">GitHub Sponsors profile</a>
+                <% unless sponsors_listing.approved? %>
+                  <span class="color-fg-muted">(not public)</span>
+                <% end %>
+              <% end %>
+            </td>
+
+            <td>
+              <% if org_permissions.include?(:admin) || org_permissions.include?(:member) %>
+                Member of <br>
+                <%= link_to pluralize(team_counts[org], "team"),
+                            stafftools_user_organization_membership_path(this_user, org) %>
+              <% end %>
+            </td>
+
+            <td>
+              <%=
+                org_permissions.map do |perm|
+                  Organization::Role.name_for_type perm
+                end.join(", ")
+              %>
+            </td>
+
+            <td>
+              <%= "2FA Required" if org.two_factor_requirement_enabled? %>
+            </td>
+
+            <td>
+              <% if org.business&.saml_sso_enabled? %>
+                SAML SSO enabled on owning enterprise
+              <% elsif org.saml_sso_enforced? %>
+                SAML SSO enforced
+              <% elsif org.saml_sso_enabled? %>
+                SAML SSO enabled
+              <% end %>
+            </td>
+
+            <td class="right-align">
+              <%= button_to "Remove",
+                            stafftools_user_remove_from_org_path(this_user, org),
+                            :form_class => "inline-form float-right",
+                            :class => "btn btn-sm",
+                            "data-confirm" => "Are you sure you want to remove #{this_user} from #{org}? They will lose access to all repositories and teams." %>
+            </td>
+          </tr>
+        <% end %>
+      </table>
+    </div>
+    <div class="text-center mx-auto mt-0 mb-4">
+      <%= will_paginate orgs, param_name: :orgs_page %>
+    </div>
+  <% end %>
+
+  <% if GitHub.auth.two_factor_authentication_enabled? %>
+    <h3 class="site-admin-subhead-heading">
+      Organization security
+    </h3>
+
+    <p>
+      These are the organizations on which this user has security privileges.
+
+      Note that enabling two-factor authentication requirement for an organization
+      will also remove the member, manager, or <%= GitHub.outside_collaborators_flavor.singularize %> status of any
+      affiliated user who doesn’t have two-factor authentication enabled on their
+      account. These can be
+      <%= link_to "reinstated within three months, however",
+                  "#{GitHub.help_url}/articles/reinstating-a-former-member-of-your-organization",
+                  class: "Link--inTextBlock" %>.
+    </p>
+
+    <% if orgs_owned.none? %>
+      <p class="site-admin-blankstate">
+        This user is not an owner of any organizations.
+      </p>
+    <% else %>
+      <div class="site-admin-table org-affiliations-table">
+        <table>
+          <% orgs_owned.each do |org| %>
+            <tr class="text-small text-normal color-fg-muted" <%= test_selector("org-security") %>>
+              <td>
+                <%= avatar_for org, 20, class: :avatar %>
+                <%= link_to org, stafftools_user_path(org) %>
+              </td>
+
+              <td>
+                <%= "2FA Required" if org.two_factor_requirement_enabled? %>
+              </td>
+
+              <td class="right-align">
+                <% if org.two_factor_requirement_enabled? %>
+                  <%= button_to "Disable 2FA requirement",
+                                stafftools_user_disable_two_factor_requirement_path(this_user, org),
+                                :form_class => "inline-form float-right",
+                                :class => "btn btn-sm",
+                                :method => :put,
+                                "data-confirm" => "Are you sure you want to disable 2FA requirement on #{org}?" %>
+                <% else %>
+                  <% if org.can_two_factor_requirement_be_enabled? %>
+                    <% count = org.affiliated_users_with_two_factor_disabled_count %>
+                    <%
+                      count_string = if count == Organization::TWO_FA_USER_COUNT_LIMIT
+                        "more than #{Organization::TWO_FA_USER_COUNT_LIMIT - 1} users"
+                      else
+                        pluralize(count, 'user', 'users')
+                      end
+                    %>
+
+
+                    <% warning = <<~STR
+                                  \n
+                                  Doing so will remove #{count_string} affiliated
+                                  with the organization without two-factor authentication enabled on their account.
+                                STR
+                    %>
+                    <%= button_to "Enable 2FA requirement",
+                                  stafftools_user_enable_two_factor_requirement_path(this_user, org),
+                                  :form_class => "inline-form float-right",
+                                  :class => "btn btn-sm",
+                                  :method => :put,
+                                  "data-confirm" => "Are you sure you want to enable 2FA requirement on #{org}? #{warning if count > 0}" %>
+                  <% else %>
+                    2FA requirement cannot be enabled. No admins have 2FA enabled.
+                  <% end %>
+                <% end %>
+              </td>
+            </tr>
+          <% end %>
+        </table>
+      </div>
+      <div class="text-center mx-auto mt-0 mb-4">
+        <%= will_paginate orgs_owned, param_name: :owned_page %>
+      </div>
+    <% end %>
+  <% end %>
+</div>

@@ -1,0 +1,82 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#
+#/ Usage: ghe-dependabot-alerts-info [options]
+#/
+#/ This utility outputs information about Dependabot Alerts which
+#/ should be submitted to GitHub Support to aid in debugging.
+#/
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -o, --stdout       Print output to STDOUT. Optional.
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+use_stdout = false
+
+ARGV.options do |opts|
+  opts.on("-o", "--stdout")    { use_stdout = true }
+  opts.on_tail("-h", "--help") { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+
+unless GitHub.enterprise? || Rails.env.development?
+  puts "This script can only be run on a GitHub Enterprise server!"
+  exit
+end
+
+def dg_query_count(table)
+  begin
+    ApplicationRecord::Domain::Internal.connection.select_value("SELECT COUNT(1) FROM #{table}")
+  rescue ActiveRecord::ActiveRecordError
+    nil
+  end
+end
+
+date = Time.now.strftime("%Y%m%d%H%M%S")
+if use_stdout
+  output_io = STDOUT
+else
+  file = "/tmp/dependabot-alerts-info-#{date}.json"
+  puts "Saving Dependabot Alerts debugging info to '#{file}'..."
+  output_io = File.open(file, "w")
+end
+
+alerts_info = {
+  audit_generated_at: date,
+  connect_features: DotcomConnection.new.current_features,
+  dependency_graph_enabled: GitHub.dependency_graph_enabled?,
+  github_enterprise_version: GitHub.version_number,
+  last_dotcom_sync: EnterpriseAdvisoryDatabaseSyncJob.last_run_at,
+  last_repository_vulnerability_alert_created_at: RepositoryVulnerabilityAlert.last&.created_at,
+  repository_count: Repository.count,
+  repository_vulnerability_alert_count: RepositoryVulnerabilityAlert.count,
+  vulnerability_alerts_enabled_for_instance: SecurityProduct::VulnerabilityAlerts.enabled_for_instance?,
+  vulnerability_count: Vulnerability.count,
+  vulnerable_version_range_count: VulnerableVersionRange.count,
+  dependency_graph: {
+    manifest_count: dg_query_count("dg_manifests"),
+    manifest_dependency_count: dg_query_count("dg_manifest_dependencies"),
+    repository_count: dg_query_count("dg_repositories"),
+    vulnerable_version_range_count: dg_query_count("dg_vulnerable_version_ranges"),
+  },
+}
+
+json = JSON.pretty_generate(alerts_info)
+output_io.write(json)
+
+unless use_stdout
+  puts "Done."
+end

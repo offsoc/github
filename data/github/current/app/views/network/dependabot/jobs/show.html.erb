@@ -1,0 +1,191 @@
+<% page_info \
+  container_xl: true,
+  responsive: false,
+  selected_link: :dependabot_updates,
+  dashboard_pinnable_item_id: current_repository.global_relay_id
+%>
+
+<% page_title "Update jobs · #{current_repository.name_with_display_owner}" %>
+
+<%= render layout: "layouts/repository/insights" do %>
+  <div id="dependabot-update-details">
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>Dependency graph<% end %>
+    <% end %>
+
+    <%= render partial: "network/dependency_tabs", locals: { selected_tab: :dependabot } %>
+
+    <div class="Box mb-3" id="">
+      <div class="Box-header clearfix border-bottom-0">
+        <div class="table-list-filters">
+          <div class="table-list-header-toggle states pl-0 color-fg-default position-relative d-flex flex-justify-between flex-items-center">
+            <div>
+              <%= render(Dependabot::PackageEcosystemIconComponent.new(package_ecosystem: update_config.package_ecosystem.name)) %>
+              <% manifest = update_config.monitored_manifest_files&.first&.path&.sub(/\A\//, "") %>
+              <% target_branch = update_config.target_branch&.present? ? update_config.target_branch : current_repository.default_branch %>
+              <% if manifest %>
+                <%= link_to Dependabot.short_manifest_file_path(manifest), blob_view_path(manifest, target_branch), {
+                  class: "ml-2 Link--primary text-bold",
+                  'data-octo-click': "dep_graph_manifest",
+                  title: manifest
+                } %>
+              <% else %>
+                <span class="ml-2 color-fg-default text-bold">
+                  <%= Dependabot.serialize_package_ecosystem(package_ecosystem: update_config.package_ecosystem.name) %>
+                </span>
+              <% end %>
+
+              <% if update_config.monitored_manifest_files&.any? %>
+                <details class="details-overlay details-reset position-relative d-inline-block ">
+                  <%= render Primer::Beta::Button.new(tag: :summary, scheme: :link, color: :muted, pl: 1, pr: 2, "aria-haspopup": "menu") do %>
+                    <%= primer_octicon(:"kebab-horizontal", "aria-label": "Show monitored") %>
+                  <% end %>
+
+                  <div class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default anim-scale-in" style="width: 200px">
+                    <div class="dropdown-header">
+                      Monitored dependency files
+                    </div>
+
+                    <ul class="overflow-y-auto d-block" style="max-height: 130px;">
+                      <% update_config.monitored_manifest_files.each do |manifest| %>
+                        <% path = manifest.path&.sub(/\A\//, "") || "" %>
+                        <li class="css-truncate">
+                          <%= link_to Dependabot.short_manifest_file_path(path), blob_view_path(path, target_branch), {
+                            class: "dropdown-item d-block css-truncate-target",
+                            'data-octo-click': "dep_graph_manifest",
+                            title: path,
+                            style: "max-width: 200px"
+                          } %>
+                        </li>
+                      <% end %>
+                    </ul>
+                  </div>
+                </details>
+              <% end %>
+            </div>
+
+            <div class="text-small">
+              <% if update_config.last_full_update_run&.finished_at %>
+                <%= form_tag create_network_dependabot_run_path(update_config_id: update_config.id), method: :post do %>
+                  <%= render Primer::Beta::Button.new(type: :submit, size: :small) do %>
+                    Check for updates
+                  <% end %>
+                <% end %>
+              <% else %>
+                Running version update job now
+              <% end %>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <% if update_jobs.size == 0 %>
+      <%= render partial: "network/dependabot/jobs/dependabot_nojobs", locals: { update_config: update_config } %>
+    <% else %>
+      <div class="Box">
+        <div class="Box-header">
+          <h3 class="Box-title">
+            Recent jobs
+          </h3>
+        </div>
+          <% update_jobs.each do |job| %>
+            <div class="Box-row TableObject">
+              <div class="TableObject-item pr-3">
+                <span class="avatar-parent-child member-avatar">
+                  <% if !job.status.finished_at %>
+                    <div style="height:16px; width:16px;">
+                    <svg aria-label="Update is currently running." width="100%" height="100%" fill="none" viewBox="0 0 16 16" class="anim-rotate" xmlns="http://www.w3.org/2000/svg">
+                      <path stroke="#DBAB0A" stroke-width="2" d="M3.05 3.05a7 7 0 1 1 9.9 9.9 7 7 0 0 1-9.9-9.9Z" opacity=".5"></path>
+                      <path fill="#DBAB0A" fill-rule="evenodd" d="M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" clip-rule="evenodd"></path>
+                      <path fill="#DBAB0A" d="M14 8a6 6 0 0 0-6-6V0a8 8 0 0 1 8 8h-2Z"></path>
+                    </svg>
+                  </div>
+                  <% elsif job.status.errors.size > 0 %>
+                    <%= render(Primer::Beta::Octicon.new(icon: :"x-circle-fill", color: :danger)) %>
+                  <% else %>
+                    <%= render(Primer::Beta::Octicon.new(icon: :"check-circle-fill", color: :success)) %>
+                  <% end %>
+                </span>
+              </div>
+
+              <div class="TableObject-item TableObject-item--primary d-flex flex-column" style="white-space: normal;">
+                <span class="text-bold">
+                  <% if job.trigger_type == :SCHEDULED %>
+                    Version update
+                  <% elsif job.trigger_type == :REBASE %>
+                    Rebase update
+                  <% elsif job.trigger_type == :SECURITY %>
+                    Security update
+                  <% else %>
+                    Update
+                  <% end %>
+                    <%= job.status.id %>
+                </span>
+
+                <span>
+                  <% if job.status.errors.size > 0 %>
+                      Errored with the message
+                      "<%= job.status.last_error.msg %>"
+                      <% if job.status.errors.size > 1 %>
+                        and <%= pluralize(job.status.errors.size-1, _("other error")) %>
+                      <% end %>
+                  <% elsif !job.status.finished_at %>
+                    Running now
+                  <% end %>
+                </span>
+
+                <% if job.status.finished_at %>
+                  <span>
+                    <% if job.pull_requests.size > 0 %>
+                      Affected
+                      <%= link_to(show_pull_request_path(user_id: current_repository.owner.display_login, repository: current_repository.name, id: job.pull_requests.first.github_number), class: "no-underline no-wrap") do %>
+                        #<%= job.pull_requests.first.github_number %>
+                      <% end %>
+                    <% end %>
+                    <% if job.pull_requests.size > 1%>
+                      and <%= job.pull_requests.size - 1 %> more
+                      <details class="details-overlay details-reset position-relative d-inline-block ">
+                        <%= render Primer::Beta::Button.new(tag: :summary, scheme: :link, color: :muted, pl: 1, pr: 2, "aria-haspopup": "menu") do %>
+                          <%= primer_octicon(:"kebab-horizontal", "aria-label": "Show PRs affected") %>
+                        <% end %>
+
+                        <div class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default anim-scale-in">
+                          <div class="dropdown-header">
+                            PRs affected
+                          </div>
+
+                          <ul class="overflow-y-auto d-block" style="max-height: 130px;">
+                            <% job.pull_requests.each do |pr| %>
+                              <li class="css-truncate">
+                                <%= link_to(show_pull_request_path(user_id: current_repository.owner.display_login, repository: current_repository.name, id: pr.github_number), class: "dropdown-item") do %>
+                                  #<%= pr.github_number %>
+                                <% end %>
+                              </li>
+                            <% end %>
+                          </ul>
+                        </div>
+                      </details>
+                    <% end %>
+                    <% if job.pull_requests.size == 0 %>
+                      No PRs affected
+                    <% end %>
+
+                    <span class="vertical-separator"></span>
+
+                    <%= time_ago_in_words_js Time.at(job.status.finished_at.seconds) %>
+
+                    <span class="vertical-separator"></span>
+
+                    <%= link_to network_dependabot_show_path(update_job_id: job.status.id) do %>
+                      view logs
+                    <% end %>
+                  </span>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+        </div>
+      </div>
+  <% end %>
+<% end %>

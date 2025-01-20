@@ -1,0 +1,69 @@
+#!/bin/bash
+
+set -e
+
+# default to cosmos
+enable_cosmos="true"
+enable_ade="false"
+enable_es="false"
+dx_flag="false"
+proxima="false"
+
+# check for special flags and remove from args
+# remaining args will be passed to script/server
+for arg do
+  shift
+  if [ "$arg" = "--es" ]; then
+    enable_es="true"
+    enable_cosmos="false"
+    continue
+  elif [ "$arg" = "--ade" ]; then
+    enable_ade="true"
+    enable_cosmos="false"
+    continue
+  elif [ "$arg" = "--cosmos" ]; then
+    enable_cosmos="true"
+    continue
+  elif [ "$arg" = "--dx" ]; then
+    dx_flag="true"
+    continue
+  elif [ "$arg" = "--proxima" ]; then
+    proxima="true"
+    set -- "$@" "--multi-tenant"
+    continue
+  fi
+  set -- "$@" "$arg"
+done
+
+ade_flag="driftwood_ade_query"
+cosmos_flag="driftwood_cosmos_query"
+if [ "$enable_es" = "true" ]; then
+  ./bin/toggle-feature-flag disable "$ade_flag"
+  ./bin/toggle-feature-flag disable "$cosmos_flag"
+fi
+if [ "$enable_ade" = "true" ]; then
+  ./bin/toggle-feature-flag disable "$cosmos_flag"
+  ./bin/toggle-feature-flag enable "$ade_flag"
+fi
+if [ "$enable_cosmos" = "true" ]; then
+  ./bin/toggle-feature-flag disable "$ade_flag"
+  ./bin/toggle-feature-flag enable "$cosmos_flag"
+fi
+
+if [ "$proxima" = "true" ]; then
+  export ALL_USERS_ARE_EMPLOYEES=1
+  echo Important: In a new terminal, execute this to ensure your server is configured with the same feature flags as a Proxima stamp:
+  echo script/multi-tenant/toggle-feature-flags enable
+fi
+
+export DRIFTWOOD_HOST="http://localhost:8082"
+export DRIFTWOOD_HMAC_KEY="deadbeef"
+export DRIFTWOOD_STREAM_KEY="lTI5ykNzQ8qWK3duCC8Wf4zEcC13sZXhCi3DEfv0z3A="
+export API_INTERNAL_TWIRP_HMAC_KEYS_FOR_AUDITLOG="deadbeef"
+
+if [ "$dx_flag" = "true" ]; then
+  ./script/dx/server-start "$@"
+else
+  ./script/server "$@"
+fi
+

@@ -1,0 +1,232 @@
+#!/usr/bin/env ruby
+#/ Usage: script/setup [--force] [--dotcom | --enterprise]
+#/ Prepare the github environment for development under the dotcom or enterprise
+#/ environments. Once this command is run, the selected runtime mode setting is
+#/ persistent.
+#/
+#/ Options:
+#/       --dotcom         Activate dotcom runtime mode.
+#/       --enterprise     Activate enterprise runtime mode.
+#/   -f, --force          Setup the database even if it's detected to be up-to-date.
+#/       --trace          Activate rake tracing, and print debug information.
+#/       --bootstrap      Passed when running from script/bootstrap.
+#/       --enable-vitess  Setup the database using Vitess.
+#/       --disable-vitess Setup the database without using Vitess.
+#
+
+# typed: ignore
+
+require "time"
+require "fileutils"
+require "digest/md5"
+require_relative "../vendor/bt/bt"
+require_relative "./hubber_codespace"
+
+# Write output immediately
+STDOUT.sync = true
+STDERR.sync = true
+
+# Show usage message with --help
+if ARGV.include?("--help")
+  system "grep '^#/' <'#{__FILE__}' |cut -c4-"
+  exit 2
+end
+
+if ARGV.include?("--trace")
+  trace = true
+end
+
+# Note if running from script/bootstrap
+bootstrap = ARGV.include?("--bootstrap")
+on_create_running = ENV["CODESPACES_ON_CREATE_RUNNING_SETUP"]
+
+unless bootstrap || on_create_running
+  if File.exist?("tmp/bootstrap-setup.lock") && ENV["CODESPACES"]
+    warn "Can't immediately run setup, as we're still bootstrapping as part of codespace creation."
+    print "Waiting for bootstrap to complete..."
+    while File.exist?("tmp/bootstrap-setup.lock")
+      sleep(5)
+      print(".")
+    end
+  end
+end
+
+# Log the current timestamp of a setup run for diagnostic purposes.
+FileUtils.touch File.expand_path("setup-last-run", __dir__)
+
+# Figure out if we need to force the setup
+force = ARGV.include?("--force") || ARGV.include?("-f")
+
+if ARGV.include?("--disable-vitess")
+  if !force && !HubberCodespace.hcs?
+    warn "switching to no-vitess mode requires --force"
+    exit 1
+  end
+
+  File.open("config/vitess-env-config", "w") { |fd| fd.puts("disabled") }
+  ENV["SKIP_VITESS"] = "1"
+end
+
+if ARGV.include?("--enable-vitess")
+  if !force && !HubberCodespace.hcs?
+    warn "switching to vitess mode requires --force"
+    exit 1
+  end
+
+  File.open("config/vitess-env-config", "w") { |fd| fd.puts("enabled") }
+  ENV["SKIP_VITESS"] = "0"
+end
+
+if !File.exist?("config/vitess-env-config")
+  # default vitess to on when setting up
+  File.open("config/vitess-env-config", "w") { |fd| fd.puts("enabled") }
+end
+
+# Change into RAILS_ROOT and make sure the runtime state dir exists
+Dir.chdir File.expand_path("../..", __FILE__)
+FileUtils.mkdir_p "tmp/runtime"
+
+# disable hydro publishing while bootstrapping/setting up data
+ENV["DISABLE_HYDRO_DURING_BOOTSTRAP"] = "1"
+
+# Figure out the current rails environment
+env = ENV["RAILS_ENV"] || "development"
+abort "error: development environments only" if env != "development"
+
+# Figure out the currently activated environment. This is the environment we
+# think we're running under right now.
+current_runtime =
+  if File.exist?("tmp/runtime/current")
+    File.read("tmp/runtime/current").chomp
+  elsif %w(ENTERPRISE E FI).any? { |var| !ENV[var].to_s.empty? }
+    "enterprise"
+  else
+    "dotcom"
+  end
+
+# Figure out the runtime we want to switch to. This can be specified on the
+# command line or by writing the runtime switcher writing tmp/runtime/pending
+# file.
+pending_runtime =
+  if ARGV.include?("--dotcom")
+    "dotcom"
+  elsif ARGV.include?("--enterprise")
+    "enterprise"
+  elsif File.exist?("tmp/runtime/pending")
+    if (value = File.read("tmp/runtime/pending").chomp).size > 0
+      value
+    else
+      current_runtime
+    end
+  else
+    current_runtime
+  end
+
+database_copy_failed = false
+
+if !File.exist?("config/database.yml") ||
+    File.read("config/database.yml") != File.read("config/defaults/database.yml")
+  warn "WARN: Your config/database.yml is missing or out-of-date. Run script/bootstrap to fix it."
+  if force
+    warn "Continue anyway? (yes/no)"
+    exit 1 unless STDIN.gets.strip =~ /y(es)?/
+  else
+    exit 1
+  end
+end
+
+# Check if the pending runtime has already been through the setup process. If
+# not, or if --force is given, run the database and repository setup process and
+# record that it's been completed. If the setup fails, the current runtime file
+# is left at the previous value.
+if force || !File.exist?("tmp/runtime/#{pending_runtime}")
+  BT.time("setting up #{pending_runtime}") do
+    warn "Setting up #{pending_runtime} runtime mode..."
+    if RUBY_PLATFORM.to_s.downcase.include?("linux") && !File.exist?("/.dockerenv")
+      if File.exist?("/etc/debian_version")
+        # Debian Stretch sudo version doesn't take an argument for --preserve-env
+        sudo_opts = `lsb_release -c` =~ /stretch/ ? "--preserve-env" : "--preserve-env=SKIP_LINUX_SETUP"
+        system("sudo #{sudo_opts} script/linux-setup")
+      else
+        warn "This does not appear to be a Debian-based Linux distribution. Skipping execution of script/linux-setup."
+      end
+    end
+
+    File.open("tmp/runtime/current", "w") { |fd| fd.puts(pending_runtime) }
+
+    rake_args = %w(bin/rake setup db:ghost)
+    rake_args << "--trace" if trace
+    reset_hookshot_cluster = "script/create-hookshot-cluster --reset --migrate"
+    if system(*rake_args) && system(reset_hookshot_cluster)
+      File.open("tmp/runtime/#{pending_runtime}", "w") do |f|
+        f.puts Time.now.iso8601
+      end
+    else
+      # reset back to previous runtime mode and bail out.
+      File.open("tmp/runtime/current", "w") { |fd| fd.puts(current_runtime) }
+      warn "error: database or repo setup failed for #{pending_runtime} environment."
+      exit 1
+    end
+  end
+elsif current_runtime == pending_runtime
+  if current_runtime == "dotcom"
+    BT.time("script/copy-databases") do
+      unless system("script/copy-databases")
+        database_copy_failed = true
+      end
+    end
+  end
+
+  unless database_copy_failed
+    warn "#{pending_runtime} databases are up-to-date."
+
+    if !bootstrap && $stdin.tty?
+      warn "To force full fresh databases and repository setup instead, use:"
+      warn "    #$0 --force"
+    end
+  end
+else
+  # Run migrations only, no heavy database prep
+  BT.time("switching environment to #{pending_runtime}") do
+    warn "Switching environment to #{pending_runtime} runtime mode..."
+    File.open("tmp/runtime/current", "w") { |fd| fd.puts(pending_runtime) }
+
+    rake_args = %w(bin/rake setup:update)
+    rake_args << "--trace" if trace
+    if system(*rake_args) && system("script/create-hookshot-cluster --migrate")
+      File.open("tmp/runtime/#{pending_runtime}", "w") do |f|
+        f.puts Time.now.iso8601
+      end
+    else
+      # reset back to previous runtime mode and bail out.
+      File.open("tmp/runtime/current", "w") { |fd| fd.puts(current_runtime) }
+      warn "error: database migrations failed for #{pending_runtime} environment."
+      exit 1
+    end
+  end
+end
+
+# If the pending and current runtimes don't match and we haven't switched over
+# the current file already due to a setup run, do that now.
+if pending_runtime != current_runtime
+  File.open("tmp/runtime/current", "w")  { |fd| fd.puts(pending_runtime) }
+elsif database_copy_failed
+  exit 1
+end
+
+# For Connect dev, we need an Enterprise license file from github/enterprise2
+# when switching to enterprise runtime in a Codespace environment.
+if pending_runtime == "enterprise" && ENV["CODESPACES"]
+  system("script/codespaces-ghes-license-getter") unless File.exist?(File.expand_path("../../../enterprise2/test.ghl", __FILE__))
+end
+
+unless bootstrap
+  if pending_runtime == "enterprise" && ENV["CODESPACES"]
+    warn "The #{pending_runtime} environment doesn't support dynamic ports, don't forget to forward port 80."
+  end
+
+  warn "The #{pending_runtime} environment is ready."
+end
+
+# If we make it here, it's cool to unlink the pending switch file.
+File.unlink("tmp/runtime/pending") if File.exist?("tmp/runtime/pending")

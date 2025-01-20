@@ -1,0 +1,208 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%
+  analytics_dimensions = {
+    currently_following_users_count: current_user.following_count(viewer: current_user),
+    page_type: "activity"
+  }
+  instrument_dashboard_page_view(current_user, payload: analytics_dimensions)
+%>
+
+<% feed = private_feed_path(:atom) %>
+<% content_for :head do %>
+  <%= auto_discovery_link_tag :atom, feed %>
+<% end %>
+
+<%
+  page_info title: current_page?(home_path) ? "GitHub" : "GitHub Dashboard",
+            class: "full-width",
+            footer: false
+%>
+<% feed_v2_classes = user_feature_enabled?(:feeds_v2) ? "color-bg-default" : "" %>
+
+<% billing_manager_orgs = current_user.billing_manager_organizations %>
+<% is_billing_manager = user_is_billing_manager?(current_user, billing_manager_orgs) %>
+<% if is_billing_manager %>
+  <div class="billing-manager-banner clearfix">
+    <div class="container"><%# erblint:disable DeprecatedCustomCss %>
+      <%= primer_octicon(:"credit-card", :height => 32, classes: "billing-manager-icon") %>
+      <div class="billing-manager-banner-text">
+        <div class="billing-manager-banner-title">Manage billing for</div>
+        <% billing_manager_orgs.each do |organization| %>
+          <%= link_to settings_org_billing_path(organization), :class => "btn" do %>
+            <%= organization.safe_profile_name %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<% if display_private_repo_limit_banner? %>
+  <div class="flash-messages">
+    <%= render Primer::Beta::Flash.new(scheme: :warning) do %>
+      <%= form_tag ignore_upgrade_path, method: :post do %>
+        <%= render(Primer::Beta::IconButton.new(
+          icon: :x,
+          type: :submit,
+          scheme: :invisible,
+          classes: "flash-close",
+          mt: -2,
+          aria: { label: "Hide this notice forever" },
+        ))%>
+      <% end %>
+      It appears you're at the private repository limit for your current plan. You can <a class="Link--inTextBlock" href="<%= plan_upgrade_url %>">upgrade now</a> for more private repositories!
+    <% end %>
+  </div>
+<% end %>
+
+<% if display_copilot_snippy_warning? %>
+  <div class="flash-messages">
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, mb: 4, test_selector: "snippy-dashboard-flash-warning"))  do |component| %>
+      <div class="d-flex flex-justify-between">
+        <%= render(Primer::Beta::Octicon.new(icon: :alert, mt: 1)) %>
+        <div>
+          Your GitHub Copilot setup is incomplete. Please go to your settings page and complete your setup.
+        </div>
+        <%= render(Primer::Beta::Link.new(href: "/settings/copilot", classes: "Link--inTextBlock")) do %>
+          <%= render(Primer::ButtonComponent.new(size: :small)) { "GitHub Copilot Setup" } %>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<% cfb_trial = copilot_business_trial %>
+
+<% if display_copilot_trial_warning? %>
+  <% banner = GitHub.flipper[:banner_migration].enabled?(current_user) ? Primer::Alpha::Banner : Primer::Beta::Flash %>
+  <%= render banner.new(icon: :copilot, mb: 4, test_selector: "cfi-trial-expiring-warning") do %>
+    You have <%= pluralize(copilot_days_left_on_trial, "day") %> left on your GitHub Copilot trial.
+  <% end %>
+<% else %>
+  <% if cfb_trial && cfb_trial.days_left < 5 && cfb_trial.ends_at >= 3.days.ago %>
+    <%= render Copilot::BusinessTrialStatusBannerComponent.new(
+      business_trial: cfb_trial, show_after_expired: true, within_tile: false
+    ) %>
+  <% end %>
+<% end %>
+
+<%= render Sponsors::PotentialSponsorableBannerComponent.new %>
+
+<% if show_new_user_github_education_banner? %>
+  <%= render "dashboard/github_education_banner_new_user" %>
+<% end %>
+
+<div data-issue-and-pr-hovercards-enabled data-sponsors-listing-hovercards-enabled>
+  <div id="dashboard" class="dashboard" data-hpc>
+    <h1 class="sr-only">Dashboard</h1>
+    <% content_for :left_column do %>
+      <% if show_profile_navigation? %>
+          <%= render partial: "dashboard/profile_navigation" %>
+      <% else %>
+      <div class="dashboard-sidebar">
+        <%= render partial: "dashboard/left_column",
+                 locals: { teams: teams, viewer: current_user, user_repo_query: query, team_query: team_query } %>
+      </div>
+      <% end %>
+    <% end %>
+
+    <% track_render_partial("dashboard/right_column") do %>
+      <%= render partial: "dashboard/right_column",
+        locals: { explore_repos: explore_repos } %>
+    <% end %>
+
+    <div class="news">
+
+      <%= notices_for(current_user) %>
+
+      <%=
+        render(
+          ConditionalAccess::UnauthorizedAccountsComponent.new(
+            resource_label: "activity",
+            classes: "Box mb-1 #{feed_v2_classes}",
+            container_classes: "mb-2",
+            cap_filter: cap_filter,
+            return_to: "/"
+          )
+        )
+      %>
+
+      <div class="d-block d-md-none">
+        <% unless user_feature_enabled?(UserDashboardPin::WEB_FEATURE) %>
+          <nav class="mt-2 mb-4 Details js-repos-container" id="dashboard-repositories-box" aria-labelledby="dashboard-repositories-nav-heading">
+            <h2 id="dashboard-repositories-nav-heading" class="f4 mb-1 text-normal d-flex flex-justify-between flex-items-center">Repositories</h2>
+            <div class="Box px-2 py-1 <%= feed_v2_classes %>">
+              <include-fragment
+                src="<%= dashboard_my_top_repositories_path(q: query, location: "center") %>" >
+                <div class="text-center p-3 mb-4 mt-2">
+                  <%= render(Primer::Beta::Spinner.new) %>
+                  <p class="color-fg-muted my-2 mb-0">Loading...</p>
+                </div>
+              </include-fragment>
+            </div>
+          </nav>
+        <% end %>
+
+        <div class="mb-4">
+          <% if current_user.feature_enabled?(:nux_recent_activity) %>
+            <include-fragment src="<%= dashboard_recent_activity_path(organization_id: current_organization.try(:global_relay_id), mobile: true) %>">
+              <div class="text-center p-3">
+                <%= render(Primer::Beta::Spinner.new) %>
+                <p class="color-fg-muted my-2 mb-0">Loading...</p>
+              </div>
+            </include-fragment>
+          <% else %>
+            <h2 class="f4 mb-1 text-normal d-flex flex-justify-between flex-items-center">Recent activity</h2>
+            <%= render(Primer::Beta::BorderBox.new(
+              bg: user_feature_enabled?(:feeds_v2) ? :default : nil
+            )) do |component| %>
+              <% component.with_row(px: 2, pt: 0, pb: 2) do %>
+                <include-fragment src="<%= dashboard_recent_activity_path(organization_id: current_organization.try(:global_relay_id)) %>">
+                  <div class="text-center p-3">
+                    <%= render(Primer::Beta::Spinner.new) %>
+                    <p class="color-fg-muted my-2 mb-0">Loading...</p>
+                  </div>
+                </include-fragment>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+
+        <% if current_user.organizations.any? %>
+          <div class="mb-4 js-repos-container user-repos" id="dashboard-user-teams-repos">
+            <h2 class="f4 text-normal mb-1">Your teams</h2>
+            <div class="Box px-2 py-1 <%= feed_v2_classes %>">
+              <%= render partial: "dashboard/user_teams", locals: { teams: teams, viewer: current_user, query: team_query, location: "center" } %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <% if user_or_global_feature_enabled?(:topic_feeds) %>
+        <div id="topic-feeds-container" <%= test_selector("topic-feeds-container") %> <%= "hidden" if params[:view] != "topics" %>>
+          <include-fragment src="<%= dashboard_topic_feeds_search_index_path(topics_query: params[:topics_query]) %>"></include-fragment>
+        </div>
+      <% end %>
+
+      <% if GitHub.conduit_feed_enabled? %>
+        <feed-container data-active-topic="<%=params[:topic] || 'for-you'%>" <%= test_selector("feeds-container") %> <%= "hidden" if params[:view] == "topics" %>>
+          <%= render partial: "dashboard/include_news_feed_next", locals: { turbo_src: turbo_src, feed_title: feed_title } %>
+        </feed-container>
+      <% else %>
+        <%= render partial: "dashboard/zero_user/items" %>
+        <%= render "dashboard/include_news_feed", url: dashboard_news_feed_path %>
+        <div class="f6 color-fg-muted mt-4">
+          <%= primer_octicon(:"light-bulb", color: :muted) %>
+          <strong>ProTip!</strong>
+          The feed shows you events from people you <a class="Link--inTextBlock" href="/<%= current_user.display_login %>?tab=following">follow</a> and repositories you <a class="Link--inTextBlock" href="/watching">watch</a> or <a class="Link--inTextBlock" href="/<%= current_user.display_login %>?tab=stars">star</a>.
+          <br>
+          <a class="f6 Link--secondary mb-2 mt-2 d-inline-block" href="<%= private_feed_path(:atom) %>"><%= primer_octicon(:rss, mr: 1) %>Subscribe to your news feed</a>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle :dashboard %>
+<% end %>

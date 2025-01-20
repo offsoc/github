@@ -1,0 +1,143 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<div class="comment">
+  <%
+    protocol_selector_view = Repositories::ProtocolSelectorView.new(
+      :context => :repo_header,
+      :repository => view.workspace_repository,
+      :user => current_user
+    )
+  %>
+  <private-forks-git-clone-help class="Box Box--spacious d-block">
+    <div class="Box-header Box-header--blue">
+      <h3>Collaborate on a patch</h3>
+
+      <div class="d-flex flex-wrap my-2">
+        <div class="BtnGroup">
+          <% protocol_selector_view.each_protocol_view do |protocol_view| %>
+            <%= form_tag protocol_view.sticky_url, :class => "BtnGroup-parent", "data-remote" => true do %>
+              <button type="submit" class="BtnGroup-item btn btn-sm js-git-protocol-clone-url<% if protocol_view.is_default %> selected<% end %>"
+                      data-action="click:private-forks-git-clone-help#updateURL"
+                      data-targets="private-forks-git-clone-help.cloneURLButtons"
+                      data-url="<%= protocol_view.url %>"
+                      data-ga-click="Empty repo, click, Clicked <%= protocol_view.protocol  %> protocol"
+                      data-protocol="<%= protocol_view.protocol %>"
+                    >
+                <%= protocol_view.protocol %>
+              </button>
+            <% end %>
+          <% end %>
+        </div>
+        <div class="flex-1 ml-2" style="min-width: 300px;">
+          <div class="input-group">
+            <input id="empty-setup-clone-url" type="text" readonly spellcheck="false" class="form-control input-sm input-monospace" data-target="private-forks-git-clone-help.helpField" value="<%= protocol_selector_view.default_url %>" aria-label="Clone URL">
+            <span class="input-group-button">
+              <%= render Primer::Beta::ClipboardCopy.new(for: "empty-setup-clone-url", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button", "data-ga-click": "Empty repo, click, Clicked copy URL") %>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <p class="mb-0">Use <%= link_to "the temporary private fork", repository_path(view.workspace), class: "Link--inTextBlock" %> to collaborate on a patch for this advisory.</p>
+    </div>
+
+    <% if view.recently_touched_branches.any? %>
+      <div class="Box-body p-4">
+        <div class="RecentBranches">
+          <% view.recently_touched_branches.each do |branch| %>
+            <div class="RecentBranches-item p-2 clearfix">
+              <%
+              branch_name = "#{view.workspace.owner.display_login}:#{branch[:name]}"
+              comparison_range = "#{view.repository.owner.display_login}:#{view.repository.default_branch}...#{branch_name}"
+              %>
+              <a href="<%= compare_path(view.workspace, comparison_range, expand: true) %>" class="btn btn-sm btn-primary float-right" data-ga-click="Repository, go to new pull request form, location:recently pushed branches; text:Compare & pull request" <%= test_selector("advisory-workspace-compare-and-pull-request") %>>
+                <%= primer_octicon(:"git-pull-request") %>
+                Compare &amp; pull request
+              </a>
+              <div class="css-truncate">
+                <%= primer_octicon(:"git-branch", ml: 2) %>
+                <strong>
+                  <%= link_to branch[:name], repository_path(view.workspace, branch[:name]),
+                    :rel => 'nofollow', :class => 'RecentBranches-item-link css-truncate-target', :title => branch_name %>
+                </strong>
+                (<%= time_ago_in_words branch[:pushed_at] %> ago)
+              </div>
+            </div>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
+    <% if view.pull_requests.any? %>
+      <ul>
+        <% view.pull_requests.each do |pull| %>
+          <li class="Box-row p-4">
+            <%= render "repos/advisories/pull_request", view: create_view_model(RepositoryAdvisories::PullRequestView, pull_request: pull) %>
+          </li>
+        <% end %>
+      </ul>
+    <% else %>
+      <div class="Box-row" <%= test_selector("advisory-workspace-clone-and-create") %>>
+        <div class="position-relative mb-2">
+          <h4>Clone and create a new branch</h4>
+        </div>
+        <div class="copyable-terminal">
+          <div class="copyable-terminal-button">
+            <%= render Primer::Beta::ClipboardCopy.new(for: "advisory-setup-clone-repo-echo", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button", "data-ga-click": "Advisory workspace repo clone, click, Clicked copy existing repo commands", tabindex: "0", role: "button") %>
+          </div>
+          <pre id="advisory-setup-clone-repo-echo" class="copyable-terminal-content"><span data-target="private-forks-git-clone-help.cloneCommandPrefix"></span><span data-targets="private-forks-git-clone-help.helpTexts" ><%= protocol_selector_view.default_url %></span>
+cd <%= view.workspace.name %>
+git checkout -b advisory-fix-1</pre>
+        </div>
+        <div class="position-relative mb-2 mt-2">
+          <h4>Make your changes, then push</h4>
+        </div>
+        <div class="copyable-terminal">
+          <div class="copyable-terminal-button">
+            <%= render Primer::Beta::ClipboardCopy.new(for: "advisory-setup-push-repo-echo", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button", "data-ga-click": "Advisory workspace repo push, click, Clicked copy existing repo commands", tabindex: "0", role: "button") %>
+          </div>
+          <pre id="advisory-setup-push-repo-echo" class="copyable-terminal-content">git push -u origin advisory-fix-1</pre>
+        </div>
+      </div>
+    <% end %>
+    <% if view.viewer_can_delete_workspace? %>
+      <div class="d-flex flex-row-reverse mx-4 mb-4">
+        <%= render Primer::Alpha::Dialog.new(
+          title: "Delete #{view.workspace.name}",
+          size: :medium_portrait,
+          pt: 2,
+          id: "tpf-delete-menu-dialog",
+        ) do |dialog| %>
+          <% dialog.with_header(show_divider: true) %>
+          <% dialog.with_show_button(
+            scheme: :danger,
+            float: :right,
+            test_selector: "tpf-delete-menu-button",
+          ).with_content("Delete temporary private fork") %>
+          <% dialog.with_body do %>
+            <div class="text-center">
+              <%= primer_octicon("repo-locked", size: :medium, color: :muted, mt: 2) %>
+
+              <%= render Primer::Beta::Text.new(
+                tag: :p,
+                font_weight: :bold,
+                font_size: 3,
+                mt: 2,
+              ).with_content(view.workspace.name) %>
+            </div>
+          <% end %>
+
+          <% dialog.with_footer(show_divider: true, flex: 1, justify_content: :center) do %>
+            <%= form_tag delete_repository_advisory_workspace_path, method: :delete do %>
+              <%= render Primer::Beta::Button.new(
+                px: 3,
+                scheme: :default,
+                type: :submit,
+              ) do %>I want to delete this temporary private fork<% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  </private-forks-git-clone-help>
+</div>

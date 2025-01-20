@@ -1,0 +1,236 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<% unless sponsor.user? %>
+  <hr class="my-3">
+<% end %>
+
+<%= form_tag(form_path, method: form_method, class: class_names(
+  "js-sponsors-form",
+  "py-2" => !sponsors_invoiced?,
+  "pb-2" => sponsors_invoiced?,
+)) do %>
+  <% if bulk_sponsorship? %>
+    <% @bulk_sponsorship_rows.each do |row| %>
+      <input type="hidden" name="sponsorables[]" value="<%= row.sponsorable_login %>">
+      <input type="hidden" name="bulk_sponsorship[<%= row.sponsorable_login %>][amount]" value="<%= row.dollars %>">
+      <input type="hidden" name="bulk_sponsorship[<%= row.sponsorable_login %>][include]" value="1">
+    <% end %>
+  <% elsif @selected_tier.persisted? %>
+    <input type="hidden" name="tier_id" value="<%= @selected_tier.id %>">
+  <% else %>
+    <input type="hidden" name="parent_tier_id" value="<%= parent_tier&.id %>">
+    <input type="hidden" name="amount" value="<%= monthly_price_in_dollars %>">
+  <% end %>
+  <input type="hidden" name="frequency" value="<%= one_time_tier? ? "one-time" : "recurring" %>">
+  <input type="hidden" name="sponsor" value="<%= @sponsor.display_login %>">
+  <input type="hidden" name="pay_prorated" value="<%= @pay_prorated %>">
+  <% @sponsorable_metadata.each do |key, value| %>
+    <input type="hidden" name="<%= key %>" value="<%= value %>">
+  <% end %>
+  <% if @active_on.present? %>
+    <input type="hidden" name="active_on" value="<%= @active_on.iso8601 %>">
+  <% end %>
+
+  <% if sponsor.user? %>
+    <hr>
+  <% end %>
+
+  <% if sponsors_invoiced? && recurring_tier? %>
+    <div class="form-checkbox">
+      <label aria-live="polite">
+        <input type="checkbox"
+                name="set_expires_at"
+                value="1"
+                class="form-checkbox-details-trigger"
+                <%= "checked" if sponsorship_expiration_date %>
+                <%= test_selector("sponsorship-end-date") %>>
+        Set a sponsorship end date
+        <span class="form-checkbox-details text-normal">
+          <%= select_month end_month, { prefix: "end_date" }, class: "form-control" %>
+          <%= select_year end_year, { prefix: "end_date", start_year: end_year,
+            end_year: max_invoice_end_year }, class: "form-control" %>
+        </span>
+      </label>
+    </div>
+    <hr class="my-3">
+  <% end %>
+
+  <% if !concurrent? %>
+    <%= render(Primer::Alpha::RadioButtonGroup.new(
+      full_width: true,
+      name: "privacy_level",
+      label: "Who can see your #{bulk_sponsorship? ? "sponsorships" : "sponsorship"}?",
+      label_arguments: { class: "h4" },
+    )) do |component| %>
+      <% component.radio_button(
+        label: "Everyone",
+        caption: "Others can see #{privacy_note_subject}.",
+        value: "public",
+        checked: public?,
+      ) %>
+
+      <% component.radio_button(
+        label: "Private",
+        caption: private_sponsorship_caption,
+        value: "private",
+        checked: private?,
+      ) %>
+    <% end %>
+
+    <hr>
+  <% end %>
+
+  <div>
+    <% if !concurrent? %>
+      <div class="form-checkbox mt-0">
+        <input type="hidden" name="email_opt_in" value="off">
+        <label class="h5">
+          <input type="checkbox"
+                name="email_opt_in"
+                value="on"
+                <%= "checked" if @opted_in_to_email %>
+                <%= test_selector("sponsorship-email-opt-in") %>>
+          Receive email updates from <%= email_updates_note_subject %>
+        </label>
+        <p class="color-fg-muted f6">Your email will not be shared</p>
+      </div>
+      <hr class="my-3">
+    <% end %>
+
+    <% if show_tax_information? %>
+      <div <%= test_selector("sponsors-business-tax-identifier-section") %>>
+        <% if sponsors_business_tax_identifier.present? %>
+          <div class="d-flex mb-2">
+            <h4 class="h4 flex-1">Tax information</h4>
+            <%= render Primer::ButtonComponent.new(
+                  variant: :small,
+                  classes: "js-show-sponsors-tax-identifier-inputs js-edit-sponsors-tax-identifier-edit-btn") do %>
+              Edit
+            <% end %>
+          </div>
+
+          <div class="js-sponsors-tax-identifier-details" <%= test_selector("sponsors-business-tax-identifier-details") %>>
+            <div class="mb-1">
+              <strong>Country:</strong> <%= sponsors_business_tax_identifier.human_country %>
+            </div>
+            <div class="mb-1">
+              <strong>Region:</strong> <%= sponsors_business_tax_identifier.human_region %>
+            </div>
+            <% if sponsors_business_tax_identifier.vat_code.present? %>
+              <div class="mb-1">
+                <strong>VAT number:</strong> <%= sponsors_business_tax_identifier.vat_code %>
+              </div>
+            <% end %>
+            <%= render Sponsors::Sponsorables::InfoSharingNoticeComponent.new(business: true) %>
+          </div>
+        <% else %>
+          <p class="h4">Tax information: which best describes you?</p>
+
+          <div class="radio-group" <%= test_selector("is-business-radio-buttons") %>>
+            <%= radio_button_tag(
+                  :is_business,
+                  false,
+                  true,
+                  id: :is_business_false,
+                  autocomplete: "off",
+                  class: "radio-input js-hide-sponsors-tax-identifier-inputs") %>
+            <label class="radio-label" for="is_business_false">Individual</label>
+
+            <%= radio_button_tag(
+                  :is_business,
+                  true,
+                  false,
+                  id: :is_business_true,
+                  autocomplete: "off",
+                  class: "radio-input js-show-sponsors-tax-identifier-inputs") %>
+            <label class="radio-label" for="is_business_true">Company</label>
+          </div>
+
+          <%= render Sponsors::Sponsorables::InfoSharingNoticeComponent.new(
+            classes: "js-non-business-tax-notice",
+            mt: 3,
+          ) %>
+        <% end %>
+
+        <div class="js-sponsors-tax-identifier-inputs-wrapper has-removed-contents">
+          <%= fields_for :sponsors_business_tax_identifier, sponsors_business_tax_identifier do |f| %>
+            <div class="form-group">
+              <div class="form-group-header">
+                <%= f.label :country %>
+              </div>
+              <div class="form-group-body">
+                <%= f.select(:country, countries,
+                  {},
+                  {
+                    class: "form-select form-control js-sponsors-tax-identifier-country-select",
+                    required: true,
+                    "data-sponsors-iso3166-path" => sponsors_iso3166_path
+                  })
+                %>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <div class="form-group-header">
+                <label for="tax_region">
+                  <%= f.label :region %>
+                </label>
+              </div>
+              <div class="form-group-body">
+                <%= f.select(:region, regions,
+                  {},
+                  {
+                    class: "form-select form-control js-sponsors-tax-identifier-region-select",
+                    required: true
+                  })
+                %>
+              </div>
+            </div>
+
+            <div class="form-group js-sponsors-tax-identifier-vat-code-wrapper" <%= "hidden" if vat_code_hidden? %>>
+              <div class="form-group-header">
+                <label for="tax_vat_code">
+                  <%= f.label :vat_code, "VAT number" %>
+                </label>
+              </div>
+              <div class="form-group-body">
+                <%= f.text_field :vat_code,
+                  class: "form-control js-sponsors-tax-identifier-vat-code-input",
+                  disabled: vat_code_hidden?
+                %>
+              </div>
+            </div>
+          <% end %>
+
+          <%= render Sponsors::Sponsorables::InfoSharingNoticeComponent.new(business: true) %>
+        </div>
+      </div>
+
+      <hr class="my-3">
+    <% end %>
+
+    <%= render Primer::ButtonComponent.new(
+      type: :submit,
+      scheme: :primary,
+      w: :full,
+      mt: 2,
+      "data-disable-with": disable_with_text,
+      test_selector: "sponsorship-sponsor-button",
+    ).with_content(submit_text) %>
+  </div>
+<% end %>
+<% if can_cancel? && editing_but_unchanged_tier? %>
+  <%= form_tag sponsorable_sponsorships_path(sponsorable, sponsor: sponsor), method: :delete, class: "py-2" do %>
+    <%= hidden_field_tag "redirect_to_sponsors_listing", "1" %>
+    <%= render Primer::ButtonComponent.new(
+      type: :submit,
+      scheme: :link,
+      block: true,
+      text_align: :center,
+      my: 4,
+      color: :danger,
+      font_size: :small,
+      test_selector: "cancel-sponsorship",
+      "data-confirm": "Are you sure you want to cancel this sponsorship? The cancellation will be effective on #{next_billing_date}.",
+    ).with_content("Cancel sponsorship") %>
+  <% end %>
+<% end %>

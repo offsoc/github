@@ -1,0 +1,255 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info :title => "PR ##{this_pull.number}", :selected_link => :issues %>
+
+<div class="site-admin-unboxed">
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      <%= link_to \
+            "Pull requests",
+            gh_stafftools_repository_issues_path(current_repository) %>
+      / Pull request #<%= this_pull.number %>
+    </h2>
+  </div>
+
+  <div class="site-admin-table">
+    <table>
+      <tr>
+        <th>State</th>
+        <td>
+          <%= this_pull.state %>
+          <% if this_pull.locked? %>
+            &ndash; discussion locked
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Creator</th>
+        <td>
+          <% if this_pull.user %>
+            <%= link_to this_pull.user, stafftools_user_path(this_pull.user) %>
+            <% if this_pull.user.spammy? %>
+              &ndash;
+              <%= primer_octicon(:alert, classes: "error") %>
+              flagged as spam
+            <% end %>
+          <% else %>
+            account has been deleted
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Comments</th>
+        <td>
+          <%= link_to \
+                pluralize((this_pull.issue_comments_count + 1), "comment"),
+                gh_stafftools_repository_issue_comments_path(this_pull) %>
+        </td>
+      </tr>
+      <tr>
+        <th>Review Comments</th>
+        <td>
+          <%= link_to \
+                pluralize(this_pull.review_comments_with_body_count, "review comment"),
+                gh_stafftools_repository_pull_request_review_comments_path(this_pull) %>
+        </td>
+      </tr>
+      <tr>
+        <th>Subscriptions</th>
+        <td>
+          <%= link_to \
+                "View subscriptions and ignores",
+                gh_stafftools_repository_pull_request_subscriptions_path(this_pull) %>
+        </td>
+      </tr>
+      <tr>
+        <th>Discussion</th>
+        <td>
+          <%= link_to "View pull request", pull_request_url_to_main_site(this_pull) %>
+        </td>
+      </tr>
+      <tr>
+        <th>Deployment Events</th>
+        <td>
+          <%= @deployment_events_count %>
+        </td>
+      </tr>
+      <tr>
+        <th>Visible Timeline Events</th>
+        <td>
+          <%= @visible_events_count %>
+        </td>
+      </tr>
+    </table>
+
+    <%= link_to \
+          "View database record",
+          gh_database_stafftools_repository_pull_request_path(this_pull),
+          class: "more" %>
+  </div>
+
+  <% if @diffs.summary.available? %>
+    <div class="site-admin-subhead">
+      <h2 class="site-admin-subhead-heading">Diffs Summary</h2>
+    </div>
+    <p>
+      <%= pluralize(@diffs.additions, "addition") %>(+), <%= pluralize(@diffs.deletions, "deletion") %>(-), <%= pluralize(@diffs.changes, "line") %> changed
+    </p>
+    <p>
+      <%= pluralize(@diffs.changed_files, "file") %> changed
+    </p>
+  <% end %>
+
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      Audit log
+    </h2>
+  </div>
+
+  <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+    <%= render \
+        partial: "stafftools/audit_log",
+        locals: {
+          query: @query,
+          logs: @logs,
+          more_results: @more_results,
+        } %>
+  <% else %>
+    <p><%=stafftools_not_authorized_html %></p>
+  <% end %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">Synchronize pull request</h2>
+  </div>
+
+  <% if this_pull.merged? %>
+    <p>
+      Merged pull requests cannot be synchronized.
+    </p>
+    <%= render Primer::Beta::Button.new(type: :button, disabled: true) do %>
+      Synchronize pull request
+    <% end %>
+  <% elsif this_pull.closed? %>
+    <p>
+      Closed pull requests cannot be synchronized.
+    </p>
+    <%= render Primer::Beta::Button.new(type: :button, disabled: true) do %>
+      Synchronize pull request
+    <% end %>
+  <% else %>
+    <p>
+      Clear the ref caches for this pull request and synchronize it against the
+      underlying git repository.
+    </p>
+    <p>
+      This action is not inherently destructive, but may have a number of
+      side effects:
+      <ul class="site-admin-descriptive-list">
+        <li>
+          Hiding commits and comments that have been removed via a force-push
+        </li>
+        <li>
+          Marking the pull request as "merged" if its commits have been merged
+          into the upstream branch
+        </li>
+        <li>
+          Closing the pull request if it no longer contains unique commits
+        </li>
+        <li>
+          Changing the internal reference branches in the repository to align
+          with the current state of the source branches
+        </li>
+      </ul>
+    </p>
+    <%= form_tag gh_sync_stafftools_repository_pull_request_path(this_pull) do %>
+      <%= render Primer::Beta::Button.new(type: :submit) do %>Synchronize pull request<% end %>
+    <% end %>
+  <% end %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">Synchronize search index</h2>
+  </div>
+
+  <p>
+    Synchronize the search index for this pull request.
+  </p>
+
+  <%= form_tag gh_sync_search_index_stafftools_repository_pull_request(this_pull) do %>
+    <%= render Primer::Beta::Button.new(type: :submit) do %>Synchronize search index<% end %>
+  <% end %>
+
+  <%= render "stafftools/pull_requests/tracking_ref", pull: this_pull %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">Delete pull request</h2>
+  </div>
+
+  <p>
+    Delete this pull request and its comments as well as branch references
+    from the Git repository.  Garbage collection will not be performed, the
+    commits <strong>will remain in the repository</strong>.
+  </p>
+  <% if this_pull.merged? %>
+    <p>
+      Because this pull request has been merged, further actions including
+      force-pushing the destination branch may be required to dereference the
+      commits.
+    </p>
+  <% end %>
+  <p>
+    This action <strong>cannot be undone.</strong>
+  </p>
+  <% if GitHub.flipper[:dialog_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Dialog.new(
+      id: "delete-dialog",
+      title: "Delete pull request?",
+    )) do |c| %>
+      <% c.with_show_button(
+        color: :danger
+      ) do |s| %>
+        Delete pull request
+      <% end %>
+      <% c.with_header(show_divider: true, variant: :large) %>
+      <% c.with_body do %>
+        <%= form_tag gh_stafftools_repository_pull_request_path(this_pull), method: :delete, id: "delete-dialog-form" do %>
+          <p>
+            All comments made on this pull request will also be deleted.<br>
+            This action <strong>cannot be undone.</strong>
+          </p>
+        <% end %>
+      <% end %>
+      <% c.with_footer(show_divider: true) do %>
+        <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "delete-dialog" })) { "Cancel" } %>
+        <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit, data: { "disable-with": "" }, :form => "delete-dialog-form")) { "Delete pull request" } %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <%= render(Primer::Experimental::Dialog.new(
+      dialog_id: "delete-dialog",
+      header_variant: :large,
+      width: :large,
+      title: "Delete pull request?",
+      form_url: gh_stafftools_repository_pull_request_path(this_pull),
+      form_method: :delete
+    )) do |c| %>
+      <% c.with_show_button(
+        color: :danger
+      ) do |s| %>
+        Delete pull request
+      <% end %>
+      <% c.with_body do %>
+        <p>
+          All comments made on this pull request will also be deleted.<br>
+          This action <strong>cannot be undone.</strong>
+        </p>
+      <% end %>
+      <% c.with_button(
+        data: { "close-dialog-id": "delete-dialog" }
+      ) { "Cancel" } %>
+      <% c.with_button(
+        type: :submit,
+        scheme: :danger,
+        data: { "disable-with": "" }
+      ) { "Delete pull request" } %>
+    <% end %>
+  <% end %>
+</div>

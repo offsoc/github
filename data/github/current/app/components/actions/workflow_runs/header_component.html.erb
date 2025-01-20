@@ -1,0 +1,325 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+
+<% track_render_partial("actions/workflow_runs/header", trace: true) do %>
+  <div
+    <% if viewing_current? %> class="js-updatable-content js-socket-channel" data-url="<%= header_path %>" data-channel="<%= live_update_view_channel(channel) %>" <% end %>>
+    <%# Update the favicon based on build status %>
+    <span data-favicon-override="<%= site_favicon(favicon_state) %>"></span>
+
+    <%= render(Primer::Experimental::PageHeader.new(title_size: :medium, mb: [0], ml: [0, 0, 3])) do |header| %>
+      <% if parent_link_href %>
+        <% header.with_parent_link(href: parent_link_href, label: parent_link_label) %>
+      <% end %>
+
+      <% header.with_leading_visual_content(classes: "actions-workflow-runs-status") do %>
+        <span class="hide-sm hide-md">
+          <%= render Actions::WorkflowRuns::StatusComponent.new(
+            status: status,
+            is_job: false,
+            conclusion: conclusion,
+            size: 22,
+            classes: "d-flex flex-items-center height-full") %>
+        </span>
+        <span class="hide-lg hide-xl">
+          <%= render Actions::WorkflowRuns::StatusComponent.new(
+            status: status,
+            is_job: false,
+            conclusion: conclusion,
+            size: 16,
+            classes: "d-flex") %>
+        </span>
+      <% end %>
+
+      <% header.with_title(classes: "lh-default", tag: :h1) do %>
+        <span>
+          <span class="markdown-title" <%= test_selector("workflow-title") %>>
+            <%= title %>
+          </span>
+          <% if run_number %>
+            <span class="color-fg-muted" style="font-weight: 400">#<%= run_number %></span>
+          <% end %>
+        </span>
+      <% end %>
+
+      <% header.with_actions do %>
+        <%# DESKTOP ACTIONS %>
+        <div class="d-none d-md-flex flex-self-start ml-n1 ml-md-0">
+          <% if logged_in? %>
+            <%# Rerun/cancel workflow buttons %>
+            <% if can_cancel? %>
+              <%= form_tag cancel_check_suite_path(
+                check_suite,
+                user_id: current_repository.owner,
+                repository: current_repository),
+                method: :put,
+                class: "d-inline-block" do %>
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, mr: 2) do %>Cancel workflow<% end %>
+              <% end %>
+            <% elsif can_rerun_all_jobs? %>
+              <div class="mr-2">
+                <%= render partial: "actions/workflow_runs/rerun",
+                locals: {
+                  workflow_run: workflow_run,
+                  current_repository: current_repository,
+                  can_rerun_failed_jobs: can_rerun_failed_jobs?,
+                  workflow_disabled: workflow_disabled?,
+                } %>
+              </div>
+            <% end %>
+
+            <%= render Actions::WorkflowRuns::NewAttemptNavigationComponent.new(
+              workflow_run: workflow_run,
+              current_repository: current_repository,
+              execution: execution,
+              retry_blankstate: retry_blankstate,
+              pull_request_number: back_to_pr_number
+            )%>
+
+            <% if show_badge_builder? || show_delete_all_logs? %>
+              <%# Kebab drop-down: view workflow file, create badge, delete logs, view in stafftools %>
+              <div class="d-flex flex-justify-end">
+                <%= render Primer::Alpha::ActionMenu.new do |menu|%>
+                  <% menu.with_show_button(icon: "kebab-horizontal", aria: { label: "Workflow run options" }) %>
+                  <% if show_badge_builder? %>
+                    <% menu.with_item(
+                      label: "Create status badge",
+                      content_arguments: { "data-show-dialog-id": "create-status-badge" },
+                      test_selector: "badge-builder-button"
+                    ) %>
+                  <% end %>
+
+                  <% if show_delete_all_logs? %>
+                    <% menu.with_item(
+                      label: "Delete all logs",
+                      scheme: :danger,
+                      content_arguments: { "data-confirm": delete_confirm_text },
+                      test_selector: "delete-logs-button",
+                      href: delete_workflow_run_logs_path(
+                        workflow_run_id: workflow_run.id,
+                        user_id: current_repository.owner.display_login,
+                        repository: current_repository
+                      ),
+                      form_arguments: {
+                        method: :delete,
+                      }
+                    ) %>
+                  <% end %>
+
+                  <% if current_user&.site_admin? %>
+                    <% if show_badge_builder? || show_delete_all_logs? %>
+                      <% menu.with_divider %>
+                    <% end %>
+                    <% text = GitHub.enterprise? ? "Site Admin" : "Stafftools"%>
+                    <% menu.with_item(
+                      label: "View in #{text}",
+                      test_selector: "staff-view-workflow-run",
+                      href: actions_workflow_execution_stafftools_repository_path(
+                        current_repository.owner,
+                        current_repository,
+                        check_suite_id: workflow_run.check_suite_id
+                      )
+                    ) %>
+                  <% end %>
+                <% end %>
+
+                <% if show_badge_builder? %>
+                  <%= render Actions::StatusBadgeDialogComponent.new(
+                    dialog_id: "create-status-badge",
+                    filename: filename,
+                    current_repository: current_repository,
+                    lab: check_suite.lab_workflow?,
+                  ) %>
+                <% end %>
+              </div>
+            <% end %>
+
+          <% else %>
+            <%# NOT LOGGED IN %>
+            <%= link_to(
+              "Sign in to view logs",
+              login_path_with_return,
+              rel: "nofollow",
+              class: "btn",
+              data: sign_in_link_data_attributes(location_in_page: "workflow logs")
+            ) %>
+          <% end %>
+        </div>
+
+        <%# MOBILE ACTIONS %>
+        <% if show_mobile_actions? %>
+          <div class="d-md-none d-flex flex-self-start ml-2">
+            <details class="dropdown details-reset details-overlay d-inline-block">
+              <summary style="width: 32px; height: 32px;" class="btn px-0 text-center" aria-haspopup="true">
+                <%= render Primer::Beta::Octicon.new(icon: "kebab-horizontal", "aria-label": "Show options") %>
+              </summary>
+
+              <ul style="width: 210px" class="dropdown-menu dropdown-menu-sw anim-scale-in">
+                <% if logged_in? %>
+                  <% if has_multiple_attempts? %>
+                    <li>
+                      <%= render Actions::WorkflowRuns::AttemptNavigationComponent.new(
+                        workflow_run: workflow_run,
+                        current_repository: current_repository,
+                        execution: execution,
+                        retry_blankstate: retry_blankstate)%>
+                    </li>
+                    <li class="dropdown-divider" role="none"></li>
+                  <% end %>
+                  <% if can_rerun_all_jobs? %>
+                    <% if !workflow_disabled? %>
+                      <% if can_rerun_failed_jobs? %>
+                        <li>
+                          <%= render Primer::ButtonComponent.new(
+                            scheme: :link,
+                            classes: "dropdown-item",
+                            "data-show-dialog-id": "rerun-dialog-mobile-failed"
+                          ) do %>
+                            Re-run failed jobs
+                          <% end %>
+                          <%= render Actions::WorkflowRuns::RerunDialogComponent.new(
+                            workflow_run: workflow_run,
+                            current_repository: current_repository,
+                            variant: :failed_jobs,
+                            dialog_id: "rerun-dialog-mobile-failed"
+                          ) %>
+                        </li>
+                      <% end %>
+                      <li>
+                        <%= render Primer::ButtonComponent.new(
+                          scheme: :link,
+                          classes: "dropdown-item",
+                          "data-show-dialog-id": "rerun-dialog-mobile-all"
+                        ) do %>
+                            Re-run all jobs
+                        <% end %>
+                        <%= render Actions::WorkflowRuns::RerunDialogComponent.new(
+                          workflow_run: workflow_run,
+                          current_repository: current_repository,
+                          variant: :all_jobs,
+                          dialog_id: "rerun-dialog-mobile-all"
+                        ) %>
+                      </li>
+                    <% end %>
+                  <% end %>
+                  <% if show_badge_builder? %>
+                    <li>
+                      <%= render Primer::ButtonComponent.new(
+                        scheme: :link,
+                        classes: "dropdown-item",
+                        "data-show-dialog-id": "create-status-badge-mobile",
+                        test_selector: "badge-builder-button"
+                      ) do %>
+                        Create status badge
+                      <% end %>
+                      <%= render Actions::StatusBadgeDialogComponent.new(
+                        dialog_id: "create-status-badge-mobile",
+                        filename: filename,
+                        current_repository: current_repository,
+                        lab: check_suite.lab_workflow?,
+                      ) %>
+                    </li>
+                  <% end %>
+                  <% if (can_rerun_all_jobs? || show_badge_builder?) && (can_cancel? || show_delete_all_logs?) %>
+                    <li class="dropdown-divider" role="none"></li>
+                  <% end %>
+                  <% if can_cancel? %>
+                    <li>
+                      <%= form_tag cancel_check_suite_path(
+                        check_suite, user_id:
+                        current_repository.owner,
+                        repository: current_repository),
+                        method: :put do %>
+                        <%= render Primer::ButtonComponent.new(
+                          type: :submit,
+                          scheme: :link,
+                          classes: "dropdown-item menu-item-danger") do %>
+                          Cancel workflow
+                        <% end %>
+                      <% end %>
+                    </li>
+                  <% end %>
+                  <% if show_delete_all_logs? %>
+                    <li>
+                      <%= form_tag delete_workflow_run_logs_path(
+                        workflow_run_id: workflow_run.id,
+                        user_id: current_repository.owner.display_login,
+                        repository: current_repository),
+                        method: :delete do %>
+                        <%= render Primer::ButtonComponent.new(
+                          type: :submit,
+                          scheme: :link,
+                          classes: "dropdown-item menu-item-danger",
+                          "data-confirm": delete_confirm_text) do %>
+                          Delete all logs
+                        <% end %>
+                      <% end %>
+                    </li>
+                  <% end %>
+                <% else %>
+                <%# NOT LOGGED IN %>
+                  <li>
+                    <%= link_to(
+                      "Sign in to view logs",
+                      login_path_with_return,
+                      rel: "nofollow",
+                      class: "dropdown-item",
+                      data: sign_in_link_data_attributes(location_in_page: "workflow logs")
+                    ) %>
+                  </li>
+                <% end %>
+              </ul>
+            </details>
+          </div>
+        <% end %>
+      <% end %>
+
+      <% header.with_navigation(hide: :whenRegular, mt: 0, ml: -3) do %>
+        <%= render(Primer::Alpha::Dialog.new(
+            dialog_id: "dialog-with-html-fragment",
+            title: title,
+            preload: true,
+            position_narrow: :bottom,
+            w: :full,
+            height: :large,
+            test_selector: "mobile-nav-dialog"
+          )) do |c| %>
+          <% c.with_show_button(scheme: :invisible, color: :default, classes: "Truncate", align_items: :center, ml: 1) do |s| %>
+            <div class="d-flex flex-items-center">
+              <% if selected_check_run %>
+                <span class="mr-2">
+                  <%= render Actions::WorkflowRuns::StatusComponent.new(status: selected_check_run.status, is_job: true, conclusion: selected_check_run.conclusion, size: 16) %>
+                </span>
+              <% end %>
+              <%= render Primer::Beta::Truncate.new(tag: :h2, mr: 2, classes: "lh-default h3") do |component| %>
+                <% if selected_check_run %>
+                  <%= render Actions::WorkflowRuns::WorkflowJobRunNameComponent.new(name: selected_check_run.visible_name, can_split_name: selected_check_run.workflow_job_run&.reusable_job?) %>
+                <% else %>
+                  <% component.with_item { selected_tab_text } %>
+                <% end %>
+              <% end %>
+              <%= render(Primer::Beta::Octicon.new(icon: "triangle-down", flex_shrink: 0, color: :default)) %>
+            </div>
+          <% end %>
+          <% c.with_header(show_divider: true, pl: 3) do |h| %>
+            <h2 class="d-flex flex-items-start">
+                <%= render Actions::WorkflowRuns::StatusComponent.new(
+                  classes: "d-flex flex-items-center pr-2",
+                  style: "height: 30px;",
+                  status: status,
+                  is_job: false,
+                  conclusion: conclusion,
+                  size: 16) %>
+              <span class="markdown-title">
+                <%= title %><span class="color-fg-muted" style="font-weight: 400"> #<%= run_number %></span>
+              </span>
+            </h2>
+          <% end %>
+          <% c.with_body do |b| %>
+            <include-fragment loading="lazy" src="<%=mobile_nav_content_src%>" <%= test_selector("mobile-nav-fragment") %>></include-fragment>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

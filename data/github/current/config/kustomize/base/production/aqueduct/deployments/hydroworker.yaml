@@ -1,0 +1,179 @@
+# https://github.com/github/kube/blob/master/docs/kubernetes/resources/deployment.md
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: hydroworker
+    labels:
+        service: hydroworker
+        role: production
+    annotations:
+        # Transposes all matching values for `image` to refer to the image
+        # corresponding to the SHA deployed at deploy time.
+        moda.github.net/image-placeholder: "github"
+        # Injects the application config Heaven has associated with this application
+        # into containers matching the following name.
+        moda.github.net/inject-moda-env-vars-into-containers: aqueduct
+        # Denote this deployment as being "canary-able"
+        moda.github.net/canary-v2: "true"
+        # Indicate which label's value should be changed to "canary" during a canary
+        # deploy.
+        moda.github.net/canary-label: "role"
+        moda.github.net/inject-otel-env-vars-into-containers: "aqueduct"
+spec:
+    replicas: 4
+    revisionHistoryLimit: 2
+    strategy:
+        rollingUpdate:
+            maxSurge: 50%
+            maxUnavailable: 0
+    selector:
+        matchLabels:
+            service: hydroworker
+            role: production
+    template:
+        metadata:
+            labels:
+                service: hydroworker
+                role: production
+            annotations:
+                ad.datadoghq.com/aqueduct.check_names: |
+                    ["openmetrics"]
+                ad.datadoghq.com/aqueduct.init_configs: |
+                    [{}]
+                ad.datadoghq.com/aqueduct.instances: |
+                    [
+                      {
+                        "prometheus_url": "http://%%host%%:9988/metrics",
+                        "namespace": "aqueduct",
+                        "metrics": [
+                          {"aqueduct_workers_count": "workers.count"},
+                          {"aqueduct_workers_idle_count": "workers.idle.count"},
+                          {"aqueduct_workers_active_count": "workers.active.count"},
+                          {"aqueduct_workers_count_by_state": "workers.by_state.count"},
+                          {"aqueduct_workers_by_shard": "workers.by_shard.count"},
+                          {"aqueduct_active_workers_by_shard": "workers.active.by_shard.count"},
+                          {"aqueduct_active_workers_by_queue": "workers.active.by_queue.count"}
+                        ]
+                      }
+                    ]
+                observability.github.com/splunk_index: prod-resque
+                fluentbit.io/parser: logfmt_sloppy
+                ad.datadoghq.com/tolerate-unready: "true"
+        spec:
+            dnsPolicy: Default
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: resqued-pidfile
+                  emptyDir: {}
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            restartPolicy: Always
+            # Keep synchronized with resqued quit-and-wait's --grace-period.
+            terminationGracePeriodSeconds: 300
+            containers:
+                - name: aqueduct
+                  image: github
+                  args: ["bin/resqued", "--pidfile", "/resqued-pidfile/resqued.pid", "config/resqued/github-environment.rb", "config/resqued/github-hydroworker-kube.rb"]
+                  readinessProbe:
+                    initialDelaySeconds: 31
+                    exec:
+                        command: ["test", "-f", "/resqued-pidfile/resqued.ready"]
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command:
+                                - "bin/resqued"
+                                - "quit-and-wait"
+                                - "/resqued-pidfile/resqued.pid"
+                                # Keep synchronized with the pod's terminationGracePeriodSeconds.
+                                - "--grace-period"
+                                - "300"
+                  ports:
+                    - name: metrics
+                      containerPort: 9988
+                      protocol: TCP
+                  volumeMounts:
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - mountPath: /resqued-pidfile
+                      name: resqued-pidfile
+                    - mountPath: /dev/log
+                      name: syslog
+                      readOnly: true
+                  resources:
+                    # How much CPU and memory we expect to use
+                    requests:
+                        cpu: 3
+                        memory: "13Gi"
+                    limits:
+                        # A hard cap on the CPU used by this container.
+                        cpu: 10
+                        # If memory usage exceeds this value, restart the container.
+                        memory: "18Gi"
+                  env:
+                    # The number of workers.
+                    - name: RESQUED_WORKER_POOL_SIZE
+                      value: "10"
+                    # Job worker-specific configuration that each worker processes uses to control
+                    # it's memory usage after processing a job
+                    - name: JOB_WORKER_GRACEFUL_MEMORY_LIMIT_IN_MB
+                      value: "2048"
+                    - name: RAILS_ENV
+                      value: production
+                    # By setting `heaven.githubapp.com/inject-moda-env-vars-into-containers` to
+                    # `aqueduct` above, environment variables from `gh-config github` will
+                    # also be available to this container. The below values are specific
+                    # to Kubernetes but general to the github application
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_HOSTNAME
+                      value: github.com
+                    # each kube node runs a local dd-agent - to send data to it
+                    # we need to explicitly set the node hostname rather than 127.0.0.1
+                    # (which points to the *pod*)
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:hydroworker"
+                    - name: USE_GLB_BALANCED_MAIL
+                      value: '1'
+                    - name: SMTP_HOST
+                      value: smtp.service.github.net
+                    - name: SMTP_PORT
+                      value: '2525'
+                    - name: GITHUB_CONFIG_ROLE
+                      value: "hydroworker"
+                    - name: RESQUED_WORKER_POOL_READY_FILE
+                      value: "/resqued-pidfile/resqued.ready"
+                    - name: RESQUED_METRICS_SERVER_ADDRESS
+                      value: "0.0.0.0:9989"
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-hydroworker-kube"
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets

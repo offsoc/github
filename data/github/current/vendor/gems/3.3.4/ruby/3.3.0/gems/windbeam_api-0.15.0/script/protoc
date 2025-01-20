@@ -1,0 +1,60 @@
+#!/bin/bash
+
+set -eE
+
+trap 'error_handler' EXIT
+
+BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )/.."
+
+echoerr() {
+  printf '\e[31m%s\e[0m\n' "$@"
+}
+
+echosuccess() {
+  printf '\e[32m%s\e[0m\n' "$@"
+}
+
+error_handler() {
+  rm -rf "$BASE_PATH"/proto
+  rm -rf "$BASE_PATH/tmp"
+  exit 0
+}
+
+"$BASE_PATH"/script/bootstrap
+
+##########################################################
+############make temp repo and clone windbeam#############
+##########################################################
+
+if [ -d "$BASE_PATH/tmp" ]; then
+  rm -rf "$BASE_PATH/tmp"
+fi
+
+mkdir "$BASE_PATH/tmp"
+pushd "$BASE_PATH/tmp"
+gh repo clone github/windbeam
+
+##########################################################
+#################copy .proto files over###################
+##########################################################
+
+# The `./` makes sense here since we already used `pushd` to get into the windbeam repo
+# To test this theory, run the above commands in sequence then run `ls`. You should see
+# a directory called `windbeam`.
+mkdir -p ../proto/api/v1
+cp ./windbeam/proto/api/v1/*.proto "$BASE_PATH"/proto/api/v1
+
+# Return out to the main directory.
+popd
+
+##########################################################
+#######################run protoc#########################
+##########################################################
+
+bundle exec protoc \
+  --proto_path="$BASE_PATH" \
+  --ruby_out="$BASE_PATH/vendor" \
+  --twirp_ruby_out="$BASE_PATH/vendor" \
+  "$BASE_PATH"/vendor/proto/api/v1/*.proto
+
+echosuccess "Twirp and pb files generated"

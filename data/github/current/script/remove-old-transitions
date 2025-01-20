@@ -1,0 +1,241 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Removes obsolete transitions files.
+#
+# This command is used to determine which transition files are no longer
+# necessary in the default branch of github/github, and then remove those
+# files. The GHES release and upgrade processes require that transition files
+# are kept for two minor versions after being included in a release. For
+# example, for GHES 3.3.x we would support data transition from 3.1.0 or later.
+# That means we'll need all the transition that were added after the
+# enterprise-3.1 tag was created in the enterprise-3.3 tag. Transition that
+# were already in the tag at the time of the enterprise-3.1 tag can be deleted.
+#
+# Note: this script considers only versions starting with 2, 3, 4, and 5. There
+# are some enterprise release tags around which we don't want to consider, such
+# as "enterprise-11.10.320" and "enterprise-99.99.0", so we filter those out.
+# We are currently on major version 3, so considering only versions starting
+# with 2, 3, 4, and 5 is good enough for now. This can be adjusted below if at
+# the time when the script is run the major version is 6 or higher.
+#
+# Note: this script doesn't detect transition files which were renamed. If a
+# transition file was renamed, then it will be present in the previous GHES
+# version, but won't be present in the latest GHES version. That's not really a
+# problem since the file will be detected and removed for some following
+# version when the script is executed at a future date.
+
+require "optparse"
+require "ruby-progressbar"
+
+class ObsoleteTransitionsRemoved
+  # Consider only valid versions and versions which have a 0 patch number. So,
+  # "enterprise-2.8.0" would remain, but "enterprise-2.8.1" and "enterprise-2.8.0.gm2"
+  # wouldn't. Also, consider only major versions 2, 3, 4, and 5.
+  VALID_GHES_TAG_REGEX = /\Aenterprise-[2-5]+\.[0-9]+\.0\z/
+
+  # List of paths for files that might have references to removed transitions.
+  # We need to remove those references from these files.
+  FILES_TO_CLEANUP = ["SERVICEOWNERS", "CODEOWNERS", "package_todo.yml"]
+
+  def initialize(dry_run: false, target_version: nil)
+    if target_version
+      puts "target: '#{target_version}'"
+      raise "Target version not detected in git history!" unless all_versions.include?(target_version)
+    end
+
+    @dry_run = dry_run
+    @target_version = target_version
+  end
+
+  def dry_run?
+    !!@dry_run
+  end
+
+  def print_transitions
+    puts "Transitions to be removed:"
+    target_transitions.each do |transition|
+      puts "  #{transition}"
+    end
+  end
+
+  def remove_transitions
+    puts "Removing transitions ..."
+
+    # Stage each transition file for removal while suppressing output for both
+    # successful removals (--quiet) and unsuccessful removals (--ignore-unmatch)
+    puts "Staging removal of transition files ..."
+    delete_transitions(target_transitions)
+
+    delete_tests(target_transitions)
+
+    # Delete mentions of removed transitions in FILES_TO_CLEANUP files
+    puts "Removing mentions of transitions filenames in #{FILES_TO_CLEANUP. join ", "} files ..."
+    remove_paths_from_files(target_transitions)
+  end
+
+  def perform
+    puts "Current GHES version: #{current_version}"
+    puts "Obsolete GHES version: #{target_version}"
+
+    if target_transitions.empty?
+      puts "No transitions to remove!"
+      exit 0
+    end
+
+    if dry_run?
+      print_transitions
+    else
+      remove_transitions
+    end
+  end
+
+  def all_versions
+    # List tags which have "enterprise-*" pattern
+    # Each returned tag has a format like "enterprise-2.8.0.gm2"
+    ghes_release_tags = `git for-each-ref 'refs/tags/enterprise-*' --format "%(refname:short)"`.lines.map(&:chomp)
+
+    valid_ghes_minor_tags = ghes_release_tags.select do |ghes_tag|
+      ghes_tag =~ VALID_GHES_TAG_REGEX
+    end
+
+    valid_ghes_minor_tags.sort_by { |ghes_tag| Gem::Version.new(ghes_tag.delete_prefix("enterprise-")) }
+  end
+
+  def files_for_git_commit(committish, path)
+    files = `git ls-tree -r --name-only "#{committish}" #{path}`.lines.map(&:chomp)
+  end
+
+  def version_from_path(path)
+    File.basename(path).gsub(/_.*\z/, "")
+  end
+
+  def target_version
+    return @target_version if @target_version
+
+    ghes_tags = all_versions
+    if ghes_tags.length < 3
+      raise "Not enough valid enterprise versions found, there must be at least three."
+    end
+
+    @target_version = ghes_tags[-3]
+  end
+
+  def current_version
+    all_versions.last
+  end
+
+  def target_transitions
+    return @target_transitions if @target_transitions
+
+    transitions_for_version = files_for_git_commit(target_version, "lib/github/transitions/*.rb")
+
+    progress_bar = ProgressBar.create(
+      total: transitions_for_version.size,
+      title: "Selecting target transitions",
+      output: STDOUT,
+      throttle_rate: 1, # 1 update per second
+      format: "%a [%B] %P%% %t", # e.g. "03:45:30 [=====     ] 50.12% complete"
+    )
+    progress_bar.log("Starting transitions selection.")
+
+    @target_transitions = transitions_for_version.select do |path|
+      progress_bar.increment
+
+      transition_name = File.basename(path, ".rb")
+
+      File.file?(path) &&
+      transition_name.start_with?(/[0-9]/) &&
+      !transition_required?(transition_name)
+    end
+
+    progress_bar.finish
+
+    @target_transitions
+  end
+
+  def test_path(transition_name)
+    "test/lib/github/transitions/#{transition_name}_test.rb"
+  end
+
+  def transition_required?(transition_name)
+    # we don't care about the files we're about to clean up anyways
+    excluded_files = FILES_TO_CLEANUP.map { |filename| ":!#{filename}" }.join(" ")
+    excluded_files += " :!#{test_path(transition_name)}"
+
+    `git grep --break -I -m1 'require.*#{transition_name}' -- #{excluded_files} | head -n1 | wc -l`.chomp == "1"
+  end
+
+  def delete_transitions(paths)
+    paths.each do |path|
+      `git rm --quiet --ignore-unmatch "#{path}"`
+    end
+  end
+
+  def remove_lines(path, patterns)
+    lines = File.readlines(path)
+    File.open(path, "w") do |file|
+      lines.each do |line|
+        file.write(line) unless patterns.any? { |pattern| line =~ pattern }
+      end
+    end
+  end
+
+  def delete_tests(paths)
+    paths.each do |path|
+      transition_name = File.basename(path, ".rb")
+      `git rm --quiet --ignore-unmatch "#{test_path(transition_name)}"`
+
+      remove_paths_from_files([test_path(transition_name)])
+    end
+  end
+
+  def remove_paths_from_files(paths)
+    # Removes references to deleted transitions from FILES_TO_CLEANUP.
+    # Removal of a line from a file is done by iterating over all lines and
+    # writing back only those lines which don't match a transition path.
+
+    # Filenames will include the directory part, but SERVICEOWNERS and
+    # CODEOWNERS files don't use those sometimes and instead use a glob
+    # pattern. So, to find those transition filenames, we need to match on the
+    # basename, i.e. without the directory name.
+
+    patterns = paths.map { |path| /#{File.basename(path)}/ }
+    FILES_TO_CLEANUP.each { |path| remove_lines(path, patterns) }
+
+    # Stage updated files
+    `git add #{FILES_TO_CLEANUP.join " "}`
+  end
+end
+
+options = {}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/remove-old-transitions --target-version [version] --dry-run|--list-versions"
+
+  opts.on("--target-version VERSION", "Target a specific GHES version to be obsolete") do |version|
+    options[:target_version] = version
+  end
+
+  opts.on(
+    "--dry-run",
+    "Display target GHES version and transitions to be removed without taking action."
+  ) do
+    options[:dry_run] = true
+  end
+
+  opts.on(
+    "--list-versions",
+    "Display a list of all GHES versions under consideration."
+  ) do
+    task = ObsoleteTransitionsRemoved.new
+    task.all_versions.each { |version| puts version }
+    exit 0
+  end
+end
+parser.parse!
+
+task = ObsoleteTransitionsRemoved.new(**options)
+task.perform
+
+exit 0

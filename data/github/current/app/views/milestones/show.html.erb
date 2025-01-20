@@ -1,0 +1,179 @@
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 4 %>
+<%# `view` is an instance of Milestones::ShowView %>
+
+<%
+  page_info \
+    selected_link: :repo_issues,
+    container_xl: true,
+    title: view.page_title,
+    dashboard_pinnable_item_id: current_repository.global_relay_id
+%>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "issues" %>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <div>
+    <div class="mb-3">
+      <div class="d-flex flex-wrap flex-justify-between width-full width-md-auto milestones-flexbox-gap">
+        <%= render partial: "issues/navigation" %>
+        <div class="d-block">
+          <% if current_user_can_push? %>
+            <%= link_to "Edit milestone", edit_milestone_path(current_repository.owner, current_repository, view.milestone), :class => "btn mr-1" %>
+          <% end %>
+          <% if emu_contribution_blocked?(current_repository) %>
+            <%= render Primer::ButtonComponent.new(scheme: :primary, classes: "tooltipped tooltipped-nw", "aria-disabled": "true", "aria-label": emu_contribute_block_hint) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              New issue
+            <% end %>
+          <% else %>
+            <%= link_to "New issue", choose_issue_path(current_repository.owner, current_repository, :milestone => view.milestone.title), :class => "btn btn-primary", :data => { test_selector: "new-milestone-issue" } %>
+          <% end %>
+        </div>
+      </div>
+      <h2 class="mt-0 mb-2 h1 text-normal" data-hpc><%=view.milestone.title%></h2>
+      <div class="col-9">
+        <%= render(Primer::Beta::ProgressBar.new(size: :large, mt: 1, mb: 2, classes: "milestone-progress")) do |component| %>
+          <% component.with_item(percentage: view.milestone.progress_percentage) %>
+        <% end %>
+        <span class="mr-3 color-fg-default"><%= milestone_due_text(view.milestone) %></span>
+        <span class="color-fg-default"><strong><%=milestone_percentage_tag(view.milestone)%></strong> complete</span>
+        <% if view.milestone.description.present? %>
+          <% if view.show_description_preview? %>
+            <div class="milestone-description js-details-container Details color-fg-muted">
+              <div class="milestone-description-plaintext markdown-body mt-3 mb-0 Details-content--shown">
+                <%= view.description_preview_html %>
+              </div>
+              <div class="milestone-description-html markdown-body mt-2 mb-0 Details-content--hidden">
+                <%= view.full_description_html %>
+              </div>
+              <button type="button" aria-expanded="false" class="btn-link h5 text-normal expand-more Details-content--shown js-details-target">
+                Show more<%= render Primer::Beta::Octicon.new(icon: "chevron-down", text: :blue, ml: 1) %>
+
+              </button>
+              <button type="button" aria-expanded="true" class="btn-link h5 text-normal expand-more Details-content--hidden js-details-target">
+                Show less<%= render Primer::Beta::Octicon.new(icon: "chevron-up", text: :blue, ml: 1) %>
+              </button>
+            </div>
+          <% else %>
+            <div class="milestone-description open color-fg-muted">
+              <div class="milestone-description-html markdown-body mt-2 mb-0">
+                <%= view.full_description_html %>
+              </div>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+<div class="position-relative js-check-all-container">
+  <%= render "milestones/filter_bar", view: view %>
+
+  <% if view.show_closed_blank_slate? %>
+    <div class="Box border-top-0 rounded-top-0">
+      <%= render Primer::BlankslateComponent.new(
+        icon: "issue-opened",
+        title: "This milestone is closed.",
+        large: true,
+        spacious: true,
+      ) do %>
+        <p>No <%= view.showing_open? ? "open" : "closed" %> issues remain. View
+        <% if view.showing_open? %>
+          <a class="Link--inTextBlock" href="<%= view.milestone_path(:closed => 1) %>">closed issues</a>
+        <% else %>
+          <a class="Link--inTextBlock" href="<%= view.milestone_path %>">open issues</a>
+        <% end %>
+        or
+        <% if view.user_can_edit? %>
+          reopen the milestone and add new issues.</p>
+          <%= form_tag view.toggle_path, :method => :put do %>
+            <button type="submit" class="btn btn-primary mt-3" aria-label="Reopen the <%=view.milestone.title%> milestone" name="milestone[state]" value="open">
+              Reopen milestone
+            </button>
+          <% end %>
+        <% else %>
+          see <%= link_to "open milestones", view.milestones_path, class: "Link--inTextBlock" %> in this repository.</p><%# erblint:disable ProperTagNesting %>
+        <% end %>
+      <% end %>
+    </div>
+
+  <% elsif view.show_blank_slate? %>
+    <div class="Box border-top-0 rounded-top-0">
+      <% if view.showing_open? %>
+        <% if emu_contribution_blocked?(current_repository) %>
+          <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+            <% c.with_visual_icon(icon: "issue-opened") %>
+
+            <% c.with_heading(tag: :h2) do %>
+              There are no open issues in this milestone.
+            <% end %>
+
+            <% c.with_description do %>
+
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render Primer::BlankslateComponent.new(
+            icon: "issue-opened",
+            title: (view.milestone.closed_issue_count == 0 && view.user_can_edit? ? "You haven’t added any issues to" : "There are no open issues in") + " this milestone.",
+            description: "Add issues to milestones to help organize your work for a particular release or project.",
+            large: true,
+            spacious: true,
+          ) do %>
+            <%= link_to "Create new issue", choose_issue_path(current_repository.owner, current_repository, :milestone => view.milestone.title), :class => "btn btn-primary my-3" %>
+            <% url = issues_search_query(replace: { no: "milestone", milestone: nil }) %>
+            <p>Or find and add <a class="Link--inTextBlock" href="<%= url %>">issues with no milestone</a> in this repo.</p>
+          <% end %>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+          <% c.with_visual_icon(icon: "issue-opened") %>
+
+          <% c.with_heading(tag: :h2) do %>
+            There are no closed issues in this milestone.
+          <% end %>
+
+          <% c.with_description do %>
+            Issues will automatically be moved here when they are closed.
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+
+  <% elsif view.show_all_done? %>
+    <div class="Box border-top-0 rounded-top-0">
+      <%= render Primer::BlankslateComponent.new(
+        icon: "issue-opened",
+        title: "All issues in this milestone have been closed.",
+        large: true,
+        spacious: true,
+      ) do %>
+        <% if view.user_can_edit? %>
+          <p>Close this milestone if you have no more issues to add.</p>
+          <%= form_tag view.toggle_path, :method => :put do %>
+            <button type="submit" class="btn btn-primary mt-3" aria-label="Close the <%=view.milestone.title%> milestone" name="milestone[state]" value="closed">
+              Close milestone
+            </button>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+
+  <% else %>
+    <%= render "milestones/issue_list", view: view %>
+  <% end %>
+
+  <% if view.draggable? %>
+    <div class="protip">
+      <%= primer_octicon(:"light-bulb", color: :muted) %>
+      <strong>Tip!</strong>
+      You can use <kbd>shift</kbd>+<kbd>j</kbd> or <kbd>shift</kbd>+<kbd>k</kbd> to move items with your keyboard.
+    </div>
+  <% end %>
+</div>
+</div>
+<% end %>

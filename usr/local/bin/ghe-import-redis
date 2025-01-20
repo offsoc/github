@@ -1,0 +1,116 @@
+#!/bin/bash
+#/ Usage: ghe-import-redis [-h]
+#/
+#/ Import a backup taken with ghe-export-redis.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the Redis data from a dump file:
+#/    $ ghe-import-redis < dump-file
+#/
+#/  Transfer the Redis data from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-redis | ghe-import-redis
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ] || [ -t 0 ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+function message {
+  echo " --> ${1}"
+}
+
+wait_for_redis_to_be_ready () {
+  for ((n = 0; n < 75; n++)); do
+    ghe-redis-cli --remote -h "$GHE_REDIS_HOST" ping >/dev/null 2>&1 && return
+    sleep 1
+  done
+  return 1
+}
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+GHE_REDIS_HOST="$(ghe-config cluster.redis-master || true)"
+GHE_REDIS_CLUSTER_HOST="$(ghe-config cluster."$GHE_REDIS_HOST".hostname || true)"
+
+if [ -n "$GHE_REDIS_HOST" -a -z "$GHE_REDIS_CLUSTER_HOST" ]; then
+  GHE_REDIS_DATA="/data/user/redis.local"
+  GHE_REDIS_EXTERNAL="1"
+elif [ -n "$GHE_REDIS_HOST" ]; then
+  GHE_REDIS_DATA="/data/user/redis"
+  GHE_REDIS_EXTERNAL="1"
+else
+  GHE_REDIS_DATA="/data/user/redis"
+  GHE_REDIS_HOST="localhost"
+fi
+
+if [ -z "$GHE_REDIS_CLUSTER_HOST" ] && nomad job status -short redis | grep Status | grep -q running >/dev/null; then
+  message "Stopping redis..."
+  /usr/local/share/enterprise/ghe-nomad-local-alloc-stop redis
+fi
+
+message "Importing redis data..."
+[ -f "$GHE_REDIS_DATA/dump.rdb" ] && mv "$GHE_REDIS_DATA/dump.rdb" "$GHE_REDIS_DATA/dump.rdb.$(date +"%s").bak"
+[ -f "$GHE_REDIS_DATA/appendonly.aof" ] && mv "$GHE_REDIS_DATA/appendonly.aof" "$GHE_REDIS_DATA/appendonly.aof.$(date +"%s").bak"
+sudo -u redis dd of="$GHE_REDIS_DATA/dump.rdb" 2>/dev/null
+
+if [ -n "$GHE_REDIS_EXTERNAL" ]; then
+  ghe-redis-cli --remote -h "$GHE_REDIS_HOST" flushdb >/dev/null
+  rdb --command protocol "$GHE_REDIS_DATA/dump.rdb" | ghe-redis-cli --remote -h "$GHE_REDIS_HOST" --pipe --pipe-timeout 900 >/dev/null
+fi
+
+message "Starting redis..."
+/usr/local/share/enterprise/ghe-service-ensure-redis
+
+# remove anything older than the last 10 dump file backups.
+# don't exit non-zero if this fails for some reason.
+ls -1 -r $GHE_REDIS_DATA/dump.rdb.*.bak 2>/dev/null |
+    tail -n +10 |
+    xargs rm -f || true
+ls -1 -r $GHE_REDIS_DATA/appendonly.aof.*.bak 2>/dev/null |
+    tail -n +10 |
+    xargs rm -f || true
+
+message "Make sure redis is ready..."
+if ! wait_for_redis_to_be_ready; then
+  message "Redis service isn't available after 30 seconds, skip removing stale resque workers"
+  exit 0
+fi
+
+message "Remove stale resque worker entries..."
+# remove stale resque worker entries from jobs running during backup
+while
+  response=$(ghe-redis-cli --remote -h "$GHE_REDIS_HOST" scan $cursor match "*:worker:*")
+  cursor=$(echo "$response" | head -1 | cut -d" " -f 1 )
+  # sometimes we get an empty response or a string, which indicates a non-blocking error
+  if [ -z "$cursor" ] || ! [[ $cursor =~ ^[0-9]+$ ]]; then
+  cat <<EOF >&2
+Warning: Unexpected response from redis-cli scan command.
+Response: $response
+Cursor: $cursor
+EOF
+  # exit 3 indicates to the caller a non-blocking error
+  # backup-utils calls this script from ghe-restore-redis
+  # and warns on this exit code but continues
+  exit 3
+  fi
+
+  if [ "$(echo "$response" | wc -w)" -gt 1 ]; then
+    keys=$(echo "$response" | tr '\n' ' ' | cut -d" " -f 2-)
+    for key in $keys; do
+      ghe-redis-cli --remote -h "$GHE_REDIS_HOST" del "$key" > /dev/null
+    done
+  fi
+  [ "$cursor" -ne 0 ]
+do true
+done

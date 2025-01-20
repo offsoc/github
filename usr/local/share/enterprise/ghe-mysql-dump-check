@@ -1,0 +1,63 @@
+#!/bin/bash
+# Checks if a MySQL dump file can be used to seed a replica.
+#
+# This should only be run on the primary MySQL node.
+#
+
+set -e
+
+MYSQL_DIR="/data/user/mysql"
+DUMPFILE=$1
+
+if [[ "$1" == *.tar.gz ]]; then
+    if [[ $# -lt 1 ]] || [[ ! -f "$DUMPFILE" ]]; then
+      echo "Error: no dump file specifed or file does not exist." 1>&2
+      exit 1
+    fi
+
+    if ghe-config --true 'mysql.backup.binary'; then
+      TEMP_DIR=$(mktemp -d --tmpdir=/data/user/tmp xtrabackup_binlog.XXXXXX)
+      cd $TEMP_DIR
+      cat $DUMPFILE | sudo xbstream -x > /dev/null
+      sudo xtrabackup8 -x --decompress  --remove-original --target-dir=${TEMP_DIR}/  > /dev/null
+      sudo xtrabackup8 --prepare --target-dir=${TEMP_DIR}/ > /dev/null
+      binlog=$(cat xtrabackup_binlog_info | cut -f 1)
+    else
+      binlog=$(head -100 $DUMPFILE | grep 'CHANGE MASTER' | cut -d "'" -f 2 )
+    fi
+
+    oldest_binlog=$(basename `ls -1t /data/user/mysql/mysql-bin* | tail -n1` )
+    if [ -z "$binlog" ]; then
+      echo "No valid position found in the dump file." 1>&2
+      exit 1
+    elif [ ! -f "$MYSQL_DIR/$binlog" ]; then
+      echo "The required binlog file $binlog does not exist." 1>&2
+      exit 1
+    elif [ "$oldest_binlog" = $binlog ]; then
+      echo "The binlog file $binlog may expire soon." 1>&2
+      exit 1
+    else
+      exit 0
+    fi
+else
+  if ghe-config --true 'mysql.backup.binary'; then
+    cd $DUMPFILE
+    binlog=$(cat xtrabackup_binlog_info | cut -f 1)
+  else
+    binlog=$(head -100 $DUMPFILE | grep 'CHANGE MASTER' | cut -d "'" -f 2 )
+  fi
+
+  oldest_binlog=$(basename `ls -1t /data/user/mysql/mysql-bin* | tail -n1` )
+  if [ -z "$binlog" ]; then
+    echo "No valid position found in the dump file." 1>&2
+    exit 1
+  elif [ ! -f "$MYSQL_DIR/$binlog" ]; then
+    echo "The required binlog file $binlog does not exist." 1>&2
+    exit 1
+  elif [ "$oldest_binlog" = $binlog ]; then
+    echo "The binlog file $binlog may expire soon." 1>&2
+    exit 1
+  else
+    exit 0
+  fi
+fi

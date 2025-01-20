@@ -1,0 +1,133 @@
+<%
+  intro_text = "Two-factor authentication adds an additional layer of security to your account by requiring more than just a password to sign in."
+  orgs_with_two_factor_requirement = current_user.affiliated_organizations_with_two_factor_requirement
+%>
+
+<%= render Primer::Alpha::Dialog.new(
+  title: "Are you sure you want to disable two-factor authentication?",
+  id: "disable-two-factor-authentication-confirmation",
+  size: :large,
+) do |d| %>
+  <% d.with_header(show_divider: true, font_weight: :bold) { "Are you sure you want to disable two-factor authentication?" } %>
+  <% d.with_body do %>
+    <% if current_user.has_forthcoming_account_two_factor_requirement? %>
+      <%= render Primer::Alpha::Banner.new(scheme: :warning, mb: 3) do %>
+        Some GitHub users are <a class="Link--inTextBlock" href="<%= GitHub.blog_url %>/2023-03-09-raising-the-bar-for-software-security-github-2fa-begins-march-13/" target="_blank" rel="noopener noreferrer">now required</a> to enable two-factor authentication as an additional security measure. Your activity on GitHub includes you in this requirement.
+        You will need to re-enable two-factor authentication on your account before <%= current_user.two_factor_requirement_metadata.required_by.to_date.to_formatted_s(:long) %>, otherwise your account will be restricted on that date.
+      <% end %>
+    <% end %>
+    <div class="px-2">
+      <p class="mt-2">Two-factor authentication adds an additional layer of security to your account by requiring more than just a password to sign in.</p>
+      <p>GitHub highly recommends that you keep two-factor authentication enabled on your account. If you need to change your configuration, or generate new recovery codes, you can do that in the settings below.</p>
+    </div>
+  <% end %>
+  <% d.with_footer do %>
+    <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "disable-two-factor-authentication-confirmation" })) { "Cancel" } %>
+    <%= form_tag settings_user_2fa_disable_path, method: :post do %>
+      <%= render(Primer::Beta::Button.new(
+        type: :submit,
+        scheme: :danger,
+        autofocus: true,
+        "data-disable-with": "Disabling..."
+      )) { "Disable" } %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render Primer::Beta::Subhead.new(spacious: spacious, "data-test-selector": "two-factor-summary-header") do |component| %>
+  <% component.with_heading(id: "two-factor-authentication", tag: :h2) do %>Two-factor authentication<% end %>
+  <% if current_user.two_factor_authentication_enabled? %>
+    <% component.with_actions do %>
+      <div class="d-flex">
+        <% if current_user.two_factor_auth_can_be_disabled? %>
+          <%= render Primer::Alpha::ActionMenu.new(id: "two-factor-options", align_content: :center, anchor_align: :end) do |menu| %>
+            <% menu.with_show_button(scheme: :invisible, "aria-label": "Two-factor authentication options") { "..." } %>
+            <% menu.with_item(tag: :button, content_arguments: { "data-show-dialog-id": "disable-two-factor-authentication-confirmation" }, vertical_align: :text_top) do |item| %>
+              <% item.with_leading_visual_icon(icon: :x, color: :danger, height: 20, width: 20) %>
+              Disable two-factor authentication
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render Primer::Beta::Label.new(id: "two-factor-status", scheme: :success, tag: :div, size: :large, inline: true) do |component| %>
+            Enabled
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if current_user.in_account_2fa_requirement_warning_state? || current_user.in_account_2fa_requirement_interrupt_state? %>
+  <%= render Primer::Alpha::Banner.new(icon: :"shield-lock", my: 2, test_selector: "account-two-factor-requirement-banner") do %>
+    Because of your contributions on GitHub, two-factor authentication will be required for your account
+    <% if current_user.two_factor_requirement_metadata.nil? || current_user.two_factor_requirement_metadata.required_by.nil? %>
+      soon.
+    <% else %>
+      starting <time datetime="<%= current_user.two_factor_requirement_metadata.required_by.utc.iso8601 %>"><%= current_user.two_factor_requirement_metadata.required_by.strftime("%b %-d, %Y") %></time>.
+    <% end %>
+    Thank you for helping keep the ecosystem safe!
+    <%= link_to "Learn more about our two-factor authentication initiative", "#{GitHub.blog_url}/2023-03-09-raising-the-bar-for-software-security-github-2fa-begins-march-13/", class: "Link--inTextBlock" %>.
+  <% end %>
+<% elsif current_user.in_account_2fa_requirement_required_state? %>
+  <%= render Primer::Alpha::Banner.new(icon: :"shield-lock", my: 2, test_selector: "account-two-factor-requirement-banner") do %>
+    Because of your contributions on GitHub, two-factor authentication is required for your account. Thank you for helping keep the ecosystem safe!
+    <%= link_to "Learn more about our two-factor authentication initiative", "#{GitHub.blog_url}/2023-03-09-raising-the-bar-for-software-security-github-2fa-begins-march-13/", class: "Link--inTextBlock" %>.
+  <% end %>
+<% elsif orgs_with_two_factor_requirement.count > 0 %>
+  <%
+    orgs_allowing_2fa_disable = orgs_with_two_factor_requirement.filter { |org| org.members_without_2fa_allowed? }
+    orgs_with_role_preventing_2fa_disable = orgs_allowing_2fa_disable.filter { |org| org.admins.include?(current_user) || org.billing_manager?(current_user) }
+
+    org_2fa_banner_text = if !current_user.two_factor_authentication_enabled?
+      "One or more organizations that you belong to require two-factor authentication. You will not be able to access their resources until you enable 2FA."
+    elsif orgs_with_role_preventing_2fa_disable.count > 0
+      "Two-factor authentication can't be disabled because you have an elevated role in one or more organizations that require it."
+    elsif orgs_allowing_2fa_disable.count == orgs_with_two_factor_requirement.count
+      "One or more organizations that you belong to require two-factor authentication. Disabling 2FA will cause you to lose access to their resources until you re-enable it."
+    else
+      "Two-factor authentication can't be disabled because you belong to one or more organizations that require it."
+    end
+  %>
+
+  <%= render Primer::Alpha::Banner.new(icon: :"shield-lock", my: 2, test_selector: "organizations-with-two-factor-requirement-banner") do %>
+    <%= org_2fa_banner_text %>
+
+    Visit your <%= link_to "organization settings page", settings_organizations_path, class: "Link--inTextBlock" %> to review which organizations require 2FA.
+  <% end %>
+<% end %>
+
+<% if current_user.two_factor_authentication_enabled? %>
+  <p class="mb-3">
+    <%= intro_text %> <a class="Link--inTextBlock" href="<%= docs_url "authentication/about-two-factor" %>">Learn more about two-factor authentication</a>.
+  </p>
+
+  <%= render partial: "settings/securities/two_factor_preference" %>
+
+  <%= render partial: "settings/securities/two_factor_summary_box", locals: {
+    configuring_type: configuring_type,
+    mashed_secret: mashed_secret,
+    qr_code_image_src: qr_code_image_src,
+    dev_otp: dev_otp
+  } %>
+
+<% else %>
+  <%= render Primer::Beta::Blankslate.new do |c| %>
+    <% c.with_visual_icon(icon: "lock") %>
+
+    <% c.with_heading(tag: :h2) do %>
+      Two-factor authentication is not enabled yet.
+    <% end %>
+
+    <% c.with_description do %>
+      <%= intro_text %>
+    <% end %>
+
+    <% c.with_primary_action(href: settings_user_2fa_intro_path, data: { turbo: false }) do %>
+      Enable two-factor authentication
+    <% end %>
+
+    <% c.with_secondary_action(href: docs_url("authentication/about-two-factor"), aria: { label: "Learn more about two-factor authentication" }) do %>
+      Learn more
+    <% end %>
+  <% end %>
+<% end %>

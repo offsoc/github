@@ -1,0 +1,176 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  team_repository_count = this_team.repository_ids.count
+  team_org_role_count = this_organization.async_can_read_custom_org_roles?(current_user).sync ? OrganizationRole.assignments_for(actor: this_team, org: this_organization).count : 0
+  pending_invitations ||= this_team.pending_invitations.filter_spam_for(current_user)
+  pending_membership_requests ||= this_team.pending_team_membership_requests.filter_spam_for(current_user)
+%>
+
+<%= render "orgs/invitations/rate_limited_message", hide_close: true if !!rate_limited %>
+
+<%= render(Primer::Alpha::Dialog::Body.new) do %>
+
+  <% button_label = scim_managed_enterprise?(this_organization.business) ? "Add" : "Invite" %>
+
+  <% if this_organization.subscription.plan.per_seat? && !this_organization.has_unlimited_seats? && !scim_managed_enterprise?(this_organization.business) && this_organization.adminable_by?(current_user) %>
+    <div class="d-block text-center color-fg-muted mt-2">
+      <span><%= pluralize this_organization.total_available_seats, seat_or_license(current_organization) %> left &mdash;</span>
+      <%= more_seats_link(this_organization, self_serve_return_to: team_members_path(this_team)) %> </div>
+  <% end %>
+
+  <%= form_tag team_members_path(this_team),
+    class: "mt-4 pb-3 px-3 js-add-team-member-form #{"js-needs-interstitial" if team_repository_count > 0 || team_org_role_count > 0 }",
+    "data-action-type": "add_member" do %>
+    <% if Rails.env.development? && params[:fakestate] %>
+      <input type="hidden" name="fakestate" value="<%= params[:fakestate] %>">
+    <% end %>
+
+    <%# The warning message is added in app/assets/modules/github/orgs/members.ts. It is visible only when the guest collaborator being added to team is not a member of the org. %>
+    <%= render(Primer::Beta::Flash.new(test_selector: "team-guest-collaborator-warning", scheme: :warning, mb: 5, classes: "js-team-guest-collaborator-warning", hidden: true)) {} %>
+
+    <div class="input-group">
+      <auto-complete src="<%= team_member_suggestions_path(this_organization, this_team) %>"
+          for="team-invite-complete-results"
+          class="auto-search-group d-block">
+        <input type="text" name="member"
+          class="form-control input-block input-contrast auto-search-input new-member-field"
+          <%= "disabled" if !!rate_limited %>
+          autofocus required
+          aria-label="Search by username, full name or email address"
+          placeholder="Search by username, full name, or email address">
+        <%= primer_octicon(:person) %>
+        <ul id="team-invite-complete-results" class="invite-member-results autocomplete-results position-relative mb-2"></ul>
+      </auto-complete>
+      <div class="input-group-button v-align-top">
+        <%= render Primer::Beta::Button.new(type: :submit, scheme: :primary, classes: "js-auto-complete-button") do %><%= button_label %><% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="js-add-members-container d-flex flex-column flex-auto overflow-hidden <%= "js-needs-interstitial" if team_repository_count > 0 || team_org_role_count > 0 %>" data-url="<%= org_team_repositories_accessible_to_members_path(team_slug: this_team.slug) %>">
+    <div class="js-add-members-loading-state width-full text-center mt-3" hidden>
+      <%= render(Primer::Beta::Spinner.new(size: :large)) %>
+    </div>
+    <div class="js-add-members-modal-content flex-auto overflow-auto mb-3">
+      <% if pending_invitations.count > 0 || pending_membership_requests.count > 0 %>
+        <div class="js-manage-memberships-container">
+          <div class="mx-3 border-bottom">
+            <div class="clearfix">
+              <nav class="manage-memberships-nav" aria-label="Invites">
+                <div class="manage-memberships-tabs-item js-manage-invitations-tabs-item color-fg-muted no-wrap float-left pb-3 mr-4 <%= "selected" if pending_invitations.count > 0 %>">
+                  Invitations
+                  <%= render Primer::Beta::Counter.new(count: pending_invitations.count) %>
+                </div>
+
+                <div class="manage-memberships-tabs-item js-manage-requests-tabs-item color-fg-muted no-wrap float-left pb-3 <%= "selected" if pending_invitations.count == 0 %>">
+                  Requests
+                  <%= render Primer::Beta::Counter.new(count: pending_membership_requests.count) %>
+                </div>
+              </nav>
+            </div>
+          </div>
+
+          <ul class="team-invitations-list js-manage-invitations-list list-style-none px-3 <%= "d-none" if pending_invitations.count == 0 %>">
+            <% if pending_invitations.count > 0 %>
+              <% pending_invitations.each do |invitation| %>
+                <% if invitation.email.present? %>
+                  <li class="list-item d-flex flex-items-baseline py-3 border-bottom">
+
+                    <span class="mr-2 color-fg-muted">
+                      <%= primer_octicon(:mail, :height => 28, classes: "avatar invite-icon") %>
+                    </span>
+
+                    <div class="flex-auto">
+                      <span class="team-member-username css-truncate css-truncate-target text-bold">
+                        <%= invitation.email %>
+                      </span>
+                    </div>
+
+                    <%= render Primer::Beta::Button.new(tag: :a, href: org_edit_email_invitation_path(org: this_organization.display_login, email: invitation.email), size: :small) do %>Edit invitation<% end %>
+                  </li>
+                <% else %>
+                  <% invitee = invitation.invitee %>
+                  <li class="list-item d-flex flex-items-baseline py-3 border-bottom">
+
+                    <a href="<%= user_path(invitee) %>" itemprop="url">
+                      <img class="<%= avatar_class_names(invitee) %> mr-2" src="<%= invitee.primary_avatar_url %>" alt="<%= invitee.display_login %>" width="28" height="28">
+                    </a>
+
+                    <div class="flex-auto">
+                      <a class="team-member-username text-bold Link--primary no-underline mr-1" href="<%= user_path(invitee) %>">
+                        <%= invitee.name || invitee.display_login %>
+                      </a>
+
+                      <span class="mt-1 mb-0 text-small color-fg-muted text-normal" itemprop="name">
+                        <%= invitee.display_login %>
+                      </span>
+                    </div>
+
+                    <% if this_organization.adminable_by?(current_user) %>
+                      <%= render Primer::Beta::Button.new(tag: :a, href: org_edit_invitation_path(org: this_organization.display_login, invitee_login: invitee.display_login), size: :small, classes: "edit-invitation") do %>Edit invitation<% end %>
+                    <% end %>
+                  </li>
+                <% end %>
+              <% end %>
+            <% else %>
+              <li class="pt-4 pb-1 color-fg-muted text-center">There are no pending invitations.</li>
+            <% end %>
+          </ul>
+
+          <ul class="team-requests-list js-manage-requests-list list-style-none mx-3 <%= "d-none" if pending_invitations.count > 0 %>">
+            <% if pending_membership_requests.count > 0 %>
+              <% pending_membership_requests.each do |request| %>
+                <% requester = request.requester %>
+                <li class="list-item d-flex flex-items-center py-3 border-bottom">
+                  <span class="mr-2">
+                    <a href="<%= user_path(requester) %>" itemprop="url">
+                      <img class="<%= avatar_class_names(requester) %>" src="<%= requester.primary_avatar_url %>" width="28" height="28" alt="<%= requester.display_login %>">
+                    </a>
+                  </span>
+
+                  <div class="flex-auto">
+                    <a class="team-member-username text-bold no-underline mr-1 Link--primary v-align-middle" href="<%= user_path(requester) %>">
+                      <%= requester.name ||requester.display_login %>
+                    </a>
+
+                    <div class="mt-1 mb-0 text-small color-fg-muted text-normal d-inline-block v-align-middle" itemprop="login">
+                      <%= requester.display_login %>
+                    </div>
+                  </div>
+
+                  <div class="BtnGroup no-wrap flex-shrink-0">
+                    <%=
+                      button_to(
+                        "Approve",
+                        approve_team_membership_request_path(
+                          requester: requester.display_login,
+                          return_to: local_assigns[:return_to]),
+                        method: "post",
+                        class: "btn btn-sm BtnGroup-item",
+                        form: { "data-action-type" => "approve_request", "data-return-to" => local_assigns[:return_to] },
+                        form_class: "BtnGroup-parent js-approve-membership-request",
+                        "data-member-name": requester.display_login )
+                    %>
+                    <%=
+                      button_to(
+                        "Deny",
+                        deny_team_membership_request_path(
+                          requester: requester.display_login,
+                          return_to: local_assigns[:return_to]),
+                        method: "post",
+                        class: "btn btn-sm BtnGroup-item",
+                        form_class: "BtnGroup-parent")
+                    %>
+                  </div>
+                </li>
+              <% end %>
+            <% else %>
+              <li class="pt-4 pb-1 color-fg-muted text-center">There are no pending requests to join.</li>
+            <% end %>
+          </ul>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% end %>

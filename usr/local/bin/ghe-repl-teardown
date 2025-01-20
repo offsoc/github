@@ -1,0 +1,430 @@
+#!/bin/bash
+#/ Usage: ghe-repl-teardown [-huv] [hostname|uuid]
+#/
+#/ Remove replica configuration from the current instance by reversing ghe-repl-setup.
+#/ If a hostname is provided, remove that replica from the current configuration.
+#/ If a UUID is provide with the [-u] option, remove that replica from the configuration.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -u | --uuid        Remove replica by UUID
+#/   -v | --verbose     Run with verbose output.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+export GHE_CMD_RUN_ID=${GHE_CMD_RUN_ID:-"$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)"}
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+HOSTNAME=
+prompt_less=
+quick_teardown=
+forced=false
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,uuid,help,yes,quick,force --options vuhy -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -u|--uuid)
+      remove_by_uuid=1
+      shift
+      ;;
+    -v|--verbose)
+      GHE_REPL_VERBOSE=true
+      shift
+      ;;
+    -y|--yes)
+      prompt_less=1
+      shift
+      ;;
+    --quick)
+      quick_teardown=1
+      shift
+      ;;
+    -f|--force)
+      forced=true
+      shift
+      ;;
+    --)
+      export HOSTNAME=$2
+      shift
+      break
+      ;;
+  esac
+done
+
+. ghe-repl-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+trap cleanup EXIT
+check_for_config_run
+
+remove_consul_node_config() {
+  hostname=$1
+
+  if [ "$REPL_STATE" = "replica" ]; then
+    primary_datacenter=$(primary_ssh "ghe-config cluster.primary-datacenter" || true)
+  else
+    primary_datacenter=$(ghe-config cluster.primary-datacenter || true)
+  fi
+
+  if [ -n "$primary_datacenter" ]; then
+    consul kv delete -recurse -datacenter="$primary_datacenter" "ghe/cluster/nodes/$hostname" || true
+  fi
+}
+
+cluster_cleanup_node() {
+  # If $1 is not UUID formatted assume it is a hostname, then get UUID for that hostname's node
+  if [[ ${1//-/} =~ ^[[:xdigit:]]{32}$ ]]; then
+    uuid=$1
+  else
+    uuid=$(ghe-config "cluster.$1.uuid")
+    if [ -z "$uuid" ]; then
+      echo "Failed to find UUID for $1"
+      exit 1
+    fi
+  fi
+
+  ghe-spokesctl server set evacuating git-server-"$uuid" 'Removing replica' || true
+  # Need to manually set git-server node to offline in order to properly destroy
+  /usr/local/share/enterprise/github-mysql "UPDATE fileservers SET online = 0 WHERE host = 'git-server-$uuid';" || true
+  ghe-spokesctl server destroy git-server-"$uuid" || true
+
+  ghe-storage destroy-host storage-server-"$uuid" --force || true
+
+  ghe-dpages offline pages-server-"$uuid" || true
+  ghe-dpages remove pages-server-"$uuid" || true
+
+  ghe-aqueduct delete_queue --queue maint_git-server-"$uuid" --force || true
+}
+
+failed_consul_nodes() {
+  # The header row from `consul members` returns in the following order:
+  # Node  Address  Status  Type  Build  Protocol  DC  Partition  Segment
+  consul members -wan -status=failed | tail -n +2 | awk -- '{ print $1 }'
+}
+
+teardown_mssql_from_primary() {
+  teardown_all=$1
+  replica_hostname=$2
+
+  # return early if actions has never been enabled
+  if ! actions-ever-enabled; then
+    return 0
+  fi
+
+  if ! ghe-config --true app.actions.enabled; then
+    # Best effort try to make sure mssql container is running on the primary an actions disabled system
+    echo "Making sure MSSQL container is running on primary to tear down replication for disabled Actions service"
+    start-mssql-global || true
+    wait-mssql-local-with-restart-alloc || true
+  fi
+
+  if $teardown_all ; then
+    # If we are tearing down the last replica, drop the availability group
+    ghe-mssql-console -y -q "DROP AVAILABILITY GROUP ha" || true
+  else
+    # We aren't dropping the last replica, drop the target replica from MSSQL availability group if needed
+    # This only really applies in a forced (unresponsive replica) scenario when they didn't run ghe-repl-stop first
+
+    # Determine if the replica currently exists in the availability group
+    query_output=$(ghe-mssql-console -y -n -q "
+      SELECT ar.replica_server_name, ars.role_desc
+      FROM sys.availability_replicas ar, sys.dm_hadr_availability_replica_states ars
+      WHERE ar.replica_id = ars.replica_id AND ar.replica_server_name = N'$replica_hostname'")
+
+    # If it does exist, it means they didn't run ghe-repl-stop first and we need to remove it
+    if echo "$query_output" | grep -q "$replica_hostname"; then
+      ghe-mssql-console -y -q "ALTER AVAILABILITY GROUP [ha] REMOVE REPLICA ON N'$replica_hostname';"
+    fi
+  fi
+
+  if ! ghe-config --true app.actions.enabled; then
+    echo "Stopping primary MSSQL container after dropping HA group, Actions is disabled"
+    stop-mssql-global || true
+  fi
+}
+
+if [ -n "$HOSTNAME" ]; then
+  if [ "$REPL_STATE" = "replica" ]; then
+    echo "$HOSTNAME can only be removed from the primary node ($PRIMARY_IP)."
+    exit 1
+  fi
+  if [ -n "$remove_by_uuid" ]; then
+    if grep -q "$HOSTNAME" /data/user/common/uuid; then
+      echo "This server is $HOSTNAME and cannot be removed"
+      exit 1
+    fi
+    for i in $(ghe-cluster-nodes 2>&1); do
+      if ghe-config --get cluster.$i.uuid | grep -q $HOSTNAME; then
+        echo "$HOSTNAME exists in cluster configuration and should be removed by name, not UUID"
+        exit 1
+      fi
+    done
+
+    cluster_cleanup_node "$HOSTNAME"
+    exit 0
+  fi
+  if ! ghe-cluster-nodes --replica | grep -q $HOSTNAME; then
+    echo "Unknown replica: $HOSTNAME"
+    exit 1
+  fi
+else
+  ensure_replica_stopped
+fi
+acquire_repl_lock
+
+# Whether to enable set -x debug output.
+: ${GHE_REPL_VERBOSE:=false}
+export GHE_REPL_VERBOSE
+
+if [[ $(ghe-cluster-nodes --replica | wc -l) -gt 1 ]]; then
+  teardown_all=false
+else
+  teardown_all=true
+fi
+
+if [ ! -f /etc/github/cluster ]; then
+  echo "Replication was not set up on this host." >&2
+  exit 1
+else
+  # Remove cluster configuration
+  if [ "$(repl_role)" = "primary" ] && [ -n "$HOSTNAME" ]; then
+    if [ -z "$quick_teardown" ] && ! replica_uuid="$(ghe-config --get "cluster.$HOSTNAME.uuid")"; then
+      echo "The $HOSTNAME cannot be torn down because the UUID value is missing from the cluster.conf file."
+      echo "To remove the $HOSTNAME configuration, re-run this command with the --quick option:"
+      echo "ghe-repl-teardown --quick $*"
+      exit 1
+    fi
+    if ! $teardown_all; then
+      if [ -z "$prompt_less" ]; then
+        echo "WARNING: You are about to remove $HOSTNAME from the replication configuration."
+        read -p "This node will no longer be accessible. Are you sure? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+          exit 1
+        fi
+      fi
+      ghe-config --remove-section cluster.$HOSTNAME
+      remove_consul_node_config "$HOSTNAME"
+      /usr/local/share/enterprise/ghe-cluster-config-update || true
+    else
+      if [ -z "$prompt_less" ]; then
+        echo "WARNING: You are about to remove the last node from the replication configuration."
+        read -p "This will teardown replication. Are you sure? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+          exit 1
+        fi
+      fi
+
+      sudo rm -f /etc/github/cluster /data/user/common/cluster.conf
+
+      consul kv delete ghe/cluster/ha
+      consul kv delete ghe/cluster/primary-datacenter
+
+      # Remove the state directory to ensure a clean start for elasticsearch
+      # as primary is becoming a single instance
+      /usr/local/share/enterprise/ghe-repl-es-teardown
+
+      sudo systemctl start ghe-dc-setup
+    fi
+
+    # Cleans up replica from MSSQL availability group if needed
+    teardown_mssql_from_primary "$teardown_all" "$HOSTNAME"
+
+    # Clean up the removed replica from spokes, storage and dpages, unless it's a quick teardown
+    if [ -z "$quick_teardown" ]; then
+      cluster_cleanup_node "$replica_uuid"
+    fi
+
+    ghe-config-apply
+
+  else # We're on a replica
+    if ! primary_reachable; then
+      echo "Warning: Primary node is unavailable." >&2
+      echo "Warning: Performing teardown without cleaning up on the primary side." >&2
+      forced=true
+    fi
+
+    replica_hostname=$(cat /etc/github/cluster)
+    replica_uuid=$(cat /data/user/common/uuid)
+
+    # Remove ssh public key from known_hosts
+    REPLICA_IP=$(primary_ssh echo \$SSH_CLIENT | awk '{ print $1 }' || true) # self
+    for node in $(ghe-cluster-nodes --replica --ip -x | cut -f2); do # for each replica excluding self
+      # on self, remove replica's public key from known_hosts
+      ssh-keygen -R "[${node}]:122" > /dev/null 2>&1 || true
+      if [ -n "$REPLICA_IP" ]; then
+        # on replica, remove self's public key from known_hosts
+        ssh_cmd "${node}" ssh-keygen -R "[${REPLICA_IP}]:122" > /dev/null 2>&1 || true
+      fi
+    done
+
+    # before removing cluster config sections, shut of extra services for the node
+    if ghe-config --true "cluster.$(cat /etc/github/cluster).active-replica-server"; then
+      /usr/local/share/enterprise/ghe-nomad-local-alloc-stop github-unicorn || true
+    fi
+
+    # move this step above ghe-nomad-cleanup
+    # Clean up MySQL-related replication configuration before nomad is down
+    if [ "$REPL_STATE" = "replica" ]; then
+      if ! is_service_external "mysql" ; then
+        # Clean up MySQL-related replication configuration
+        ghe-repl-teardown-mysql $teardown_all || {
+          echo "WARNING: MySQL replication is not running. ghe-repl-start was not run. Proceeding with teardown"
+        }
+      elif ghe-config --get-regex "cluster-external-mysql.$(cat /etc/github/cluster)"; then
+        ghe-config --remove-section "cluster-external-mysql.$(cat /etc/github/cluster)"
+      fi
+
+      if $teardown_all && actions-ever-enabled; then
+        if ! ghe-config --true app.actions.enabled; then
+          # Best effort try to make sure mssql container is running on the primary an actions disabled system
+          echo "Making sure MSSQL container is running on primary to tear down replication for disabled Actions service"
+          primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && start-mssql-global && wait-mssql-local-with-restart-alloc" || true
+        fi
+        primary_ssh "ghe-mssql-console -y -q \"DROP AVAILABILITY GROUP ha\"" > /dev/null || true
+
+        if ! ghe-config --true app.actions.enabled; then
+          echo "Stopping primary MSSQL container after dropping HA group, Actions is disabled"
+          primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && stop-mssql-global" || true
+        fi
+      fi
+    fi
+
+    ghe-nomad-cleanup -y
+
+    if ! $teardown_all; then
+      ghe-config --remove-section cluster.$(cat /etc/github/cluster)
+      /usr/local/share/enterprise/ghe-cluster-config-update || true
+    else
+      primary_ssh "sudo rm -f /etc/github/cluster /data/user/common/cluster.conf" || true
+    fi
+
+    # Clean up the removed replica from spokes, storage and dpages, unless it's a quick teardown
+    if [ -z "$quick_teardown" ]; then
+      remove_consul_node_config "$replica_hostname"
+      #shellcheck disable=SC2034
+      primary_ssh "$(typeset -f cluster_cleanup_node); cluster_cleanup_node $replica_uuid" || true
+    fi
+
+    sudo rm -f /etc/github/cluster /data/user/common/cluster.conf
+    /usr/local/share/enterprise/ghe-repl-es-teardown || true
+
+    sudo systemctl start ghe-dc-setup
+
+    if $teardown_all; then
+      # Remove the state directory to ensure a clean start for elasticsearch
+      # as primary is becoming a single instance
+      primary_ssh "/usr/local/share/enterprise/ghe-repl-es-teardown" || true
+    fi
+    primary_ssh "GHE_CONFIG_APPLY_RUN_ID=$GHE_CONFIG_APPLY_RUN_ID ghe-config-apply" || true
+
+    n=0
+    while [ -z "$(failed_consul_nodes)" ]; do
+      if [ $n -gt 60 ]; then
+        break
+      fi
+      sleep 1
+      n=$((n + 1))
+    done
+
+    detected_failed_nodes=false
+    while read -r node; do
+      detected_failed_nodes=true
+      echo "Consul member $node failed; removing it from the cluster"
+      # Sometimes consul fails to find $node (presumably it's already removed from the WAN pool, but that's just a conjecture),
+      # but in that case it shouldn't hurt to continue even if force-leave doesn't finish succesfully.
+      # (See https://github.com/github/enterprise2/pull/27914/files#r784229329 for additional details).
+      consul force-leave -prune -wan "$node" || true
+    done < <(failed_consul_nodes)
+
+    if [ "$detected_failed_nodes" = true ]; then
+      sudo systemctl restart consul
+    fi
+  fi
+fi
+
+if [ "$REPL_STATE" = "replica" ]; then
+
+  # clean up replication state
+  sudo rm -f /etc/github/repl-{state,remote}
+  sudo rm -f /data/user/replica-mode-cluster
+
+  if $teardown_all; then
+    primary_ssh "sudo rm -f /etc/github/repl-{state,remote}" || true
+  fi
+
+  # restart memcached if running to ensure a fresh cache on repl promote
+  # https://github.com/github/enterprise2/issues/3859
+  sudo nomad stop memcached &> /dev/null || true
+  sudo nomad run /etc/nomad-jobs/memcached/memcached.hcl &> /dev/null || true
+
+  # start enterprise-manage
+  sudo systemctl start enterprise-manage 2>/dev/null || true
+
+  # Put back the preflight page
+  LOADING=1 /usr/share/rbenv/versions/current/bin/erb /usr/local/share/enterprise/preflight.html.erb | sudo tee /data/github/current/public/index.html >/dev/null
+  # Remove the replication placeholder page
+  sudo rm -f /data/enterprise-manage/current/public/index.html
+
+  if ! $forced; then
+    # remove elasticsearch exclusion settings for replica
+    primary_ssh 'curl -s -o /dev/null -X PUT "localhost:9200/_cluster/settings?pretty" \
+      -H "Content-Type: application/json" \
+      -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"\" } }"'
+
+    # remove all exclusions from list
+    primary_ssh 'curl -s -X DELETE "localhost:9200/_cluster/voting_config_exclusions?wait_for_removal=false"'
+  fi
+else
+  # remove elasticsearch exclusion settings for replica
+  curl -s -o /dev/null -X PUT "localhost:9200/_cluster/settings?pretty" \
+    -H "Content-Type: application/json" \
+    -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"\" } }"
+
+  # remove all exclusions from list
+  curl -s -X DELETE "localhost:9200/_cluster/voting_config_exclusions?wait_for_removal=false"
+
+  if $teardown_all; then
+    sudo rm -f /etc/github/repl-{state,remote} || true
+  fi
+fi
+
+if [ "$REPL_STATE" = "replica" ]; then
+  if $teardown_all; then
+    es_set_primary_auto_expand "0-1"
+  fi
+else
+  if $teardown_all; then
+    es_set_local_auto_expand "0-1"
+  fi
+fi
+
+{ set +x; } 2>/dev/null
+
+if $teardown_all; then
+  echo "Success: Replication configuration has been removed."
+else
+  if [ -n "$HOSTNAME" ]; then
+    echo "Success: Replication configuration has been removed for $HOSTNAME."
+  else
+    echo "Success: Replication configuration has been removed on this node."
+  fi
+fi
+
+if $teardown_all && [ -z "$HOSTNAME" ]; then
+  echo "Run \`ghe-repl-setup' to re-enable replica mode."
+fi

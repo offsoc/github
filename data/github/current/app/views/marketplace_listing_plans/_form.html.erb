@@ -1,0 +1,374 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  plan = local_assigns[:marketplace_listing_plan]
+  free_trial_length = "#{Billing::Subscription::FREE_TRIAL_LENGTH / (60 * 60 * 24)} day"
+  bullets_left = if plan
+    plan.remaining_bullet_count
+  else
+    Marketplace::ListingPlanBullet::BULLET_LIMIT_PER_LISTING_PLAN
+  end
+
+  lock_name = plan ? !plan.can_change_name? : false
+  lock_pricing = plan && !plan.can_change_pricing?
+
+  pricing_locked_message = "Pricing cannot be updated because this listing is live"
+%>
+
+<% if plan&.draft? %>
+  <div class="Box p-3 my-3 color-bg-subtle d-flex flex-items-center flex-justify-between">
+    <div>
+      <div class="CircleIcon mr-2">
+        <%= render(Primer::Beta::Octicon.new(icon: "pencil")) %>
+      </div>
+      <span class="text-bold">Draft</span>
+    </div>
+  </div>
+<% end %>
+
+<div class="Box js-marketplace-edit-plan-container">
+  <div class="Box-header p-0 border-bottom-0">
+    <div class="tabnav px-2 pt-2 mb-0">
+      <nav class="tabnav-tabs" aria-label="Foo bar">
+        <button type="button" class="tabnav-tab selected js-marketplace-plan-editor-toggle">Plan editor</button>
+        <button type="button" class="tabnav-tab js-marketplace-plan-preview-toggle">Preview</button>
+      </nav>
+    </div>
+  </div>
+  <div class="Box-body">
+    <div class="anim-fade-in js-marketplace-edit-plan-editor">
+      <dl class="form-group my-0 required">
+        <dt><label for="plan-name">Plan name</label>
+          <% if lock_name %>
+            <span>
+              <%= primer_octicon(:lock, color: :muted, mr: 1) %> Name cannot be updated because this listing is live
+            </span>
+          <% end %>
+        </dt>
+        <dd>
+          <input class="form-control width-full js-marketplace-plan-name-field" type="text" <%= "readonly" if lock_name %> value="<%= plan.name if plan %>" name="marketplace_listing_plan[name]" id="plan-name" maxlength="<%= Marketplace::ListingPlan::NAME_MAX_LENGTH %>" required>
+        </dd>
+      </dl>
+      <div class="clearfix">
+        <div class="col-6 float-left pr-3">
+          <dl class="form-group mb-1 required">
+            <dt><label for="price-model">Pricing model</label>
+              <% if lock_pricing %>
+                <span>
+                  <%= primer_octicon(:lock, color: :muted, mr: 1) %> <%= pricing_locked_message %>
+                </span>
+              <% end %>
+            </dt>
+            <dd>
+              <% plan_name = plan&.price_model ? plan.price_model.titleize.humanize : "Free" %>
+              <% plan_description = capture do %>
+
+                <div class="text-normal f6">
+                  <% if plan&.price_model == "FLAT_RATE" %>
+                    Example: $10 / month
+                  <% elsif plan&.price_model == "PER_UNIT" %>
+                    Example: $10 per user / month
+                  <% elsif plan&.price_model == "DIRECT_BILLING" %>
+                    Use your own billing system
+                  <% else %>
+                    This plan will cost nothing. Free trials will be disabled.
+                  <% end %>
+                </div>
+              <% end %>
+              <% if lock_pricing %>
+                <input type="radio" checked hidden name="price_model" class="js-listing-plan-option" value="<%= plan&.price_model ? plan.price_model.underscore.upcase : "FREE" %>">
+                <div class="py-2 px-3 border rounded-2 color-border-default" <%= test_selector("lock_plan_changes") %>>
+                  <%= plan_name %>
+                  <%= plan_description %>
+                </div>
+              <% else %>
+              <details class="details-reset details-overlay select-menu width-full position-relative">
+                <%= render Primer::ButtonComponent.new(tag: :summary, w: :full) do %>
+                  <span data-menu-button><%= plan_name %></span>
+                  <div class="dropdown-caret float-right mt-2"></div>
+                <% end %>
+
+                <details-menu class="select-menu-modal width-full position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <div class="select-menu-list">
+                    <label tabindex="0" class="select-menu-item width-full" aria-checked="<%= !plan || plan.price_model == "FREE" %>" role="menuitemradio">
+                      <input class="js-listing-plan-option" type="radio" value="FREE" name="price_model" <% if !plan || plan.price_model == "FREE" %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span class="select-menu-item-heading" data-menu-button-text>Free</span>
+                        <span class="description text-normal f6">This plan will cost nothing. Free trials will be disabled.</span>
+                      </div>
+                    </label>
+                    <label tabindex="0" class="select-menu-item width-full" aria-checked="<%= plan.present? && plan.price_model == "FLAT_RATE" %>" role="menuitemradio">
+                      <input class="js-listing-plan-option" type="radio" value="FLAT_RATE" name="price_model" <% if plan.present? && plan.price_model == "FLAT_RATE" %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span class="select-menu-item-heading" data-menu-button-text>Flat rate</span>
+                        <span class="description text-normal f6">Example: $10 / month</span>
+                      </div>
+                    </label>
+                    <label tabindex="0" class="select-menu-item width-full" aria-checked="<%= plan.present? && plan.price_model == "PER_UNIT" %>" role="menuitemradio">
+                      <input class="js-listing-plan-option" type="radio" value="PER_UNIT" name="price_model" <% if plan.present? && plan.price_model == "PER_UNIT" %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span class="select-menu-item-heading" data-menu-button-text>Per unit</span>
+                        <span class="description text-normal f6">Example: $10 per user / month</span>
+                      </div>
+                    </label>
+                    <% if marketplace_listing.direct_billing_enabled? %>
+                      <label tabindex="0" class="select-menu-item width-full" aria-checked="<%= plan.present? && plan.price_model == "DIRECT_BILLING" %>" role="menuitemradio">
+                        <input class="js-listing-plan-option" type="radio" value="DIRECT_BILLING" name="price_model" <% if plan.present? && plan.price_model == "DIRECT_BILLING" %>checked<% end %>>
+                        <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                        <div class="select-menu-item-text">
+                          <span class="select-menu-item-heading" data-menu-button-text>Direct billing</span>
+                          <span class="description text-normal f6">Use your own billing system</span>
+                        </div>
+                      </label>
+                    <% end %>
+                  </div>
+                </details-menu>
+              </details>
+              <% end %>
+            </dd>
+          </dl>
+        </div>
+        <div class="col-6 float-left pl-3 js-marketplace-plan-edit-unit" hidden>
+          <dl class="form-group mb-1 js-marketplace-plan-edit-unit" hidden>
+            <dt>
+              <label for="plan-unit-name">Name of the unit</label>
+              <% if lock_pricing %>
+                <span>
+                  <%= primer_octicon(:lock, color: :muted, mr: 1) %> %= pricing_locked_message %>
+                </span>
+              <% end %>
+            </dt>
+            <dd>
+              <input maxlength="<%= Marketplace::ListingPlan::UNIT_NAME_MAX_LENGTH %>"
+              <%= "readonly" if lock_pricing %>
+              class="form-control width-full js-marketplace-plan-unit-name-field js-marketplace-plan-unit-field-group"
+              type="text"
+              value="<%= plan.unit_name if plan %>"
+              name="marketplace_listing_plan[unitName]"
+              id="plan-unit-name"
+              <%= "required" if plan&.per_unit %>
+              <%= "disabled" unless plan&.unit_allowed? %>>
+              <p class="note mb-0">Example: user, seat, or person</p>
+            </dd>
+          </dl>
+        </div>
+      </div>
+      <div class="clearfix pt-3 pb-2 text-bold js-marketplace-plan-enable-free-trial" hidden>
+        <input type="checkbox" class="js-marketplace-free-trial-field js-marketplace-plan-free-trial-field-group" id="has_free_trial" name="has_free_trial" <% if plan&.has_free_trial? %>checked<% end %> <%= "disabled" unless plan&.free_trial_allowed? %>>
+        <label for="has_free_trial">Enable <%= free_trial_length %> free trial for this plan</label>
+      </div>
+      <div class="clearfix js-marketplace-plan-edit-price" hidden>
+        <hr>
+        <div class="col-6 float-left pr-3">
+          <dl class="form-group mt-0 mb-1">
+            <dt>
+              <label for="plan-price-per-month">Price <span class="js-marketplace-plan-edit-unit" hidden>per unit </span>/ month</label>
+              <% if lock_pricing %>
+                <span>
+                  <%= primer_octicon(:lock, color: :muted, mr: 1) %> <%= pricing_locked_message %>
+                </span>
+              <% end %>
+            </dt>
+            <dd class="marketplace-plan-dollar-field-container js-marketplace-plan-dollar-field-container">
+              <div class="d-flex flex-items-center">
+                <input type="hidden" name="monthly_price_in_dollars" value="0">
+                <span class="d-inline-block pr-1">$</span><input class="form-control js-marketplace-plan-monthly-price-field js-marketplace-plan-dollar-field js-marketplace-plan-price-field-group" style="width: 80px;"
+                  <%= "readonly" if lock_pricing %>
+                  type="number" min="0" step="1" pattern="\d+" required
+                  value="<%= plan ? plan.monthly_price_in_dollars : 0 %>"
+                  name="monthly_price_in_dollars" id="plan-price-per-month"
+                  <% unless plan&.prices_allowed? %>disabled<% end %>>
+                <span class="d-inline-block no-wrap color-fg-muted"><span class="js-marketplace-plan-edit-unit" hidden>per unit </span>/ month</span>
+              </div>
+              <p class="note price-note color-fg-danger">Must be a whole dollar amount</p>
+            </dd>
+          </dl>
+        </div>
+        <div class="col-6 float-left pl-3">
+          <dl class="form-group mt-0 mb-1">
+            <dt>
+              <label for="plan-price-per-year">Price <span class="js-marketplace-plan-edit-unit" hidden>per unit </span>/ year</label>
+              <% if lock_pricing %>
+                <span>
+                  <%= primer_octicon(:lock, color: :muted, mr: 1) %> <%= pricing_locked_message %>
+                </span>
+              <% end %>
+            </dt>
+            <dd class="marketplace-plan-dollar-field-container js-marketplace-plan-dollar-field-container">
+              <div class="d-flex flex-items-center">
+                <input type="hidden" name="yearly_price_in_dollars" value="0">
+                <span class="d-inline-block pr-1">$</span><input class="form-control js-marketplace-plan-yearly-price-field js-marketplace-plan-dollar-field js-marketplace-plan-price-field-group" style="width: 80px;"
+                  <%= "readonly" if lock_pricing %>
+                  type="number" min="0" step="1" pattern="\d+" required
+                  value="<%= plan ? plan.yearly_price_in_dollars : 0 %>"
+                  name="yearly_price_in_dollars" id="plan-price-per-year"
+                  <% unless plan&.prices_allowed? %>disabled<% end %>>
+                <span class="d-inline-block no-wrap color-fg-muted"><span class="js-marketplace-plan-edit-unit" hidden>per unit </span>/ year</span>
+              </div>
+              <p class="note price-note color-fg-danger">Must be a whole dollar amount</p>
+            </dd>
+          </dl>
+        </div>
+      </div>
+
+      <div class="clearfix">
+        <div class="col-6 float-left pr-3">
+          <dl class="form-group mb-1 required">
+            <dt>
+              <label>Available for</label>
+            </dt>
+            <dd>
+              <details class="select-menu details-reset details-overlay width-full position-relative">
+                <summary class="btn select-menu-button text-left width-full">
+                  <span class="css-truncate css-truncate-target pricing-model-selector js-plan-for-account-type" data-menu-button>
+                    <% if plan&.for_users_only? %>
+                      Personal accounts only
+                    <% elsif plan&.for_organizations_only? %>
+                      Organizations only
+                    <% else %>
+                      Personal accounts and organizations
+                    <% end %>
+                  </span>
+                </summary>
+
+                <details-menu class="select-menu-modal position-absolute width-full" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <div class="select-menu-list">
+                    <label tabindex="0" role="menuitemradio" class="select-menu-item" aria-checked="<%= !plan || !(plan.for_users_only? || plan.for_organizations_only?) %>">
+                      <input type="radio" name="for_account_type" value="USERS_AND_ORGANIZATIONS" <% if !plan || !(plan.for_users_only? || plan.for_organizations_only?) %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span data-menu-button-text class="select-menu-item-heading">Personal accounts and organizations</span>
+                        <span class="description">This plan can be subscribed to by both personal users and organizations</span>
+                      </div>
+                    </label>
+                    <label tabindex="0" role="menuitemradio" class="select-menu-item" aria-checked="<%= plan.present? && plan.for_users_only? %>">
+                      <input type="radio" name="for_account_type" value="USERS_ONLY" <% if plan.present? && plan.for_users_only? %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span data-menu-button-text class="select-menu-item-heading">Personal accounts only</span>
+                        <span class="description">This plan can only be subscribed to by personal user accounts only</span>
+                      </div>
+                    </label>
+                    <label tabindex="0" role="menuitemradio" class="select-menu-item" aria-checked="<%= plan.present? && plan.for_organizations_only? %>">
+                      <input type="radio" name="for_account_type" value="ORGANIZATIONS_ONLY" <% if plan.present? && plan.for_organizations_only? %>checked<% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                      <div class="select-menu-item-text">
+                        <span data-menu-button-text class="select-menu-item-heading">Organizations only</span>
+                        <span class="description">This plan can only be subscribed to by organizations only</span>
+                      </div>
+                    </label>
+                  </div>
+                </details-menu>
+              </details>
+            </dd>
+          </dl>
+        </div>
+      </div>
+
+      <hr>
+      <dl class="form-group required">
+        <dt><label for="plan-short-desc">Short description</label></dt>
+        <dd><input class="form-control width-full js-marketplace-plan-description-field" type="text" value="<%= plan.description if plan %>" name="marketplace_listing_plan[description]" id="plan-short-desc" required></dd>
+      </dl>
+      <% if plan %>
+        <% plan.bullets.each_with_index do |bullet, i| %>
+          <dl class="form-group">
+            <dt><label for="plan-bullet-<%= i %>-desc">Plan bullet <%= i + 1 %></label></dt>
+            <dd><input class="form-control short js-marketplace-plan-bullet-field" type="text" value="<%= bullet.value %>" name="bullet_values_<%= bullet.id %>" id="plan-bullet-<%= i %>-desc"></dd>
+          </dl>
+        <% end %>
+        <% bullets_left.times do |i| %>
+          <dl class="form-group">
+            <dt><label for="plan-bullet-<%= i + plan.bullets.size %>-desc">Plan bullet <%= i + 1 + plan.bullets.size %></label></dt>
+            <dd><input class="form-control short js-marketplace-plan-bullet-field" type="text" value="" name="bullet_values[]" id="plan-bullet-<%= i + plan.bullets.size %>-desc"></dd>
+          </dl>
+        <% end %>
+      <% else %>
+        <% bullets_left.times do |i| %>
+          <dl class="form-group">
+            <dt><label for="plan-bullet-<%= i %>-desc">Plan bullet <%= i + 1 %></label></dt>
+            <dd><input class="form-control short js-marketplace-plan-bullet-field" type="text" value="" name="bullet_values[]" id="plan-bullet-<%= i %>-desc"></dd>
+          </dl>
+        <% end %>
+      <% end %>
+    </div>
+
+    <div class="js-marketplace-edit-plan-preview position-relative overflow-hidden color-bg-default rounded-2 color-shadow-large p-4 mb-3 d-none anim-fade-in">
+      <div class="position-absolute top-0 left-0 width-full color-bg-accent-emphasis pt-1"></div>
+      <div class="col-2 float-right pl-3">
+        <div style="background-color: #<%= marketplace_listing.bgcolor %>" class="CircleBadge CircleBadge--small box-shadow-none">
+          <img src="<%= marketplace_listing.primary_avatar_url(106) %>" class="CircleBadge-icon" alt="<%= marketplace_listing.name %> logo preview">
+        </div>
+      </div>
+      <div class="lh-condensed color-fg-muted text-small"><%= marketplace_listing.name %></div>
+      <h3 class="f2 text-normal lh-condensed mb-2">
+        <span class="js-marketplace-plan-name"></span>
+      </h3>
+      <p class="mb-3 lh-condensed js-marketplace-plan-description"></p>
+      <p class="lh-condensed"><%= primer_octicon(:organization, color: :accent, mr: 2) %> For <span class="js-marketplace-plan-for-account-type"></span></p>
+      <ul class="list-style-none mb-4 js-marketplace-plan-bullets">
+      </ul>
+      <div class="border-top border-bottom py-2 mb-3 d-flex flex-items-center flex-justify-between js-marketplace-plan-dollars-container d-none">
+        <div class="d-none js-marketplace-plan-per-unit-info">
+          <input disabled class="form-control input-contrast mr-2" type="number" value="1" style="width:60px"><span class="d-none js-marketplace-plan-unit-name"></span>(s) in this plan
+        </div>
+        <div class="d-flex flex-items-center">
+          <span class="pr-2">
+            <span class="f2">$</span><span class="f2 js-marketplace-plan-monthly-dollars"></span>
+          </span>
+          <span class="lh-condensed-ultra">
+            <span class="color-fg-muted text-small d-none marketplace-plan-unit-name-preview js-marketplace-plan-unit-name"></span><span class="color-fg-muted text-small d-block">/ month</span>
+          </span>
+        </div>
+
+        <div class="d-flex flex-wrap flex-items-center d-none">
+          <span class="pr-2">
+            <span class="f2">$</span><span class="f2 js-marketplace-plan-yearly-dollars"></span>
+          </span>
+          <span class="lh-condensed-ultra">
+            <span class="color-fg-muted text-small d-none marketplace-plan-unit-name-preview js-marketplace-plan-unit-name"></span><span class="color-fg-muted text-small d-block">/ year</span>
+          </span>
+        </div>
+      </div>
+      <div class="TableObject">
+        <div class="TableObject-item v-align-middle">
+          <div class="js-marketplace-free-trial-container d-none">
+            <%= render Primer::ButtonComponent.new(scheme: :primary, px: 6, py: 2, disabled: true) do %>Try free for <%= free_trial_length.pluralize %><% end %>
+          </div>
+          <div class="js-marketplace-no-trial-container d-none">
+            <%= render Primer::ButtonComponent.new(scheme: :primary, px: 6, py: 2, disabled: true) do %>Buy with GitHub<% end %>
+          </div>
+          <div class="js-marketplace-direct-billing-container d-none">
+            <%= render Primer::ButtonComponent.new(scheme: :primary, px: 6, py: 2, disabled: true) do %>Setup with <%= marketplace_listing.name %><% end %>
+          </div>
+        </div>
+        <div class="TableObject-item TableObject-item--primary v-align-middle" style="white-space:normal;">
+          <p class="text-small color-fg-muted ml-3 mb-0 lh-condensed">Next: Confirm your installation location and payment information.</p>
+        </div>
+      </div>
+
+      <template class="js-marketplace-plan-bullet-template">
+        <li class="mb-2">
+          <%= primer_octicon(:check, mr: 2, color: :success) %>
+          <span class="js-marketplace-plan-bullet"></span>
+        </li>
+      </template>
+    </div>
+  </div>
+
+  <% if !plan&.published? %>
+    <div class="Box-footer">
+      <%= render(Primer::Beta::Button.new(
+        type: :submit,
+        scheme: :primary,
+        disabled: plan.nil?,
+        "data-disable-invalid": "",
+      )) do |_button|
+        "Save draft"
+      end %>
+    </div>
+  <% end %>
+</div>

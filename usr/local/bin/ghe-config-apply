@@ -1,0 +1,63 @@
+#!/bin/bash
+#/ Usage: ghe-config-apply [-h]
+#/
+#/ This utility applies Management Console settings, reloads system services,
+#/ prepares a storage device, reloads application services, and runs any pending
+#/ database migrations on all nodes in a multi node environment.
+#/  It is equivalent to clicking Save settings in the Management Console's web UI
+#/
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/
+set -e
+
+usage () {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+# Always run as admin user.
+[ "$(whoami)" = "admin" ] || {
+    exec sudo -u admin "$0" "$@"
+    exit 1
+}
+
+declare -a passthrough
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      passthrough+=("$arg")
+      ;;
+  esac
+done
+
+if ghe-config --true config-apply.lightweight.enabled; then
+  export GHE_CONFIG_APPLY_FORCE=${GHE_CONFIG_APPLY_FORCE:-""}
+else
+  export GHE_CONFIG_APPLY_FORCE=${GHE_CONFIG_APPLY_FORCE:-"1"}
+fi
+
+export GHE_CONFIG_APPLY_RUN_ID=${GHE_CONFIG_APPLY_RUN_ID:-$(echo $RANDOM | md5sum | head -c 16)}
+export GHE_CMD_RUN_ID=${GHE_CMD_RUN_ID:-"$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)"}
+
+TS_FORMAT='%Y-%m-%dT%H:%M:%S%z'
+
+if [ -f /etc/github/cluster ]; then
+  if ghe-config --true cluster.ha; then
+    export HA_CLUSTER=1
+  fi
+  ghe-cluster-config-apply "${passthrough[@]}"
+
+else
+  ghe-single-config-apply "${passthrough[@]}"
+fi
+
+LOGFILE=/data/user/common/ghe-config.log
+# Archive current configuration
+# stderr goes to console and appended to LOGFILE, stdout just goes to the LOGFILE
+# both get prepended with the timestamp
+sudo ghe-config-archive -s 2> >(ts "$TS_FORMAT" | tee -a $LOGFILE) 1> >(ts "$TS_FORMAT" >> $LOGFILE)

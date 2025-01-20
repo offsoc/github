@@ -1,0 +1,142 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-repl-teardown [options]
+#/
+#/ Back up the current cluster configuration and unconfigure high-availability on the primary cluster
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -v                 Run with verbose output
+#/   -y                 Do not show the warning prompt
+#/
+set -euo pipefail
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-repl-lib
+source /usr/local/share/enterprise/ghe-cluster-repl-lib
+
+############################################################################################################
+# CAUTION - Do not change/set any of the following values unless directed to by GitHub Enterprise support. #
+############################################################################################################
+SKIP_CONFIG_CHECK=${SKIP_CONFIG_CHECK:-"false"}
+SKIP_CONFIG_APPLY=${SKIP_CONFIG_APPLY:-"false"}
+SKIP_DATACENTER_CHECK=${SKIP_DATACENTER_CHECK:-"false"}
+SKIP_CONFIGURE_CONSUL=${SKIP_CONFIGURE_CONSUL:-"false"}
+CMD_NAME="ghe-cluster-repl-teardown"
+PROCEED_PROMPT_MESSAGE_WARNING="Warning: You are about to unconfigure high-availability on this cluster."
+PROCEED_PROMPT_MESSAGE_DESC="This will tear down replication on the active Replica cluster and apply the new configuration."
+PROCEED_PROMPT_MESSAGE="${PROCEED_PROMPT_MESSAGE_WARNING} ${PROCEED_PROMPT_MESSAGE_DESC}"
+skip_prompt="false"
+############################################################################################################
+
+## Exit codes
+# 2 - usage
+# 30 - sanity check failed
+
+usage() {
+  usage_core
+}
+
+get_opts() {
+  while getopts "hvy" OPTION; do
+    case $OPTION in
+      h)
+        usage
+        exit 0
+        ;;
+      v)
+        set -x
+        ;;
+      y)
+        skip_prompt="true"
+        ;;
+      \?)
+        usage
+        exit 2
+        ;;
+    esac
+  done
+}
+
+sanity_check() {
+  echo "Started sanity check"
+
+  sanity_check_core
+  core_exit_code=$?
+  if [ "$core_exit_code" -ne 0 ]; then
+    exit "$core_exit_code"
+  fi
+
+  # Check if datacenter of node is not the same as cluster.primary-datacenter
+  if [ "$SKIP_DATACENTER_CHECK" != "true" ]; then
+    local this_host
+    this_host="$(hostname)"
+
+    local current_host_dc
+    current_host_dc="$(ghe-config "cluster.${this_host}.datacenter")"
+
+    # Check if datacenter of node is the not the same as cluster.primary-datacenter
+    if [ "$current_host_dc" != "$(ghe-config cluster.primary-datacenter)" ]; then
+      echo "[ Error ] Cannot perform cluster teardown on replica, please run on primary cluster." >&2
+      exit 30
+    fi
+  fi
+
+  echo "Finished sanity check"
+}
+
+# Check the configuration is valid before attempting a teardown.
+check_initial_cluster_configuration() {
+  echo "Started initial cluster configuration check"
+  check_cluster_configuration_core
+  echo "Finished initial cluster configuration check"
+}
+
+proceed_check() {
+  if [ "$skip_prompt" != "true" ]; then
+    proceed_check_core "$PROCEED_PROMPT_MESSAGE"
+  fi
+}
+
+backup_cluster_configuration() {
+  backup_cluster_configuration_core "$CMD_NAME"
+}
+
+# Update the cluster configuration to purge all references to the replica datacenter.
+update_cluster_configuration() {
+  echo "Started teardown configuration updates"
+  # Unconfigure all nodes in the replica datacenter.
+  replica_dc="$(get_failover_datacenter)"
+  unconfigure_nodes_in_datacenter "$replica_dc"
+
+  # In the top level cluster section:
+  # delete the redis-master-replica and mysql-master-replica key value pairs
+  ghe-config --unset cluster.redis-master-replica
+  ghe-config --unset cluster.mysql-master-replica
+
+  echo "Finished teardown configuration updates"
+}
+
+check_updated_cluster_configuration() {
+  echo "Started updated cluster configuration check"
+  date | sponge /data/user/common/cluster-repl-teardown-occurred
+  check_cluster_configuration_core
+  echo "Finished updated cluster configuration check"
+}
+
+apply_cluster_configuration() {
+  apply_cluster_configuration_core
+}
+
+main() {
+  get_opts "$@"
+
+  sanity_check
+  check_initial_cluster_configuration
+  proceed_check
+  backup_cluster_configuration
+  update_cluster_configuration
+  check_updated_cluster_configuration
+  apply_cluster_configuration
+  echo "ghe-cluster-repl-teardown complete"
+}
+
+main "$@"

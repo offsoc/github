@@ -1,0 +1,49 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-pages [-hjnv]
+#/
+#/ Check the status of the Pages service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+start_output "pages"
+
+pages_status=$(ghe-dpages replication-status || true)
+online_hosts=$(mysql_query "SELECT * FROM pages_fileservers WHERE online = 1;" || true)
+
+for hostname in $(ghe-cluster-nodes -r pages); do
+  uuid=$(ghe-config "cluster.$hostname.uuid")
+  if echo "$online_hosts" | grep -q "pages-server-$uuid"; then
+    check_result "$hostname" "pages-host-online" "ok"
+  else
+    check_result "$hostname" "pages-host-online" "error" "Pages server (pages-server-$uuid) not marked online"
+  fi
+done
+
+mysql_master=$(/usr/local/share/enterprise/ghe-call-configrb mysql_master)
+if [ -n "$pages_status" ]; then
+  count="$(total_error_counts "$pages_status" "under/over-replicated pages")"
+  if [ "$count" -gt 0 ]; then
+    check_result "$mysql_master" "pages-replication" "warn" "$count unsynchronized sites"
+  elif [ "$count" -eq 0 ]; then
+    check_result "$mysql_master" "pages-replication" "ok" "Pages replication in sync"
+  fi
+else
+  check_result "$mysql_master" "pages-replication" "error" "Pages replication has stopped"
+fi
+
+end_output "pages"

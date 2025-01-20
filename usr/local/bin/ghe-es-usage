@@ -1,0 +1,92 @@
+#!/bin/bash
+#/ Usage: ghe-es-usage [OPTIONS] [INDEX...]
+#/
+#/ Calculate disk usage of indices in elasticsearch.
+#/
+#/ OPTIONS:
+#/   -h | --help             Show this message
+#/   -s | --summarize        Display only a total
+#/   -H | --human-readable   Print sizes in human readable format
+#/
+#/ EXAMPLES:
+#/   ghe-es-usage -H
+#/   ghe-es-usage pull-requests-11
+#/   ghe-es-usage -s -H commits-* issues-* audit_log-* labels-* gists-*
+#/
+set -ef
+
+# Default options
+searches=()
+humanize=""
+summarize=""
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h|--help)
+			usage
+			;;
+		-sH|-Hs)
+			summarize="true"
+			humanize="true"
+			;;
+		-s|--summarize)
+			summarize="true"
+			;;
+		-H)
+			humanize="true"
+			;;
+		-*)
+			usage
+			;;
+		*)
+			searches+=("$1")
+			;;
+	esac
+	shift
+done
+
+if [ ${#searches} -eq 0 ]; then
+	searches=('*')
+fi
+
+humanize() {
+	echo "$1" | numfmt --to iec
+}
+
+report=$(curl -sS "http://localhost:9200/_cat/indices?bytes=b&h=store.size,index")
+readarray -t LINES <<< "$report"
+
+#shellcheck disable=SC2053
+for search in "${searches[@]}"; do
+	if [ -n "$summarize" ]; then
+		sum=0
+		for line in "${LINES[@]}"; do
+			read -r bytes key <<< "$line"
+			if [[ $key != $search ]]; then continue ; fi
+			sum=$((sum + bytes))
+		done
+		if [ -n "$humanize" ]; then
+			hsum="$(humanize "$sum")"
+			echo -e "$hsum\t$search"
+		else
+			echo -e "$sum\t$search"
+		fi
+	else
+		for line in "${LINES[@]}"; do
+			read -r bytes key <<< "$line"
+			if [[ $key != $search ]]; then continue ; fi
+
+			if [ -n "$humanize" ]; then
+				hbytes="$(humanize "$bytes")"
+				echo -e "$hbytes\t$key"
+			else
+				echo -e "$bytes\t$key"
+			fi
+		done
+	fi
+done

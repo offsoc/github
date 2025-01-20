@@ -1,0 +1,74 @@
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%-
+  before_comment_id = params[:before_comment_id]
+  after_comment_id = params[:after_comment_id]
+  permalink_comment_id = params[:permalink_comment_id]
+  gist = timeline_marker
+  forward_in_time_pagination = local_assigns[:forward_in_time_pagination]
+
+  comments = gist.timeline_for(current_user,
+                               since: discussion_last_modified_at,
+                               before_comment_id: before_comment_id,
+                               after_comment_id: after_comment_id,
+                               permalink_comment_id: permalink_comment_id,
+                               forward_in_time_pagination: forward_in_time_pagination)
+  oldest_loaded_comment_id = comments.present? ? comments.first.id : nil
+-%>
+
+<%# discussion_last_modified_at is only set when creating a new comment, in which case we don't want to show the button to load older comments %>
+<% if comments.present? && (oldest_loaded_comment_id > gist.comments.first.id) && !discussion_last_modified_at && !after_comment_id %>
+  <%= form_tag "#{user_gist_path(gist.user_param, gist)}/load_comments", :method => :get,
+      :class => "ajax-pagination-form js-ajax-pagination" do %>
+    <%= hidden_field_tag :partial, "gists/timeline_marker" %>
+    <%= hidden_field_tag :before_comment_id, oldest_loaded_comment_id %>
+    <%= hidden_field_tag :mark_as_unread, "0" %>
+    <%= button_tag "Load earlier comments...", class: "ajax-pagination-btn", data: { :"disable-with" => "Loading..." } %>
+  <% end %>
+<% end %>
+
+<% if forward_in_time_pagination %>
+  <% comments.first(Gist::COMMENTS_PER_PAGE).each do |comment| %>
+    <div class="TimelineItem d-block js-comment-container">
+      <div class="avatar-parent-child TimelineItem-avatar d-none d-md-block">
+        <%= linked_avatar_for(comment.user, 40) %>
+      </div>
+      <%= render Gists::CommentComponent.new(
+          comment: comment,
+          gist: gist) %>
+    </div>
+  <% end %>
+<% else %>
+  <% comments.each do |comment| %>
+    <div class="TimelineItem d-block js-comment-container">
+      <div class="avatar-parent-child TimelineItem-avatar d-none d-md-block">
+        <%= linked_avatar_for(comment.user, 40) %>
+      </div>
+      <%= render Gists::CommentComponent.new(
+          comment: comment,
+          gist: gist) %>
+    </div>
+  <% end %>
+<% end %>
+
+<% if forward_in_time_pagination && comments.present? && comments.size > Gist::COMMENTS_PER_PAGE && !discussion_last_modified_at %>
+  <%= form_tag "#{user_gist_path(gist.user_param, gist)}/load_comments", :method => :get,
+      :class => "ajax-pagination-form js-ajax-pagination mb-5" do %>
+    <%= hidden_field_tag :partial, "gists/timeline_marker" %>
+    <%= hidden_field_tag :after_comment_id, comments[-1]&.id %>
+    <%= hidden_field_tag :mark_as_unread, "0" %>
+    <%= button_tag "Load later comments...", class: "ajax-pagination-btn mt-0", data: { :"disable-with" => "Loading..." } %>
+  <% end %>
+<% end %>
+
+<% unless before_comment_id.present? %>
+<% updated_at = gist.timeline_updated_at_for(current_user) %>
+<!-- Rendered timeline since <%= updated_at.to_formatted_s(:db) %> -->
+<div id="partial-timeline-marker"
+      class="js-timeline-marker js-updatable-content"
+      data-last-modified="<%= updated_at.httpdate %>"
+      <% if flash[:ga_gist_comment] %>
+        data-ga-load="Gist, Comment, <%= gist.visibility %> <%= gist.ownership %>"
+      <% end %>
+      >
+</div>
+<% end %>

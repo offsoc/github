@@ -1,0 +1,51 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-negotiate-version <application> [version]
+#/
+#/ Verifies external application requirements.
+#/
+#/ <application>    The application to verify.
+#/
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  system "grep '^#/' '#{__FILE__}' | cut -c 4-"
+  exit 2
+end
+app = ARGV[0]
+version = ARGV[1]
+
+app_key = app.to_s.gsub("-", "_").to_sym
+
+enterprise_version = \
+  `. /etc/github/enterprise-release 2>/dev/null; echo "$RELEASE_VERSION"`.strip
+if !$?.success? || enterprise_version.to_s.empty?
+  abort "Could not read GitHub Enterprise Server version!"
+end
+
+MINIMUM_APP_VERSIONS = {
+  backup_utils: enterprise_version.sub(/(\d+\.\d+)\.(.+)/, '\1.0'), # X.Y.0 release is the minimum required
+}
+
+minimum_version = MINIMUM_APP_VERSIONS[app_key]
+abort "#{app} has no known minimum version!" unless minimum_version
+
+unless version
+  puts minimum_version
+  exit
+end
+
+unless Gem::Version.correct? version
+  abort "Cannot parse version: '#{version}'!"
+end
+version = Gem::Version.new version
+minimum_version = Gem::Version.new minimum_version
+
+if version.release < minimum_version
+  abort "#{app} #{minimum_version} or greater is required!"
+end
+
+puts <<-EOS
+GitHub Enterprise Server version #{enterprise_version}
+#{app} #{version} is supported.
+EOS
+exit

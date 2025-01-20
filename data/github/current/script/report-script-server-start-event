@@ -1,0 +1,40 @@
+#!/usr/bin/env ruby
+# typed: true
+# frozen_string_literal: true
+
+require_relative "dx/events/hydro/schemas/dotcom_codespaces/v0/script_usage_pb"
+require_relative "dx/events/hydro_client"
+
+start_time = Time.at(ARGV[0].to_i)
+bootstrap_required = !ARGV[1].to_i.zero?
+exit_code = ARGV[2].to_i
+
+runtime = if ENV["MULTI_TENANT_ENTERPRISE"].present?
+  "MULTI_TENANT_ENTERPRISE"
+elsif File.exist?("tmp/runtime/current")
+  File.read("tmp/runtime/current").chomp.upcase
+elsif ENV["ENTERPRISE"]
+  "ENTERPRISE"
+else
+  "DOTCOM"
+end
+
+message_params = {
+  script_executed: "SERVER_STARTUP",
+  started_at: start_time,
+  completed_at: Time.now,
+  runtime: runtime,
+  bootstrap_required: bootstrap_required,
+  exit_code: Google::Protobuf::Int32Value.new(value: exit_code),
+}
+
+message = ::Hydro::Schemas::DotcomCodespaces::V0::ScriptUsage.new(**message_params)
+
+payload = {
+  events: [
+    schema: "dotcom_codespaces.v0.ScriptUsage",
+    value: message.to_json({ preserve_proto_fieldnames: true })
+  ]
+}.to_json
+
+DX::Events::HydroClient.report_event(payload)

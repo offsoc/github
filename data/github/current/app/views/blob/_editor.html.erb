@@ -1,0 +1,488 @@
+<%# erblint:counter DeprecatedComponentsCounter 15 %>
+<%# erblint:counter ButtonComponentMigrationCounter 4 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# rubocop:disable GitHub/DeprecatedViewHelpers %>
+<%# `view` is Blob::EditorView %>
+
+<% if stack_template_file? || workflow_yaml_file? || dependabot_yaml_file? || dev_container_file? %>
+  <template id="yaml-lint-template">
+    <div class="Box Box--condensed text-small color-shadow-large js-yaml-lint">
+      <div class="js-yaml-lint-header Box-row markdown-body f6">
+        <p class="mb-0 text-bold js-yaml-lint-title"></p>
+        <p class="color-fg-muted js-yaml-lint-subtitle">Did you mean <%= render Primer::ButtonComponent.new(scheme: :link, variant: :small) do %>todo-here<% end %>?</p>
+      </div>
+      <div class="Box-footer color-bg-subtle markdown-body f6 js-yaml-lint-message"></div>
+      <div class="Box-footer color-bg-subtle js-yaml-lint-fixes">
+        <select class="form-select select-sm" aria-label="Suggested fixes">
+          <option>Other suggestions…</option>
+        </select>
+      </div>
+    </div>
+  </template>
+<% end %>
+
+<% if dependabot_yaml_file? %>
+ <% content_for :scripts do # rubocop:disable GitHub/ContentFor %>
+    <%= javascript_bundle "dependabot-editor" %>
+  <% end %>
+<% end %>
+
+<% if workflow_yaml_file? %>
+  <span id="workflow-short-sha-warning-url" class="d-none" data-help-url="<%= GitHub.help_url %>/actions/learn-github-actions/security-hardening-for-github-actions#using-third-party-actions"></span>
+  <span id="workflow-on-schedule-url" class="d-none" data-on-schedule-url="<%= GitHub.help_url %>/actions/reference/workflow-syntax-for-github-actions#onschedule"></span>
+  <span id="workflow-dispatch-help-url" class="d-none" data-help-url="<%= GitHub.help_url %>/actions/reference/events-that-trigger-workflows#workflow_dispatch"></span>
+  <span id="workflow-shell-help-url" class="d-none" data-help-url="<%= GitHub.help_url %>/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsshell"></span>
+
+ <% content_for :scripts do # rubocop:disable GitHub/ContentFor %>
+    <%= javascript_bundle "workflow-editor" %>
+  <% end %>
+
+  <% if GitHub.enterprise? && !current_repository.actions_disabled? %>
+    <div
+      class="js-workflow-editor-no-runners-registered-container"
+      data-check-readiness-path="<%= repository_actions_settings_check_readiness_path %>"
+      hidden>
+      <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, icon: "alert", mx: [nil, nil, nil, 3], mt: 3, mb: 0)) do %>
+        This workflow will fail until runners are configured for the repository. Finish setting up GitHub Actions by <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/actions/hosting-your-own-runners/adding-self-hosted-runners">adding runners</a>.
+      <% end %>
+    </div>
+  <% end %>
+<% end %>
+
+<% if dev_container_file? %>
+ <% content_for :scripts do # rubocop:disable GitHub/ContentFor %>
+    <%= javascript_bundle "devcontainer-editor" %>
+  <% end %>
+<% end %>
+
+<% fullscreen = params["fullscreen"].present? %>
+
+<% if view.blob.present? && view.blob.transcoding_necessary? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, icon: "alert")) do %>
+    We’ve detected the file encoding as <strong><%= view.blob.detected_encoding %></strong>. When you commit changes we will transcode it to <strong>UTF-8</strong>.
+  <% end %>
+<% end %>
+<% if view.blob.present? && view.blob.has_mixed_line_endings? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, icon: "alert")) do %>
+    We’ve detected the file has mixed line endings. When you commit changes we will normalize them to <strong>Windows-style</strong> (<kbd>CR</kbd><kbd>LF</kbd>).
+  <% end %>
+<% end %>
+
+<div class="d-flex flex-column height-full position-relative">
+  <div class="breadcrumb d-flex flex-shrink-0 flex-items-center<%= ' px-3 px-sm-6 px-lg-3' if responsive? || blob_fullwidth? %><%= ' py-3' if blob_fullwidth? %>">
+    <% if fullscreen %>
+      <a href="/" aria-label="Homepage" data-ga-click="Header, go to dashboard, icon:logo">
+        <%= primer_octicon(:"mark-github", height: 28, color: :default, mr: 2) %>
+      </a>
+    <% end %>
+    <% if view.action == "delete" %>
+      <%= breadcrumb_trail params[:path] %>
+    <% else %>
+      <span class="js-breadcrumb-container d-flex flex-items-center flex-wrap flex-auto">
+        <% if fullscreen %>
+          <span class="f3"><%= link_to current_repository.owner, user_path(current_repository.owner) %></span>
+          <span class="separator">/</span>
+        <% end %>
+        <%= breadcrumb_trail view.proposed_path.to_a,
+          :linkify_last => view.linkify_last,
+          :turbo_frame => "repo-content-turbo-frame",
+          :hide_filename => view.hide_filename %>
+
+        <input type="text" class="form-control js-detect-filename-language js-blob-filename js-breadcrumb-nav mr-1 mt-1 mt-sm-0 col-12 width-sm-auto" name="filename"
+        value="<%= view.filename_for_display %>" placeholder="Name your file…" aria-label="Name your file…"
+        data-language-detection-url="<%= detect_blob_language_path %>"
+        <% if view.new_file? %>
+          data-new-file
+          autofocus
+        <% end %>
+        >
+
+        <div class=" js-branch-name-label-container d-flex flex-items-center">
+          <span> in </span>
+          <%= link_to(view.quick_pull_base, tree_path("", view.quick_pull_base, current_repository), title: view.quick_pull_base, class: "branch-name css-truncate css-truncate-target ml-1", style: "max-width: 320px", **repo_turbo_frame_attr(hash: true, flagged: true)) %>
+        </div>
+
+        <% if responsive? %>
+          <% if !workflow_yaml_file? && !dev_container_file? && !blob_fullwidth? %>
+            <div class="flex-auto"></div>
+            <span><%= render Primer::ButtonComponent.new(tag: :a, href: view.cancel_url, display: [:none, nil, :inline_block], **repo_turbo_frame_attr(hash: true, flagged: true)) do %>Cancel changes<% end %></span>
+          <% end %>
+        <% else %>
+          <% if !view.new_file? %>
+            <%= render Primer::Beta::ClipboardCopy.new(for: "blob-edit-path", "aria-label": "Copy file path to clipboard", mr: 1, ml: 0, display: :inline_block, classes: "btn btn-sm") %>
+          <% end %>
+          <span class="editor-abort">or <%= link_to "cancel changes", view.cancel_url, class: "Link--inTextBlock", **repo_turbo_frame_attr(hash: true, flagged: true) %></span>
+        <% end %>
+      </span>
+
+      <div class="js-gitignore-template js-template-suggestion d-flex flex-shrink-0 flex-justify-end f5 flex-items-center<%= " hide-sm hide-md hide-lg" if responsive? %> <% unless view.show_gitignore_picker_on_load? %> d-none<% end %>" data-template-suggestion-pattern="^(.+\/)?\.gitignore$">
+        <div class="mx-2">Want to use a <span class="text-mono f6">.gitignore</span> template?</div>
+        <%= render :partial => "blob/gitignore_menu" %>
+      </div>
+      <% if GitHub.license_picker_enabled? && view.license_picker_available? %>
+        <div class="js-template-suggestion d-flex flex-shrink-0 flex-justify-end<%= " hide-sm hide-md" if responsive? %> <% unless view.show_license_picker_on_load? %> d-none<% end %>" data-template-suggestion-pattern="^(.+\/)?(licen[sc]e|copying)(-)?(-\D+)?($|\.)">
+          <% if current_user_can_push? %>
+            <%= render Primer::ButtonComponent.new(tag: :a, display: [nil, nil, :inline_block], ml: 2, "data-template-button": "", href: license_tool_path(branch: view.quick_pull_base)) do %>Choose a license template<% end %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if view.code_of_conduct_picker_available? %>
+        <div class="js-template-suggestion d-flex flex-auto flex-justify-end<%= " hide-sm hide-md" if responsive? %> <% unless view.show_code_of_conduct_picker_on_load? %> d-none<% end %>" data-template-suggestion-pattern="^(code.?of.?conduct|coc)($|\.)">
+          <%= render Primer::ButtonComponent.new(tag: :a, size: :small, "data-template-button": "", href: code_of_conduct_tool_path) do %>Choose a code of conduct template<% end %>
+        </div>
+      <% end %>
+
+      <input id="blob-edit-path" type="hidden" name="new_filename" class="js-new-filename-field" value="<%= view.proposed_path.for_display %>">
+      <div class="d-none">
+        <%# Avoid introducing whitespace within the following nodes: %>
+        <span class="js-crumb-template js-path-segment"><a href="" <%= repo_turbo_frame_attr(flagged: true) %>><span>REPLACEME</span></a></span>
+        <span class="separator js-crumb-separator">/</span>
+      </div>
+
+    <% end %>
+  </div>
+
+  <% if view.funding_file_callout_enabled? %>
+    <div class="js-template-suggestion px-3 mt-3 <%= "hide-sm hide-md" if responsive? %> <% unless view.show_funding_template_callout_on_load? %>d-none<% end %>" data-template-suggestion-pattern="^FUNDING\.yml$">
+      <%= render(Primer::Beta::Flash.new) do %>
+        <p>
+          <code>.github/FUNDING.yml</code> shows the community how to support this project.
+
+          Please see our
+          <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/displaying-a-sponsor-button-in-your-repository">repository funding links documentation</a>
+          for more information on formatting and what is and isn't allowed in this file.
+        </p>
+
+        <% unless current_repository.repository_funding_links_enabled? %>
+          <p>
+            Please note that funding links are currently <em>disabled</em> on this repository. Visit
+            <%= link_to "repository settings", edit_repository_path(current_repository), class: "Link--inTextBlock" %>
+            to enable display of your funding links.
+          </p>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% view.issue_template_banner.each do |banner| %>
+    <div class="js-template-suggestion px-3 mt-3 <%= "hide-sm hide-md" if responsive? %> d-none" data-template-suggestion-pattern="<%= banner[:file_path] %>">
+      <%= render(Primer::Beta::Flash.new(variant: "#{banner[:variant]}".to_sym)) do %>
+        <p>
+          <%= banner[:text] %>
+          <% if banner[:documentation] %>
+            Looks like this file is an <b>issue template</b>. Need help? Check out the <%= link_to("documentation.", "#{GitHub.help_url}/articles/about-issue-and-pull-request-templates", class: "Link--inTextBlock") %>
+          <% end %>
+        </p>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if current_user.custom_slash_commands_enabled? %>
+    <div class="js-template-suggestion <%= "d-none" unless custom_slash_command? %>"
+      data-template-suggestion-pattern="^(\.github\/commands\/.+\.(yaml|yml))"
+    >
+      <%= render(ConfigAsCode::TemplateDescriptionComponent.new(
+        "Alpha",
+        "custom slash command",
+        custom_slash_commands_docs_url,
+        mode: :edit,
+        hide: responsive? ? :sm : nil,
+        mx: 3,
+        mt: custom_slash_command? ? 0 : 3,
+        mb: custom_slash_command? ? 3 : 0,
+      )) %>
+    </div>
+  <% end %>
+
+  <div class="js-template-suggestion px-3 mt-3 <%= "hide-sm hide-md" if responsive? %> d-none" data-template-suggestion-pattern="^(\.github\/ISSUE_TEMPLATE\/config)">
+    <%= render(Primer::Beta::Flash.new) do %>
+      <p>
+        Looks like this file is an <b>issue template config</b>. Need help? Check out the <%= link_to("documentation.", "#{GitHub.help_url}/articles/configuring-issue-templates-for-your-repository#configuring-the-template-chooser", class: "Link--inTextBlock") %>
+      </p>
+    <% end %>
+  </div>
+
+  <% if view.profile_readme_callout_enabled? %>
+    <div class="<%= class_names(
+      "js-template-suggestion px-3 mt-3",
+      "hide-sm hide-md" => responsive?,
+      "d-none" => !view.show_profile_readme_callout_on_load?
+      ) %>"
+      data-template-suggestion-pattern="^(README.md)$">
+      <%= render(Primer::Beta::Flash.new(scheme: :success)) do %>
+        <div class="d-flex flex-justify-between">
+          <p class="mb-0">
+            <strong><%=current_repository.name_with_display_owner %></strong> is a special
+            repository: its <code>README.md</code> will appear on your profile!
+          </p>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if view.org_profile_readme_callout_enabled? %>
+    <div class="<%= class_names(
+      "js-template-suggestion px-3 mt-3",
+      "hide-sm hide-md" => responsive?,
+      "d-none" => !view.show_org_profile_readme_callout_on_load?
+      ) %>"
+      data-template-suggestion-pattern="^(profile/README.md)$">
+      <%= render(Primer::Beta::Flash.new(scheme: :success)) do %>
+        <div class="d-flex flex-justify-between">
+          <p class="mb-0">
+            <strong><%=current_repository.name_with_display_owner %></strong> is a special
+            repository: this <code>README.md</code> will appear on your public organization profile, visible to anyone.
+          </p>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if view.org_member_profile_readme_callout_enabled? %>
+    <div class="<%= class_names(
+      "js-template-suggestion px-3 mt-3",
+      "hide-sm hide-md" => responsive?,
+      "d-none" => !view.show_org_member_profile_readme_callout_on_load?
+      ) %>"
+      data-template-suggestion-pattern="^(profile/README.md)$">
+      <%= render(Primer::Beta::Flash.new(scheme: :success)) do %>
+        <div class="d-flex flex-justify-between">
+          <p class="mb-0">
+            <strong><%=current_repository.name_with_display_owner %></strong> is a special
+            repository: this <code>README.md</code> will appear on your organization member profile, visible
+            only to organization members.
+          </p>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <div class="js-template-suggestion px-3 mt-3 <%= "hide-sm hide-md" if responsive? %> d-none" data-template-suggestion-pattern="^CITATION\.cff$">
+    <%= render(Primer::Beta::Flash.new(scheme: :success)) do %>
+      <div class="d-flex flex-justify-between">
+        <p class="mb-0">
+          Adding a <strong>CITATION.cff</strong> file helps users to easily cite your software from the repository overview.
+          <a class="Link--inTextBlock" href="<%= Repositories::Citation.help_url %>">Learn more about CITATION files</a>.
+        </p>
+        <p class="mx-2">
+          <%= render(Primer::ButtonComponent.new(variant: :small, classes: "js-citation-template", data: { "template-url": repository_citation_template_url, "template-button": "" })) do %>
+            Insert example
+          <% end %>
+        </p>
+      </div>
+    <% end %>
+  </div>
+
+  <% if view.issue_template? && view.issue_template_message %>
+    <div
+      class="<%= class_names(
+        "pt-2 px-3",
+        "mb-3" => issue_form_template_file?,
+        "hide-sm hide-md" => responsive?,
+      ) %>"
+    >
+      <div class="<%= view.issue_template_flash_classes %>">
+
+        <p>
+          <%= render GitHub::BetaFlagComponent.new(mr: 2) if view.issue_form? %>
+          <%= view.issue_template_message %> <a href="<%= view.issue_template_help_url %>">Learn more about issue templates</a>.
+          <% if view.issue_form? %>
+            <a class="Link--inTextBlock" href="https://github.com/github/feedback/discussions/categories/issues-feedback">Give Feedback.</a>
+          <% end %>
+        </p>
+      </div>
+    </div>
+  <% end %>
+
+  <% if view.action == "delete" %>
+      <%= render partial: "blob/preview", locals: {
+        view: create_view_model(
+          Blob::PreviewView,
+          :action          => view.action,
+          :layout          => false,
+          :repo            => current_repository,
+          :tree_name       => tree_name,
+          :commit          => current_commit,
+          :blob            => current_blob,
+          :path            => path_string,
+          :blobname        => current_blob.name,
+          :code            => "",
+          :old_oid         => current_commit.try(:oid),
+          :render_url_base => url_for(:action => :show)
+        )
+      } %>
+  <% else %>
+
+  <% if flash[:secret_detected] %>
+    <%= render SecretScanning::PushProtection::WebEditorDetectedSecretsComponent.new(current_repository, view.detected_secrets, view.unblock_secret_success) %>
+  <% end %>
+
+  <% if discussion_template_file? %>
+    <%= render ConfigAsCode::EditorSidebarComponent.new(sidebar_doc.markdown_content) do |component| %>
+      <% component.with_body do %>
+        <%= render(
+          "editors/file",
+          view: create_view_model(
+            view,
+            confirm_unload: false,
+            default_codemirror_mode: "text/x-yaml",
+          ),
+        ) %>
+      <% end %>
+    <% end %>
+  <% elsif issue_form_template_file? %>
+    <%= render ConfigAsCode::EditorSidebarComponent.new(sidebar_doc.markdown_content(current_repository.issue_forms_type_field_enabled?(current_user))) do |component| %>
+    <% component.with_body do %>
+      <%= render(
+        "editors/file",
+        view: create_view_model(
+          view,
+          confirm_unload: false,
+          default_codemirror_mode: "text/x-yaml",
+        ),
+      ) %>
+      <% end %>
+    <% end %>
+  <% elsif show_marketplace_sidebar? && workflow_yaml_file? %>
+    <div class="d-flex flex-column flex-auto width-full mb-6 mb-lg-0 pb-2 pb-lg-0 overflow-hidden px-lg-3">
+      <div class="d-flex flex-items-stretch flex-auto overflow-hidden">
+        <div class="file-sidebar-container d-flex flex-column flex-auto overflow-hidden">
+          <%
+              # disable confirm unloading in the file editor because we will handle it at form scope
+            %>
+          <%= render "editors/file", view: create_view_model(view, :confirm_unload => false, :default_codemirror_mode => 'text/x-yaml') %>
+        </div>
+
+        <% if GitHub.enterprise? %>
+          <div class="flex-shrink-0 col-4 border border-left-0 rounded-right-2 mb-3 d-none d-lg-block overflow-y-auto">
+            <div class="markdown-body f5 p-4">
+              <%= render_sidebar_documentation %>
+            </div>
+          </div>
+        <% else %>
+          <tab-container class="flex-shrink-0 col-4 border border-left-0 rounded-right-2 mb-3 pb-3 d-none d-lg-block overflow-hidden" <%= test_selector "marketplace-sidebar" %>>
+            <div class="UnderlineNav" role="tablist">
+              <div class="UnderlineNav-body ml-4">
+                <button style="padding-top: 10px; padding-bottom: 10px;"
+                        class="UnderlineNav-item btn-link"
+                        aria-selected=true
+                        type="button" role="tab" <%= safe_analytics_click_attributes(category: "Workflow Editor", action: "click to go to marketplace", label: "ref_page:#{request.fullpath};ref_cta:Marketplace;ref_loc:workflow editor") %> >
+                  Marketplace
+                </button>
+                <button style="padding-top: 10px; padding-bottom: 10px;"
+                        class="UnderlineNav-item btn-link"
+                        type="button" role="tab" <%= safe_analytics_click_attributes(category: "Workflow Editor", action: "click to go to documentation", label: "ref_page:#{request.fullpath};ref_cta:Documentation;ref_loc:workflow editor") %> >
+                  Documentation
+                </button>
+              </div>
+            </div>
+
+            <div class="p-4 mb-3 overflow-y-auto height-full">
+              <div role="tabpanel">
+                <% seed=rand(4294967295) %>
+                <remote-input param="query"
+                     src="<%= editor_actions_search_url(seed: seed) %>"
+                     aria-owns="js-workflow-editor-sidebar-content"
+                     class="mb-3 position-relative mb-3 js-remoteinput">
+                  <%
+                  # Setting `form` to a non-existent id here to prevent this input field from submitting the ancestor
+                  # form, that's unrelated to this search, on enter.
+                  %>
+                  <input type="text"
+                     form="marketplace-search"
+                     class="form-control input-block input-contrast"
+                     placeholder="Search Marketplace for Actions"
+                     aria-label="Search Marketplace for Actions"
+                     <%= test_selector("sidebar-actions-search") %>>
+                </remote-input>
+                <div id="js-workflow-editor-sidebar-content">
+                  <include-fragment src="<%= editor_actions_search_url(seed: seed) %>">
+                    <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block)) %>
+                  </include-fragment>
+                </div>
+              </div>
+
+              <div role="tabpanel" class="f5 markdown-body pb-3" hidden>
+                <%= render_sidebar_documentation %>
+              </div>
+            </div>
+          </tab-container>
+        <% end  %>
+      </div>
+    </div>
+  <% elsif show_marketplace_sidebar? && dev_container_file? %>
+    <div class="d-flex flex-column flex-auto width-full mb-6 mb-lg-0 pb-2 pb-lg-0 overflow-hidden px-lg-3">
+      <div class="d-flex flex-items-stretch flex-auto overflow-hidden">
+        <div class="file-sidebar-container d-flex flex-column flex-auto overflow-hidden">
+          <%
+              # disable confirm unloading in the file editor because we will handle it at form scope
+            %>
+          <%= render "editors/file", view: create_view_model(view, :confirm_unload => false, :default_codemirror_mode => 'text/javascript') %>
+        </div>
+
+        <% if GitHub.enterprise? %>
+          <div class="flex-shrink-0 col-4 border border-left-0 rounded-right-2 mb-3 d-none d-lg-block overflow-y-auto">
+            <div class="markdown-body f5 p-4">
+              <%= render :partial => "blob/dev_container_editor_sidebar_docs" %>
+            </div>
+          </div>
+        <% else %>
+          <tab-container class="flex-shrink-0 col-4 border border-left-0 rounded-right-2 mb-3 pb-3 d-none d-lg-block overflow-hidden" <%= test_selector "marketplace-sidebar" %>>
+            <div class="UnderlineNav" role="tablist">
+              <div class="UnderlineNav-body ml-4">
+                <button style="padding-top: 10px; padding-bottom: 10px;"
+                        class="UnderlineNav-item btn-link"
+                        aria-selected=true
+                        type="button" role="tab" <%= safe_analytics_click_attributes(category: "Dev Container Editor", action: "click to go to marketplace", label: "ref_page:#{request.fullpath};ref_cta:Marketplace;ref_loc:dev container editor") %> >
+                  Marketplace
+                </button>
+                <button style="padding-top: 10px; padding-bottom: 10px;"
+                        class="UnderlineNav-item btn-link"
+                        type="button" role="tab" <%= safe_analytics_click_attributes(category: "Dev Container Editor", action: "click to go to documentation", label: "ref_page:#{request.fullpath};ref_cta:Documentation;ref_loc:dev container editor") %> >
+                  Documentation
+                </button>
+              </div>
+            </div>
+
+            <div class="p-4 mb-3 overflow-y-auto height-full">
+              <div role="tabpanel">
+
+                  <input type="text"
+                     form="marketplace-search"
+                     class="form-control input-block input-contrast"
+                     placeholder="Search for Features"
+                     id="dev-container-search-input"
+                     <%= test_selector("sidebar-dev-container-search") %>>
+
+
+              <div>
+                <span id="js-devcontainer-editor-sidebar-content-complete">
+                  <include-fragment src="<%= editor_dev_containers_search_url %>">
+                    <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block)) %>
+                  </include-fragment>
+                </span>
+
+                <span id="js-devcontainer-editor-sidebar-details"></span>
+              </div>
+
+              </div>
+              <div role="tabpanel" class="f5 markdown-body pb-3" hidden>
+                <%= render :partial => "blob/dev_container_editor_sidebar_docs" %>
+              </div>
+            </div>
+          </tab-container>
+        <% end %>
+      </div>
+    </div>
+  <% else %>
+    <%
+      # disable confirm unloading in the file editor because we will handle it at form scope
+    %>
+    <%= render "editors/file", view: create_view_model(view, confirm_unload: false, default_codemirror_mode: workflow_yaml_file? ? 'text/x-yaml' : nil) %>
+  <% end %>
+
+  <% end %>
+
+  <%= render "web_commit/file_commit_form", view: view %>
+</div>

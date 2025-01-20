@@ -1,0 +1,72 @@
+<%# view is an instance of PullRequests::MergeButtonView %>
+
+<%# sometimes we get here via the show_partial method in pull_requests_controller.
+    In this case we'll have a pull (as 'merging'), but no view. %>
+
+<% if logged_in? %>
+  <%-
+    view ||= PullRequests::MergeButtonView.new(:pull => merging, :merge_type => (defined?(merge_type) && merge_type), :current_user => current_user, :commit_title => params[:commit_title], :commit_message => params[:commit_message], :gate_requests => [])
+    gate_requests ||= view.gate_requests
+  -%>
+  <% head_label = pull_branch_label(view.pull, :head, expandable: false, extra_classes: "commit-ref css-truncate user-select-contain") %>
+
+  <div id="partial-pull-merging" class="pull-merging js-pull-merging js-socket-channel js-updatable-content js-pull-refresh-on-pjax <%= local_assigns[:merging_error] ? " is-error" : ""%>"
+       data-refresh-on-turbo-restored="true"
+       aria-live="polite"
+       data-channel="<%= view.channels.map { |name| live_update_view_channel(name) }.join(" ") %>"
+       data-url="<%= pull_request_merging_partial_path(id: view.pull, merge_type: view.merge_method, commit_title: view.commit_title, commit_message: view.commit_message) %>">
+
+    <% if view.show_merge_area? %>
+      <% status = view.pull.combined_status %>
+      <h2 class="sr-only">Merge state</h2>
+      <div class="merge-pr js-merge-pr js-details-container Details <%= view.merge_area_status_class %> is-updating-via-merge"
+        <%= render_nothing_if_database_fails do %>
+          <% if status.any? %>data-favicon-override="<%= site_favicon(status.state) %>"<% end %>>
+        <% end %>
+
+        <% track_render_partial("pull_requests/deployments_box_wrapper", trace: true) do %>
+          <%= render :partial => "pull_requests/deployments_box_wrapper", :locals => { :pull => view.pull, :gate_requests => gate_requests } %>
+        <% end %>
+
+        <% track_render_partial("pull_requests/merge_button", trace: true) do %>
+          <%= render :partial => "pull_requests/merge_button", :locals => { :view => view } %>
+        <% end %>
+      </div>
+    <% else %>
+      <% track_render_partial("pull_requests/deployments_box_wrapper", trace: true) do %>
+        <%= render :partial => "pull_requests/deployments_box_wrapper", :locals => { :pull => view.pull, :gate_requests => gate_requests } %>
+      <% end %>
+    <% end %>
+
+    <% if view.fork_deleteable? %>
+      <% track_render_partial("pull_requests/fork_cleanup", trace: true) do %>
+        <%= render "pull_requests/fork_cleanup", view: create_view_model(PullRequests::ForkCleanupView, { pull: view.pull, head_branch_deleteable: view.head_branch_deleteable?, head_label: head_label } ) %>
+      <% end %>
+    <% elsif view.head_branch_deleteable? %>
+      <% track_render_partial("pull_requests/branch_cleanup", trace: true) do %>
+        <%= render :partial => "pull_requests/branch_cleanup", :locals => { :pull => view.pull, cleanup_did_error: !!local_assigns[:merging_error], head_label: head_label } %>
+      <% end %>
+    <% end %>
+
+    <%# Hidden state to indicate if the "Restore" button should be visible. See restore-branch.ts %>
+    <% if view.head_branch_restoreable? %>
+      <span id="js-pull-restorable" class="d-none"></span>
+    <% end %>
+
+    <% if view.head_branch_restoreable? %>
+      <%= render(PullRequests::CodespacesCleanupComponent.new(
+        pull: view.pull,
+        cleanup_did_error: !!local_assigns[:merging_error],
+        head_label: head_label,
+        codespaces: view.pull.codespaces.can_be_deprovisioned_by_user(current_user)
+        )) %>
+    <% end %>
+
+    <% if local_assigns[:merging_error] %>
+      <% merging_error = local_assigns[:merging_error] %>
+      <%= render partial: "pull_requests/merging_error", locals: { title: merging_error[:title], message: merging_error[:message], hook_output: merging_error[:hook_output], unretryable: merging_error[:unretryable], form_target: merging_error[:form_target] } %>
+    <% else %>
+      <%= render partial: "pull_requests/merging_error", locals: { title: "Update branch attempt failed", message: nil, unretryable: false, form_target: 'js-update-branch-form' } %>
+    <% end %>
+  </div>
+<% end %>

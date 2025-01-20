@@ -1,0 +1,94 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-import-settings [-h]
+#/
+#/ Import a backup taken with ghe-export-settings.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the settings from a dump file:
+#/    $ ghe-import-settings < dump-file
+#/
+#/  Transfer the settings from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-settings | ghe-import-settings
+#/
+require "json"
+require "tempfile"
+require "/data/enterprise-manage/current/lib/ghe-config"
+
+if ARGV.include?("--help") || ARGV.include?("-h") || $stdin.tty?
+  system "grep '^#/' '#{__FILE__}' |cut -c 4-"
+  exit 2
+end
+
+SKIP_CONFIG_APPLY = ARGV.include?("--skip-config-apply")
+
+#Abort if it looks like we are restoring with an old version of backup utils
+if ENV.has_key?("SSH_CLIENT") && `nice`.chomp == "19" && `ionice`.chomp == "idle"
+  ghebuver = ENV.has_key?("GHEBUVER") ? ENV["GHEBUVER"].to_i : 1
+  if ghebuver < 2
+    warn "You must update to the latest version of GitHub Enterprise Backup Utils to restore. Exiting."
+    exit 101
+  end
+end
+
+# Auto-sudo to root if effective user is something else.
+if Process.euid != 0
+  Process.exec("sudo", "-u", "root", __FILE__, ARGV.join(","))
+  warn "error: exec failed"
+  exit 1
+end
+
+# Read and parse JSON or ghe-config input.
+puts " --> Importing settings data #{GheConfig.new.config_file}..."
+begin
+  data = $stdin.read
+  if data[0] == "{"
+    settings = JSON.parse(data)["enterprise"]
+  else
+    t = Tempfile.new("github.conf")
+    t.write(data)
+    t.close
+    settings = GheConfig.new.load_config(t.path)
+  end
+rescue => boom
+  warn "error: invalid settings data (#{boom})"
+  exit 1
+end
+
+# Verify the top-level settings are present
+if settings.nil? || !settings.is_a?(Hash)
+  warn "error: invalid settings data"
+  exit 1
+end
+
+# When hostname is set to an IP, don't import hostname or SSL settings because
+# they're very likely wrong on the restoring instance and the default values are
+# probably appropriate if they match. Also ensure SSL stays enabled by default.
+if settings["github_hostname"].to_s =~ /\A\d+\.\d+\.\d+\.\d+\z/
+  settings.delete("github_hostname")
+  settings["github_ssl"] = { "enabled" => true }
+end
+
+# Delete old 'device' key just to be safe.
+settings.delete("device")
+
+# Write config data back out to github.conf, moving in place atomically only
+# once its been fully written to avoid truncating.
+ghe_config = GheConfig.new
+real_config = ghe_config.config_file
+ghe_config.config_file="#{ghe_config.config_file}+"
+settings.each do |k, value|
+  ghe_config.set_config(k, value)
+end
+File.rename(ghe_config.config_file, real_config)
+
+# Generate any needed templates with tokens etc.
+unless File.exist?("/etc/github/domain")
+  system "ghe-single-config-apply --phase-1" unless SKIP_CONFIG_APPLY
+  status_file = "/data/user/common/ghe-config-apply.status.json"
+  File.delete(status_file) if File.exist?(status_file)
+end

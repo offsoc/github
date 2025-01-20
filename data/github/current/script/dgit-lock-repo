@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+#
+# Receives the nwo as the only argument.
+#
+# Gets the lock on boot and returns the PID of the child process that holds the lock.
+#
+# The child holds the lock until it is killed. If the lock cannot be acquired, the
+# parent process will exit 1.
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/memcache"
+require "github/cache_lock"
+
+include GitHub::CacheLock
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} nwo"
+  exit 1
+end
+
+trap("USR1") do
+  puts $__dgit_lock_child_pid
+  exit 0
+end
+
+trap("USR2") do
+  exit 1
+end
+
+trap("TERM") do
+  # Prevent the term from hitting failbot
+  exit 0
+end
+
+usage unless ARGV.length == 1
+
+key = "dgit_repo_lock:#{ARGV[0]}:v1"
+
+parent_pid = $$
+$__dgit_lock_child_pid = fork do
+  if cache_lock_obtain(key, 10 * 60) # TTL of 10 minutes
+    begin
+      Process.kill("USR1", parent_pid)
+      $stdin.reopen "/dev/null"
+      $stdout.reopen "/dev/null", "a"
+      $stderr.reopen $stdout
+      sleep 60 * 10 # Hold onto the lock for 10 mins, no more
+    ensure
+      cache_lock_release(key)
+    end
+
+    exit 0
+  else
+    Process.kill("USR2", parent_pid)
+  end
+end
+
+Process.waitpid($__dgit_lock_child_pid)

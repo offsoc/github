@@ -1,0 +1,145 @@
+<%
+  sponsorships_count = sponsorships.count
+  page_info title: user_sponsoring_title(login: user.display_login, name: nil, is_viewer: viewing_own_profile?),
+    breadcrumb: "Sponsoring"
+%>
+
+<% if sponsorships_count > 0 %>
+  <div class="d-lg-flex gutter-lg mt-4">
+    <div class="col-lg-12">
+      <%= render Sponsors::SponsoringHeaderComponent.new(
+        paginated_sponsorships: paginated_sponsorships,
+        active_sponsoring_count: active_sponsoring_count,
+        inactive_sponsoring_count: inactive_sponsoring_count,
+        location: :user_sponsoring_tab,
+        user_or_org: user,
+        viewer_can_manage_sponsorships: viewing_own_profile?
+      ) %>
+
+      <%= render Sponsors::Explore::StartBulkSponsorshipComponent.new(
+        location: :user_sponsoring_tab,
+        sponsor_login: user
+      ) %>
+
+      <% paginated_sponsorships.each do |sponsorship| %>
+        <%
+          sponsorable = sponsorship.sponsorable
+          tier = sponsorship.tier
+        %>
+        <div class="d-table table-fixed col-12 width-full py-4 border-bottom color-border-muted" <%= test_selector("sponsorable-#{sponsorable.display_login}") %>>
+          <div class="d-table-cell col-2 col-lg-1 v-align-top">
+            <%= linked_avatar_for(sponsorable, 50, img_class: "avatar") %>
+          </div>
+
+          <div class="d-table-cell col-8 v-align-top pr-3">
+            <%= profile_link(sponsorable, class: "d-inline-block no-underline mb-1") do %>
+              <span class="f4 Link--primary"><%= sponsorable.safe_profile_name %></span>
+              <% unless sponsorable.display_login == sponsorable.safe_profile_name %>
+                <span class="Link--secondary pl-1"><%= sponsorable.display_login %></span>
+              <% end %>
+            <% end %>
+            <% unless sponsorship.active? %>
+              <%= render Primer::Beta::Label.new(
+                scheme: :secondary,
+                ml: 2,
+                test_selector: "past-sponsorship-label",
+              ).with_content("Past sponsorship") %>
+            <% end %>
+            <%= render Profiles::User::PatreonSponsorshipLabelComponent.new(sponsorship: sponsorship) %>
+            <div>
+              <span class="color-fg-muted text-small">
+                <% if sponsorship.active? %>
+                  Sponsoring since
+                <% else %>
+                  Sponsored on
+                <% end %>
+                <%= sponsorship.created_at.strftime("%B %-d, %Y") %>
+                <% if tier && viewing_own_profile? %>
+                  &bull;
+                  <span <%= test_selector("sponsorable-#{sponsorable.display_login}-tier") %>>
+                    <%= tier.name %>
+                    <%= "(custom amount)" if tier.custom? %>
+                  </span>
+                  <% if sponsorship.tier_selected_date != sponsorship.created_at.localtime.to_date %>
+                    <% if tier.one_time? %>
+                      on
+                    <% else %>
+                      since
+                    <% end %>
+                    <span <%= test_selector("sponsorable-#{sponsorable.display_login}-tier-selected-at") %>>
+                      <%= sponsorship.tier_selected_date.strftime("%B %-d, %Y") %>
+                    </span>
+                  <% end %>
+                  &bull;
+                  <span <%= test_selector("sponsorable-#{sponsorable.display_login}-privacy-level") %>>
+                    <%= sponsorship.privacy_level %>
+                  </span>
+                  <% if tier.custom? && tier.description_html.present? %>
+                    &bull;
+                    <span <%= test_selector("custom-tier-memo") %>><%= tier.description_html %></span>
+                  <% end %>
+                <% end %>
+              </span>
+              <%
+                sponsorship_for_viewer_as_sponsorable = sponsorable.sponsorship_as_sponsor_for(current_user)
+              %>
+              <% if sponsorship_for_viewer_as_sponsorable&.active? %>
+                <span class="color-fg-muted text-small ml-2" <%= test_selector("is-sponsoring-viewer") %>>
+                  <%= primer_octicon(:heart, vertical_align: :middle, color: :sponsors, classes: "icon-sponsoring") %>
+                  <% if sponsorship_for_viewer_as_sponsorable.privacy_private? %>
+                    Your private sponsor
+                  <% else %>
+                    Your sponsor
+                  <% end %>
+                </span>
+              <% end %>
+            </div>
+          </div>
+
+          <div class="d-table-cell col-2 v-align-top text-right" <%= test_selector("sponsorable-#{sponsorable.display_login}-button") %>>
+            <% if viewing_own_profile? %>
+              <%= render  Sponsors::ManageSponsorshipComponent.new(sponsorship: sponsorship) %>
+            <% else %>
+              <% if sponsorable.sponsored_by_viewer?(current_user) || sponsorable.sponsorable_by?(current_user) %>
+                <%= render Sponsors::SponsorButtonComponent.new(
+                  sponsorable: sponsorable.display_login,
+                  is_sponsoring: sponsorable.sponsored_by_viewer?(current_user),
+                  location: sponsorable.sponsored_by_viewer?(current_user) ? :PROFILE_SPONSORING_TAB_SPONSORING : :PROFILE_SPONSORING_TAB_SPONSOR
+                ) %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+        <%= render Sponsors::PendingChangeNoticeComponent.new(sponsorship: sponsorship) %>
+      <% end %>
+
+      <% if paginated_sponsorships.total_pages > 1 %>
+        <div class="paginate-container" <%= test_selector("pagination") %>>
+          <%= will_paginate paginated_sponsorships, "data-pjax": true %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% else %>
+  <div class="d-lg-flex gutter-lg">
+    <div class="col-lg-12" <%= test_selector("sponsoring-blank-slate") %>>
+      <%= render Primer::Beta::Blankslate.new(mt: 5) do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          <%= blank_slate_text %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% if viewing_own_profile? %>
+  <p class="mt-4 color-fg-muted">
+    You can see changes you've made to your sponsorships over time in your
+    <a class="Link--inTextBlock" href="<%= settings_user_sponsors_log_path %>">sponsorship log</a>.
+  </p>
+<% end %>
+
+<%= render Sponsors::DependenciesBannerComponent.new(
+  sponsor_login: user.display_login,
+  total_dependencies: dependency_count,
+) %>

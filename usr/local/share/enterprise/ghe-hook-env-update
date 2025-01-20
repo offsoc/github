@@ -1,0 +1,188 @@
+#!/bin/bash
+#/ Downloads a tarball and extracts it to a pre-receive-hook environment
+#/ When run in a cluster, it also pushes the environment to other git nodes
+#/
+#/ Usage:
+#/          ghe-hook-env-update environment-id tarball-url [options]
+#/ Options:
+#/          -h | --help           Show this message
+#/          -n                    Do not push to other cluster nodes
+#/
+#/ Exit codes:
+#/          0                     Everything went swimmingly
+#/          3                     Invalid arguments
+#/          4                     Error fetching the tarball
+#/          5                     Tarball isn't a valid tarball
+#/          6                     Error extracting the tarball
+#/          7                     Error pushing tarball to other nodes
+
+set -e
+
+[ "$(whoami)" = "git" ] || {
+  exec sudo -u git "$0" "$@"
+  echo Run this script as the git user. >&2
+  exit 1
+}
+
+export GHE_LIBDIR="${GHE_LIBDIR:-"/usr/local/share/enterprise/lib"}"
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+[ -z "$SKIP_GHE_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-commons"
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-cluster-commons
+[ -z "$SKIP_GHE_CLUSTER_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-cluster-commons"
+
+main() {
+  local extract_dir tar_filename sudo_user dl_tmp
+
+  while [ "$1" ]; do
+    case "$1" in
+      -n)
+        no_push_to_nodes=1
+        ;;
+      -h)
+        usage
+        exit
+        ;;
+      *)
+        if [ -z "$ENVIRONMENT_ID" ]; then
+          ENVIRONMENT_ID="$1"
+        elif [ -z "$TARBALL_URL" ]; then
+          TARBALL_URL="$1"
+        else
+          exit_invalid_args "Unknown argument '$1'!"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$ENVIRONMENT_ID" ] || exit_invalid_args "environment-id is required"
+  [ -n "$TARBALL_URL" ] || exit_invalid_args "tarball-url is required"
+
+  TARBALL_URL="$(build_file_url "$TARBALL_URL")" || err_exit 3 \
+    "'$TARBALL_URL' is neither a valid url nor the path to an existing file."
+
+  # tar_filename is the user-specified filename, from their URL
+  tar_filename=$(basename "$TARBALL_URL")
+
+  # Make a temp dir for the tarball, and clean it up on exit.
+  dl_tmp="$(mktemp -d --tmpdir="/data/user/tmp" hook-env-XXXXXX)"
+  trap_add "rm -rf $dl_tmp" EXIT
+
+  # Download the tarball
+  sudo_user=githook
+  if [[ $TARBALL_URL =~ ^file:// ]]; then
+    sudo_user=$(whoami)
+  fi
+
+  # Download the tarball.
+  # shellcheck disable=SC2024 # The output file should end up owned by the current user, not the sudo user.
+  sudo -u "$sudo_user" /usr/local/share/enterprise/ghe-hook-env-update-curl "$TARBALL_URL" > \
+    "$dl_tmp/$tar_filename" || \
+    err_exit 4 "There was an error downloading '$TARBALL_URL'"
+
+  # Make sure the tarball is valid
+  tar -tf "$dl_tmp/$tar_filename" > /dev/null || err_exit 5 "That's a bad tarball"
+
+  if [[ -z "$no_push_to_nodes" ]]; then
+    push_to_nodes "$ENVIRONMENT_ID" "$dl_tmp/$tar_filename" || err_exit 7 "There was an error copying this environment to other cluster nodes"
+  fi
+
+  # Move the tarball to its permanent home
+  sha=$(sha256sum "$dl_tmp/$tar_filename" | cut -d ' ' -f1)
+
+  if local_update_eligible; then
+    HOOK_ENV_DIR=${HOOK_ENV_DIR:-"/data/user/git-hooks/environments"}
+    mkdir -p "$HOOK_ENV_DIR/tarballs"
+    perm_tar="$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID/$sha/$tar_filename"
+    mkdir -p "$(dirname "$perm_tar")"
+    mv -f "$dl_tmp/$tar_filename" "$perm_tar"
+
+    # Extract the tarball
+    extract_dir=$(mktemp -d --tmpdir=/data/user/tmp hook-env-extract-XXXXXX)
+    mkdir -p "$extract_dir/$sha"
+    tar -xf "$perm_tar" -C "$extract_dir/$sha" > /dev/null || err_exit 6 "There was an error extracting this tarball"
+
+    # Move to final place. Prevents in place extraction errors
+    env_dir="$HOOK_ENV_DIR/$ENVIRONMENT_ID"
+    mkdir -p "$env_dir"
+    chmod -R u+w "$env_dir/$sha" || true
+    rm -rf "${env_dir:?}/$sha"
+    mv "$extract_dir/$sha" "$env_dir/"
+    trigger_ha_replica "environments/tarballs/$ENVIRONMENT_ID/$sha/"
+    trigger_ha_replica "environments/$ENVIRONMENT_ID/$sha/"
+  fi
+
+  echo "$sha"
+}
+
+trigger_ha_replica() {
+  asset_path="$1"
+  if [ -f /etc/github/cluster ]; then
+    return 0
+  fi
+  #shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+  source /usr/local/share/enterprise/ghe-repl-lib
+  if [ "$REPL_STATE" = "primary" ]; then
+    /usr/local/share/enterprise/ghe-repl-sync-git-hooks "$asset_path"
+  fi
+}
+
+# checks whether the url passed in is really a file path. If it is, it turns it into a file:/// url
+# returns 1 if the url isn't http, https, file or the path to a file on the local server
+build_file_url() {
+  input_url="$1"
+  if [[ "$input_url" =~ ^(https?|file):// ]]; then
+    echo "$input_url"
+  elif [ -f "$input_url" ]; then
+    echo "file://$input_url"
+  else
+    return 1
+  fi
+}
+
+# This will return 0 if either
+# - This is a non-clustered instance
+# - This is a git server
+local_update_eligible() {
+# return 0 if this isn't a cluster
+  is_in_cluster || return 0
+# now that we know it's a cluster, just return whether it has the git-server role
+  cluster_node_has_role git-server "$(cluster_local_node_name)"
+}
+
+push_to_nodes() {
+  local tmpdir
+
+  tarball="$2"
+  env_id="$1"
+  tarball_name="$(basename "$tarball")"
+  # No point continuing if this isn't a cluster
+  is_in_cluster || return 0
+  nodes=$(ghe-cluster-nodes -x -r git --no-cache)
+
+  for node in $nodes; do
+    tmpdir=$(ssh_node "$node" "mktemp -d --tmpdir=/data/user/tmp hook-env-XXXXXX")
+    scp -P 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+      -oStrictHostKeyChecking=no -oLogLevel=quiet \
+      "$tarball" \
+      "git@$node:$tmpdir/$tarball_name"
+    >&2 ssh_node "$node" "/usr/local/share/enterprise/ghe-hook-env-update '$env_id' 'file://$tmpdir/$tarball_name' -n"
+  done
+}
+
+exit_invalid_args() {
+  echo "$1" >&2
+  usage
+  exit 3
+}
+
+err_exit() {
+  [ -n "$2" ] && echo "$2" >&2
+  exit "$1"
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+main "$@"

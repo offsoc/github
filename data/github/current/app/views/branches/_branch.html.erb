@@ -1,0 +1,195 @@
+<%# erblint:counter DeprecatedInPrimerCounter 4 %>
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%# `branch` is an instance of `Branches::BranchView` %>
+<li class="Box-row position-relative">
+  <branch-filter-item
+    branch="<%= branch.name_for_display %>"
+    dialog-body-path="<%= branch_delete_branch_dialog_path(name: branch.name) %>"
+    class="d-flex flex-items-center Details">
+  <div class="col-12 col-lg-6 d-flex css-truncate flex-wrap">
+    <% if branch.ref.protected? %>
+      <% if current_repository&.plan_supports?(:protected_branches) %>
+        <a
+            class="tooltipped tooltipped-nw Link--secondary"
+            aria-label="View rules"
+            href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{branch.name}") %>"
+          ><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+          <%= render Primer::Beta::Octicon.new(icon: "shield-lock",  color: :muted, mr: 2, classes: "Details-content--shown", title: "This branch is protected") %>
+        </a>
+      <% else %>
+        <%= primer_octicon(:"shield-lock", color: :muted, mr: 2, classes: "Details-content--shown", title: "This branch is protected") %>
+      <% end %>
+    <% end %>
+
+    <%= link_to branch.name_for_display, tree_path("", branch.name, current_repository), :class => "branch-name css-truncate-target v-align-baseline width-fit mr-2 Details-content--shown" %>
+    <span class="color-fg-muted mr-2">
+      <%= render Primer::Beta::ClipboardCopy.new(value: branch.name_for_display, "aria-label": "Copy branch name to clipboard", classes: "Link--onHover", "data-copy-feedback": "Copied!") %>
+    </span>
+    <span class="css-truncate-target v-align-baseline color-fg-muted f6 width-fit Details-content--shown d-block d-md-inline pr-3">
+      Updated <%= render Primer::Beta::RelativeTime.new(datetime: branch.commit.authored_date, tense: :past) %> by <%= branch.author_link %>
+    </span>
+
+    <% if (rename = branch.recent_errored_rename) %>
+      <span <%= test_selector("branch-#{branch.name_for_display}-rename-error") %> class="color-fg-danger f6 tooltipped tooltipped-n tooltipped-multiline"><%= failed_rename_tooltip(rename, deletable: branch.can_delete?) %></span><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+    <% end %>
+
+    <% if branch.can_delete? %>
+      <span class="branch-name css-truncate-target Details-content--hidden mr-2"><%= branch.name_for_display %></span>
+      <span class="css-truncate-target v-align-baseline color-fg-muted f6 width-fit Details-content--hidden">
+        Deleted just now by <%= link_to current_user.display_login, current_user.permalink, :class => "Link--muted Link--inTextBlock" %>
+      </span>
+    <% end %>
+  </div>
+  <div class="d-flex col-md-6 flex-items-center">
+    <div class="Details-content--shown" style="width:12px;">
+      <% if branch.commit.has_status_check_rollup? %>
+        <%= render "statuses/deferred_icon", commit_oid: branch.commit.oid, dropdown_direction: "e", url: checks_statuses_batch_rollup_path(user_id: current_repository.owner_display_login, repository: current_repository) %>
+      <% end %>
+    </div>
+    <div class="col-md-12 col-lg-6 d-none d-md-flex flex-justify-end flex-lg-justify-center Details-content--shown">
+      <% if branch.is_default? %>
+        <%= render Primer::Beta::Label.new(scheme: :secondary, ml: 3, title: "Label: Default") do %>
+          Default
+        <% end %>
+      <% else %>
+        <%= render partial: "branches/deferred_count", locals: { branch: branch } %>
+      <% end %>
+    </div>
+    <div class="flex-auto flex-justify-end flex-items-center Details-content--shown d-none d-md-flex no-wrap">
+      <% if branch.is_default? && current_repository.merge_queue_enabled_for_branch?(branch.name) %>
+        <% merge_queue = current_repository.merge_queue_for(branch: branch.name) %>
+        <% entries_count = number_with_delimiter(merge_queue.entries.count) %>
+        <% channel = GitHub::WebSocket::Channels.merge_queue(merge_queue) %>
+        <a
+          href="<%= merge_queue_path(merge_queue_branch: branch.name) %>"
+          data-channel="<%= live_update_view_channel(channel) %>"
+          data-singular-message="pull request queued to merge"
+          data-plural-message="pull requests queued to merge"
+          <%= test_selector "merge-queue-link" %>
+          class="ml-2 js-socket-channel js-branch-merge-queue-link"
+        >
+          <%= pluralize(entries_count, "pull request") %> queued to merge
+        </a>
+      <% end %>
+      <% if branch.pull_request %>
+        <% if branch.pull_request.issue %>
+          <div class="d-inline-block text-right ml-3">
+            <a href="<%= pull_request_path(branch.pull_request) %>"
+               data-issue-and-pr-hovercards-enabled
+               <%= safe_data_attributes(hovercard_data_attributes_for_issue_or_pr(branch.pull_request)) %>
+            >#<%= branch.pull_request.number %></a>
+
+            <% if branch.pull_request.in_merge_queue? %>
+              <%= render Primer::Beta::State.new(
+                title: "Queued",
+                size: :small,
+                ml: 1,
+                bg: :attention_emphasis
+              ) do %>
+                <%= primer_octicon(:clock, style: "margin: 0 1px -1px 0;") %>
+                Queued
+              <% end %>
+            <% else %>
+              <%= render(PullRequests::StateComponent.new(
+                state: branch.pull_request.state.to_sym,
+                is_draft: branch.pull_request.draft?,
+                size: :small, ml: 1
+              )) %>
+            <% end %>
+          </div>
+        <% else %>
+          <% Failbot.report_user_error GitHub::DataQualityError.new(branch.pull_request, :issue) %>
+        <% end %>
+      <% elsif !branch.is_default? %>
+        <%
+          ga_action = branch.can_push ? "go to new pull request form" : "go to compare view"
+          ga_text   = branch.can_push ? "New pull request" : "Compare"
+          ga_attribute = "Repository, #{ga_action}, location:branch list; text:#{ga_text}"
+        %>
+        <%= link_to branch.compare_path, :class => "btn btn-sm d-none d-lg-inline-block test-compare-link", "data-ga-click" => ga_attribute do %>
+          <% if branch.can_push %>
+            <%= primer_octicon(:"git-pull-request") %>
+            New pull request
+          <% else %>
+            <%= primer_octicon(:"git-compare") %>
+            Compare
+          <% end %>
+        <% end %>
+      <% end %>
+      <a
+        class="tooltipped tooltipped-nw Link--secondary ml-3"
+        aria-label="View branch activity"
+        href="<%= activity_index_path(current_repository.owner, current_repository, ref: branch.name) %>"
+      ><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+        <%= render Primer::Beta::Octicon.new(icon: "pulse") %>
+      </a>
+      <% if current_repository.writable? %>
+        <% if branch.can_rename? %>
+          <%= render "branches/rename_button", branch: branch.name, display_name: branch.name_for_display,
+                section: branch.page_section, is_default: branch.is_default? %>
+        <% elsif branch.can_push && branch.is_branch_protected && !branch.is_default? %>
+          <%= render Primer::ButtonComponent.new(
+            scheme: :link,
+            ml: 2,
+            display: [:none, nil, :inline_block],
+            classes: "tooltipped tooltipped-nw",
+            "aria-label": "You must have admin access to rename protected branches",
+            disabled: true) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+            <%= primer_octicon(:pencil) %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if branch.can_delete? %>
+        <%= form_tag branch.delete_path, method: :delete, "data-action": "submit:branch-filter-item#destroy" do %>
+          <%= render Primer::IconButton.new(
+            tag: :button,
+            icon: :trash,
+            type: :submit,
+            scheme: :danger,
+            test_selector: "delete-button",
+            title: "Delete #{branch.name_for_display}",
+            aria: { label: "Delete #{branch.name_for_display}" },
+            data: { target: "branch-filter-item.destroyButton" },
+            tooltip_direction: :nw,
+            classes: "js-branch-delete-button", ml: 1)
+          %>
+        <% end %>
+      <% elsif branch.would_be_deletable? %>
+        <%= render Primer::IconButton.new(
+          tag: :button,
+          icon: :trash,
+          type: :button,
+          disabled: true,
+          scheme: :danger,
+          test_selector: "delete-button",
+          aria: { label: branch.not_deletable_reason },
+          tooltip_direction: :nw,
+          classes: "disabled", ml: 1)
+        %>
+      <% end %>
+    </div>
+    <div class="d-flex flex-auto flex-justify-end flex-items-center Details-content--hidden">
+      <%= form_tag branch.restore_path, method: :post, "data-action": "submit:branch-filter-item#restore" do %>
+        <%= render Primer::ButtonComponent.new(
+          type: :submit,
+          size: :small,
+          float: :right,
+          name: "return_to",
+          value: request.path,
+          data: { target: "branch-filter-item.restoreButton" },
+        ) do %>
+          Restore
+        <% end %>
+      <% end %>
+    </div>
+    <%= render(Primer::Beta::Spinner.new(
+      size: :small,
+      data: { target: "branch-filter-item.spinner" },
+      hidden: true,
+      classes: "btn-octicon" )) %>
+  </div>
+  <%# responsive full row link %>
+  <%= link_to "", tree_path("", branch.name, current_repository), :class => "d-block d-md-none position-absolute top-0 bottom-0 left-0 right-0", :'aria-label' => "Link to #{branch.name_for_display} file tree." %>
+  </branch-filter-item>
+</li>

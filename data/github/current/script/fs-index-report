@@ -1,0 +1,67 @@
+#!/usr/bin/env ruby
+#/ Usage:
+#/   cat /data/repositories/[0-9a-f]/index.txt | fs-index-report
+#/
+#/ Emit a report for the given diskpaths on stdin, where a path
+#/ is as found in the /data/repositories/[0-9a-f]/index.txt file.
+#/ Currently only inspects gist paths.
+#/
+#/ Output is one JSON object per diskpath:
+#/
+#/   {
+#/     "state" : "error" | "archived" | "normal" | "unknown",
+#/     "line"  : <the full inspected diskpath>,
+#/     "msg"   : optional information message
+#/   }
+#/
+
+unless ARGV.empty?
+  exec "grep ^#/<'#{__FILE__}' | cut -c4-"
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+require "github/config/mysql"
+
+Failbot.disable
+GitHub.load_activerecord
+abort "This script is for production only." if Rails.env.development?
+
+def index_entry_to_gist_repo_name(l)
+  g, rn = l.split("/").last(2)
+  return nil if g.nil? || rn.nil? || !rn.end_with?(".git")
+  rn.chomp ".git"
+end
+
+def gist_repo_name_to_state(rn)
+  g = Gist.find_by_repo_name rn
+  unless g.nil?
+    return :dgit
+  end
+
+  :unknown
+end
+
+def emit(r)
+  $stdout.puts JSON.generate(r)
+end
+
+any_errors = false
+
+ARGF.each_with_index do |l, _n|
+  l.chomp!
+  next unless l.include? "/gist/"
+
+  gist_repo_name = index_entry_to_gist_repo_name(l)
+  unless gist_repo_name
+    emit({ state: :error, msg: "bunk gist_repo_name", line: l })
+    any_errors = true
+    next
+  end
+
+  emit({
+    state: gist_repo_name_to_state(gist_repo_name),
+    line: l,
+  })
+end
+
+exit any_errors ? 1 : 0

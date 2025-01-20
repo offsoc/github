@@ -1,0 +1,168 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<% page_info title: "Repositories", class: "page-account" -%>
+
+<%= render layout: "settings/settings" do %>
+  <div class="mb-4">
+    <%= render "settings/default_branch_names/index" %>
+  </div>
+
+  <%= render Primer::Beta::Subhead.new(
+    display: :flex,
+    justify_content: :space_between,
+  ) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Repositories<% end %>
+  <% end %>
+
+  <% all_repositories, overflow_occurred = current_user.owned_and_member_repos_by_name(
+    limit: (params[:repository_limit] || 1000),
+  ) %>
+
+  <% if overflow_occurred %>
+    <%= render Primer::Beta::Flash.new(scheme: :warning, spacious: true) do %>
+      Only showing the first <%= all_repositories.size %> repositories.
+    <% end %>
+  <% end %>
+
+  <div class="Box">
+    <% unless GitHub.enterprise? %>
+      <div class="Box-header pl-0">
+        <%= render partial: "navigation/settings_repositories" %>
+      </div>
+    <% end %>
+    <div
+      class="Box-body text-center py-6 js-collaborated-repos-empty"
+      <% if all_repositories.any? %>
+        hidden
+      <% end %>
+    >
+      You don’t have any repositories yet. Would you like to <a class="Link--inTextBlock" href="/new">create one</a>?
+    </div>
+
+    <% grouped_repos = all_repositories.group_by { |repo| repo.name_with_display_owner.split("/").first } %>
+    <% grouped_repos.each do |owner_display_login, repositories| %>
+      <div class="js-collab-repo-owner Box-header rounded-0" data-owner-login="<%= owner_display_login %>">
+        <% if grouped_repos.length >= 1 %>
+          <h4 class="Box-title"><%= owner_display_login %></h4>
+        <% end %>
+      </div>
+
+      <div class="js-collaborated-repos">
+        <% repositories.each do |repo| %>
+          <div
+            class="<%= class_names(
+              "Box-row",
+              "js-collab-repo",
+              "simple" => owner_display_login == current_user.display_login,
+              "public" => repo.public?,
+              "private" => !repo.public?,
+              "fork" => repo.fork?,
+            ) %>"
+            data-repo-id="<%= repo.id %>"
+            data-owner-login="<%= owner_display_login %>"
+          >
+            <% if repo.owner != current_user %>
+              <%= render(
+                layout: "shared/details_dialog",
+                locals: {
+                  button_class: "btn btn-sm",
+                  button_text: "Leave",
+                  details_class: "float-right",
+                  title: "Are you sure you want to leave #{repo.name_with_display_owner}?",
+                },
+              ) do %>
+                <% if repo.private? %>
+                  <% user_has_fork = repo.find_fork_for_user(current_user) %>
+
+                  <% if user_has_fork %>
+                    <%= render Primer::Beta::Flash.new(
+                      scheme: :danger,
+                      full: true,
+                    ) do %>
+                      You will lose push and pull access, and your fork will be deleted.
+                    <% end %>
+                  <% else %>
+                    <%= render Primer::Beta::Flash.new(
+                      scheme: :warning,
+                      full: true,
+                    ) do %>
+                      You will lose push and pull access.
+                    <% end %>
+                  <% end %>
+
+                  <div class="Box-body">
+                    <ul class="ml-4">
+                      <li>Your commits won’t be lost</li>
+                      <li>You will not be able to view this repository anymore</li>
+                      <% if user_has_fork %>
+                        <li><strong>Your fork of this repository will be deleted</strong></li>
+                      <% end %>
+                      <li>
+                        You can always ask <strong><%= owner_display_login %></strong> for access again
+                      </li>
+                    </ul>
+                  </div>
+                <% else %>
+                  <%= render Primer::Beta::Flash.new(
+                    scheme: :warning,
+                    full: true,
+                  ) do %>
+                    You will lose push access.
+                  <% end %>
+                  <div class="Box-body">
+                    <ul class="ml-4">
+                      <li>Your commits won’t be lost</li>
+                      <li>You will still be able to view this repository</li>
+                      <li>
+                        You can always ask <strong><%= owner_display_login %></strong> for access again
+                      </li>
+                    </ul>
+                  </div>
+                <% end %>
+                <div class="Box-footer">
+                  <%= form_tag(
+                    leave_repo_path(repo.id),
+                    class: "js-leave-collaborated-repo",
+                    "data-repo-id": repo.id,
+                    "data-owner-login": owner_display_login,
+                  ) do %>
+                    <%= render Primer::ButtonComponent.new(
+                      type: :submit,
+                      block: true,
+                      scheme: :danger,
+                      "data-disable-with": "",
+                    ) do %>
+                      I understand, leave this repository
+                    <% end %>
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
+
+            <%= primer_octicon("#{(repo.public? ? "repo" : "lock")}", mr: 1) %>
+            <%= link_to repo.name_with_display_owner, repository_path(repo), class: "mr-1" %>
+
+            <span class="text-small">
+              <%= repo.human_disk_usage %>
+              <% if repo.owner == current_user %>
+                <span class="ml-2">
+                  <%= primer_octicon(:people) %>
+                  <%= link_to(
+                    pluralize(repo.filled_seats, "collaborator"),
+                    repository_access_management_path(current_user, repo),
+                  ) %>
+                </span>
+              <% end %>
+            </span>
+
+            <% if repo.fork? && repo.parent %>
+              <p class="text-small mb-0">
+                <%= primer_octicon(:"repo-forked") %>
+                <%= link_to repo.parent.name_with_display_owner, repository_path(repo.parent) %>
+              </p>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

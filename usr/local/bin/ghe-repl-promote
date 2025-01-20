@@ -1,0 +1,185 @@
+#!/bin/bash
+#/ Usage: ghe-repl-promote [-h]
+#/
+#/ Perform a graceful failover if the primary is accessible.
+#/ Perform a hard failover if the primary cannot be reached.
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/   -y | --yes      Don't prompt for promotion.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+export GHE_CMD_RUN_ID=$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)
+prompt_less=
+
+usage() {
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+}
+
+# show usage if any argument is passed other than -h or -y
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -y|--yes)
+      prompt_less=1
+      shift
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+    esac
+done
+
+. ghe-repl-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+ensure_replica
+check_for_config_run
+
+if is_cache_replica; then
+  echo "Error: Cache replicas cannot be promoted." >&2
+  exit 1
+fi
+
+# Set true when the primary instance is not available via SSH.
+forced=false
+
+echo "Warning: You are about to promote this Replica node"
+echo "Promoting this Replica will tear down replication and enable maintenance mode on the current Primary and on all active Replicas."
+echo "All other Replicas need to be re-setup to use this new Primary server."
+echo
+if [ -z "$prompt_less" ]; then
+  read -p "Proceed with promoting this appliance to Primary? [y/N] "
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+if ! primary_reachable; then
+  echo "Warning: Primary node is unavailable." >&2
+  echo "Warning: Performing hard failover without cleaning up on the primary side." >&2
+  forced=true
+else
+  # stop writes on the primary
+  echo "Enabling maintenance mode on the primary to prevent writes ..."
+  primary_ssh ghe-maintenance -s
+fi
+
+echo "Enabling maintenance mode on active replicas"
+hosts=$(ghe-cluster-nodes --replica)
+for hostname in $hosts; do
+  if ghe-config --true "cluster.${hostname}.active-replica-server"; then
+    replica=$(ghe-config cluster."${hostname}".ipv4)
+    set +e
+    ssh_cmd "${replica}" ghe-maintenance -s 2> /dev/null
+    if [ "$?" = 255 ]; then
+      echo "$hostname is unreachable. Maintenance mode not set"
+    else
+      echo "Maintenance mode has been enabled for active replica $hostname"
+    fi
+    set -e
+  else
+    echo "${hostname} is an inactive replica. Maintenance mode not set."
+  fi
+done
+
+set -o pipefail
+
+if [ -f /etc/github/repl-running ]; then
+  # perform before ghe-repl-stop where we stop data replication
+  if actions-ever-enabled; then
+    if ! ghe-config --true app.actions.enabled; then
+      # Best effort try to make sure mssql containers are running on an actions disabled system
+      echo "Starting MSSQL containers to perform replication on disabled Actions service."
+      if $forced; then
+        echo "The MSSQL primary node is unavailable. Waiting only for the local mssql instance to be healthy in order to perform a forced failover."
+        # Despite the name, this is expected to start mssql on the local node in HA
+        start-mssql-global
+        wait-mssql-local-with-restart-alloc
+      else
+        # If the primary node is available we want to wait for all mssql instances
+        echo "The MSSQL primary node is available. Waiting for all mssql instance to be healthy in order to perform a planned failover."
+        ghe-cluster-each --role mssql -- ". /usr/local/share/enterprise/ghe-mssql-lib && start-mssql-global && wait-mssql-local-with-restart-alloc" || true
+      fi
+    fi
+
+    echo "Performing MSSQL failover ..."
+    if $forced; then
+      ghe-mssql-repl-promote -f 2>&1 | awk -Winteractive '$0="  | "$0'
+    else
+      ghe-mssql-repl-promote 2>&1 | awk -Winteractive '$0="  | "$0'
+    fi
+  fi
+
+  if ! $forced; then
+    echo "Decomissioning replica nodes from Elasticsearch ..."
+
+    for node_hostname in $(ghe-cluster-nodes --exclude); do
+      node_ip=$(ghe-config "cluster.$node_hostname.ipv4")
+
+      curl -s -o /dev/null -XPUT \
+        "localhost:9201/_cluster/settings?pretty" \
+        -H "Content-Type: application/json" \
+        -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"$node_ip\" } }" \
+        || echo "Failed to decomission ${node_hostname} from Elasticsearch"
+
+      retry_count=0
+      max_retries=3
+
+      while [ $retry_count -lt $max_retries ]; do
+        curl -s -XPOST "localhost:9201/_cluster/voting_config_exclusions?node_names=$node_hostname&timeout=3m&pretty" \
+          && break
+
+        retry_count=$((retry_count + 1))
+        sleep 1
+      done
+
+      if [ $retry_count -eq $max_retries ]; then
+        echo "Failed to add ${node_hostname} to voting configuration exclusion list after $max_retries retries"
+      fi
+
+      timeout=30
+      elapsed_time=0
+
+      while [ $elapsed_time -lt $timeout ]; do
+        # Run the curl command to get shard information
+        shard_info=$(curl -s http://localhost:9200/_cat/allocation?format=json | jq)
+
+        # Extract the shard count for the replica node
+        replica_shards=$(echo "$shard_info" | jq -r ".[] | select(.node == \"$node_hostname\") | .shards")
+
+        # Check if the shard count is 0
+        if [ -n "$replica_shards" ] && [ "$replica_shards" -eq 0 ]; then
+          echo "Shards for $node_hostname are 0, stopping Elasticsearch"
+          break
+        fi
+
+        # Sleep for 1 second
+        sleep 1
+
+        # Increment the elapsed time
+        elapsed_time=$((elapsed_time + 1))
+      done
+    done
+  else
+    echo "Skipping decomissioning replica nodes from Elasticsearch as the primary node is unavailable"
+  fi
+
+  echo "Stopping replication ..."
+  ghe-repl-stop -c -p 2>&1 | awk -Winteractive '$0="  | "$0'
+fi
+
+echo "Switching out of replica mode ..."
+ghe-repl-teardown --quick 2>&1 | awk -Winteractive '$0="  | "$0'
+
+echo "Applying configuration and starting services ..."
+ghe-single-config-apply 3>&1 1>/dev/null 2>&3 | awk -Winteractive '$0="  | "$0'
+
+echo "Success: Replica has been promoted to primary and is now accepting requests."

@@ -1,0 +1,84 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#/ Usage: create-marketplace-insights [<slug>]
+#/ Create a bunch of insights for a Marketplace::Listing.
+
+# Show usage
+if ARGV.include?("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c3-"
+  exit 1
+end
+
+if ARGV.empty?
+  puts "Include a listing slug"
+  exit 1
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+require "faker"
+
+unless Rails.env.development?
+  puts "This can only be run in the development environment!"
+  exit 1
+end
+
+listing = Marketplace::Listing.find_by(slug: ARGV.shift)
+if listing.nil?
+  puts "Include a listing slug. bin/create-marketplace-insights slug"
+  exit 1
+end
+
+end_date = Date.today
+46.times do |i|
+  record_date = end_date - i.days
+  insight = listing.insights.find_or_initialize_by(recorded_on: record_date)
+
+  attributes = {
+    pageviews:        rand(50) + 100,
+    visitors:         rand(100),
+    new_purchases:    rand(5),
+    installs:         rand(4),
+    new_seats:        rand(10),
+    upgrades:         rand(3),
+    upgraded_seats:   rand(5),
+    downgrades:       rand(3),
+    downgraded_seats: rand(2),
+    cancellations:    rand(2),
+    cancelled_seats:  rand(2),
+    landing_uniques: rand(50) + 100,
+    checkout_uniques: rand(25) + 50,
+    mrr_gained:    rand(500..1000) * 100,
+    mrr_lost:      rand(150..250) * 100,
+    mrr_recurring: rand(500..1000) * 100,
+  }
+
+  if listing.paid?
+    attributes[:new_paid_subscriptions] = rand(6)
+
+    if listing.offers_free_trial?
+      attributes.merge!(
+        new_free_trial_subscriptions: rand(4),
+        free_trial_conversions: rand(3),
+        free_trial_cancellations: rand(2),
+      )
+    end
+  else
+    attributes.merge!(
+      new_paid_subscriptions: 0,
+      new_free_trial_subscriptions: 0,
+      free_trial_conversions: 0,
+      free_trial_cancellations: 0,
+    )
+  end
+
+  if listing.published_free_plans?
+    attributes[:new_free_subscriptions] = rand(100)
+  else
+    attributes[:new_free_subscriptions] = 0
+  end
+
+  insight.update(attributes)
+
+  puts "Created #{listing.name} insights for #{ record_date }"
+end

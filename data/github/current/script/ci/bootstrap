@@ -1,0 +1,289 @@
+#!/bin/bash
+# Usage: script/ci/bootstrap --help
+#
+set -e
+
+# Ensure script/bootstrap does not generate the serviceowners cache so we can
+# run it in the background
+export PARALLEL_SERVICEOWNERS=true
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_functions.sh"
+
+function print_usage() {
+  cat <<-HELP
+Usage:
+  ${0} [--skip-database] [--skip-serviceowners] [--precompile-assets] [--skip-precompile-assets] [--skip-background-sections]
+
+Setup a CI agent for github/github. This includes Ruby gems, Node packages,
+assets, and the database. By default, it sets up everything but you can turn off
+the things you don't want.
+HELP
+}
+
+while [ "$1" != "" ]; do
+  OPTION=$(echo $1)
+
+  case $OPTION in
+    -h | --help)
+      print_usage
+      exit
+      ;;
+    --skip-database)
+      SKIP_DATABASE=1
+      ;;
+    --skip-serviceowners)
+      SKIP_SERVICEOWNERS=1
+      ;;
+    --precompile-assets)
+      PRECOMPILE_ASSETS=1
+      ;;
+    --skip-precompile-assets)
+      SKIP_PRECOMPILE_ASSETS=1
+      ;;
+    --skip-background-sections)
+      SKIP_BACKGROUND_SECTIONS=1
+      ;;
+    *)
+      echo "ERROR: unknown option \"$OPTION\""
+      print_usage
+      exit 1
+      ;;
+  esac
+
+  shift
+done
+
+initial_cleanup() {
+  # reset working tree to a pristine state to ensure a clean build. this ensures
+  # that artifacts aren't left around from previous builds.
+  mkdir -p tmp/builds
+
+  start_fold "Cleaning ..."
+  # clean up git-hooks/repos.  It has .git directories so it won't removed by git-clean
+  rm -rf git-hooks/repos/
+  script/ciclean
+  mkdir -p tmp/builds # recreate this directory since `script/ciclean` removes `tmp`
+  end_fold
+
+  start_fold "Dirty Workspace Files"
+  git ls-files --modified
+  git ls-files --others --exclude-standard
+  end_fold
+}
+
+database_setup() {
+  echo "Setting up VTCombo"
+  script/ci/vtcombo-setup
+  script/ci/vtcombo-up
+
+  export WORKSPACE="${WORKSPACE:-/workspace/github}"
+  DB_BACKUP_PATH="$WORKSPACE/tmp/mysql-backup.tar.gz"
+
+  # read for identical database cache
+  DB_CACHE_READ_START=$(metric_timestamp)
+  script/ci/cache read \
+    --verbose \
+    --name=test-databases \
+    --key-glob "db/**/*" \
+    --key-glob "config/defaults/database.yml" \
+    --key-string "$(mysql -u root --batch --skip-column-names --execute "SELECT VERSION()")" \
+    --key-string "concurrency-${TEST_QUEUE_WORKERS}" \
+    --key-string "rails-env-${RAILS_ENV}" \
+    --key-string "vitess${DISABLE_VITESS:+-disabled}" \
+    --key-string "incremental_test_ci_reset" \
+    --postread-command "script/ci/vtcombo-down && script/ci/mysql_backup restore && script/ci/vtcombo-up" \
+    --no-compression \
+    $DB_BACKUP_PATH
+
+  log_duration_metric "db_cache_read" $DB_CACHE_READ_START
+
+  # Ensure vtcombo is running before continuing
+  wait_for_vtcombo
+
+  if [ ! -f $DB_BACKUP_PATH ]; then
+    # read for last master database cache
+    DB_CACHE_READ_MASTER_START=$(metric_timestamp)
+    script/ci/cache read \
+      --verbose \
+      --name=test-databases \
+      --key-string "master" \
+      --key-glob "config/defaults/database.yml" \
+      --key-string "$(mysql -u root --batch --skip-column-names --execute "SELECT VERSION()")" \
+      --key-string "concurrency-${TEST_QUEUE_WORKERS}" \
+      --key-string "rails-env-${RAILS_ENV}" \
+      --key-string "vitess${DISABLE_VITESS:+-disabled}" \
+      --key-string "incremental_test_ci_reset" \
+      --postread-command "script/ci/vtcombo-down && script/ci/mysql_backup restore && script/ci/vtcombo-up" \
+      --no-compression \
+      $DB_BACKUP_PATH || master_branch_cache_read_ret=$?
+
+    log_duration_metric "db_cache_read_master" $DB_CACHE_READ_MASTER_START
+
+    # Ensure vtcombo is running before continuing
+    wait_for_vtcombo
+
+    DB_CACHE_RESTORE_START=$(metric_timestamp)
+    if [ ! -f $DB_BACKUP_PATH ]; then
+      log_database_cache_metric "cache_miss"
+      # Perform full database rebuild
+      bin/rails --trace db:drop:all db:create:all db:test:load_schema db:test:ci:reset
+    else
+      log_database_cache_metric "secondary_cache_hit"
+      # Perform partial database rebuild
+      bin/rails --trace db:test:ci:reset
+    fi
+    log_duration_metric "db_cache_restore" $DB_CACHE_RESTORE_START
+
+    DB_CACHE_WRITE_START=$(metric_timestamp)
+    script/ci/cache write \
+      --verbose \
+      --name=test-databases \
+      --key-glob "db/**/*" \
+      --key-glob "config/defaults/database.yml" \
+      --key-string "$(mysql -u root --batch --skip-column-names --execute "SELECT VERSION()")" \
+      --key-string "concurrency-${TEST_QUEUE_WORKERS}" \
+      --key-string "rails-env-${RAILS_ENV}" \
+      --key-string "vitess${DISABLE_VITESS:+-disabled}" \
+      --key-string "incremental_test_ci_reset" \
+      --prewrite-command "script/ci/vtcombo-down && (script/ci/mysql_backup create || echo 'MySQL backup failed, forcing zero exit') && script/ci/vtcombo-up" \
+      --no-compression \
+      $DB_BACKUP_PATH
+
+    log_duration_metric "db_cache_write" $DB_CACHE_WRITE_START
+  else
+    log_database_cache_metric "primary_cache_hit"
+  fi
+
+  # If we're on the master branch, also write the master branch cache,
+  if [ "$BUILD_BRANCH" = "master" ] || [ "$BUILD_BRANCH" = "main" ]; then
+    DB_CACHE_WRITE_MASTER_START=$(metric_timestamp)
+    script/ci/cache write \
+      --verbose \
+      --name=test-databases \
+      --key-string "master" \
+      --key-glob "config/defaults/database.yml" \
+      --key-string "$(mysql -u root --batch --skip-column-names --execute "SELECT VERSION()")" \
+      --key-string "concurrency-${TEST_QUEUE_WORKERS}" \
+      --key-string "rails-env-${RAILS_ENV}" \
+      --key-string "vitess${DISABLE_VITESS:+-disabled}" \
+      --key-string "incremental_test_ci_reset" \
+      --no-compression \
+      $DB_BACKUP_PATH
+
+    log_duration_metric "db_cache_write_master" $DB_CACHE_WRITE_MASTER_START
+  fi
+
+  if [ -n "$TRACK_EXPENSIVE_QUERIES" ]; then
+    DB_STATS_START=$(metric_timestamp)
+    # Download stats from https://github.com/github/mysql-index-stats-import
+    octofactory_latest_download --app_name mysql-index-stats-import \
+      --blob update_local_test_index_and_table_stats.sql \
+      update_local_test_index_and_table_stats.sql
+
+    echo "Inserting single db index stats"
+    time mysql -uroot < update_local_test_index_and_table_stats.sql
+
+    for ((i=1; i<=TEST_QUEUE_WORKERS; i++)); do
+      sed -Ee "s/database_name='([a-z_]+)'/database_name='\1$i'/g" update_local_test_index_and_table_stats.sql > parallel_test_index_stats_$i.sql
+      echo "Inserting db $i index stats"
+      time mysql -uroot < parallel_test_index_stats_$i.sql
+    done
+
+    mysql -uroot -e 'set GLOBAL innodb_stats_auto_recalc = 0;'
+    mysql -uroot -e 'flush tables;'
+
+    log_duration_metric "db_stats" $DB_STATS_START
+  fi
+
+  # Wait for vtcombo to have started up
+  wait_for_vtcombo
+}
+
+set_runtime_type() {
+  rm -rf tmp/runtime
+  if [ -n "$ENTERPRISE" -o -n "$FI" ]; then
+    mkdir -p tmp/runtime
+    echo "enterprise" > tmp/runtime/current
+  fi
+}
+
+precompile_assets() {
+  date +%s > tmp/assets-precompiled-at
+
+  if [ -n "$PRECOMPILE_ASSETS" ]; then
+    echo "Precompiling assets"
+    npm run precompile-assets
+  else
+    echo "Faking asset pre-compilation for tests"
+    npm run precompile-assets-for-tests
+  fi
+
+  if [ $? -ne 0 ]; then
+    echo "Precompiling assets failed"
+    exit 1
+  fi
+
+  # Bump modification date
+  touch public/assets
+}
+
+generate_serviceowners() {
+  mkdir -p vendor/serviceowners
+  bin/generate-service-files.rb --cache-only
+}
+
+bootsnap_precompile() {
+  # precompile Ruby iseqs in parallel so that we boot faster
+  bin/bundle exec bootsnap precompile app lib packages test --gemfile
+}
+
+run_script_bootstrap() {
+  SKIP_ROBOTS=1 SKIP_OPENSEARCH=1 script/bootstrap --local --deployment
+}
+
+# Generate a timestamp in milliseconds that we can use to report CI bootstrapping time
+TIME="$(date +%s%N)"
+
+cd "${RAILS_ROOT}"
+mkdir -p tmp
+echo "Bootstrapping from $(pwd)"
+
+# Initialize bt.sh for breaking down where we spend time during the build
+bt_init
+trap "bt_cleanup" EXIT
+
+section initial_cleanup
+section script/build-ruby
+section run_script_bootstrap
+section set_runtime_type
+
+if [[ -z "${SKIP_BACKGROUND_SECTIONS}" ]]; then
+  background_section "Generate robots.txt" bin/robots
+  background_section "Generate opensearch.xml" bin/opensearch
+  background_section "Bootsnap precompile" bootsnap_precompile
+  [[ -z "${SKIP_SERVICEOWNERS}" ]] && background_section "Generate SERVICEOWNERS" generate_serviceowners
+  [[ -z "${SKIP_DATABASE}" ]] && background_section "Setup database" database_setup
+  [[ -z "${SKIP_PRECOMPILE_ASSETS}" ]] && background_section "Precompile assets" precompile_assets
+  background_finish
+fi
+
+start_actions_log_grouping "Bootstrap - stats"
+
+# Enable YJIT for CI
+sed -i 's/--yjit-disable//' bin/safe-ruby
+
+# Calculate the bootstrap duration and report it in milliseconds
+TIME="$(($(date +%s%N)-TIME))"
+MS="$((TIME/1000000))"
+script/ci/dogstats distribution bootstrap.duration "$MS" "branch:${BUILD_BRANCH}"
+
+# Celebrate our success
+cat <<MESSAGE
+CI boostrap completed 🎉
+
+pwd: $(pwd)
+hostname: $(hostname)
+ruby path: $(which ruby)
+ruby version: $(ruby -v)
+git version: $(git --version)
+MESSAGE

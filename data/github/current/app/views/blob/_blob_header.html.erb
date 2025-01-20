@@ -1,0 +1,257 @@
+<%# `view` is an instance of Blob::ShowView %>
+<% head = capture do %>
+  <%= dont_index if robot? && current_repository.hide_from_google? %>
+<% end %>
+
+  <div
+    class="Box-header js-blob-header <% if show_toc %>blob-header js-sticky js-position-sticky top-0 p-2<% end %><% unless show_toc %>py-2 pr-2<% end %><%= responsive? ? " d-flex flex-shrink-0 flex-md-row flex-items-center": " d-flex flex-justify-between flex-items-center" %>"
+    <% if show_toc %>style="position: sticky; z-index: 1;"<% end %>
+  >
+
+    <% if toc.present? && show_toc %>
+      <%= render partial: "files/readme_toc", locals: { headers: toc, layout: :compact, show_toc: show_toc } %>
+    <% end %>
+
+  <div class="text-mono f6<%= " flex-auto pr-3 flex-order-2 flex-md-order-1" if responsive? %>">
+    <% if current_repository.codeowners? %>
+      <include-fragment src="<%= codeowners_badge_path(current_repository.owner, current_repository, current_ref, view.path) %>"></include-fragment>
+    <% end %>
+
+    <% unless (human_mode current_blob.mode) == "file" %>
+      <span class="file-mode"><%= human_mode current_blob.mode %></span>
+      <span class="file-info-divider"></span>
+    <% end %>
+    <% if current_blob.viewable? %>
+      <%= current_blob.truncated_loc %> lines (<%= current_blob.truncated_sloc %> sloc)
+      <span class="file-info-divider"></span>
+    <% end %>
+    <%= number_to_human_size(current_blob.size) %>
+    <% if current_blob.git_lfs? -%>
+      <span class="file-info-divider"></span>
+      <a class="no-underline" href="<%= GitHub.help_url %>/articles/versioning-large-files/">
+        <%= primer_octicon(:question, :"aria-label" => "Learn more about Git LFS") %>
+      </a>
+      Stored with Git LFS
+    <% end -%>
+  </div>
+
+  <%# <----- Large screen size menu -----> %>
+  <div class="d-flex<%=" py-1 py-md-0 flex-auto flex-order-1 flex-md-order-2 flex-sm-grow-0 flex-justify-between hide-sm hide-md" if responsive? %>">
+    <% if view.blob.markdown? %>
+      <%= render GitHub::SourceRenderedToggleComponent.new \
+            toggleable: current_blob.viewable?,
+            source_selected: params[:plain],
+            source_url: url_for(plain: 1),
+            rendered_url: url_for(plain: nil),
+            canonical_source_url: permalink ? permalink + "?plain=1" : nil,
+            canonical_rendered_url: permalink %>
+    <% else %>
+      <%= render GitHub::SourceRenderedToggleComponent.new \
+            toggleable: view.blob.render_file_type_for_display(:view) && current_blob.viewable?,
+            source_selected: view.source_selected?,
+            source_url: url_for(short_path: blob_short_path(current_blob)),
+            rendered_url: url_for(short_path: nil),
+            canonical_source_url: permalink ? permalink + "?short_path=" + blob_short_path(current_blob) : nil,
+            canonical_rendered_url: permalink %>
+    <% end %>
+
+    <div class="BtnGroup">
+      <%
+        url_tree = current_branch_or_tag_name || commit_sha
+        download_label = render_image_or_raw?(view.blob) ? "Download" : "Raw"
+        download_permalink = current_branch_or_tag_name ? blob_raw_path(params[:path], commit_sha) : nil
+        blame_permalink = current_branch_or_tag_name ? blob_blame_path(params[:path], commit_sha) : nil
+      %>
+      <%= render Primer::Beta::Button.new(
+        size: :small,
+        tag: :a,
+        data: { "permalink-href": download_permalink },
+        href: blob_raw_path(params[:path], url_tree),
+        id: "raw-url",
+        group_item: true,
+        classes: download_permalink ? "js-permalink-replaceable-link" : ""
+      ) do %>
+        <%= download_label %>
+      <% end %>
+      <% if current_blob.viewable? %>
+        <%= render Primer::Beta::Button.new(
+          size: :small,
+          tag: :a,
+          data: { "permalink-href": blame_permalink },
+          href: blob_blame_path(params[:path], url_tree),
+          group_item: true,
+          classes: "js-update-url-with-hash" + (blame_permalink ? " js-permalink-replaceable-link" : ""),
+          "data-hotkey": "b"
+        ) do %>
+          Blame
+        <% end %>
+      <% end %>
+    </div>
+
+    <div class="d-flex">
+      <% if current_blob.viewable? %>
+        <%= render(Blobs::EditDropdownMenuComponent.new(
+          edit_tooltip: view.file_action_tooltip(action: :edit),
+          current_branch_or_tag_name: current_branch_or_tag_name,
+          branch: view.branch?,
+          repo: current_repository,
+          edit_enabled: view.edit_enabled?,
+          edit_path: url_for(params.to_unsafe_h.slice(:pr).merge(:action => "edit", :name => tree_name, :path => path_string)),
+          github_dev_enabled: github_dev_enabled?,
+          dropdown_tracking_attributes: view.dropdown_tracking_attributes(github_dev_enabled: github_dev_enabled?),
+          github_dev_link_tracking_attributes: view.github_dev_link_tracking_attributes
+        ))%>
+
+        <%= render partial: "blob/blob_header_copy_contents", locals: { url_tree: url_tree } %>
+
+        <% if view.edit_enabled? %>
+          <%= form_tag url_for(params.to_unsafe_h.slice(:pr).merge(:action => "delete", :name => tree_name, :path => path_string)),
+            :class => "inline-form" do %>
+            <button class="btn-octicon btn-octicon-danger" id="delete-action-button" type="submit" data-disable-with>
+              <%= primer_octicon(:trash) %>
+            </button>
+            <%= render(Primer::Alpha::Tooltip.new(
+              for_id: "delete-action-button",
+              text: view.file_action_tooltip(action: :delete),
+              type: :label,
+              direction: :nw,
+            )) %>
+          <% end %>
+        <% else %>
+          <button class="btn-octicon btn-octicon-danger disabled" disabled type="button">
+            <%= primer_octicon(:trash) %>
+          </button>
+        <% end %>
+      <% else %>
+        <% if !view.branch? %>
+          <a href="<%= site_nav_login_path %>" id="nav-disabled-link" class="btn-octicon btn-octicon-danger disabled">
+            <%= primer_octicon(:trash) %>
+          </a>
+          <%= render(Primer::Alpha::Tooltip.new(
+            text: view.file_action_tooltip(action: :delete),
+            direction: :nw,
+            type: :label,
+            for_id: "nav-disabled-link"
+          )) %>
+        <% else %>
+          <%= form_tag url_for(params.to_unsafe_h.slice(:pr).merge(:action => "delete", :name => tree_name, :path => path_string)),
+            :class => "inline-form" do %>
+            <button class="btn-octicon btn-octicon-danger" id="delete-action-button" type="submit" data-disable-with>
+              <%= primer_octicon(:trash) %>
+            </button>
+            <%= render(Primer::Alpha::Tooltip.new(
+              text: view.file_action_tooltip(action: :delete),
+              direction: :nw,
+              type: :label,
+              for_id: "delete-action-button"
+            )) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+
+  <%# <----- Small screen size menu -----> %>
+    <div class="d-flex hide-lg hide-xl flex-order-2 flex-grow-0">
+      <details class="dropdown details-reset details-overlay d-inline-block">
+        <% small_dropdown_tracking = view.dropdown_tracking_attributes(
+            small_screen: true,
+            github_dev_enabled: github_dev_enabled?
+        ) %>
+        <summary
+          class="js-blob-dropdown-click btn-octicon<% if show_toc %> p-2<% end %>"
+          aria-haspopup="true"
+          aria-label="Possible actions"
+          <%= test_selector "small-screen-more-options" %>
+          data-dropdown-tracking="<%= small_dropdown_tracking%>"
+        >
+          <%= primer_octicon(:"kebab-horizontal") %>
+        </summary>
+
+        <ul class="dropdown-menu dropdown-menu-sw" style="width: 175px">
+          <% if !mobile? %>
+            <li>
+              <% if view.branch? %>
+                <a class="dropdown-item js-remove-unless-platform"
+                   data-platforms="windows,mac"
+                   href="<%= app_clone_url(nil, nil, current_branch_or_tag_name, path_string) %>">
+                  Open with Desktop
+                </a>
+              <% end %>
+            </li>
+          <% end %>
+          <li>
+            <a class="dropdown-item" href="<%= blob_raw_path(params[:path], url_tree) %>">
+              <%= render_image_or_raw?(view.blob) ? "Download" : "View raw" %>
+            </a>
+          </li>
+          <% if current_blob.viewable? %>
+            <li>
+              <%= render GitHub::RemoteClipboardCopyComponent.new(
+                    src: blob_raw_path(params[:path], url_tree),
+                    classes: "dropdown-item") do |c| %>
+
+                <% c.with_idle do %>
+                  <%= content_tag :span,
+                    class: "cursor-pointer",
+                    data: copy_raw_contents_button_attributes(current_repository) do %>
+                    Copy raw contents
+                  <% end %>
+                <% end %>
+
+                <% c.with_fetching do %>
+                  Copy raw contents
+                  <span class="d-inline-block position-relative" style="top: 3px">
+                    <%= render(Primer::Beta::Spinner.new(size: :small, "aria-label": "fetching contents…")) %>
+                  </span>
+                <% end %>
+
+                <% c.with_success do %>
+                  Copy raw contents
+                  <%= primer_octicon(:check, color: :success, "aria-label": "Copied!") %>
+                <% end %>
+
+                <% c.with_error do %>
+                  Copy raw contents
+                  <%= primer_octicon(:alert, color: :attention, "aria-label": "Something went wrong. Try again.") %>
+                <% end %>
+              <% end %>
+            </li>
+            <li>
+              <a class="dropdown-item" href="<%= blob_blame_path(params[:path], url_tree) %>">
+                View blame
+              </a>
+            </li>
+          <% end %>
+
+          <% if current_blob.viewable? %>
+            <% if view.edit_enabled? %>
+              <li class="dropdown-divider" role="none"></li>
+              <li>
+                <%= link_to "Edit file", params.to_unsafe_h.slice(:pr).merge(:action => "edit", :name => tree_name, :path => path_string), class: "dropdown-item" %>
+              </li>
+              <% if github_dev_enabled? %>
+                <li>
+                  <%= render(Primer::Beta::Link.new(
+                    href: GitHub.codespaces_serverless_url,
+                    test_selector: "small-screen-github-dev-link",
+                    classes: "dropdown-item js-github-dev-shortcut js-blob-dropdown-click",
+                    data: {
+                      "dropdown-tracking": view.github_dev_link_tracking_attributes(small_screen: true)
+                    }
+                  )) { "Open with github.dev" } %>
+                </li>
+              <% end %>
+              <li>
+                <%= link_to "Delete file", params.to_unsafe_h.slice(:pr).merge(:action => "delete", :name => tree_name, :path => path_string), class: "dropdown-item menu-item-danger" %>
+              </li>
+            <% end %>
+          <% elsif view.branch? %>
+            <li>
+              <%= link_to "Delete file", params.to_unsafe_h.slice(:pr).merge(:action => "delete", :name => tree_name, :path => path_string), class: "dropdown-item menu-item-danger" %>
+            </li>
+          <% end %>
+        </ul>
+      </details>
+    </div>
+</div>

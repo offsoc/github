@@ -1,0 +1,82 @@
+#!/bin/bash
+#/ Initialized a block device at a mountpoint under /data
+#/ Usage: ghe-storage-init-device <device> <mountpoint> [<minimum size>]
+#/ <device> is the device that should be initialized. e.g. /dev/sdc
+#/ <mountpoint> is where it should be mounted.  e.g. /data/db
+#/ <minimum size> is the minimum allowed partition size in GB.  Default is 10
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+if [ "$#" -lt 2 ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 1
+fi
+
+device=$1
+mountpoint=$2
+min_size=${3:-"10"}
+
+[[ $min_size =~ ^[-0-9]+$ ]] || {
+  echo minimum_size must be an integer >&2
+  exit 1
+}
+
+[ "/data" = "$(dirname "$mountpoint")" ] || {
+  echo The parent directory of the mountpoint must be /data
+  exit 1
+}
+
+# succeed if already mounted
+if mountpoint -q "$mountpoint"; then
+  exit 0
+fi
+
+# resolve symlink in dev
+if [ -L $device ]; then
+  device=$(readlink -f $device)
+fi
+
+if [ ! -b "$device" ]; then
+  echo "Error: $device is not a block device" >&2
+  exit 1
+fi
+
+# refuse to overwrite existing data
+if ! file -s $device | grep -q "$device: data"; then
+  echo -e "Error: detected existing partitions on $(file -s $device)" >&2
+  exit 1
+fi
+
+# check size of device
+if [ $(blockdev --getsize64 $device) -lt $(($min_size*1024*1024*1024)) ]; then
+  echo "Error: $device is smaller than $min_size GB minimum" >&2
+  exit 1
+fi
+
+volume_part="$(basename "$mountpoint" | sed -e 's/-/_/')"
+lvm_name="ghe_${volume_part}_data"
+
+# create lvm volume group (ghe_db) and ext4 fs (ghe_db_data)
+DEVICE=$device
+VOLUME="ghe_${volume_part}_$(openssl rand -hex 4)"
+pvcreate -ffy $DEVICE
+vgcreate -f $VOLUME $DEVICE
+lvcreate --zero n -n "$lvm_name" -l 100%FREE $VOLUME || \
+(sleep 1 && lvcreate --zero n -n "$lvm_name" -l 100%FREE $VOLUME) || \
+(sleep 1 && lvcreate --zero n -n "$lvm_name" -l 100%FREE $VOLUME) || \
+(sleep 1 && lvcreate --zero n -n "$lvm_name" -l 100%FREE $VOLUME) || true
+vgscan --mknodes
+
+mkfs.ext4 -L "$lvm_name" /dev/$VOLUME/"$lvm_name"
+
+# mount
+mount -o defaults,noauto,noatime,nofail,data=ordered /dev/$VOLUME/"$lvm_name" "$mountpoint"
+rmdir "$mountpoint/lost+found" || true
+
+echo "Success: $device mounted at $mountpoint"

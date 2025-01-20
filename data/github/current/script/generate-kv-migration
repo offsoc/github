@@ -1,0 +1,85 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+#
+#/ Usage: generate-kv-migration --service SERVICE --domain DOMAIN [--migration [run]] [--transition KEYS]
+#/
+#/ This generates a transition and/or migration file(s)
+#/ for moving key_values into an application cluster.
+
+require_relative "../config/boot"
+
+require "optparse"
+require "rubocop"
+require "rubocop-ast"
+require "active_support/all"
+require "kv_migration/generator/option_validator"
+require "kv_migration/generator/generate_migration"
+require "kv_migration/generator/generate_transition"
+require "kv_migration/generator/generate_ghes_migration"
+
+options = {
+  migration: false,
+  transition: false,
+  ghes_migration: false,
+  service: nil,
+  domain: nil,
+  key_patterns: [],
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: #{$0} --service SERVICE --domain DOMAIN [options]"
+  opts.separator ""
+  opts.separator "The following options are required for Transitions or Migrations:"
+  opts.on("-s SERVICE", "--service SERVICE", "The service to use for the transition") do |s|
+    options[:service] = s
+  end
+  opts.on("-d DOMAIN", "--domain DOMAIN", "The ActiveRecord domain to use for the table") do |d|
+    options[:domain] = d
+  end
+
+  opts.separator ""
+  opts.separator "One or more of the following options is required:"
+  opts.on("-m [run]", "--migration [run]", "Generates the migration to create a new key_values table", "Optionally specify the run argument to run the transition.") do |r|
+    options[:migration] = true
+    options[:run] = r == "run"
+  end
+  opts.on("-o OWNER", "--owner OWNER", "Specifies the catalog service to use when updating tableowners.yml") do |s|
+    options[:owner] = s
+  end
+  opts.on("-c CLUSTER", "--cluster CLUSTER", "Specifies the cluster name for updating lib/github/db_structure.rb") do |s|
+    options[:cluster] = s
+  end
+  opts.on(
+    "-t KEYS", "--transition KEYS", "Generates the transition to move the specified keys.", "The values are passed without modification to mysql's LIKE operator.", "Multiple keys may be specified using ',' as a separator.") do |keys|
+    options[:transition] = true
+    options[:key_patterns] = keys.split(",").map { |k| k.strip.delete_prefix("\"").delete_suffix("\"") }.to_a
+  end
+  opts.on("-g VERSION", "--ghes-migration VERSION", "Create GHES migration to execute the transition. All feature flags should be removed before merging.") do |v|
+    options[:ghes_migration] = true
+    options[:version] = v
+  end
+
+  opts.separator ""
+  opts.separator "Common options:"
+  opts.on_tail("-h", "--help", "Show this message") do
+    puts opts
+    exit
+  end
+end
+
+parser.parse!
+
+validator = KvMigration::Generator::OptionValidator.new(options)
+if validator.invalid?
+  puts validator.errors.full_messages
+  abort parser.help
+end
+
+if options[:migration]
+  KvMigration::Generator::GenerateMigration.call(options[:service], options[:domain], cluster: options[:cluster], owner: options[:owner], run: options[:run])
+elsif options[:transition]
+  KvMigration::Generator::GenerateTransition.call(options[:service], options[:domain], options[:key_patterns])
+elsif options[:ghes_migration]
+  KvMigration::Generator::GenerateGhesMigration.call(options[:version])
+end

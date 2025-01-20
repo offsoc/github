@@ -1,0 +1,206 @@
+<%# erblint:counter DeprecatedComponentsCounter 8 %>
+<%# erblint:counter DeprecatedInPrimerCounter 4 %>
+<%
+  if pull_request.repository.dco_signoff_enabled?
+    commit_suggestion_title = "Sign off and commit suggestion"
+    commit_changes_title = "Sign off and commit changes"
+  else
+    commit_suggestion_title = "Commit suggestion"
+    commit_changes_title = "Commit changes"
+  end
+%>
+
+<template class="js-suggested-changes-template"
+          data-comment-pending="<%= comment.pending? %>"
+          data-outdated-comment="<%= comment.outdated? %>"
+          data-head-oid-is-loaded="<%= current_head_oid_loaded? %>"
+          <% if pull_request.repository.merge_queue_enabled? %>
+               data-in-merge-queue="<%= pull_request.in_merge_queue? %>"
+          <% end %>
+>
+  <div class="p-2 border-top d-flex flex-sm-row flex-column flex-sm-items-center flex-items-center flex-justify-end suggested-change-form-container js-suggested-change-form-container " data-comment-pending="<%= comment.pending? %>" data-outdated-comment="<%= comment.outdated? %>" data-resolved-comment="<%= pull_request_review_thread.resolved? %>">
+    <% if !current_user&.hadron_editor_preview_enabled? ||
+          !feature_enabled_globally_or_for_user?(feature_name: :copilot_hadron_suggestions_ui) %>
+    <%= render Primer::ButtonComponent.new(variant: :small, display: :none,
+      w: [:full, :auto], classes: "js-suggestion-applied", disabled: true
+    ) do |button| %>
+      <% button.icon(icon: :check) %>
+      Suggestion applied
+    <% end %>
+
+    <%= render Primer::ButtonComponent.new(variant: :small, display: :none, mb: [2, 0], disabled: true, dropdown: true,
+      w: [:full, :auto], classes: "js-disabled-apply-suggestion-button tooltipped tooltipped-multiline tooltipped-n",
+      "data-pull-is-open": pull_request.open?,
+    ) do |button| %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+      <%= commit_suggestion_title %>
+    <% end %>
+
+    <% if pull_request.open? %>
+      <%= render Primer::Beta::Label.new(scheme: :warning, display: :none, mt: 0, mr: :auto, mb: [2, 0, 0, 0], ml: [0, 0, 0, 1],
+        classes: "js-pending-batched-suggestion-label",
+        title: "Label: Pending in batch"
+      ) do %>
+        Pending in batch
+      <% end %>
+
+      <%= render Primer::ButtonComponent.new(scheme: :danger, variant: :small, display: :none, mb: [2, 0], ml: [0, 2],
+        w: [:full, :auto], classes: "js-batched-suggested-changes-remove tooltipped tooltipped-multiline tooltipped-n",
+        "aria-label": "Remove this suggestion from those to be applied in batch"
+      ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+        Remove from batch
+      <% end %>
+
+      <%= render Primer::ButtonComponent.new(variant: :small, display: :none, mb: [2, 0], ml: [0, 2],
+        w: [:full, :auto], classes: "js-focus-commit-suggestions-form-button tooltipped tooltipped-multiline tooltipped-n",
+        "aria-label": "Apply all batched suggestions as a single commit"
+      ) do |button| %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+        <%= commit_suggestion_title %>s
+        <% button.counter(count: 0, classes: "js-pending-batched-suggested-changes-count") %>
+      <% end %>
+
+      <details class="details-reset details-overlay position-relative js-apply-single-suggestion mb-0 width-full width-sm-auto" id="<%= commit_suggestion_modal_id %>">
+        <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, w: [:full, :auto], classes: "js-apply-suggestion-button", ml: [0, 2], mb: [2, 0], dropdown: true, data: suggested_changes_click("apply_suggestion")) do %>
+          <%= commit_suggestion_title %>
+        <% end %>
+        <div class="pt-1 SelectMenu right-0">
+          <div class="SelectMenu-modal" style="max-width: calc(100vw - 32px); width: 420px; height: auto;">
+            <header class="SelectMenu-header p-2">
+              <span class="SelectMenu-title"><%= commit_suggestion_title %></span>
+              <%= render Primer::ButtonComponent.new(scheme: :invisible, classes: "SelectMenu-closeButton", "data-toggle-for": "#{commit_suggestion_modal_id}") do |button| %>
+                <% primer_octicon(:x, "aria-label": "Close commit suggestion dialog") %>
+              <% end %>
+            </header>
+
+            <%= form_tag(apply_suggested_changes_path, method: :post, class: "js-single-suggested-change-form p-2") do %>
+              <input type="hidden" name="comment_id" value="<%= comment.id %>">
+              <input type="hidden" name="path" value="<%= pull_request_review_thread.path %>">
+              <input type="hidden" name="current_oid" value="<%= current_head_oid %>">
+              <input type="text" name="commit_title" class="form-control input-block input-contrast js-suggestion-commit-title mb-2" aria-label="Commit title" value="Update <%= pull_request_review_thread.path %>" placeholder="Commit title">
+
+              <textarea rows="2" aria-label="Commit message" autocomplete="off" class="js-quick-submit form-control input-block mb-2" type="text" name="commit_message" placeholder="Add an optional extended description…" style="resize: vertical"></textarea>
+
+              <%= render Repositories::DcoLabelComponent.new(
+                repo: pull_request.repository
+              ) %>
+
+              <div class="form-actions">
+                <% data = suggested_changes_click("commit_changes").merge("disable-invalid": true) %>
+                <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, classes: "js-suggested-changes-submit", data: data.merge(disable_with: "Applying commit...")).with_content(commit_changes_title) %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      </details>
+
+      <%= render Primer::ButtonComponent.new(variant: :small, ml: [0, 2], disabled: batch_suggestions_disabled?,
+        w: [:full, :auto], classes: "js-batched-suggested-changes-add tooltipped tooltipped-multiline tooltipped-n",
+        "aria-label": batch_suggestions_label
+      ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+        Add suggestion to batch
+      <% end %>
+    <% end %>
+    <% else %>
+      <%= render Primer::Beta::Button.new(size: :small, display: :none,
+        w: [:full, :auto], classes: "js-suggestion-applied", disabled: true
+      ) do |button| %>
+        <% button.with_leading_visual_icon(icon: :check) %>
+        Suggestion applied
+      <% end %>
+
+      <% if pull_request.open? %>
+        <%= render Primer::Beta::Label.new(scheme: :warning, display: :none, mt: 0, mr: :auto, mb: [2, 0, 0, 0], ml: [0, 0, 0, 1],
+          classes: "js-pending-batched-suggestion-label",
+          title: "Label: Pending in batch"
+        ) do %>
+          Pending in batch
+        <% end %>
+
+        <%= render Primer::Beta::Button.new(size: :small, tag: :a, ml: [0, 2],
+          w: [:full, :auto], classes: "js-open-in-editor no-underline",
+          "aria-label": "Open in editor.",
+          href: repo_copilot_task_edit_path(
+            id: pull_request.number,
+            user_id: pull_request.repository.owner_display_login,
+            repository: pull_request.repository,
+            path: pull_request_review_thread.path,
+            pull_request_review_comment_id: comment.id),
+        ) do |button| %>
+          <% button.with_leading_visual_icon(icon: :pencil) %> Edit
+        <% end %>
+
+        <%= render Primer::Beta::Button.new(scheme: :danger, size: :small, display: :none, mb: [2, 0], ml: [0, 2],
+          w: [:full, :auto], classes: "js-batched-suggested-changes-remove tooltipped tooltipped-multiline tooltipped-n",
+          "aria-label": "Remove this suggestion from those to be applied in batch"
+        ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+          Remove from batch
+        <% end %>
+
+        <%= render Primer::Beta::Button.new(size: :small, ml: [0, 2], disabled: batch_suggestions_disabled?,
+          w: [:full, :auto], classes: "js-batched-suggested-changes-add tooltipped tooltipped-multiline tooltipped-n",
+          "aria-label": batch_suggestions_label
+        ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+          Add to batch
+        <% end %>
+
+        <%= render Primer::Beta::Button.new(size: :small, display: :none, mb: [2, 0], ml: [0, 2],
+          w: [:full, :auto], classes: "js-focus-commit-suggestions-form-button tooltipped tooltipped-multiline tooltipped-n",
+          "aria-label": "Apply all batched suggestions as a single commit"
+        ) do |button| %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+          <%= commit_suggestion_title %>s
+          <% button.with_trailing_visual_counter(count: "0", classes: "js-pending-batched-suggested-changes-count") %>
+        <% end %>
+
+        <details class="details-reset details-overlay position-relative js-apply-single-suggestion mb-0 width-full width-sm-auto" id="<%= commit_suggestion_modal_id %>">
+          <%= render Primer::Beta::Button.new(tag: :summary, size: :small, w: [:full, :auto], classes: "js-apply-suggestion-button", ml: [0, 2], mb: [2, 0], data: suggested_changes_click("apply_suggestion")
+          ) do |button| %>
+            <%= commit_suggestion_title %>
+            <% button.with_trailing_action_icon(icon: "triangle-down") %>
+          <% end %>
+          <div class="pt-1 SelectMenu right-0">
+            <div class="SelectMenu-modal" style="max-width: calc(100vw - 32px); width: 420px; height: auto;">
+              <header class="SelectMenu-header p-2">
+                <span class="SelectMenu-title"><%= commit_suggestion_title %></span>
+                <%= render Primer::Beta::Button.new(scheme: :invisible, classes: "SelectMenu-closeButton", "data-toggle-for": "#{commit_suggestion_modal_id}") do |button| %>
+                  <% primer_octicon(:x, "aria-label": "Close commit suggestion dialog") %>
+                <% end %>
+              </header>
+
+              <%= form_tag(apply_suggested_changes_path, method: :post, class: "js-single-suggested-change-form p-2") do %>
+                <input type="hidden" name="comment_id" value="<%= comment.id %>">
+                <input type="hidden" name="path" value="<%= pull_request_review_thread.path %>">
+                <input type="hidden" name="current_oid" value="<%= current_head_oid %>">
+                <input type="text" name="commit_title" class="form-control input-block input-contrast js-suggestion-commit-title mb-2" aria-label="Commit title" value="Update <%= pull_request_review_thread.path %>" placeholder="Commit title">
+
+                <textarea rows="2" aria-label="Commit message" autocomplete="off" class="js-quick-submit form-control input-block mb-2" type="text" name="commit_message" placeholder="Add an optional extended description…" style="resize: vertical"></textarea>
+
+                <%= render Repositories::DcoLabelComponent.new(
+                  repo: pull_request.repository
+                ) %>
+
+                <div class="form-actions">
+                  <% data = suggested_changes_click("commit_changes").merge("disable-invalid": true) %>
+                  <%= render Primer::Beta::Button.new(type: :submit, size: :small, classes: "js-suggested-changes-submit", data: data.merge(disable_with: "Applying commit...")).with_content(commit_changes_title) %>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        </details>
+      <% end %>
+
+      <%= render Primer::Beta::Button.new(size: :small, display: :none, ml: [0, 2], mb: [2, 0], disabled: true,
+        w: [:full, :auto], classes: "js-disabled-apply-suggestion-button tooltipped tooltipped-multiline tooltipped-n",
+        "data-pull-is-open": pull_request.open?,
+      ) do |button| %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+        <%= commit_suggestion_title %>
+        <% button.with_trailing_action_icon(icon: "triangle-down") %>
+      <% end %>
+    <% end %>
+  </div>
+</template>
+
+<div class="form-group flex-auto warn m-0 color-fg-attention js-error-message-placeholder" hidden>
+  <div class="position-relative warning m-0" style="max-width: inherit;">
+    <span class="js-error-message"></span>
+    <span class="text-bold btn-link js-refresh-after-suggestion">Refresh and try again.</span>
+  </div>
+</div>

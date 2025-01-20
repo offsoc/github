@@ -1,0 +1,196 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ExperimentalDialogMigrationCounter 1 %>
+<%= render Primer::Beta::Subhead.new(spacious: two_factor_auth_available, pt: 1, id: "saml-settings") do |component| %>
+  <% component.with_heading(tag: :h3) do %>SAML single sign-on<% end %>
+<% end %>
+
+<% enable_saml_task = OnboardingTasks::Businesses::EnableSaml.new(taskable: this_business, user: current_user) %>
+<%= render(Businesses::TipComponent.new(
+  business: this_business,
+  show_tip: params[:show_onboarding_guide_tip].present?,
+  task: enable_saml_task,
+  container_class: "my-3"
+  )) do %>
+  <h3 class="mb-1">Enable SAML single sign-on</h3>
+
+  <div class="color-fg-muted">
+    <p>
+      If you centrally manage your users' identities and applications with an identity provider (IdP), you can
+      <a
+        href="https://docs.github.com/enterprise-cloud@latest/admin/identity-and-access-management/using-saml-for-enterprise-iam/configuring-saml-single-sign-on-for-your-enterprise"
+        target="_blank"
+        class="Link--inTextBlock"
+      >configure SAML single sign-on</a> to protect your enterprise's resources on GitHub.
+    </p>
+    <p>
+      When you select “Enable SAML authentication”, you’ll be asked for some
+      <a
+        href="https://docs.github.com/enterprise-cloud@latest/organizations/managing-saml-single-sign-on-for-your-organization"
+        target="_blank"
+        class="Link--inTextBlock"
+      >details about your identity provider (IdP)</a>.
+    </p>
+
+    <p class="mb-0">
+      <a
+        href="https://docs.github.com/enterprise-cloud@latest/admin/identity-and-access-management/using-saml-for-enterprise-iam/configuring-saml-single-sign-on-for-your-enterprise"
+        target="_blank"
+        class="Link--inTextBlock"
+      >
+        <%= render(Primer::Beta::Octicon.new(:file, mr: 1)) %>
+        Read a step-by-step guide
+      </a>
+    </p>
+  </div>
+<% end %>
+<%= render(Businesses::CompletedGuidanceComponent.new(
+  business: this_business,
+  completed_task: enable_saml_task,
+  show_tip: params[:show_onboarding_guide_tip].present?,
+  container_class: "mt-4 mb-4"
+)) %>
+
+<p>
+  <% if GitHub.flipper[:enterprise_idp_provisioning].enabled?(this_business) %>
+    Manage your enterprise’s membership while adding another level of security with SAML.
+  <% else %>
+    Add another level of security to your enterprise with SAML single sign-on.
+  <% end  %>
+  <% if view.business_emu_configured? %>
+      <%= link_to \
+      "Learn more about SAML single sign-on",
+      "#{GitHub.help_url}/admin/identity-and-access-management/configuring-authentication-for-enterprise-managed-users/configuring-saml-single-sign-on-for-enterprise-managed-users",
+      class: "Link--inTextBlock" %>.
+  <% else %>
+    <%= link_to \
+      "Learn more about SAML single sign-on",
+      "#{GitHub.help_url}/github/setting-up-and-managing-your-enterprise/enabling-saml-single-sign-on-for-organizations-in-your-enterprise-account",
+      class: "Link--inTextBlock" %>.
+  <% end %>
+</p>
+
+<template id="disable-saml-confirmation">
+  <div class="Box-header"><h3 class="Box-title">Are you sure you want to disable SAML?</h3></div>
+  <div class="Box-body">
+    Disabling SAML authentication for the <%= this_business.name %> enterprise will not remove existing members.
+  </div>
+
+  <%= form_tag settings_saml_provider_enterprise_path(this_business.slug), method: :delete, "data-turbo": "false", class: "Box-footer" do %>
+    <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>Disable SAML authentication<% end %>
+  <% end %>
+</template>
+
+<div class="saml-settings-form" data-warn-unsaved-changes="Changes to your SAML provider settings may not be saved">
+  <%= form_for(:saml, url: settings_saml_provider_enterprise_path(this_business.slug, anchor: "saml-settings"),
+    method: :put, html: { class: "js-business-saml-provider-settings-form", novalidate: true, "data-turbo": "false"}) do |f| %>
+    <div class="form-checkbox">
+      <% disabled = view.saml_sso_configured_checkbox_disabled? %>
+      <input id="enable-saml-checkbox" type="checkbox" name="enable-saml-checkbox" class="js-business-enable-saml" <%= "checked" if view.show_saml_settings? %> <%= "disabled" if disabled %>>
+      <input type="hidden" name="saml-currently-enabled" class="js-business-saml-currently-enabled" value="<%= view.saml_settings_saved? ? 1 : 0 %>">
+      <label for="enable-saml-checkbox">
+        <% if view.builtin_auth_fallback? %>
+          Can use SAML authentication
+        <% else %>
+          Require SAML authentication
+        <% end %>
+      </label>
+
+      <% if disabled && view.show_saml_settings? %>
+        <p class="note">
+          Disabling SAML authentication for your enterprise is only allowed
+          if you are logged in as the first enterprise owner.
+        </p>
+      <% else %>
+        <p class="note">
+          After you require SAML authentication, members of the <%= this_business.name %> enterprise
+          must authenticate with your SAML identity provider (IdP) to access any of the enterprise's
+          organizations. Supported IdPs include <%= view.supported_idps %>.
+        </p>
+      <% end %>
+
+      <% if view.show_orgs_with_saml_configured? %>
+        <div class="d-flex flex-column flex-items-start py-2">
+          <% if view.business_emu_configured? %>
+            <span class="note d-inline-block"> Requiring SAML sign-on for the enterprise will enforce SAML for all the organizations in the enterprise.</span>
+          <% else %>
+            <% if this_business.team_sync_enabled_orgs.any? %>
+              <%= render(Primer::Beta::Text.new(tag: :span, color: :danger, font_size: :small, test_selector: "org_team_sync_warning")) { "Warning" }%>
+              <%= render(Primer::Beta::Text.new(tag: :span, color: :default, font_size: :small)) {
+                "Enabling enterprise SAML will remove active team synchronization settings in #{this_business.team_sync_enabled_orgs.count} #{"organization".pluralize(this_business.team_sync_enabled_orgs.count)}.
+                Please take note of the current configuration in the affected #{"organization".pluralize(this_business.team_sync_enabled_orgs.count)} if you intend to manually re-enable team sync after enabling enterprise SAML."
+              } %>
+              <br>
+            <% end %>
+            <%= render Primer::Alpha::Dialog.new(
+              title: "SAML single sign-on",
+              size: :large,
+              id: "view-your-organizations-current-configurations-saml",
+            ) do |dialog| %>
+              <% dialog.with_header(show_divider: true) %>
+              <% dialog.with_show_button(scheme: :link, my: 2, classes: 'Link--inTextBlock') do  %>
+                View organizations' SAML single sign-on policy
+              <% end %>
+              <% dialog.with_body do %>
+                <include-fragment loading="lazy" src="<%= view.saml_identity_provider_setting_organizations_business_path %>">
+                  <div class="d-flex flex-items-center flex-justify-center my-2">
+                    <div class="text-center" data-hide-on-error>
+                      <h2 class='f5'>Loading...</h2>
+                      <%= render(Primer::Beta::Spinner.new(size: :small, mt: 1)) %>
+                    </div>
+                    <div class="text-center" data-show-on-error hidden>
+                      <h2 class='f5'>Sorry, something went wrong.</h2>
+                    </div>
+                  </div>
+                </include-fragment>
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+      <% end %>
+      <div class="js-business-saml-form-inputs" <%= "hidden" unless view.show_saml_settings? %>>
+        <% if view.saml_settings_saved? %>
+          <div class="Box my-4 color-bg-subtle">
+            <div class="border-bottom p-3 d-flex flex-items-center">
+              <div>
+                <%= primer_octicon(:"shield-lock", color: :muted, mr: 3) %>
+              </div>
+              <p class="note">
+                <%= link_to "Save your recovery codes",
+                  settings_saml_provider_recovery_codes_enterprise_path(this_business.slug), class: "Link--inTextBlock" %>
+                in a safe place. If your IdP is unavailable you can use a
+                recovery code to skip single sign-on and access
+                the <%= this_business.name %> enterprise.
+              </p>
+            </div>
+
+            <div class="p-3 d-flex flex-items-center">
+              <div>
+                <%= primer_octicon(:link, color: :muted, mr: 3) %>
+              </div>
+              <p class="note">
+                The <%= this_business.name %> enterprise single sign-on URL is
+                <%= link_to view.sso_url, view.sso_path, class: "Link--inTextBlock" %>
+              </p>
+            </div>
+          </div>
+        <% end %>
+        <%= render "businesses/settings/security/saml_form", f: f, view: view, bootstrap_flow: false %>
+      </div>
+    </div>
+    <% unless view.saml_sso_configuration_readonly? %>
+      <%= render Primer::ButtonComponent.new(
+          id: "save-saml-settings",
+          name: "save_settings",
+          value: "1",
+          classes: "js-business-saml-submit js-business-saml-save-submit",
+          type: :submit,
+          disabled: view.saml_test_failure?,
+        ) do %>Save SAML settings<% end %>
+    <% end %>
+  <% end %>
+</div>
+<div class="js-business-saml-user-provisioning">
+  <% if view.saml_settings_saved? %>
+    <%= render "businesses/saml_provider/user_provisioning/settings" if GitHub.flipper[:enterprise_idp_provisioning].enabled?(this_business) %>
+  <% end %>
+</div>

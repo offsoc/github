@@ -1,0 +1,52 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-es-dump-meta 'http://localhost:9200/audit_log*' > meta.json
+require "rubygems"
+require "net/http"
+require "json"
+require "uri"
+
+if ARGV.size < 1
+  puts File.read(__FILE__).lines.select { |l| l =~ /^#\// }.map { |l| l[3, l.size] }.join("\n")
+  exit 1
+end
+
+url = ARGV[0]
+uri = URI.parse(url)
+
+Net::HTTP.start(uri.host, uri.port) do |http|
+  metadata = {}
+  index_path = uri.path
+
+  uri.path = "#{index_path}/_settings"
+  request = Net::HTTP::Get.new(uri)
+  response = http.request request
+  settings = response.code == "200" ? JSON.parse(response.body) : {}
+
+  uri.path = "#{index_path}/_mapping"
+  request = Net::HTTP::Get.new(uri)
+  response = http.request request
+  mappings = response.code == "200" ? JSON.parse(response.body) : {}
+
+  settings.each do |index_name, index_settings|
+    metadata[index_name] ||= {}
+    index_settings['settings']['index'].delete('creation_date')
+    index_settings['settings']['index'].delete('provided_name')
+    index_settings['settings']['index'].delete('uuid')
+    index_settings['settings']['index']['version'].delete('created')
+    metadata[index_name].merge!(index_settings)
+  end
+
+  mappings.each do |index_name, index_mappings|
+    metadata[index_name] ||= {}
+    # accommodate 0.90 mapping response
+    if !index_mappings.has_key?("mappings")
+      index_mappings = { "mappings" => index_mappings }
+    end
+    metadata[index_name].merge!(index_mappings)
+  end
+
+  metadata.each do |index_name, index_metadata|
+    STDOUT.puts JSON.dump({index_name => index_metadata})
+  end
+end

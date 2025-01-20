@@ -1,0 +1,70 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  # I need to be able to use the preview_comment_form_component header_id in the new_comment_form
+  previewable_comment_form_component = Comments::PreviewableCommentFormComponent.new(
+    textarea_id: "new_comment_field",
+    subject: timeline.discussion,
+    placeholder: placeholder,
+    current_repository: repository,
+    slash_commands_enabled: slash_commands_enabled?,
+    slash_commands_surface: SlashCommands::DISCUSSION_SURFACE,
+    use_fixed_width_font: current_user.use_fixed_width_font?,
+    local_storage_resumable: current_user.feature_enabled?(:local_storage_resumable_discussion_posts),
+    session_resumable: !current_user.feature_enabled?(:local_storage_resumable_discussion_posts)
+  )
+%>
+
+<div class="<%= class_names(
+  "timeline-comment-wrapper timeline-new-comment js-comment-container ml-0 pl-0",
+  "locked-conversation" => locked_discussion?,
+) %>">
+  <% if timeline.can_interact_with_repo? %>
+    <%= form_tag discussion_comments_path(timeline.repo_owner_login,
+        timeline.repo_name,
+        timeline.discussion_number),
+        id: "new_comment_form",
+        aria: {labelledby: previewable_comment_form_component.header_id},
+        class: "js-new-comment-form js-needs-timeline-marker-header" do %>
+      <%= helpers.spamurai_form_signals %>
+      <div>
+        <% if emu_contribution_blocked? %>
+          <%= render "comments/emu_comment_blocked_form" %>
+        <% elsif viewer_must_verify_email? %>
+          <%= render "comments/no_verified_email_message" %>
+        <% elsif timeline.archived_repo? %>
+          <%= render "comments/archived_repository_comment_form" %>
+        <% elsif locked_discussion? %>
+          <%= render "comments/locked_comment_form" %>
+        <% elsif timeline.blocked_from_commenting? %>
+          <%= render Comments::BlockedFromCommentingComponent.new(
+            repo_owner: timeline.repo_owner,
+            code_of_conduct_url: repository.code_of_conduct.url,
+          ) %>
+        <% else %>
+          <%# I need the id generated from this component to be used in the form above, so rendering a variable after using the id %>
+          <%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+          <%= render(previewable_comment_form_component) do |c| %>
+            <% c.with_header(tag: :h3, text: heading) %>
+          <% end %>
+
+          <div class="mt-2">
+            <%= render Discussions::FormActionsComponent.new(
+              timeline: timeline,
+              is_inline_comment: false,
+            ) %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+    <% if comment_form_shown? %>
+      <%= render Repositories::ContributorFooterComponent.new(
+        safe_link_data_attrs: safe_discussion_view_click_attrs(timeline.discussion, target: :COMMUNITY_LINK),
+        repo: repository,
+      ) %>
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, test_selector: "interaction-ban")) do %>
+      <%= helpers.interaction_ban_copy(repository, current_user) %>
+    <% end %>
+  <% end %>
+</div>

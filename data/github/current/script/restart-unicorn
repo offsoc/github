@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+#/ Usage: restart-unicorn <-P|--pidfile> [options]
+#/ Restart a unicorn process and wait for the new process to start up.
+#/
+#/ Options
+#/   -h, --help           Show help
+#/   -P, --pidfile=<file> Location of the pid file unicorn writes to
+#/   -t, --timeout=<time> Time in seconds to wait; default: 60
+require "optparse"
+
+timeout = 60
+pidfile = nil
+
+OptionParser.new do |opts|
+  opts.on("-P", "--pidfile=val") { |o| pidfile = o }
+  opts.on("-t", "--timeout=val") { |o| timeout = o }
+  opts.on_tail("-h", "--help")   { exec "grep ^#/<'#{__FILE__}'|cut -c4-" }
+
+  opts.parse!
+end
+
+pidfile = nil if pidfile == ""
+if pidfile.nil?
+  $stderr.puts "must provide a pid"
+end
+
+old_pid = File.read(pidfile).to_i
+
+# Send USR2 to the process specified in this file and keep reading the file
+# until it changes. If it does not change within our timeout, then something has
+# gone wrong and the new process failed to start.
+Process.kill(:USR2, old_pid)
+timeout.times do |_t|
+  sleep(1)
+  begin
+    pid = File.read(pidfile).to_i
+  rescue Errno::ENOENT
+    next
+  end
+
+  if pid != old_pid
+    exit(0)
+  end
+end
+
+$stderr.puts "timeout waiting for restart after #{timeout}s"
+exit(1)

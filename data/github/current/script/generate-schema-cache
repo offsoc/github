@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -e
+
+if [ "$1" = "--start-mysql" ]; then
+  mkdir -p /var/run/mysqld /var/lib/mysql
+  chown -R mysql:mysql /var/lib/mysql /var/run/mysqld
+  mysqld_safe --initialize
+  mysqld_safe --skip-grant-tables &
+  pid=$!
+  sleep 5
+fi
+
+# Never run against production config, but always use test
+cp config/defaults/* config/
+RAILS_ENV=test bin/rake db:create
+RAILS_ENV=test bin/rake db:test:load_schema
+RAILS_ENV=test bin/rake db:structure:dump
+
+template_path="protected"
+
+if [ "$ENTERPRISE" = "1" ]; then
+  template_path="enterprise"
+fi
+
+cp config/$template_path/* config/
+
+if [ "$1" = "--start-mysql" ]; then
+  kill -TERM $(ps --ppid $pid -o pid=)
+  sleep 2
+fi

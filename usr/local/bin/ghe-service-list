@@ -1,0 +1,87 @@
+#!/bin/bash
+#/ Usage: ghe-service-list [-h]
+#/
+#/ List all of the services that have been started or stopped (are running or waiting) on your appliance.
+#/
+#/ OPTIONS:
+#/     -h | --help              Display this help
+#/     -s | --system-services   Include system services
+#/
+
+# shellcheck source=../share/enterprise/ghe-nomad-lib
+source /usr/local/share/enterprise/ghe-nomad-lib
+# shellcheck source=../share/enterprise/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+fi
+
+# systemd units for which to check the running state
+ghe_services="
+consul
+enterprise-manage-unicorn
+ghe-user-disk
+nomad
+wireguard
+"
+
+# systemd units that only run on the replica
+if [ "$REPL_STATE" = "replica" ]; then
+  ghe_services="${ghe_services}
+consul-replicate
+"
+fi
+
+system_services="
+collectd
+chrony
+dnsmasq
+ssh
+syslog-ng
+systemd-journald
+"
+
+if [ "$1" = "--system-services" ] || [ "$1" = "-s" ]; then
+  services_list="${ghe_services}${system_services}"
+else
+  services_list="${ghe_services}"
+fi
+
+IFS=$'\n'
+
+#
+# Collect all the ActiveState properties for services in parallel.
+# tranforms into: <service> <active|inactive>, process <pid>
+status_output=$(for service in $services_list; do
+  # defaults to inactive
+  systemctl show --type=service,timer --property=ActiveState,ExecMainPID $service 2>&1 | \
+    sort | \
+    xargs | \
+    sed --expression "s/ActiveState=\(.*\)/$service \1/" --expression "s/ ExecMainPID=\(.*\)/, process \1/" &
+done
+wait)
+
+# Add nomad jobs as active if healthy or inactive if unhealthy
+healthy=$(fetch_healthy_jobs)
+for job in $healthy; do
+  status_output="$status_output
+$job active, process 0"
+done
+
+unhealthy=$(fetch_unhealthy_jobs)
+for job in $unhealthy; do
+  status_output="$status_output
+$job inactive, process 0"
+done
+
+
+echo "$status_output" | sed 's/, process 0//' | sort -k 2,2d -k 1,1d | while read -r service; do
+  state=$(echo "$service" | sed 's/([[:digit:]]) //' | cut -d, -f1 | cut -d' ' -f2)
+  [ "$state" != "$prevstate" ] && [ -n "$prevstate" ] && echo
+  [ "$state" = "$prevstate" ] || echo "$state"
+  prevstate=$state
+  echo "  - $service" | sed -e "s| $state||"
+done

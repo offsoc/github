@@ -1,0 +1,130 @@
+#!/bin/bash
+#/ Usage: ghe-mysql-failover-recovery [-ahn]
+#/
+#/ Recovers replication on previous mysql master which is failed over by orchestrator.
+#/ It restarts mysql service on failed node, and then add it as a replica to cluster.
+#/ This command will recover the last failed over mysql node if -n is not specified.
+#/
+#/ OPTIONS:
+#/   -n | --node        Failed mysql node which needs to be restarted and added as replica.
+#/   -a | --ack         Acknowledge cluster recovery to unblock pending future recoveries
+#/   -h | --help        Show this message.
+#/
+
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+# Display usage information and quit.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+# Default options.
+ack=
+node=
+
+# Process command line arguments.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -n|--node)
+      node="$2"
+      shift
+      shift
+      ;;
+    -a|--ack)
+      ack=1
+      shift
+      ;;
+    *)
+      >&2 echo "Unrecognized argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+. ghe-repl-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+
+if ! orchestrator_enabled ; then
+  echo "ghe-mysql-failover-recovery is only supported when MySQL orchestrator is enabled."
+  exit 1
+fi
+
+mysql_master=$(ghe-config cluster.mysql-master)
+
+if [ -n "$node" ]; then
+  new_primary=$(/usr/local/share/enterprise/ghe-orchestrator-client -c which-cluster-master -alias ghe | grep -Po '^[a-zA-Z0-9\-]*')
+  old_primary=$node
+  if [ $new_primary = $old_primary ]; then
+    echo "$old_primary is current master node"
+    exit 2
+  fi
+  if [ $(/usr/local/share/enterprise/ghe-orchestrator-client -c is-replicating -i $old_primary | grep $old_primary) ]; then
+    echo "$old_primary is already in replication"
+    exit 2
+  fi
+else
+  json_output=$(/usr/local/share/enterprise/ghe-orchestrator-client -c api -path audit-recovery/alias/ghe)
+  # Only look at successful recoveries
+  failover_result=$(jq -re '[.[] | select( .IsSuccessful == true )] | max_by(.RecoveryEndTimestamp) | [.SuccessorKey.Hostname, .AnalysisEntry.AnalyzedInstanceKey.Hostname] | join(" ")' <<< $json_output)
+  read new_primary old_primary <<< $failover_result
+  if [ -z "$new_primary" ] || [ -z "$old_primary" ]; then
+    echo "No failover logged"
+    exit
+  fi
+  echo "Latest failover $old_primary -> $new_primary"
+fi
+
+## Additional sanity check
+if [ "$new_primary" != "$mysql_master" ]; then
+  echo "Mysql Master $mysql_master doesn't match with master node $new_primary known to orchestrator!"
+  exit 2
+fi
+
+echo "trying to restart mysql service on $old_primary..."
+ssh_cmd "$new_primary" "ghe-cluster-config-apply"
+
+# giving 60 seconds to have replication enabled
+retry=60
+while [ $retry -gt 0 ]; do
+  echo "checking replication status"
+  # check that replica properly added to cluster
+  if /usr/local/share/enterprise/ghe-orchestrator-client -c topology -alias ghe | grep "+ $old_primary" | grep "ok"; then
+    # acknowledging recovery to unblock pending future recoveries
+    echo "$old_primary successfully configured as replica"
+
+    if [ -z "$ack" ]; then
+      read -p "Do you want to acknowledge cluster recovery (N/y)?" choice
+      case "$choice" in
+        y|Y )
+          ack=1
+          ;;
+        *)
+          echo "cluster recovery will not be acknowledged"
+          exit
+          ;;
+      esac
+    fi
+
+    if [ -n "$ack" ]; then
+        /usr/local/share/enterprise/ghe-orchestrator-client -c ack-cluster-recoveries -i $new_primary -reason acknowledge > /dev/null
+        echo "cluster recovery acknowledged"
+    fi
+
+    exit
+  fi
+
+  echo "replication not ready, retrying..."
+  sleep 1
+  retry=$((retry-1))
+done
+
+# retry didn't succeeded
+echo "failed to enable replication"
+exit 1

@@ -1,0 +1,191 @@
+#!/bin/bash
+#/ Usage: ghe-chatops-configure -a [slack/msteams/slacksocket] [-h]
+#/
+#/ Configure the ChatOps service
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/   -a | --app      App type to initialise(slack/msteams/slacksocket)
+#/   -d | --detached Run via enterprise-manage
+#/
+set -e
+
+usage() {
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+}
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo "Run this script as the admin user." >&2
+  exit 1
+
+}
+
+get_prerequisites() {
+  echo "ChatOps $type service requires the following inputs to initialize:"
+  if [ "$type" != "slacksocket" ]; then
+    read -r -p "Configure ChatOps service with public endpoint? (y/n)" configure_public_endpoint
+    if [ "$configure_public_endpoint" == "y" ] || [ "$configure_public_endpoint" == "Y" ]; then 
+      read -r -p "Public endpoint to use to configure ChatOps service: " public_endpoint
+      if [[ -z "${public_endpoint// }" ]] #checking for strings with only spaces
+      then 
+        echo "Invalid string provided for public endpoint, please re-run script with a valid string."
+        exit 1
+      fi
+      ghe-config 'secrets.chatops.public-endpoint' "$public_endpoint"
+    else
+      ghe-config 'secrets.chatops.public-endpoint' ""
+    fi
+  else 
+    ghe-config 'secrets.chatops.public-endpoint' ""
+  fi
+  case "$type" in 
+    slack)
+      input_slack_details
+      ghe-config app.chatops.slack.enabled 'true'
+      ;;
+    msteams)
+      input_msteams_details
+      ghe-config app.chatops.msteams.enabled 'true'
+      ;;
+    slacksocket)
+      input_slack_details
+      input_slack_socket_details
+      ghe-config app.chatops.slack.enabled 'true'
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+
+}
+
+input_slack_details(){
+  if [ "$detached" == "Y" ]
+  then
+    setup_slack_config_vars "$(ghe-config secrets.chatops.slack.app-id)" "$(ghe-config secrets.chatops.slack.client-id)" "$(ghe-config secrets.chatops.slack.client-secret)" "$(ghe-config secrets.chatops.slack.verification-token)"
+  else
+    read -r -p "App ID: " app_id
+    read -r -p "Client ID: " client_id
+    read -r -s -p "Client Secret: " client_secret
+    printf "\n"
+    read -r -s -p "Verification Token: " verification_token
+    printf "\n"
+    default_slash_command="ghe"
+    read -r -p "Enter the slash command name for slack (press enter for default: /$default_slash_command)" slash_command
+    slash_command=${slash_command:-$default_slash_command}
+    default_app_name="GHE"
+    read -r -p "Enter the app name for slack (press enter for default: $default_app_name)" app_name
+    app_name=${app_name:-$default_app_name}
+    setup_slack_config_vars "$app_id" "$client_id" "$client_secret" "$verification_token" "$slash_command" "$app_name"
+  fi
+}
+
+input_slack_socket_details(){
+  if [ "$detached" == "Y" ]
+  then
+    setup_slack_socket_vars "$(ghe-config secrets.chatops.app-signing-secret)" "$(ghe-config secrets.chatops.slack.app-level-token)" "$(ghe-config secrets.chatops.slack.bot-token)"
+  else
+    read -r -s -p "Signing Secret: " signing_secret
+    printf "\n"
+    read -r -s -p "App-Level Token: " app_level_token
+    printf "\n"
+    setup_slack_socket_vars "$signing_secret" "$app_level_token"
+  fi
+}
+
+input_msteams_details(){
+  if [ "$detached" == "Y" ]
+  then
+    setup_msteams_config_vars "$(ghe-config secrets.chatops.msteams.app-id)" "$(ghe-config secrets.chatops.msteams.app-password)"
+  else
+    read -r -p "App ID: " app_id
+    read -r -s -p "App Password: " app_password
+    printf "\n"
+    default_slash_command="ghe"
+    read -r -p "Enter the bot handle for teams (press enter for default: $default_slash_command)" slash_command
+    slash_command=${slash_command:-$default_slash_command}
+    default_app_name="GHE"
+    read -r -p "Enter the bot name for teams (press enter for default: $default_app_name)" app_name
+    app_name=${app_name:-$default_app_name}
+    verify_msteams_credentials "$app_id" "$app_password" 
+    setup_msteams_config_vars "$app_id" "$app_password" "$slash_command" "$app_name"
+  fi
+}
+
+setup_slack_config_vars(){
+  ghe-config 'secrets.chatops.app-type' 'slack'
+  ghe-config 'secrets.chatops.slack.app-id' "$1"
+  ghe-config 'secrets.chatops.slack.client-id' "$2"
+  ghe-config 'secrets.chatops.slack.client-secret' "$3"
+  ghe-config 'secrets.chatops.slack.verification-token' "$4"
+  ghe-config 'secrets.chatops.slack.slash-command' "$5"
+  ghe-config 'secrets.chatops.slack.app-name' "$6"
+}
+
+setup_slack_socket_vars(){
+  ghe-config 'secrets.chatops.slack.socket-mode' 'true'
+  ghe-config 'secrets.chatops.slack.signing-secret' "$1"
+  ghe-config 'secrets.chatops.slack.app-level-token' "$2"
+}
+
+setup_msteams_config_vars(){
+  ghe-config 'secrets.chatops.app-type' 'msteams'
+  ghe-config 'secrets.chatops.msteams.app-id' "$1"
+  ghe-config 'secrets.chatops.msteams.app-password' "$2"
+  ghe-config 'secrets.chatops.msteams.bot-handle' "$3"
+  ghe-config 'secrets.chatops.msteams.bot-name' "$4"
+}
+
+verify_msteams_credentials(){
+  response=$(curl -s -k -X POST https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token -d "grant_type=client_credentials&client_id=$1&client_secret=$2&scope=https%3A%2F%2Fapi.botframework.com%2F.default" | jq '.')
+  error=$(echo $response | jq '.error // empty')
+  if [ ! -z "$error" ]; then
+    echo ""
+    error_description=$(echo $response | jq '.error_description // empty')
+    echo "Error verifying the credentials provided."  
+    echo "Error received: $error_description"
+    exit 1
+  fi
+}
+
+# show usage if any argument is passed other than -h
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a|--app)
+      type="$2"
+      shift 2
+      ;;
+    -d|--detached)
+      detached="Y"
+      shift 2
+      ;;  
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$type" ]; then
+      >&2 echo "Error: Missing required flag --app"
+      exit 2
+fi
+
+get_prerequisites
+ghe-config-apply
+
+echo "ChatOps service was successfully configured!"
+if [ "$type" == "slacksocket" ] || [ "$type" == "slack" ]; then
+  if [ "$(ghe-config core.subdomain-isolation)" = "true" ]; then
+      echo "You can now install the GHES app in slack from: https://slack.$(ghe-config 'core.github-hostname')"
+    else
+      echo "You can now install the GHES app in slack from: https://$(ghe-config 'core.github-hostname')/_slack/"
+  fi
+fi

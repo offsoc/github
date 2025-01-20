@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Takes a git conflicted structure.sql file and cleans it up :tada:
+# Requires a path to a file
+# usage: ./deconflict_structure  ./db/structure.sql
+
+file="${1?path to structure file expected}"
+
+# remove common ancestor section from diff3 conflict markers, if present
+sed -i '/|||||||/,/=======/d' "$file"
+
+# remove remaining git conflict identifiers
+sed -i '/<<<<<<</d' "$file"
+sed -i '/=======/d' "$file"
+sed -i '/>>>>>>>/d' "$file"
+
+# find the delimiter where the migration numbers start
+delimiter_line_number=$(awk '/INSERT INTO \`schema_migrations\`/ { printf NR; exit }' "$file")
+
+migration_sql=$(head -n "$delimiter_line_number" "$file")
+
+# increment by 1 to move beyond the delimiter
+start_of_timestamps=$((delimiter_line_number+1))
+
+# sort the migration timestamps
+sorted_migration_numbers=$(tail -n +"$start_of_timestamps" "$file" | sort -ru)
+
+# empty the existing file
+: > "$file"
+
+# write the fixed contents to the file
+echo "$migration_sql" >> "$file"
+echo "$sorted_migration_numbers" >> "$file"

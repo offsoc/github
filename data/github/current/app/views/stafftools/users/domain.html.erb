@@ -1,0 +1,130 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  host_name_found = domain.host_name_found?
+  verification_token_found = domain.verification_token_found?
+%>
+
+<div class="d-flex flex-justify-between flex-items-center">
+  <div>
+    <span class="text-bold"><%= domain.domain %></span>
+    <% if domain.verified? %>
+      <%= render Primer::Beta::Label.new(mx: 1, scheme: :success, title: "Domain is verified") do %>
+        Verified
+      <% end %>
+    <% elsif domain.approved? %>
+      <%= render Primer::Beta::Label.new(mx: 1, scheme: :success, title: "Domain is approved") do %>
+        Approved
+      <% end %>
+      <%= render Primer::Beta::Label.new(mx: 1, scheme: :secondary, title: "Domain is pending verification") do %>
+        Pending verification
+      <% end %>
+    <% elsif domain.verification_token %>
+      <%= render Primer::Beta::Label.new(mx: 1, scheme: :secondary, title: "Domain is pending verification") do %>
+        Pending verification
+      <% end %>
+    <% end %>
+
+    <%= link_to "View audit log", stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? domain.domain_audit_log_kql_query : domain.domain_audit_log_query) %>
+  </div>
+  <% if params["inherited"] %>
+    <p class="color-fg-muted f6 mb-1">
+      Managed by
+      <%= link_to \
+        domain.owner.name,
+        stafftools_enterprise_path(domain.owner),
+        class: "Link--inTextBlock" %>
+    </p>
+  <% else %>
+    <% if domain.verified? %>
+      <% if domain.required_for_policy_enforcement? %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn btn-sm",
+            button_text: "Unverify",
+            title: "Confirm unverifying #{domain.domain}" } do %>
+          <%= render partial: "stafftools/users/domain_unverify_confirmation", locals: { domain: domain } %>
+        <% end %>
+      <% elsif domain.maybe_required_for_org_policy_enforcement? %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_class: "btn btn-sm",
+            button_text: "Unverify",
+            title: "Confirm unverifying #{domain.domain}" } do %>
+          <%= render partial: "stafftools/users/domain_unverify_child_orgs_warn", locals: { domain: domain } %>
+        <% end %>
+      <% else %>
+        <%= button_to "Unverify", unverify_stafftools_domain_path(domain.id), method: "put", class: "btn btn-sm", 'data-confirm': "Are you sure you want to unverify this domain?" %>
+      <% end %>
+    <% else %>
+      <%= button_to "Verify", verify_stafftools_domain_path(domain.id), method: "put", class: "btn btn-sm", disabled: !host_name_found || !verification_token_found %>
+    <% end %>
+  <% end %>
+</div>
+<% unless domain.verified? %>
+  <ul class="list-style-none mt-1">
+    <li class="mb-1">
+      <% if verification_token_found && host_name_found %>
+        <span class="color-fg-success">Hostname and code are both <strong>valid</strong> and can be safely verified.</span>
+      <% elsif host_name_found && !verification_token_found %>
+        <span class="color-fg-danger"><strong>Invalid verification code</strong>: the expected code can't be found in the TXT record.</span>
+      <% else %>
+        <span class="color-fg-danger"><strong>Invalid hostname</strong>: the DNS may not be properly configured.</span>
+      <% end %>
+    </li>
+    <li>
+      <% if host_name_found %>
+        <%= primer_octicon(:check, color: :success) %>
+      <% else %>
+        <%= primer_octicon(:x, color: :danger) %>
+      <% end %>
+      <strong>Hostname:</strong>
+      <span class="text-mono text-small"><%= domain.dns_host_name %></span>
+    </li>
+    <li>
+      <% if !host_name_found %>
+        <%= primer_octicon(:"dot-fill", classes: "hx_dot-fill-pending-icon") %>
+      <% elsif verification_token_found %>
+        <%= primer_octicon(:check, color: :success) %>
+      <% else %>
+        <%= primer_octicon(:x, color: :danger) %>
+      <% end %>
+      <strong>Verification code:</strong>
+      <% if domain.verification_token %>
+        <% token_expires_at = domain.async_token_expiration_time.sync %>
+        <span class="text-mono text-small"><%= domain.verification_token %></span>
+        &ndash; expires in <%= distance_of_time_in_words_to_now(token_expires_at) %>
+
+        <% unless params["inherited"] %>
+          <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Change expiry time",
+            button_class: "btn btn-sm ml-2",
+            title: "Change verification code expiry time for #{domain.domain}",
+          } do %>
+            <%= render(Primer::Beta::BorderBox.new) do |box| %>
+              <% box.with_body do %>
+                <p>
+                  You can change the expiry time for the verification code if a
+                  customer cannot create the TXT record before the verification code expires.
+                </p>
+                <%= form_tag set_token_expiration_stafftools_domain_path(domain.id), method: :put do %>
+                  <dl class="form-group">
+                    <dt class="input-label">
+                      <label for="<%= "#{domain.id}_token_expires_at" %>">Verification code expires on</label>
+                    </dt>
+                    <dd>
+                      <input type="date" pattern="\d\d\d\d-\d\d-\d\d" placeholder="yyyy-mm-dd"
+                        class="form-control" id="<%= "#{domain.id}_token_expires_at" %>" name="token_expires_at"
+                        value="<%= token_expires_at.strftime("%Y-%m-%d") if token_expires_at.present? %>">
+                    </dd>
+                  </dl>
+                  <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>Change expiry time<% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+      <% else %>
+        <span class="text-small">The verification token expired or was revoked by a staff member.</span>
+      <% end %>
+    </li>
+  </ul>
+<% end %>

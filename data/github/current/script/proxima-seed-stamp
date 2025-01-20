@@ -1,0 +1,91 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#
+# Usage: proxima-seed-stamp [options]
+#
+# This utility is used to seed a new proxima stamp. It is intended to be idempotent.
+
+require File.expand_path("../../config/environment", __FILE__)
+
+
+puts "Seeding database..."
+puts "\n== Users =="
+
+if User.ghost.present?
+  puts "ghost user id=#{User.ghost.id} already exists, skipping..."
+else
+  puts "created ghost user id=#{User.create_ghost.id}"
+end
+
+if User.staff_user.present?
+  puts "staff user id=#{User.staff_user.id} already exists, skipping..."
+else
+  puts "created staff user id=#{User.create_staff_user.id}"
+end
+
+apps_owner = GitHub.trusted_oauth_apps_owner
+if apps_owner.present?
+  puts "trusted oauth apps org id=#{apps_owner.id} login=#{apps_owner.login} already exists, skipping..."
+else
+  apps_owner = Organization.where(login: GitHub.trusted_oauth_apps_org_name).first_or_create(
+        login: GitHub.trusted_oauth_apps_org_name,
+        plan: GitHub::Plan.find("free").name,
+        billing_email: "ghost-org@github.com",
+        admins: [User.ghost],)
+  puts "created trusted oauth apps org id=#{apps_owner.id} login=#{apps_owner.login}"
+end
+
+puts "\n== Stafftools roles =="
+
+%w[developer super-admin support].each do |name|
+  role = StafftoolsRole.find_by_name(name)
+
+  if role.present?
+    puts "stafftools role id=#{role.id} name=#{role.name} already exists, skipping..."
+  else
+    role = StafftoolsRole.new(name:)
+    role.save!
+    puts "created stafftools role id=#{role.id} name=#{role.name}"
+  end
+end
+
+puts "\n== Fine-grained permissions roles =="
+
+GitHub.system_roles.reconcile(purge: false, dry_run: false, verbose: true)
+
+puts "\n== Elasticsearch indexes =="
+
+::Elastomer.env.index_names.each do |index_name|
+  if Elastomer::Router.instance.index_map.canonical_map[index_name].present?
+    puts "index for #{index_name} already exists, skipping..."
+    next
+  end
+  index = Search::IndexView.new({ kind: index_name })
+  puts "creating #{index.name}..."
+  index.create
+  index.make_primary
+end
+
+puts "enabling code search and code search indexing..."
+Elastomer::App.new.enable_code_search
+
+puts "\n== Memex data =="
+
+Apps::Internal::MemexAutomation.seed_database!
+unless Configuration::Entry.memex_project_org_wide_role.global.take.present?
+  puts "creating memex org wide global role..."
+  Configuration::Entry.memex_project_org_wide_role.global.create(
+    value: "project_writer",
+    updater: User.staff_user,
+  )
+end
+
+puts "\n== Dependabot Alerts Global Rule data =="
+if VulnerabilityAlertRule.create_default_auto_dismissal_rule
+  puts "created global dependabot alert rule"
+end
+
+puts "\n== Security Products GitHub Recommended Configuration =="
+if SecurityConfiguration.create_github_recommended_configuration
+  puts "created GitHub recommended configuration"
+end

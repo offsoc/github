@@ -1,0 +1,62 @@
+<% raise ArgumentError, "rendering layouts/repository requires current_repository" if !current_repository %>
+
+<%-
+  pull_request_page_info(pull_request)
+  page_info breadcrumb_object: pull_request
+-%>
+
+<% content_for :head do %>
+  <meta name="voltron-timing" value="<view-proxy-timing></view-proxy-timing>">
+<% end %>
+
+<%= render layout: "issues/issues" do %>
+  <% track_render_partial("pull_requests/review_request_banner") do %>
+    <% if pull_request.review_requested_for?(current_user) && pull_request.open? && !pull_request.user_has_violated_push_rule?(current_user)%>
+      <%= render "pull_requests/review_request_banner", pull: pull_request %>
+    <% end %>
+  <% end %>
+
+  <div class="clearfix js-issues-results">
+    <% track_render_partial("pull_requests/title") do %>
+      <%= render 'comments/title',
+        pull:          pull_request,
+        comment:       pull_request.issue,
+        issue:         pull_request.issue,
+        title:         pull_request.title.blank? ? "Untitled" : pull_request.title,
+        sticky:        true
+      %>
+    <% end %>
+
+    <% if params[:show_onboarding_guide_tip].present? %>
+      <div class="px-6">
+        <%= render(Onboarding::Organizations::CompletedGuidanceComponent.new(
+          organization: current_repository.owner,
+          completed_task: OnboardingTasks::Organizations::OpenPullRequest.new(taskable: current_repository.owner, user: current_user),
+          show_tip: true,
+          container_class: "mb-3"
+        )) %>
+      </div>
+    <% end %>
+
+    <% track_render_partial("pull_requests/lazy_tabs") do %>
+      <%= render "pull_requests/lazy_tabs", pull: pull_request %>
+    <% end %>
+
+    <div id="discussion_bucket"
+          class="pull-request-tab-content is-visible js-socket-channel js-updatable-content"
+          data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.pull_request_timeline(pull_request)) %>">
+        <%- gate_requests ||= [] -%>
+      <%= render(Primer::Alpha::Layout.new(first_in_source: :main)) do |component| %>
+        <% component.with_main do %>
+        <% stats.record_render("conversation_content") do %>
+          <%= render "pull_requests/conversation_content", pull_request: pull_request, gate_requests: gate_requests %>
+        <% end %>
+        <% end %>
+        <% component.with_sidebar(col_placement: :end, row_placement: :end) do %>
+          <viewproxy-fragment id="sidebar"></viewproxy-fragment>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+  <%= render "comments/suggested_changes_validation" %>
+<% end %>

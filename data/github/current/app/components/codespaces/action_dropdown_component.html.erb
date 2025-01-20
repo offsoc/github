@@ -1,0 +1,291 @@
+<%= render(Primer::Alpha::ActionMenu.new) do |menu|
+  menu.with_show_button(icon: "kebab-horizontal", "aria-label": "Show more actions for codespace", scheme: :invisible)
+
+  menu.with_item(label: "Rename", content_arguments: { "data-show-dialog-id": rename_codespace_id },) do |item|
+    item.with_leading_visual_icon(icon: :pencil)
+  end
+
+  if codespace.unpublished?
+    menu.with_item(disabled: export_disabled?, content_arguments: { "data-show-dialog-id": publish_codespace_id }) do |item|
+      if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+      else
+        item.with_leading_visual_icon(icon: "git-branch")
+      end
+      content_tag(:span, "Publish to a new repository", class: "text-normal")
+    end
+  elsif needs_fork_to_push
+    menu.with_item(disabled: export_disabled?, content_arguments: { "data-show-dialog-id": export_fork_codespace_id }) do |item|
+      if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+      else
+        item.with_leading_visual_icon(icon: "git-branch")
+      end
+      content_tag(:span, "Export changes to a fork", class: "text-normal")
+    end
+  else
+    menu.with_item(disabled: export_disabled?, content_arguments: { "data-show-dialog-id": export_codespace_id }) do |item|
+      if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+      else
+        item.with_leading_visual_icon(icon: "git-branch")
+      end
+      content_tag(:span, "Export changes to a branch", class: "text-normal")
+    end
+  end
+
+  if allow_change_machine_type
+    menu.with_item(disabled: change_machine_type_disabled?, content_arguments: { "data-show-dialog-id": change_machine_type_codespace_id }) do |item|
+      if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+      else
+        item.with_leading_visual_icon(icon: :pencil)
+      end
+      content_tag(:span, "Change machine type", class: "text-normal")
+    end
+  end
+
+  if codespace.suspendable? || codespace.consuming_compute?
+    menu.with_item(
+      href: suspend_codespace_path(codespace),
+      form_arguments: {
+        method: :post,
+      },
+      data: {
+        "hydro-click": "#{suspend_hydro_attributes['hydro-click']}",
+        "hydro-click-hmac": "#{suspend_hydro_attributes['hydro-click-hmac']}",
+      },
+      disabled: codespace.blocking_operation?
+    ) do |item|
+      if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+      else
+        item.with_leading_visual_icon(icon: :stop)
+      end
+      content_tag(:span, "Stop codespace", class: "text-normal")
+    end
+  end
+
+  if codespace.retention_period.present?
+    menu.with_divider
+    if keep_disabled
+      menu.with_item(disabled: true) do |item|
+        item.with_leading_visual_icon(icon: :bookmark)
+        item.with_description.with_content("Action disabled by your organization")
+        item.with_trailing_visual_icon(icon: :check)
+        content_tag(:span, "Auto-delete codespace", class: "text-normal")
+      end
+    else
+      menu.with_item(
+        label: "Auto-delete codespace",
+        href: codespace_path(codespace),
+        form_arguments: {
+          method: :patch,
+          name: "codespace[keep]",
+          value: "#{!codespace.keep?}"
+        }
+      ) do |item|
+        item.with_leading_visual_icon(icon: :bookmark)
+        item.with_trailing_visual_icon(icon: :check, hidden: codespace.keep?)
+      end
+    end
+  end
+  menu.with_divider
+
+  if show_open_options?
+    EDITOR_TO_DESCRIPTORS_MAP.each do |editor, descriptors|
+      menu.with_item(
+        label: descriptors[:label],
+        href: codespace_path(codespace, editor: editor),
+        content_arguments: {target: "_blank", rel: "noopener noreferrer"},
+      ) do |item|
+        item.with_leading_visual_icon(icon: descriptors[:icon])
+        item.with_trailing_visual_label(scheme: :success, title: "Beta", ml: 1) { "Beta" } if descriptors[:beta]
+      end
+    end
+  else
+    EDITOR_TO_DESCRIPTORS_MAP.values.each do |descriptors|
+      menu.with_item(
+        disabled: true,
+        label: descriptors[:label],
+        label_arguments: { font_weight: :normal }
+      ) do |item|
+        if codespace.blocking_operation?
+        item.with_leading_visual_content do
+          render(Primer::Beta::Spinner.new(size: :small))
+        end
+
+        item.with_description.with_content(codespace.blocking_operation_disabled_text)
+        else
+          item.with_leading_visual_icon(icon: :alert)
+          item.with_description.with_content("Start is temporarily disabled")
+        end
+
+        item.with_trailing_visual_label(scheme: :success, title: "Beta", ml: 1) { "Beta" } if descriptors[:beta]
+      end
+    end
+  end
+
+  if show_delete?
+    menu.with_divider
+    menu.with_item(
+      label: "Delete",
+      content_arguments: { "data-show-dialog-id": delete_codespace_id },
+      scheme: :danger,
+      data: {
+        "hydro-click": destroy_hydro_attributes['hydro-click'],
+        "hydro-click-hmac": destroy_hydro_attributes['hydro-click-hmac']
+      }
+    ) do |item|
+      item.with_leading_visual_icon(icon: :trash)
+    end
+  end
+
+end %>
+
+<%# Rename modal %>
+<%= render(Primer::Alpha::Dialog.new(id: rename_codespace_id, title: "Rename codespace")) do |d| %>
+  <%= form_tag codespace_path(codespace), method: :patch do %>
+    <%= render(Primer::Alpha::Dialog::Body.new) do %>
+      <%= render(Primer::Alpha::TextField.new(name: "codespace[display_name]", label: "Name", value: codespace.display_name, autofocus: true)) %>
+    <% end %>
+    <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+      <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": rename_codespace_id })) { "Cancel" } %>
+      <%= render(Primer::Beta::Button.new(scheme: :primary, type: :submit)) { "Save" } %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%# Delete Confirmation Modal %>
+<%= render(Primer::Alpha::Dialog.new(id: delete_codespace_id, title: "Are you sure?")) do |d| %>
+  <%= form_tag codespace_path(codespace), method: :delete do %>
+    <%= render(Primer::Alpha::Dialog::Body.new) do %>
+      <%= delete_confirmation_message %>
+    <% end %>
+    <%= render(Primer::Alpha::Dialog::Footer.new) do %>
+      <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": delete_codespace_id })) { "Cancel" } %>
+      <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit)) { "Delete" } %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<%# Change machine type modal %>
+<%= render(Primer::Alpha::Dialog.new(id: change_machine_type_codespace_id, title: "Change codespace machine type", size: :auto)) do |d| %>
+  <% d.with_header(show_divider: true, variant: :medium) %>
+  <%= form_tag codespace_path(codespace), method: :patch do %>
+    <include-fragment loading="lazy" src="<%= skus_codespaces_path(codespace_id: codespace.id) %>">
+      <div class="d-flex flex-items-center">
+        <%= render(Primer::Beta::Spinner.new(my: 6, flex: 1)) %>
+      </div>
+    </include-fragment>
+  <% end %>
+<% end %>
+
+<% if codespace.unpublished? %>
+  <%= render(Primer::Alpha::Dialog.new(id: publish_codespace_id, title: "Publish to a new repository", size: :auto)) do |d| %>
+    <% d.with_header(show_divider: true) %>
+    <% d.with_body do %>
+      <div class="pb-3">This will create a new repository and push up your work.</div>
+      <%# This form is never submitted on its own. Form fields get tacked onto the export request. Follow the include fragment below. %>
+      <%= form_with(url: export_codespace_path(codespace), html: { "data-class": "publish-codespace-form", "data-codespace-id": codespace.id }) do |f| %>
+        <div class="form-group mt-1 mb-2">
+          <div class="form-group-header">
+            <label for="publish-codespace-repo-name>">Name</label>
+          </div>
+          <div class="form-group-body">
+            <input id="publish-codespace-repo-name" name="name" value="<%= codespace.safe_display_name.gsub(/\s+/, "-") %>" maxlength=100 class="form-control short">
+          </div>
+        </div>
+        <hr>
+        <div class="hx_disabled-form-checkbox-label form-checkbox">
+          <label class="js-privacy-toggle-label-public">
+            <%= f.radio_button :visibility, "public", checked: false, :class => "mt-2 js-privacy-toggle", :'aria-describedby' => "public-description" %>
+            Public
+          </label>
+          <%= primer_octicon(:repo, height: 24, float: :left, mt: 1, mr: 2, color: :muted) %>
+          <span id="public-description" class="note js-public-description pl-5">
+            <% if GitHub.private_mode_enabled? %>
+              Any logged in user can see this repository. You choose who can commit.
+            <% else %>
+              Anyone on the internet can see this repository. You choose who can commit.
+            <% end %>
+          </span>
+        </div>
+
+        <div class="hx_disabled-form-checkbox-label form-checkbox mb-0">
+          <label class="js-privacy-toggle-label-private">
+            <%= f.radio_button :visibility, "private", checked: true, :class => "mt-2 js-privacy-toggle", :'aria-describedby' => "private-description" %>
+            Private
+          </label>
+          <%= primer_octicon(:lock, height: 24, color: :muted, float: :left, mt: 1, mr: 2) %>
+          <span id="private-description" class="note js-private-description pl-5">
+            You choose who can see and commit to this repository.
+          </span>
+        </div>
+      <% end %>
+    <% end %>
+    <% d.with_footer(show_divider: true) do %>
+      <include-fragment src="<%=export_control_codespace_path(codespace)%>">
+        <%= render Primer::Beta::Button.new(disabled: true) do %>
+          <%= render(Primer::Beta::Spinner.new(size: :small, mr: 2, vertical_align: :middle)) %>
+          <span>Checking repository status</span>
+        <% end %>
+      </include-fragment>
+    <% end %>
+  <% end %>
+<% elsif needs_fork_to_push %>
+  <%= render(Primer::Alpha::Dialog.new(id: export_fork_codespace_id, title: "Export changes to a fork")) do |d| %>
+    <% d.with_header(show_divider: true) %>
+    <% d.with_body do %>
+      <% if existing_fork %>
+        <div class="pb-3">You do not have write access to this codespace's repository. This will reassign your codespace to your existing fork of this repository, <b><%= existing_fork.name_with_display_owner %></b> and export your changes to a new branch.</div>
+      <% else %>
+        <div class="pb-3">You do not have write access to this codespace's repository. This will create a new fork of the repository at <b><%= codespace.owner.display_login %>/<%= codespace.repository.name %></b>, reassign your codespace to that fork, and export your changes to a new branch.</div>
+      <% end %>
+    <% end %>
+    <% d.with_footer(show_divider: true) do %>
+      <include-fragment src="<%=export_control_codespace_path(codespace, needs_fork: true)%>">
+        <%= render Primer::Beta::Button.new(disabled: true) do %>
+          <%= render(Primer::Beta::Spinner.new(size: :small, mr: 2, vertical_align: :middle)) %>
+          <span>Checking fork status</span>
+        <% end %>
+      </include-fragment>
+    <% end %>
+  <% end %>
+<% else %>
+  <%= render(Primer::Alpha::Dialog.new(id: export_codespace_id, title: "Export changes to a branch")) do |d| %>
+    <% d.with_header(show_divider: true) %>
+    <% d.with_body do %>
+      <div class="pb-3">This will create a new branch with any unpushed changes</div>
+      <%= render PullRequests::BranchLabelComponent.new(repository: codespace.repository, branch: codespace.export_branch_name, extra_classes: "branch-name", branch_octicon: true) %>
+    <% end %>
+    <% d.with_footer(show_divider: true) do %>
+      <include-fragment src="<%=export_control_codespace_path(codespace)%>">
+        <%= render Primer::Beta::Button.new(disabled: true) do %>
+          <%= render(Primer::Beta::Spinner.new(size: :small, mr: 2, vertical_align: :middle)) %>
+          <span>Checking branch status</span>
+        <% end %>
+      </include-fragment>
+    <% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: check-suite-status-change-processor
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "check-suite-status-change-processor"
+        heaven.githubapp.com/image-placeholder: "702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master"
+        moda.github.net/inject-otel-env-vars-into-containers: "check-suite-status-change-processor"
+spec:
+    selector:
+        matchLabels:
+            service: check-suite-status-change-processor
+    replicas: 1
+    template:
+        metadata:
+            labels:
+                service: check-suite-status-change-processor
+            annotations:
+                fluentbit.io/parser: logfmt_sloppy
+        spec:
+            restartPolicy: Always
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+            containers:
+                - name: check-suite-status-change-processor
+                  image: 702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master
+                  imagePullPolicy: IfNotPresent
+                  args: ["bin/check-suite-status-change-processor", "--review-lab"]
+                  resources:
+                    requests:
+                        cpu: 0.01
+                        memory: "1.2G"
+                    limits:
+                        cpu: 1.0
+                        memory: "1.5G"
+                  volumeMounts:
+                    - name: github-metadata
+                      mountPath: /etc/github/metadata.json
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                  env:
+                    - name: RAILS_ENV
+                      value: production
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: STAFF_ENVIRONMENT
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: staff-environment
+                    - name: GH_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: rate-limiter-servers
+                    - name: MONOLITH_REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: monolith-rate-limiter-servers
+                    - name: JOB_COORDINATION_REDIS_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: job-coordination-url
+                    - name: RESQUED_QUEUE_PREFIX
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: DYNAMIC_LAB_NAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: STAFF_ENVIRONMENT_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-stream-processor"
+                  envFrom:
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets

@@ -1,0 +1,295 @@
+#!vendor/ruby/current/bin/ruby
+# frozen_string_literal: true
+
+require_relative "./worker_common"
+
+require "fileutils"
+require "logger"
+require "optparse"
+
+HELP_USAGE = <<-EOF
+Usage: #{__FILE__} [options]
+
+DESCRIPTION
+
+  This script dumps debug info for resqued workers based on pid or aqueduct job id.
+
+  If neither --pid or --job-id are provided, it will accept output generated from the `worker-status` script as
+  filter criteria, reading one worker status from each line provided to STDIN.
+
+  It re-outputs the dumped worker status(es) to STDOUT so further action can be taken
+
+  All logs are written to STDERR.
+EOF
+
+EXAMPLES = <<-EOF
+EXAMPLES
+
+  *) Dump worker by pid using rbtrace
+
+    #{__FILE__} --pid $pid --rbtrace-dump
+
+  *) Dump worker by pid using gdb dump (i.e. if not responding to rbtrace)
+
+    #{__FILE__} --pid $pid --gdb-dump
+
+  *) Dump worker running a job with a specific aqueduct job id
+
+    #{__FILE__} --rbtrace-dump --job-id 0ef61e36-bab4-4ef8-b87e-9ff21f6d37af
+
+  *) Dump workers running AqueductTestJob that have been running for more than 60 seconds
+
+  Dump rbtrace and gdb backtraces for each job before killing, up to 10000 KiB per job file,
+  to a dump directory.
+
+    script/worker-status --job-class AqueductTestJob --longer-than 60s \\
+    | #{__FILE__} \\
+      --dump-dir /tmp/killed-dumps \\
+      --rbtrace-dump 10000 \\
+      --gdb-dump 10000
+EOF
+
+def rbtrace_dump_path(dump_dir, job_name, run_start_time)
+  "#{dump_dir}/rbtrace-dump_#{job_name}_#{run_start_time}.log"
+end
+
+def gdb_dump_path(dump_dir, job_name, run_start_time)
+  "#{dump_dir}/gdb-dump_#{job_name}_#{run_start_time}.log"
+end
+
+options = {
+  dump_dir: Dir.pwd,
+  rbtrace_dump_max_kb: 0,
+  gdb_dump_max_kb: 0,
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = HELP_USAGE
+
+  opts.on("-h", "--help", "prints help") do |_|
+    STDERR.puts opts
+    STDERR.puts EXAMPLES
+    exit 0
+  end
+
+  PID_HELP = <<-HELP
+Dumps the worker with the given pid.
+
+HELP
+  opts.on("--pid PID", Integer, *PID_HELP.split("\n")) do |v|
+    options[:pid] = v
+  end
+
+  JOBID_HELP = <<-HELP
+Dumps the worker running a job with the given aqueduct job id.
+
+HELP
+  opts.on("--job-id JOB_ID", String, *JOBID_HELP.split("\n")) do |v|
+    options[:job_id] = v
+  end
+
+  DUMP_DIR_HELP  = <<~HELP
+The directory path where dumps should be written to. Defaults to the present working directory.
+
+HELP
+  opts.on("--dump-dir DUMPDIR", String, *DUMP_DIR_HELP.split("\n")) do |v|
+    options[:dump_dir] = v
+  end
+
+  RBTRACE_DUMP_HELP  = <<-HELP
+Whether or not the script should dump rbtrace backtraces for a worker process.
+
+Caution: rbtrace's backtrace can cause the current job to error and make the worker skip to the next job.
+
+Dumps are written to "#{rbtrace_dump_path('#{dump_dir}', "${job_name}", "${date}")}" and are appended
+until reaching a size of $MAX_KB.
+$MAX_KB defaults to 5000.
+
+HELP
+  opts.on("--rbtrace-dump [MAX_KB]", Integer, *RBTRACE_DUMP_HELP.split("\n")) do |v|
+    if v.to_i == 0
+      v = 5000
+    end
+    options[:rbtrace_dump_max_kb] = v
+  end
+
+  GDB_DUMP_HELP  = <<-HELP
+Whether or not the script should dump gdb backtraces for a worker process.
+
+Dumps are written to "#{gdb_dump_path('#{dump_dir}', "${job_name}", "${date}")}" and are appended until reaching a size of $MAX_KB.
+$MAX_KB defaults to 5000.
+
+HELP
+  opts.on("--gdb-dump [MAX_KB]", Integer, *GDB_DUMP_HELP.split("\n")) do |v|
+    if v.to_i == 0
+      v = 5000
+    end
+    options[:gdb_dump_max_kb] = v
+  end
+end
+
+if ARGV.length == 0
+  parser.parse! %w[--help]
+else
+  parser.parse!
+end
+
+def generate_gdb_dump_script
+  gdb_dump_script = <<~SCRIPT
+  set height 0
+
+  # find relevant threads - these should contain a .rb and a line number so we can find the blocked location
+  info threads
+
+  # dump all thread backtraces (looking for .rb in the thread name), should potentially be line number too
+  thread apply all bt
+
+  detach
+SCRIPT
+  File.write("#{Dir.pwd}/gdb-dump-script", gdb_dump_script, mode: "w+")
+end
+
+class WorkerDumper
+  include Resqued
+
+  attr_reader :options, :summary
+
+  def initialize(options)
+    @options = options
+    logger.level = "INFO"
+  end
+
+  def enforce_job_id_match?
+    !!options[:job_id] || @from_stdin
+  end
+
+  def run
+    if options[:rbtrace_dump_max_kb] == 0 && options[:gdb_dump_max_kb] == 0
+      STDERR.puts "Please specify at least one of the following: --rbtrace-dump, --gdb-dump"
+      exit 1
+    end
+
+    describe_run
+
+    @running = true
+    Signal.trap("INT") do
+      STDERR.puts "Shutting down after next job status has been evaluated..."
+      @running = false
+    end
+
+    FileUtils.mkdir_p(options[:dump_dir])
+
+    @run_start_time = Time.now.strftime(Resqued::STATUS_TIME_FORMAT)
+
+    @from_stdin = false
+    if pid = options[:pid]
+      puts "pid: #{pid}"
+      statuses = worker_status_by_pid(pid)
+        .map { |worker_info| [worker_info, worker_info.to_json] }
+    elsif job_id = options[:job_id]
+      statuses = worker_statuses
+        .filter { |worker_info| worker_info.job_id == job_id }
+        .map { |worker_info| [worker_info, worker_info.to_json] }
+    else
+      lines = []
+      while job_json = $stdin.gets
+        lines << job_json
+      end
+      statuses = lines.map do |status_json|
+        [Resqued::WorkerInfo.from_json(status_json), status_json]
+      end
+    end
+
+    statuses.each do |worker_info_with_json|
+      unless @running
+        break
+      end
+
+      job_info = worker_info_with_json[0]
+      status_json = worker_info_with_json[1]
+
+      pid = job_info.pid
+      job_name = job_info.job_class
+
+      unless job_info.running?(match_job_id: enforce_job_id_match?)
+        logger.info "job is no longer running - skipping"
+        next
+      end
+
+      # Note: rbtrace's backtrace can cause the current job to error and skip to the next job;
+      # This can cause the kill script to avoid killing the worker process since the job ID on the
+      # worker no longer matches.
+      if options[:rbtrace_dump_max_kb] > 0
+        cmd = "which rbtrace"
+        stdout, stderr, status = Open3.capture3(cmd)
+        unless status.success?
+          logger.error "Could not locate path for rbtrace: #{cmd} exited nonzero: #{status.exitstatus} \n with stderr: #{stderr}\n stdout:\n#{stdout}"
+          exit 1
+        end
+
+        rbtrace_path = stdout.strip!
+
+        dump_until_limit(command: "sudo #{rbtrace_path} -p #{pid} --backtraces",
+          dump_file_path: rbtrace_dump_path(options[:dump_dir], job_name, @run_start_time),
+          limit_bytes: options[:rbtrace_dump_max_kb] * 1024,
+        )
+      end
+
+      if options[:gdb_dump_max_kb] > 0
+        dump_until_limit(command: "sudo gdb -p #{pid} < #{Dir.pwd}/gdb-dump-script",
+          dump_file_path: gdb_dump_path(options[:dump_dir], job_name, @run_start_time),
+          limit_bytes: options[:gdb_dump_max_kb] * 1024,
+        )
+      end
+
+      # So this can also be fed into another script
+      puts status_json
+    end
+
+    logger.info "Run ended"
+  end
+
+  def dump_until_limit(command:, dump_file_path:, limit_bytes:)
+    if File.exist? dump_file_path
+      size = File.size(dump_file_path)
+      if size > limit_bytes
+        logger.info "#{dump_file_path} has exceeded the max dump file size of #{limit_bytes / 1024} KB (#{size / 1024} KB)"
+      end
+    else
+      File.write(dump_file_path, "", mode: "a+")
+    end
+
+    run_command "#{command} >> '#{dump_file_path}'"
+    File.write(dump_file_path, "--------------------------------", mode: "a+")
+    logger.info "Appended output of #{command} to #{dump_file_path}"
+  end
+
+  def run_command(command)
+    logger.info "Running command: #{command}"
+    stdout, stderr, status = Open3.capture3("bash -c '#{command}'")
+    unless status.success?
+      logger.error "#{command} exited nonzero: #{status.exitstatus} \n with stderr: #{stderr}\n stdout:\n#{stdout}"
+      return [false, stdout]
+    end
+
+    [true, "true"]
+  end
+
+  def describe_run
+    if options[:rbtrace_dump_max_kb] > 0
+      path = rbtrace_dump_path(options[:dump_dir], "${job_name}", "${date}")
+      STDERR.puts "rbtrace dumps will be written to #{path} until reaching #{options[:rbtrace_dump_max_kb]} KB."
+    end
+    STDERR.puts ""
+
+    if options[:gdb_dump_max_kb] > 0
+      generate_gdb_dump_script
+      path = gdb_dump_path(options[:dump_dir], "${job_name}", "${date}")
+      STDERR.puts "gdb dumps will be written to #{path} until reaching #{options[:gdb_dump_max_kb]} KB."
+    end
+    STDERR.puts ""
+  end
+end
+
+dumper = WorkerDumper.new(options)
+dumper.run

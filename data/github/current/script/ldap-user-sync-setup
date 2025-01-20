@@ -1,0 +1,55 @@
+#!/usr/bin/env ruby
+#/ Usage: script/ldap-user-sync-setup <login> <dn>
+#/ Setup a User to sync with LDAP.
+#/ Requires a User login and the DN to map the User to.
+$stderr.sync = true
+require File.expand_path("../../config/environment", __FILE__)
+require "optparse"
+
+unless ENV["ENTERPRISE"]
+  abort "enterprise mode required for #{$0}. Run script/setup --enterprise"
+end
+
+def usage
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+# default options
+force = false
+
+ARGV.options do |opts|
+  opts.on("-f", "--force")     { force = true }
+  opts.on_tail("-h", "--help") { usage }
+  opts.parse!
+end
+
+login = ARGV.shift
+dn    = ARGV.shift
+
+usage unless login.present? && dn.present?
+
+unless user  = User.find_by_login(login)
+  warn "User (#{login}) not found"
+  exit 2
+end
+
+if map = user.ldap_mapping
+  if force
+    map.update_attribute :dn, dn
+  else
+    if map.dn == dn
+      warn "No change to current mapping (#{map.dn})"
+    else
+      warn "Would overwrite current mapping (#{map.dn})"
+    end
+    exit 3
+  end
+else
+  map = LdapMapping.new subject: user, dn: dn
+  unless map.save
+    warn "Failed to map user #{login} to LDAP entry #{dn}"
+    exit 4
+  end
+end
+
+LdapUserSyncJob.perform_later(user.id)

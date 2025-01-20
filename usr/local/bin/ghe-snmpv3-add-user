@@ -1,0 +1,134 @@
+#!/bin/bash
+#/ Usage: ghe-snmpv3-add-user [-h] [-A passphrase] [-X passphrase] [-a MD5|SHA] [-x DES|AES] <username>
+#/
+#/ Add a read-only user to the SNMPv3 configuration.
+#/
+#/ OPTIONS:
+#/    -A <passphrase>    Set the authentication passphrase. Must be 8 or more characters.
+#/    -X <passphrase>    Set the encryption passphrase. Must be 8 or more characters
+#/                       or a quoted empty string. The authentication passphrase
+#/                       will be used if the encryption passphrase is empty.
+#/    -a <MD5|SHA>       Set the authentication protocol. Defaults to SHA.
+#/    -x <DES|AES>       Set the encryption protocol. Defaults to AES.
+#/    -h | --help        Show this message.
+#/    <username>         The username to add.
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+validate_password () {
+  if [ $(echo "$2" | wc -c) -lt 8 ]; then
+    echo "$1 passphrase must be 8 or more characters"
+    exit 1
+  fi
+}
+
+auth_protocol=SHA
+auth_password=
+priv_protocol=
+priv_password=
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help --options A:X:a:x:h -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a)
+      case "$2" in
+        MD5|md5|SHA|sha)
+          auth_protocol=$(echo $2 | tr a-z A-Z)
+          shift 2
+          ;;
+        *)
+          echo "Invalid authentication protocol. Only MD5 or SHA are supported."
+          exit 1
+          ;;
+      esac
+      ;;
+    -A)
+      validate_password "Authentication" "$2"
+      auth_password="$2"
+      shift 2
+      ;;
+    -x)
+      case "$2" in
+        DES|des|AES|aes)
+          priv_protocol=$(echo $2 | tr a-z A-Z)
+          shift 2
+          ;;
+        *)
+          echo "Invalid encryption protocol. Only DES or AES are supported."
+          exit 1
+          ;;
+      esac
+      ;;
+    -X)
+      [ -z "$priv_protocol" ] && priv_protocol=AES
+      if [ -n "$2" ]; then
+        validate_password "Encryption" "$2"
+        priv_password="$2"
+      fi
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+if [ -z "$1" ]; then
+  usage
+  exit 1
+fi
+
+username="$1"
+users="$(ghe-config --get snmp.users)"
+
+# Verify this user doesn't already exist
+for user in ${users//;/ }; do
+  if [ -n "$(echo $user | grep -o ^$username:)" ]; then
+    echo "$username already exists. Remove the user first."
+    exit 1
+  fi
+done
+
+if [ -n "$auth_password" -a -n "$priv_protocol" ]; then
+  sec_level=authPriv
+elif [ -n "$auth_password" ]; then
+  sec_level=authNoPriv
+else
+  sec_level=noAuthNoPriv
+fi
+
+user_entry="$username:$sec_level"
+if [ -n "$auth_password" ]; then
+  hashed_auth_password="$(HASH_ALG=${auth_protocol} ghe-snmpv3-hash-password $auth_password)"
+  user_entry+=":$auth_protocol:$hashed_auth_password"
+fi
+
+if [ -n "$priv_protocol" ]; then
+  if [ -n "$priv_password" ]; then
+    hashed_priv_password="$(HASH_ALG=${auth_protocol} ghe-snmpv3-hash-password $priv_password)"
+  else
+    hashed_priv_password=
+  fi
+  user_entry+=":$priv_protocol:$hashed_priv_password"
+fi
+[ -n "$users" ] && users+=";"
+users+="$user_entry"
+
+ghe-config snmp.users "$users"
+
+echo "$username successfully added. Run \`ghe-config-apply\` for it to take effect."

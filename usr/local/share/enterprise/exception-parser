@@ -1,0 +1,165 @@
+#!/usr/bin/env ruby
+
+require "json"
+
+LAST_N = 100000
+ROLLUP = false
+CONTEXT = 500
+BIG_ARRAY = 20
+
+class String
+  class << self
+    def nocolors
+      @nocolors
+    end
+    def nocolors=(b)
+      @nocolors = b
+    end
+  end
+
+  def red;    return self if String.nocolors; "\033[31m#{self}\033[0m"; end
+  def green;  return self if String.nocolors; "\033[32m#{self}\033[0m"; end
+  def yellow; return self if String.nocolors; "\033[33m#{self}\033[0m"; end
+  def cyan;   return self if String.nocolors; "\033[36m#{self}\033[0m"; end
+  def grey;   return self if String.nocolors; "\033[1;30m#{self}\033[0m"; end
+  def purple; return self if String.nocolors; "\033[35m#{self}\033[0m"; end
+end
+
+class ParsedException
+  attr_accessor :raw, :parsed, :occurances
+
+  def initialize(raw_json)
+    @raw = raw_json
+    @parsed = JSON.parse(@raw)
+    @occurances = 1
+  end
+
+  def increment
+    @occurances += 1
+  end
+
+  def kind
+    if push?
+      :push
+    elsif background_job?
+      :background_job
+    elsif sigterm?
+      :sigterm
+    else
+      :generic
+    end
+  end
+
+  def push?
+    @parsed.keys.include?("pusher")
+  end
+
+  def background_job?
+    @parsed.keys.include?("job")
+  end
+
+  def gc?
+    @parsed.keys.include?("networked") && @parsed.keys.include?("alternates")
+  end
+
+  def sigterm?
+    @parsed.keys.include?("halting") && @parsed.keys.include?("argv")
+  end
+
+  def matches?(regex)
+    @parsed["class"] =~ regex || @parsed["message"] =~ regex
+  end
+
+  def description
+    case kind
+    when :background_job
+      keys = parsed.keys - ["backtrace"]
+      desc("#{@parsed["queue"]}".yellow + " / ".grey + "#{@parsed["job"]}".yellow + " (Background Job)".cyan, keys)
+    when :push
+      keys = parsed.keys - ["backtrace"]
+      desc("#{@parsed["job"]}".yellow + " (Push)".cyan, keys)
+    when :sigterm
+      keys = parsed.keys - ["backtrace"]
+      desc("SignalException".yellow + " (SIGTERM)".cyan, keys)
+    else
+      keys = parsed.keys - ["backtrace"]
+      desc("#{@parsed["controller"]}##{@parsed["action"]}".yellow + " (Application)".cyan, keys)
+    end
+  end
+
+  def ==(other)
+    @parsed["rollup"] == other.parsed["rollup"]
+  end
+
+  def <=>(other)
+    if @occurances == other.occurances
+      0
+    elsif @occurances > other.occurances
+      1
+    else
+      -1
+    end
+  end
+
+  def print_summary
+    puts "\n" + "=".cyan*80
+    puts "#{occurances}".yellow + " :: ".grey + "#{@parsed["class"]}".red + " :: ".grey + "#{@parsed["message"]}".red
+    puts "-".grey*60
+    puts description
+    puts "-".grey*60
+    puts @parsed["backtrace"].split("\n").first(CONTEXT).join("\n")
+    puts @parsed.keys.inspect.grey
+  end
+
+  private
+  def attribute(key)
+    if @parsed[key] && !@parsed[key].to_s.empty? && @parsed[key] != "nil"
+      if @parsed[key].to_s.split("], [").size >= BIG_ARRAY
+        value = "#{@parsed[key].to_s.split('], [').first(BIG_ARRAY).join('], [')} ... truncated" + " (hiding #{@parsed[key].size - BIG_ARRAY} refs)".red
+      else
+        value = @parsed[key]
+      end
+      "\n" + "#{key}: ".green + "#{value}"
+    else
+      ""
+    end
+  end
+
+  def desc(header, keys)
+    str = header
+    str << "\n" + "-".grey*60
+    keys.each do |key|
+      str << attribute(key)
+    end
+    str
+  end
+end
+
+filename = ARGV[0]
+if filename.nil? or !File.exist?(filename)
+  $stderr.puts "Invalid filename '#{filename}'"
+  $stderr.puts "Usage: exception-parser <file> [--nocolors]"
+  exit 1
+end
+
+if ARGV.include?("--nocolors")
+  String.nocolors = true
+end
+exceptions = []
+
+File.open(filename, "r") do |file|
+  file.each_line do |line|
+    exception = ParsedException.new(line)
+    if (i = exceptions.find_index(exception)) && ROLLUP
+      exceptions[i].increment
+    else
+      exceptions << exception
+    end
+  end
+end
+
+ex = ROLLUP ? exceptions.sort : exceptions
+
+ex.last(LAST_N).each do |e|
+  e.print_summary
+end

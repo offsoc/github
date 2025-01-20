@@ -1,0 +1,112 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require_relative "./seeds/objects"
+
+unless Rails.env.development?
+  raise "This is a dev-only script"
+end
+
+class SetupCodespaces
+  DEFAULT_FEATURE_FLAGS = [
+    :disable_codespaces_secrets,
+    :codespaces_billing_free,
+    :codespaces_max_concurrent_cores,
+    :codespaces_linux_x_large,
+    :codespaces_developer,
+    :codespaces_skip_minting_cascade_token
+  ]
+
+  REQUIRED_ENV_VARS = [
+    "CODESPACES_REGISTRY_PASSWORD"
+  ]
+
+  def call(tenant_slug: nil)
+    enable_feature_flags
+    Apps::Internal::Codespaces.seed!(tenant_slug: tenant_slug)
+    create_lwe_app!
+    create_vscode_token!
+    check_env
+    create_dot_env_file
+  end
+
+  private
+
+  def create_lwe_app!
+    if OauthApplication.find_by(key: Apps::Internal::Codespaces::LWE_KEY)
+      puts "LWE app already exists, skipping..."
+      return
+    end
+
+    puts "Creating LWE app..."
+    app = OauthApplication.create!(
+      key: Apps::Internal::Codespaces::LWE_KEY,
+      user: GitHub.trusted_oauth_apps_owner,
+      name: "LWE",
+      url: "http://github.localhost",
+      callback_url: "http://localhost:3000",
+    )
+  end
+
+  def create_vscode_token!
+    app = OauthApplication.find_by(key: Apps::Internal::Codespaces::VSCODE_AUTH_SERVER_KEY)
+
+    puts "Creating token..."
+    user = User.find_by_login("monalisa")
+
+    access = user.oauth_accesses.build(
+      application: app,
+      description: "Generated token",
+      scopes: %w[user repo codespace],
+    )
+
+    # Force the token to something predictable for dev
+    token = "#{OauthAccess::OAUTH_PREFIX}1234567890abcdefghijklmnopqrstuvwxyz"
+    access.token_last_eight = token[-8..-1]
+    access.hashed_token = access.hash_token(token)
+
+    exisiting_access = user.oauth_accesses.where(hashed_token: access.hashed_token)
+
+    if exisiting_access.present?
+      puts "Using existing token..."
+      return
+    end
+
+    access.save!
+  end
+
+  def enable_feature_flags
+    DEFAULT_FEATURE_FLAGS.each do |flag|
+      puts "Enabling \"#{flag}\"..."
+
+      GitHub.flipper[flag].enable
+    end
+  end
+
+  def check_env
+    REQUIRED_ENV_VARS.each do |name|
+      if ENV[name].blank?
+        puts "*** Warning: required env var \"#{name}\" not set!"
+      end
+    end
+  end
+
+  def create_dot_env_file
+    integration = Integration.find_by(key: GitHub.codespaces_app_key)
+    File.open(codespaces_dot_env_file, "w") do |file|
+      file.puts "CODESPACES_APP_GLOBAL_ID=\"#{integration.global_relay_id}\""
+      file.puts "CODESPACES_APP_NEXT_GLOBAL_ID=\"#{integration.next_global_id}\""
+    end
+  end
+
+  def codespaces_dot_env_file
+    "tmp/codespaces.env.local"
+  end
+end
+
+if __FILE__ == $0
+  SetupCodespaces.new.call(tenant_slug: ARGV[0])
+  puts "Codespaces setup done!"
+  puts "If you need to work with codespace templates, please start `bin/server` (for gitrpc) and in another terminal run `bin/setup-codespaces-templates`..."
+end

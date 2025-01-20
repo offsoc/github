@@ -1,0 +1,54 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require_relative "../config/environment"
+
+unless Rails.env.development?
+  puts "This can only be run in the development environment!"
+  exit 1
+end
+
+if __FILE__ == $0
+  logger = Logger.new(STDERR)
+
+  if ARGV.include?("--no-bootstrap")
+    logger.info "Skipping audit log bootstrap"
+  else
+    rake_args = %w(bin/rake es:bootstrap_audit_logs)
+    if system(*rake_args)
+      logger.info "Audit log bootstrap complete"
+    else
+      logger.warn "Failed to bootstrap audit logs"
+      exit 1
+    end
+  end
+
+  logger.warn "Starting development driftwood stream processesors in threaded mode..."
+
+  queue = Queue.new
+  processor_type = "GitHub::StreamProcessors::Audit::DevelopmentDriftwoodProcessor".constantize
+  Thread.new do # rubocop:disable GitHub/ThreadUse
+    Rails.application.executor.wrap do
+      logger.info "Thread for #{processor_type.name} running."
+      processor = processor_type.new
+      begin
+        topic_checker_client = Kafka.new(seed_brokers: GitHub.environment.fetch("HYDRO_KAFKA_BROKERS", GitHub::Config::HydroConfig::DEVELOPMENT_BROKER).split(","))
+        subscribe_to = Array(processor.options[:subscribe_to])
+        logger.info "Waiting on topics for #{processor_type.name} matching #{subscribe_to}."
+        sleep 1.second while subscribe_to.flat_map { |pattern| topic_checker_client.topics.grep(pattern) }.empty?
+        logger.info "Topics for #{processor_type.name} found."
+      ensure
+        topic_checker_client.close
+      end
+      logger.info "Starting Executor on #{processor_type.name}."
+      consumer = GitHub.hydro_consumer(processor.options)
+      executor = Hydro::Executor.new(processor: processor, consumer: consumer)
+      executor.run
+      logger.info "Leaving Executor for #{processor_type.name}."
+      # push an item on the queue stop the main thread
+      queue.push(true)
+    end
+  end.abort_on_exception = true
+
+  # wait for any thread to push an item on the queue
+  queue.pop
+end

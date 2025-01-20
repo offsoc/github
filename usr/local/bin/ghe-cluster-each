@@ -1,0 +1,213 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-each [options] -- [command]
+#/
+#/ Iterates over all the nodes in the cluster and executes command (in parallel).
+#/
+#/ OPTIONS:
+#/   -h | --help                   Show this message.
+#/   -o | --offline                Try running the command on nodes marked offline.
+#/   -r <role> | --role <role>     Run only on hosts that provide a role.
+#/   -d <dc> | --datacenter <dc>   Only include nodes within specified datacenter
+#/   --primary                     Return only primary hosts
+#/   --replica                     Return only replica hosts
+#/   --cluster-ha-primary          Return only hosts on primary datacenter and mysql primary on replica datacenter
+#/   --cluster-ha-replica          Return only hosts on replica datacenter without mysql primary on replica datacenter
+#/   -x | --exclude                Exclude local host
+#/   -s | --serial                 Run commands serially.
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+}
+
+OFFLINE_NODES=
+RUN_SERIAL=
+MATCH_ROLE=
+HA_FILTER=
+DATACENTER_FILTER=
+EXCLUDE_LOCAL_HOST=
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,offline,role:,datacenter:,primary,replica,cluster-ha-primary,cluster-ha-replica,exclude,serial --options hor:d:xs -- "$@") || {  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -o|--offline)
+      export OFFLINE_NODES=1
+      ;;
+    --primary)
+      export HA_FILTER=primary
+      ;;
+    --replica)
+      export HA_FILTER=replica
+      ;;
+    --cluster-ha-primary)
+      export CLUSTER_HA_REPLICA=primary
+      ;;
+    --cluster-ha-replica)
+      export CLUSTER_HA_REPLICA=replica
+      ;;
+    -r|--role)
+      export MATCH_ROLE=$2
+      shift
+      ;;
+    -d|--datacenter)
+      # This is only used by ghe-cluster-nodes
+      export DATACENTER_FILTER=$2
+      shift
+      ;;
+    -x|--exclude)
+      # This is only used by ghe-cluster-nodes
+      export EXCLUDE_LOCAL_HOST=1
+      ;;
+    -s|--serial)
+      RUN_SERIAL=1
+      ;;
+    --)
+      if [ "$1" = "--" ]; then
+        shift
+        COMMAND="$*"
+      fi
+      break
+      ;;
+  esac
+  shift
+done
+
+GHE_CLUSTER_FILE=${GHE_CLUSTER_FILE:-/etc/github/cluster}
+if [ ! -f "$GHE_CLUSTER_FILE" ] || [ -z "$(cat $GHE_CLUSTER_FILE)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+ssh_node() {
+  local ip=$1
+  shift
+  ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+             -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$ip" "$@"
+}
+
+cleanup() {
+  kill -9 $(jobs -p) 2> /dev/null || true
+}
+
+get_node_ip() {
+  local node_name="$1"
+  if [ -n "$(ghe-config cluster.$node_name.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv6")
+  elif [ -n "$(ghe-config cluster.$node_name.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv4")
+  fi
+  echo $ip
+}
+
+lookup_host_info() {
+  local lookup_list="$1"
+  local node_name="$2"
+  node_line="$(echo "$lookup_list" | grep -E "^$node_name:")" && {
+    echo ${node_line#"$node_name:"}
+  }
+}
+
+trap cleanup EXIT
+
+hosts=$(ghe-cluster-nodes)
+local_host=$(cat $GHE_CLUSTER_FILE)
+
+for hostname in $hosts; do
+  ip_lookup="$(echo -e "$ip_lookup\n$hostname:$(get_node_ip $hostname)")"
+  node_offline="$(ghe-config "cluster.$hostname.offline" || true)"
+  offline_lookup="$(echo -e "$offline_lookup\n$hostname:$node_offline")"
+  unset node_offline
+done
+
+set -o pipefail
+set +e # waiting on async subshells that have non-0 exit codes will cause the script to exit
+# order the hosts such that delegate hosts occur last
+DELEGATE_CHECK="/usr/local/share/enterprise/ghe-call-configrb ghes_nomad_delegate?"
+declare -a nondelegatehosts
+declare -a delegatehosts
+for hostname in $hosts; do
+  ip="$(lookup_host_info "$ip_lookup" "$hostname")"
+  if [ -z "$ip" ]; then
+    echo "No IP found for $hostname" >&2
+    continue
+  fi
+  if [ "$hostname" != "$local_host" ]; then
+    if [ "$(lookup_host_info "$offline_lookup" "$hostname")" = true ]; then
+      ( ssh_node $ip "$DELEGATE_CHECK 2>&1" | nl -s "$hostname: " | cut -c7- || true ) &
+    else
+      ( ssh_node $ip "$DELEGATE_CHECK 2>&1" | nl -s "$hostname: " | cut -c7- ) &
+    fi
+  else
+    eval $DELEGATE_CHECK 2>&1 | nl -s "$hostname: " | cut -c7- &
+  fi
+  pid=$!
+  wait $pid
+  result=$?
+  if [ $result = 1 ]; then
+    nondelegatehosts+=( "$hostname" )
+  else
+    delegatehosts+=( "$hostname" )
+  fi
+done
+
+orderedhosts=(${nondelegatehosts[@]} ${delegatehosts[@]})
+
+set -e # reset the shell options for exit
+for hostname in "${orderedhosts[@]}"; do
+  ip="$(lookup_host_info "$ip_lookup" "$hostname")"
+  if [ -z "$ip" ]; then
+    echo "No IP found for $hostname" >&2
+    continue
+  fi
+  if [ "$hostname" != "$local_host" ]; then
+    if [ "$(lookup_host_info "$offline_lookup" "$hostname")" = true ]; then
+      ( ssh_node $ip "$COMMAND 2>&1" | nl -s "$hostname: "  | cut -c7- || true ) &
+    else
+      ssh_exit_status=$(ssh_node "$ip" "echo 0" 2>/dev/null) || true
+      if [ "$ssh_exit_status" != "0" ]; then
+        echo -e "Cluster node $hostname ($ip) cannot be reached over SSH and is not marked offline. Confirm the node status before proceeding, or to skip, please run:\nghe-config cluster.$hostname.offline true && ghe-config-apply"
+        exit 2
+      fi
+      ( ssh_node $ip "$COMMAND 2>&1" | nl -s "$hostname: "  | cut -c7- ) &
+    fi
+  else
+    eval $COMMAND 2>&1 | nl -s "$hostname: "  | cut -c7- &
+  fi
+
+  if [ -n "$RUN_SERIAL" ]; then
+    wait
+  fi
+done
+
+exit_code=0
+if [ -z "$RUN_SERIAL" ]; then
+  set +e
+  for pid in `jobs -p`; do
+    wait $pid
+    ret_code=$?
+    if [ "$ret_code" != "0" ]; then
+      echo "$pid exited $ret_code" >&2
+      exit_code=$ret_code
+    fi
+  done
+fi
+
+trap "" EXIT
+
+exit $exit_code

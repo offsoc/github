@@ -1,0 +1,92 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+# This file replaces the contents of a transition and transition test file
+# With code to sync system_roles.yml to the database.
+# It is only intended to be called from script/system-role-transition
+
+require "erb"
+require "optparse"
+
+class SystemRoleTransitionGenerator
+  SYSTEM_ROLES_PATH = "#{ENV["RAILS_ROOT"]}/config/system_roles.yml"
+  TRANSITION_TEMPLATE_PATH = "#{ENV["RAILS_ROOT"]}/lib/github/authorization/templates/system_roles_migration.rb.erb"
+  TEST_TEMPLATE_PATH = "#{ENV["RAILS_ROOT"]}/lib/github/authorization/templates/system_roles_test.rb.erb"
+
+  attr_reader :verbose,
+    :class_name,
+    :transition_file,
+    :transition_test_file,
+    :file_without_lib_or_extension
+
+  def initialize(name, transition_file, transition_test_file, options)
+    @class_name = name.underscore.camelize
+    @transition_file = transition_file
+    @transition_test_file = transition_test_file
+    @file_without_lib_or_extension = transition_file.gsub(/(^lib\/|\.rb$)/, "")
+    @verbose = options[:verbose]
+  end
+
+  def run
+    system_role_lines = system_roles.split("\n").map do |line|
+      next line if line.blank?
+      "  #{line}"
+    end
+
+    render_template(TRANSITION_TEMPLATE_PATH, transition_file, { system_roles_yml: system_role_lines.join("\n") })
+    render_template(TEST_TEMPLATE_PATH, transition_test_file, {})
+  end
+
+  private
+
+  def verbose?
+    @verbose
+  end
+
+  def log(message)
+    return unless verbose?
+
+    Rails.logger.debug message
+    puts "[#{Time.now.iso8601.sub(/-\d+:\d+$/, '')}] #{message}"
+    STDOUT.flush
+  end
+
+  def render_template(template_filename, output_filename, params)
+    template = File.read(template_filename)
+    File.open(output_filename, "wb") do |f|
+      erb = ERB.new(template, trim_mode: "-")
+      erb.filename = output_filename
+      f.write erb.result(binding)
+    end
+  end
+
+  def system_roles
+    log("using system_roles.yml at: #{SYSTEM_ROLES_PATH}")
+    File.open(SYSTEM_ROLES_PATH).read
+  end
+end
+
+if $0 == __FILE__
+  options = {}
+  optparser = OptionParser.new do |opts|
+    opts.banner = "Usage: system-role-transition-generator [options] [name] [relative-path-to-transition-file] [relative-path-to-transition-test-file]"
+
+    opts.on("-v", "--verbose", "Log verbose output") do
+      options[:verbose] = true
+    end
+  end
+  optparser.parse!
+
+  if ARGV.length != 3
+    puts "error: expected name, migration file path, and transition file path. got: #{ARGV.join(", ")}"
+    puts optparser.help
+    return
+  end
+
+  name = ARGV[0]
+  transition_file = ARGV[1]
+  transition_test_file = ARGV[2]
+
+  generator = SystemRoleTransitionGenerator.new(name, transition_file, transition_test_file, options)
+  generator.run
+end

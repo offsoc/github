@@ -1,0 +1,128 @@
+#!/bin/bash
+#/ Usage: ghe-packages-configure [-h]
+#/
+#/ Configures GitHub Packages on this GitHub Enterprise appliance.
+#/ Needs to be executed after GitHub Enterprise configuration has been changed
+#/ This script is normally called by ghe-config-apply
+#/
+#/ OPTIONS:.
+#/   -h | --help     Show this message.
+#/
+set -e
+
+# usage
+#   Display usage information for this script.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+echoerr() { echo "$@" 1>&2; }
+
+assert_value_exists() {
+    key_name=$1
+    if ghe-config --blank "$key_name"; then
+        echoerr "Please set the ${key_name} config value before calling this script"
+        exit 1
+    fi
+    ghe-config "$key_name"
+}
+
+run_storage_tests() {
+  # BlobProvider should only be one of s3 or azure, if not, this will fail. But that's
+  # good since like, if it's not, we can't save data to it anyway
+  BLOB_PROVIDER=$(assert_value_exists "secrets.packages.blob-storage-type")
+
+  if [ "$BLOB_PROVIDER" = "azure" ]; then
+      CONNECTION_STRING=$(assert_value_exists "secrets.packages.azure-connection-string")
+      CONTAINER_NAME=$(assert_value_exists "secrets.packages.azure-container-name")
+  else
+      BUCKET_NAME=$(assert_value_exists "secrets.packages.s3-bucket")
+      ACCESS_KEY=$(assert_value_exists "secrets.packages.aws-access-key")
+      SECRET_KEY=$(assert_value_exists "secrets.packages.aws-secret-key")
+      SERVICE_URL=$(assert_value_exists "secrets.packages.service-url")
+
+      # Assume ForcePathStyle for non AWS S3 service URLs (minio and other 3rd party storage providers).
+      FORCE_PATH_STYLE="false"
+      if echo "$SERVICE_URL" | grep -q -v amazonaws.com 2>&1; then
+          FORCE_PATH_STYLE="true"
+      fi
+
+      CONNECTION_STRING="BucketName=${BUCKET_NAME};AccessKeyId=${ACCESS_KEY};SecretAccessKey=${SECRET_KEY};ServiceUrl=${SERVICE_URL};PathPrefix=actions-storage-check;ForcePathStyle=${FORCE_PATH_STYLE}"
+  fi
+
+  # Configure each of packages services
+  echo "Testing connection parameters for ${BLOB_PROVIDER}"
+  out=$(ghe-packages-precheck -p "$BLOB_PROVIDER" -cs "$CONNECTION_STRING" -cn "$CONTAINER_NAME" 2>&1)
+
+  echo "Storage tests finished, output is below:"
+  printf '==%.0s' {1..30}
+  echo
+  echo "$out"
+  printf '==%.0s' {1..30}
+  echo
+
+  if echo "$out" | grep -q "Storage tests failed"; then
+    >&2 echo "ghe-packages-configure: Storage tests failed"
+    exit 1
+  else
+    echo "Packages Blob Storage is healthy!"
+  fi
+
+}
+
+copy_ecosystem_toggle() {
+    secret_key=$1
+    config_key=$2
+    container_config="app.packages.container-enabled"
+
+    # if the config_key is already set, do nothing
+    if (ghe-config --present "$config_key"); then
+        return 0
+    fi
+
+    # if the secret key is present, set the config key to the secret value.
+    if ghe-config --present "$secret_key"; then
+      ghe-config "$config_key" $(ghe-config "$secret_key")
+      ghe-config --unset "$secret_key"
+    else
+      #container should be disabled by default
+      if [ "$config_key" = "$container_config" ]; then
+        ghe-config "$config_key" false
+      else
+        ghe-config "$config_key" true
+      fi
+    fi
+}
+
+# Transfers ecosystem toggles from secrets (secrets.conf) to the raw config (github.conf) in case of an upgrade from 2.22
+# and sets default values if the configs are missing. All ecosystem toggles are required for registry to start.
+update_ecosystem_toggles() {
+    for ecosystem in "npm" "docker" "container" "maven" "rubygems" "nuget"
+    do
+        copy_ecosystem_toggle "secrets.packages.$ecosystem-enabled" "app.packages.$ecosystem-enabled"
+    done
+}
+
+# Process command line arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+echo "Running Packages storage tests..."
+run_storage_tests
+
+echo "Updating ecosystem toggles for Packages service..."
+update_ecosystem_toggles
+
+echo "Packages service was successfully configured!"

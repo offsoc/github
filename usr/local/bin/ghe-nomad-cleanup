@@ -1,0 +1,113 @@
+#!/bin/bash
+#/ Usage: ghe-nomad-cleanup [options]
+#/
+#/ Drains the nomad node, stops nomad and deletes the nomad data directory.
+#/
+#/ OPTIONS:
+#/  -h | --help                  Show this message.
+#/  -s | --skip-drain            Skip nomad drain.
+#/  -n | --no-haproxy-restart    Skip starting haproxy-frontend and leave nomad offline
+#/  -y | --yes                   Do not show the warning prompt.
+#/
+set -euo pipefail
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+proceed() {
+  echo "
+  WARNING: This script may cause significant outages.
+  
+  $(basename "$0") should only be used when requested by the GitHub Enterprise Support team. Incorrect use could cause damage or data loss.
+  "
+  read -p "Proceed with running $(basename "$0")? [y/N] " -r
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+}
+
+ARGS=$(getopt --name "$0" --long help,skip-drain,no-haproxy-restart,yes --options hnsy -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+SKIP_DRAIN=${SKIP_DRAIN:-false}
+HAPROXY_PRE_CONFIG_TIMEOUT=${HAPROXY_PRE_CONFIG_TIMEOUT:-90}
+NO_HAPROXY_RESTART=
+PROMPT_LESS=
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -n|--no-haproxy-restart)
+      NO_HAPROXY_RESTART=true
+      ;;
+    -s|--skip-drain)
+      SKIP_DRAIN=true
+      ;;
+    -y|--yes)
+      PROMPT_LESS=1
+      ;;
+  esac
+  shift
+done
+
+# Only warn user about script usage in interactive mode by 
+# testing if file descriptor 0 (stdin) is a terminal (-t 0)
+if [ -t 0 ] && [ -z "$PROMPT_LESS" ] ; then
+  proceed
+fi
+
+if [ -z "$NO_HAPROXY_RESTART" ]; then
+  # To keep the node accessible via HAProxy we must start `haproxy-pre-config` and wait for it to be available before stopping nomad
+  sudo /usr/local/share/enterprise/ghe-set-haproxy-pre-config enable &>/dev/null
+  until_timeout=$(($SECONDS + $HAPROXY_PRE_CONFIG_TIMEOUT))
+  while [ $SECONDS -lt $until_timeout ]; do
+    test -S /var/run/haproxy-pre-config.sock && break
+  done
+  test -S /var/run/haproxy-pre-config.sock || (
+    echo "haproxy-pre-config failed to become available before ${HAPROXY_PRE_CONFIG_TIMEOUT} seconds"
+    systemctl status haproxy-pre-config
+    journalctl -u haproxy-pre-config
+    exit 1
+  )
+else
+  echo "skipping haproxy-pre-config.service start"
+fi
+
+sudo systemctl stop nomad-jobs.timer --no-block &>/dev/null || true
+
+if [ "$SKIP_DRAIN" = "false" ]; then
+  # NOTE: -force is equivalent
+  # of -deadline 0s. It means don't wait for
+  # migrations to work before shutting down the services
+  # on the node. It *does* honor the service's kill_timeout
+  # and kill_signal, so it fully drains the service's outstanding
+  # connections or waits until "kill_timeout" before SIGKILLing
+  # the service.
+  sudo nomad node drain -enable -force -self &>/dev/null || true
+fi
+
+sudo systemctl stop nomad-jobs --no-block &> /dev/null || true
+sudo systemctl stop nomad --no-block &> /dev/null || true
+
+# Stop HAProxy reloaders since Consul aware instances are now down
+sudo systemctl stop haproxy-cluster-proxy-config.timer --no-block &> /dev/null || true
+sudo systemctl stop haproxy-data-proxy-config.timer --no-block &> /dev/null || true
+
+ghe-config --unset "secrets.nomad.acl-management-token" || true
+ghe-config --unset "secrets.nomad.acl-bootstrap-token" || true
+
+sudo docker stop $(docker ps -aq) &>/dev/null || true
+sudo docker rm $(docker ps -aq) &>/dev/null || true
+
+sudo find /data/user/nomad -mindepth 1 -maxdepth 1 | sudo xargs rm -rf &>/dev/null || true
+
+sudo rm -f "/etc/nomad-jobs/system-queue" &>/dev/null || true
+sudo rm -f "/etc/nomad-jobs/service-queue" &>/dev/null || true
+sudo rm -f "/etc/nomad-jobs/locked-queue" &>/dev/null || true

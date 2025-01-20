@@ -1,0 +1,98 @@
+#!/bin/bash
+
+if [ -n "$SERVER_START_DEBUG" ]; then debug="1"; fi
+if [ -n "$SERVER_START_RDBG" ]; then rdbg="1"; fi
+if [ -n "$SERVER_START_DAP" ]; then dap="1"; fi
+if [ -n "$SERVER_START_LOG" ]; then log="1"; fi
+
+if [ -n "$debug" ]; then
+  # start overmind detached without the web process
+  overmind start --ignored-processes web > tmp/app.log 2>&1 &
+  # exec starts the process replacing this process, but this ^ starts it in the background
+  # this also starts the unicorn server later
+
+  echo $! > tmp/pids/app.pid
+
+  # ensure we cleanup tmp files and overmind
+  function cleanup {
+    echo "Shutting down...";
+
+    overmind kill;
+
+    kill $(cat tmp/pids/app.pid) &>/dev/null;
+    rm -f tmp/pids/app.pid tmp/app.log .overmind.sock /tmp/overmind.sock;
+  }
+
+  function process_overmind_exit {
+    # Will still print out errors, but not info, as we may have been deliberately killed
+    cat tmp/app.log | gh medic diagnose
+
+    # overmind has exited, so we should exit too
+    kill -s USR1 $$ 2> /dev/null
+  }
+
+  # tail waits for the process to exit
+  (tail --pid=$(cat tmp/pids/app.pid) -f /dev/null; process_overmind_exit ) &
+
+  trap cleanup EXIT
+
+  echo "starting overmind non-web processes, this will take a few seconds..."
+  sleep 8 # let overmind start up (and fail, if it's going to) before starting web process
+
+  # start unicorn with a single worker so the log tailer doesn't split processes
+  # without this ajax requests split stdin input when typing into debuggers
+  if [ -n "$dap" ]; then
+    DEBUG_DAP=1 GH_UNICORN_WORKER_COUNT=1 script/unicorn-server
+  else
+    GH_UNICORN_WORKER_COUNT=1 script/unicorn-server
+  fi
+elif [ -n "$rdbg" ]; then
+  exec overmind start --ignored-processes web
+elif [ -n "$log" ]; then
+  echo "Running in logged mode"
+  truncate -s 0 tmp/app.log
+
+  for p in $(cat Procfile | cut -d ":" -f1 | grep -v '#'); do
+    log="tmp/$p.log"
+    echo "Truncating logfile ${log}"
+    truncate -s 0 $log
+
+    $(tail -f tmp/app.log | grep $p | cut -d "|" -f "2-" > $log) &
+  done
+
+  overmind start > tmp/app.log 2>&1 &
+  echo $! > tmp/pids/app.pid
+
+  # give overmind a moment so echo works
+  while [ ! -S /tmp/overmind.sock ]; do
+    sleep 0.1;
+  done
+
+  function cleanup {
+    pid=$(cat tmp/pids/app.pid)
+    echo "Killing pid group ${pid}"
+    kill -- -$pid &>/dev/null;
+
+    # start listening again to capture shutdown messages
+    if [ -S /tmp/overmind.sock ]; then
+      overmind echo
+    fi
+
+    rm -f tmp/pids/app.pid;
+  }
+  trap cleanup EXIT
+
+  overmind echo
+
+else
+  # Add .overmind-tmux.conf in the repo root if you'd like overmind's
+  # tmux server to use a config file other than ~/.tmux.conf, e.g. if
+  # you already use tmux as a terminal multiplexer and you want to
+  # nest overmind's tmux instance with a different command prefix.
+  # This usage requires overmind >= 2.0.3.
+  if [ -f ".overmind-tmux.conf" ]; then
+    exec overmind start -F .overmind-tmux.conf
+  else
+    exec overmind start
+  fi
+fi

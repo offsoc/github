@@ -1,0 +1,73 @@
+<%
+  force_raw = local_assigns.fetch(:force_raw) { false }
+  raw_url = local_assigns.fetch(:raw_url) { blob_url_as_raw }
+  named_anchor_prefix ||= ""
+  issue_template = local_assigns[:issue_template]
+  discussion_template = local_assigns[:discussion_template]
+  display_with_code_rendering_service ||= false
+  gist_context = local_assigns[:gist] ? { gist: local_assigns[:gist] } : {}
+  richtext, _ = format_blob_with_result(blob, gist_context) if local_assigns[:richtext].nil? && !local_assigns[:plain]
+%>
+<% if logged_in? && issue_form_template_file? && issue_template&.valid? %>
+  <div
+    id="<%= "#{named_anchor_prefix}readme" %>"
+    class="Box-body readme blob js-code-block-container p-5 p-xl-6 <%= 'gist-border-0' if responsive? %>"
+  >
+      <%= render StructuredTemplates::PreviewComponent.new(template: issue_template, type_field_enabled: current_repository.issue_forms_type_field_enabled?(current_user)) %>
+  </div>
+<% elsif logged_in? && discussion_template_file? && discussion_template&.valid? %>
+  <div
+    id="<%= "#{named_anchor_prefix}readme" %>"
+    class="Box-body readme blob js-code-block-container p-5 p-xl-6 <%= 'gist-border-0' if responsive? %>"
+  >
+      <%= render StructuredTemplates::PreviewComponent.new(template: discussion_template) %>
+  </div>
+<% elsif richtext %>
+  <div id="<%= "#{named_anchor_prefix}readme" %>" class="Box-body readme blob js-code-block-container p-5 p-xl-6 <%= 'gist-border-0' if responsive? %>">
+    <%= richtext %>
+  </div>
+<% else %>
+  <% csv, error = parse_csv_or_tsv(blob) if csv_or_tsv?(blob.extname) && !(blob.git_lfs_pointer? || blob.data.blank?) %>
+  <% if error %>
+    <div class="render-notice">
+      <%= error %>
+    </div>
+  <% elsif force_raw || (blob.truncated? && !blob.large? && !(blob.image? || blob.render_file_type_for_display(:view))) %>
+    <div class="render-notice">
+      This file has been truncated, but you can <%= link_to "view the full file", raw_url, class: "Link--inTextBlock" %>.
+    </div>
+  <% end %>
+
+  <% unless force_raw %>
+    <div itemprop="text" class="Box-body p-0 blob-wrapper data type-<%= blob.language ? blob.language.name.parameterize : "text" %> <%= "d-flex flex-column flex-auto" if blob_fullwidth? %> <%= 'gist-border-0' if responsive? %>">
+      <% use_render = local_assigns.fetch(:use_render, true) %>
+
+      <% if display_with_code_rendering_service %>
+        <%= render code_rendering_service %> <%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+      <% elsif render_image_or_raw?(blob) %>
+        <div class="text-center p-3" data-hpc>
+          <% if blob.image? %>
+            <% blob_repo = blob.repository || current_repository %>
+            <span class="border-wrap"><img src="<%= renderable_blob_url(blob, blob_repo, raw_url) %>" alt="<%= blob.display_name %>"></span>
+          <% else %>
+            <%= link_to "View raw", raw_url %>
+            <% if blob.large? %>
+              <p>(Sorry about that, but we can’t show files that are this big right now.)</p>
+            <% end %>
+          <% end %>
+        </div>
+      <% elsif csv %>
+        <%= render :partial => "blob/blob_csv", :object => csv, :locals => {
+          named_anchor_prefix: named_anchor_prefix
+        } %>
+      <% else %>
+        <%= render :partial => "blob/blob_code", :locals => {
+          blob: blob,
+          named_anchor_prefix: named_anchor_prefix,
+          snippet: local_assigns.fetch(:snippet, false),
+          show_toolbar: local_assigns.fetch(:show_toolbar, false)
+        } %>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

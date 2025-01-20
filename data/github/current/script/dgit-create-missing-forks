@@ -1,0 +1,41 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/environment", __FILE__)
+
+# Don't mess with repositories created too recently.  Their
+# `repository-fork` job may well just be in a job somewhere waiting to
+# run, and we don't want to conflict with it.
+MINIMUM_AGE = 3600
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+GitRPC.timeout = 30.minutes.to_i  # let clone-fork run as long as it needs
+
+GitHub.load_activerecord
+
+# Run background jobs inline for this script
+Rails.application.config.active_job.queue_adapter = :inline
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} network_id"
+  exit 1
+end
+
+usage unless ARGV.length == 1
+network = if ARGV[0] =~ /^\S+\/\S+$/
+  Repository.nwo(ARGV[0]).network
+else
+  RepositoryNetwork.find_by_id(ARGV[0].to_i)
+end
+
+network.repositories.each do |repo|
+  if !repo.exists_on_disk?
+    if repo.created_at > Time.now - MINIMUM_AGE
+      puts "FATAL: #{repo.nwo} (#{repo.id}) is too recent: #{repo.created_at}"
+      exit 1
+    end
+
+    puts "Setting up #{repo.nwo} (#{repo.id})"
+    repo.setup_git_repository
+  end
+end

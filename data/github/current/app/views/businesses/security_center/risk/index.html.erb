@@ -1,0 +1,127 @@
+<%# locals: (data:) %>
+<%
+  data => {
+    current_user:,
+    business:,
+    visible_features:,
+    query:,
+    default_query:,
+    filter_input_suggestions:,
+    filter_menus:,
+    list_menus:,
+    repository_list_data:,
+    sso_payload:,
+    async_stats_src:,
+    show_blankslate:,
+    no_authorized_orgs:,
+  }
+%>
+
+<% page_info title: "Security · Risk · #{business}" %>
+
+<%= render Primer::Box.new(mb: 3, test_selector: "security-center-new-sso-banner") do %>
+  <%= render_react_partial name: "single-sign-on-dropdown-partial", props: sso_payload, ssr: false %>
+<% end %>
+
+<%= render(SecurityCenter::SubheadComponent.new(
+  actor: current_user,
+  scope: business,
+  heading: "Security risk",
+  subheading: "Open alert counts across your enterprise.",
+  hide_border: true,
+)) do |c| %>
+  <% c.with_feedback_link %>
+  <% c.with_phase_label %>
+<% end %>
+
+<% unless show_blankslate %>
+  <%= render Primer::Box.new(
+    id: "risk-filters",
+    display: :flex,
+    flex_wrap: :wrap,
+    justify_content: :space_between,
+    mt: 1,
+    mb: 3,
+    style: "gap: 8px"
+  ) do %>
+    <%= render Primer::Box.new(flex: 1) do %>
+      <%= render Primer::Experimental::QueryBuilder.new(
+        id: "security-center-risk-search",
+        input_name: "query",
+        label_text: "Search all repository risks",
+        visually_hide_label: true,
+        placeholder: "Search all repository risks",
+        form_action_url: security_center_risk_enterprise_path(this_business),
+        hidden_form_fields: { is_search: true },
+        value: query,
+        mt: 1,
+        test_selector: "security-center-search-box",
+        "data-suggestable-owner-path": filter_input_suggestions[Search::Queries::SecurityCenter::RiskQueryParser::OWNER][:path],
+        "data-suggestable-repo-path": filter_input_suggestions[Search::Queries::SecurityCenter::RiskQueryParser::REPOSITORY][:path],
+        "data-suggestable-team-path": filter_input_suggestions[Search::Queries::SecurityCenter::RiskQueryParser::TEAM][:path],
+        "data-suggestable-topic-path": filter_input_suggestions[Search::Queries::SecurityCenter::RiskQueryParser::TOPIC][:path],
+        "data-show-biz-only-providers": true,
+      ) do |component|
+        component.with_leading_visual_icon(icon: :search)
+      end %>
+    <% end %>
+
+    <%= render Primer::Box.new(display: :flex, align_items: :center) do %>
+      <% filter_menus.each do |menu_data| %>
+        <%= render SecurityCenter::Coverage::SelectMenuComponent.new(menu_data) %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render SecurityCenter::Risk::StatsSummariesComponent.new(
+    SecurityCenter::Risk::StatsSummariesComponent::AsyncData.new(
+      src: async_stats_src
+    )
+  ) %>
+<% end %>
+
+<%= render Primer::Box.new(id: "risk-data", mb: 3, data: { hpc: true }) do %>
+  <%= render SecurityCenter::Risk::RepositoryListComponent.new(repository_list_data) do |l| %>
+    <% list_menus.each { |menu_data| l.with_action_menu(data: menu_data) } %>
+
+    <% if visible_features.empty? %>
+
+      <% doc_url = GitHub.enterprise? ?
+        "#{GitHub.enterprise_admin_help_url}/advanced-security/enabling-github-advanced-security-for-your-enterprise" :
+        "#{GitHub.help_url(ghec_exclusive: true)}/code-security/security-overview/about-the-security-overview" %>
+
+      <% l.with_blankslate(icon: :search, heading: "No security features enabled.") do %>
+        <%= render Primer::Beta::Text.new(test_selector: "security-center-risk-blankslate-no-features") do %>
+          Your <%= GitHub.flavor %> instance does not have any security scanning features enabled.
+          Read more about <%= render(Primer::Beta::Link.new(href: doc_url, classes: "Link--inTextBlock")) { "enabling security features on #{GitHub.flavor}" } %>.
+        <% end %>
+      <% end %>
+
+    <% elsif show_blankslate %>
+
+      <% heading = no_authorized_orgs ? "No managed organizations." : "No repositories found." %>
+      <% test_selector = no_authorized_orgs ? "security-center-risk-blankslate-no-perms" : "security-center-risk-blankslate-no-repos" %>
+
+      <% l.with_blankslate(icon: :search, heading: heading) do %>
+        <%= render(Primer::Beta::Text.new(display: :block, test_selector: test_selector)) do %>
+          Only repositories in organizations you can manage are shown on this page.
+        <% end %>
+
+        <% doc_url = "#{GitHub.help_url(ghec_exclusive: true)}/code-security/security-overview/about-the-security-overview#security-risk-view" %>
+        <%= render(Primer::Beta::Link.new(href: doc_url, classes: "Link--inTextBlock")) { "Learn more about viewing the risk page" } %>.
+      <% end %>
+
+    <% elsif query.present? %>
+
+      <% l.with_blankslate(icon: :search, heading: "No repositories found.") do %>
+        <% if query != default_query %>
+          <%= render Primer::Beta::Text.new(test_selector: "security-center-risk-blankslate-clear-filters") do %>
+            Try <%= render(Primer::Beta::Link.new(href: "?", classes: "Link--inTextBlock")) { "clearing current search filters" } %>.
+          <% end %>
+        <% end %>
+      <% end %>
+
+    <% end %>
+
+  <% end %>
+<% end %>

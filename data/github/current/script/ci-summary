@@ -1,0 +1,331 @@
+#!/usr/bin/env safe-ruby
+# typed: true
+# frozen_string_literal: true
+
+require "json"
+require "net/http"
+require "uri"
+require "optparse"
+require "set"
+
+ENV["RAILS_ENV"] = "test"
+LOG_PREFIX = "=>"
+DEBUG_PREFIX = "==>"
+ACCEPT_HEADER = "application/vnd.github.v3+json"
+
+ENTERPRISE_BUILD_PREFIX = "enterprise"
+MULTITENANT_BUILD_PREFIX = "github-multitenant"
+MULTITENANT_ALL_FEATURES_BUILD_PREFIX = "github-multitenant-all-features"
+EMU_BUILD_PREFIX = "github-emu"
+RUBY_NEXT_BUILD_PREFIX = "github-ruby-next"
+ALL_FEATURES_BUILD_PREFIX = "github-all-features"
+DEFAULT_BUILD_PREFIX = "github"
+SERVICE_CENTRIC_INFIX = "-org-"
+NUMBERED_BUILD_SUFFIX = "-\\d+"
+SUMMARY_BUILD_SUFFIX = "-results"
+
+class FailedTestRunner
+  class GETRequestError < StandardError; end
+  class MissingEnvVarError < StandardError; end
+  extend T::Helpers
+
+  def initialize(options)
+    @current_branch = options.fetch(:current_branch)
+    @sha        = options.fetch(:sha, remote_sha(branch: @current_branch))
+    @branch     = options.fetch(:branch, @current_branch)
+    @run_tests  = options[:run_tests]
+    @list_only  = options[:list_only]
+    @files_only = options[:files_only]
+    @verbose    = options[:verbose]
+    @stdout     = options[:stdout]
+    @stderr     = options[:stderr]
+
+    @build_name_filter = build_name_filter
+  end
+
+  def run
+    report_script_usage
+    compare_shas
+    failed_runs = fetch_failed_check_runs
+
+    return output_files(failed_runs) if @files_only
+
+    annotations = fetch_annotations(failed_runs)
+    if @run_tests
+      execute_tests(annotations.values.flatten)
+    elsif !@list_only
+      print_summary(annotations)
+    end
+  ensure
+    if @stdout.is_a?(File)
+      @stdout.close
+      @stdout = $stdout
+    end
+  end
+
+  private def debug(msg, prefix = DEBUG_PREFIX)
+    @stderr.puts "#{prefix} #{msg}" if @verbose
+  end
+
+  private def log(msg, prefix = LOG_PREFIX)
+    @stdout.puts "#{prefix} #{msg}"
+  end
+
+  private def compare_shas
+    # We're testing a different branch so we'd expect the shas to differ
+    return unless @branch == @current_branch
+    return unless @sha != local_sha(branch: @branch)
+
+    log("Checking branch\nYour local commit does not match the remote commit for #{@branch}, you may want to either push or pull to get things in sync.")
+  end
+
+  private def build_name_filter
+    # If we're not attempting to run tests, we want a summary of all the
+    # build failures so we can make recommendations on next steps.
+    return nil unless @run_tests
+
+    if ENV["ENTERPRISE"] || current_runtime == "enterprise"
+      ENTERPRISE_BUILD_PREFIX
+    elsif ENV["MULTI_TENANT_ENTERPRISE"]
+      if ENV["TEST_ALL_FEATURES"]
+        MULTITENANT_ALL_FEATURES_BUILD_PREFIX
+      else
+        MULTITENANT_BUILD_PREFIX
+      end
+    elsif ENV["TEST_WITH_ALL_EMUS"]
+      EMU_BUILD_PREFIX
+    elsif ENV["RUBY_NEXT"]
+      RUBY_NEXT_BUILD_PREFIX
+    elsif ENV["TEST_ALL_FEATURES"]
+      ALL_FEATURES_BUILD_PREFIX
+    else
+      DEFAULT_BUILD_PREFIX
+    end
+  end
+
+  private def current_runtime
+    return "dotcom" unless File.exist?("tmp/runtime/current")
+    File.read("tmp/runtime/current").chomp
+  end
+
+  private def fetch_failed_check_runs
+    filter_regex = if @build_name_filter
+      /#{Regexp.escape(@build_name_filter)}#{NUMBERED_BUILD_SUFFIX}|#{SERVICE_CENTRIC_INFIX}/
+    end
+
+    debug("Fetching check runs for #{@sha}")
+    runs = T.let([], T::Array[Hash])
+    2.times do |i|
+      runs += get("/repos/github/github/commits/#{@sha}/check-runs?per_page=100&page=#{i + 1}")["check_runs"]
+    end
+
+    runs.select do |run|
+      failed = run.fetch("conclusion", "") == "failure"
+      build_name = run.fetch("name", "")
+      suffix_regex = Regexp.new(Regexp.escape(SUMMARY_BUILD_SUFFIX))
+      matching_build_name = if filter_regex
+        build_name.match?(filter_regex) && build_name !~ suffix_regex
+      else
+        build_name !~ suffix_regex
+      end
+      failed && matching_build_name
+    end.map do |run|
+      {
+        name: run["name"],
+        id: run["id"],
+        annotations_url: run.dig("output", "annotations_url"),
+        summary: run.dig("output", "summary"),
+      }
+    end
+  end
+
+  private def fetch_annotations(failed_runs)
+    annotations = Hash.new { [] }
+
+    message = <<EOF
+Processing
+Commit: #{@sha}
+Branch: #{@branch}
+Failed runs: #{failed_runs.count}
+EOF
+    message << "Build type: #{@build_name_filter}" if @build_name_filter
+    log(message)
+
+    failed_runs.each do |run|
+      build_name = run[:name].split[0]
+      debug("Fetching annotations for #{run[:name]}, #{run[:annotations_url]}")
+      failures = test_files_for(run: run).map { |x| "#{x["path"].strip}:#{x["start_line"]}" }
+      if failures.any?
+        log("\t#{run[:name]}")
+        log("\tFound #{failures.count} Failed tests")
+        log("\t\t#{failures.join("\n\t\t")}")
+        annotations[build_name] += failures.flatten
+      else
+        log("\t#{run[:name]} has failed status but no annotations. Summary was `#{run[:summary]}`")
+      end
+    end
+    annotations
+  end
+
+  private def print_summary(build_failures)
+    return true unless build_failures.any?
+    single_build_failures = Set.new
+    multiple, single = build_failures.each_with_object({}) do |(build, failures), out|
+      failures.each do |failure|
+        out[failure] ||= []
+        out[failure] << build
+      end
+    end.partition do |_test, build|
+      if build.count > 1
+        true
+      else
+        single_build_failures << build.first
+        false
+      end
+    end
+
+    log("")
+    if multiple.any?
+      log("The following tests failed in multiple builds. Fixing it in one build may fix it in all builds:")
+      multiple.each do |failure, _builds|
+        log("\t#{failure}")
+      end
+    end
+
+    log("")
+    if single.any?
+      log("The following tests each failed in only one build. This suggests that you may need to fix the test or the code its testing in a specific scenario.")
+      print_recommendations(single_build_failures)
+      log("\tFailures:")
+      single.sort_by { |_, builds| builds.first }.each do |failure, builds|
+        log("\t\t#{failure} failed in #{builds.first}")
+      end
+    end
+
+  end
+
+  RECOMMENDATIONS = {
+    ENTERPRISE_BUILD_PREFIX => "To replicate enterprise build failures, run `script/setup --enterprise` before running tests.",
+    MULTITENANT_BUILD_PREFIX => "To replicate multitenant failures, run tests with `MULTI_TENANT_ENTERPRISE=1 bin/rails test`",
+    MULTITENANT_ALL_FEATURES_BUILD_PREFIX => "To replicate multitenant all-features failures, run tests with `TEST_ALL_FEATURES=1 MULTI_TENANT_ENTERPRISE=1 bin/rails test`",
+    EMU_BUILD_PREFIX => "To replicate emu failures, run tests with `TEST_WITH_ALL_EMUS=1 bin/rails test`",
+    ALL_FEATURES_BUILD_PREFIX => "To replicate all-features failures, run tests with `TEST_ALL_FEATURES=1 bin/rails test`. You may need to explicitly disable a feature flag in your test, or handle the non-feature flagged case appropriately.",
+    RUBY_NEXT_BUILD_PREFIX => "To replicate ruby-next failures, run tests with `RUBY_NEXT=1 bin/rails test`",
+  }
+
+  private def print_recommendations(failed_build_names)
+    recommendations = RECOMMENDATIONS.values_at(*failed_build_names).compact
+    return unless recommendations.any?
+    log("\tRecommendations:")
+    recommendations.each do |reco|
+      log("\t\t#{reco}")
+    end
+  end
+
+  private def output_files(failed_runs)
+    files = []
+    failed_runs.each do |run|
+      test_files_for(run: run).each { |x| files << "#{x["path"].strip}" }
+    end
+
+    log(files.uniq.join("\ \n"), "")
+  end
+
+  private def execute_tests(annotations)
+    return true unless @run_tests
+
+    if annotations.empty?
+      log("Found no failed tests")
+      return true
+    end
+
+    debug("Running tests for #{annotations.count} annotations")
+    debug("Running tests: #{annotations.join(" ")}")
+    system("bin/rails test #{annotations.join(" ")}")
+  end
+
+  private def test_files_for(run:)
+    get("/repos/github/github/check-runs/#{run[:id]}/annotations")
+      .select { |x| x["path"].end_with?("_test.rb") }
+  end
+
+  private def remote_sha(branch:)
+    `git rev-parse origin/#{branch}`.strip
+  end
+
+  private def local_sha(branch:)
+    `git rev-parse #{branch}`.strip
+  end
+
+  private def report_script_usage
+    `bin/safe-ruby /workspaces/github/script/dx/report-usage ci-summary execute`
+  end
+
+  private def get(path)
+    resp = JSON.parse(`gh api "#{path}"`)
+    return resp if resp.is_a?(Array)
+
+    raise GETRequestError, "#{resp["message"]}: unable to GET #{path}" if resp["message"]
+
+    resp
+  end
+end
+
+# Run as a single process if this script is run directly
+if $0 == __FILE__
+  options = {
+    current_branch: `git rev-parse --abbrev-ref HEAD`.strip,
+    list_only: false,
+    files_only: false,
+    stdout: $stdout,
+    stderr: $stderr
+  }
+
+  parser = OptionParser.new do |opts|
+    opts.banner = <<~RUBY
+Usage: #{$0} [options].
+  This script can be used to summarize failing tests in CI or locally run failed tests for a given git push.
+  This will save round trips to the ci server and remove the need to copy and
+  paste file paths into bin/rails test.
+
+  If running tests with the --run-tets flag, this script will respect your local test environment flags, such as
+  TEST_ALL_FEATURES, RUBY_NEXT, etc., and only run failed tests that match your
+  local environment setup. If you need to run a different mode, set the
+  appropriate environment variable.
+
+    RUBY
+
+    opts.on("--sha=SHA", "Specific commit to check. Default is most recent commit on current branch") do |v|
+      options[:sha] = v
+    end
+
+    opts.on("--branch=BRANCH", "Specific Branch to check. Default is `origin/HEAD`") do |v|
+      options[:sha] = FailedTestRunner.sha(branch: v)
+      options[:branch] = v || options[:current_branch]
+    end
+
+    opts.on("--list-only", "Display failed tests but do not provide summary") do |v|
+      options[:list_only] = v
+    end
+
+    opts.on("--files-only", "Display a unique list of all test files with failures") do |v|
+      options[:files_only] = v
+    end
+
+    opts.on("--run-tests", "Executes tests which are failing in the current test mode and environment variables") do |v|
+      options[:run_tests] = v
+    end
+
+    opts.on("-o", "--output=FILE", "File to write all output to. Default is STDOUT") do |v|
+      options[:stdout] = File.open(v, "w")
+    end
+
+    opts.on("-v", "--verbose", TrueClass, "Print logs of what is happening") do |v|
+      options[:verbose] = v.nil? ? true : v
+    end
+  end.parse!
+
+  parser.parse!
+  puts "#{DEBUG_PREFIX} Options: #{options}" if options[:verbose]
+  FailedTestRunner.new(options).run
+end

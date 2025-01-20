@@ -1,0 +1,164 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% page_info title: "Connect your GitHub Enterprise environment" %>
+<meta http-equiv="refresh" content="300;<%= enterprise_installation_host_url %>" >
+
+<div class="container-lg px-3 py-6">
+  <div class="col-9 mx-auto">
+    <%= render(Primer::Beta::Breadcrumbs.new) do |component| %>
+      <% component.with_item(href: enterprise_installation_host_url).with_content("GitHub Connect") %>
+      <% component.with_item(href: request.path).with_content("Select an enterprise or organization") %>
+    <% end %>
+
+    <%= render Primer::Beta::Subhead.new(mt: 3) do |component| %>
+      <% component.with_heading(tag: :h2) do %>
+        Select an enterprise<% unless GitHub.single_or_multi_tenant_enterprise? %> or an organization<% end %>
+      <% end %>
+    <% end %>
+
+    <%= render Primer::Box.new(container: :lg, clearfix: true ) do %>
+      <%= render Primer::Beta::Text.new(tag: :p) do %>
+        To get started, select your GitHub Enterprise cloud account you want to connect to your GitHub Enterprise Server instance.
+        This account will be used to make requests to the GitHub cloud on behalf of your instance.
+      <% end %>
+      <%= render Primer::Beta::Text.new(tag: :p) do %>
+        Once you have completed this step, you can enable GitHub Connect features on the next screen.
+        All GitHub Connect features are disabled by default and can only be enabled by you.
+      <%= render Primer::Beta::Link.new(
+        href: "#{GitHub.enterprise_admin_help_url}/configuration/managing-connections-between-your-enterprise-accounts/connecting-your-enterprise-account-to-github-enterprise-cloud"
+      ) do %>
+        Learn more about connecting to your GitHub Enterprise cloud account
+      <% end %>
+      <% end %>
+    <% end %>
+
+    <%= render Primer::Beta::Subhead.new(mt: 3) do |component| %>
+      <% component.with_heading(tag: :h3) do %>Enterprises<% end %>
+    <% end %>
+
+    <% if has_eligible_businesses_for_gh_connect?(businesses) %>
+      <div class="Box">
+        <% businesses_eligible_for_gh_connect(businesses).each do |business| %>
+          <div class="Box-row d-flex flex-items-center">
+            <div class="col-8">
+              <%= avatar_for business, 20, class: "v-align-middle avatar" %>
+              <strong class="ml-1"><%= link_to business.name, enterprise_path(business) %></strong>
+
+              <% instance = business.enterprise_installations.find_by(host_name: installations_data['host_name']) %>
+              <% if instance.present? %>
+                <p class="connection-conflict">
+                  <%= primer_octicon(:alert, mr: 1, mt: 2) %>
+                  <% if instance.connected? %>
+                    A connection for
+                    <%= link_to installations_data['host_name'], enterprise_enterprise_installations_path(business), class: "Link--inTextBlock" %>
+                    already exists. <br>
+                    Please disconnect the existing instance and try again. If the instance no longer exists,
+                    you can remove it from <%= link_to "known installations", enterprise_enterprise_installations_path(business), class: "Link--inTextBlock" %>.
+                  <% else %>
+                    License information for a different instance of
+                    <%= link_to installations_data['host_name'], enterprise_licensing_path(business), class: "Link--inTextBlock" %>
+                    already exists. <br>
+                    Please remove the
+                    <%= link_to "existing license information", enterprise_licensing_path(business), class: "Link--inTextBlock" %>
+                    and try again.
+                  <% end %>
+                </p>
+              <% end %>
+            </div>
+            <div class="col-4 text-right">
+              <%= button_to "Connect", enterprise_enterprise_installations_path(business, token: params[:token], state: params[:state]),
+                  form_class: "inline-form", class: "btn btn-sm ml-2", method: :post, disabled: instance.present? %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          You are not an owner of any enterprise accounts that are eligible to use GitHub Connect.
+        <% end %>
+      <% end %>
+    <% end %>
+
+  <% unless GitHub.single_or_multi_tenant_enterprise? %>
+    <%= render Primer::Beta::Subhead.new(mt: 3) do |component| %>
+      <% component.with_heading(tag: :h3) do %>Organizations (deprecated)<% end %>
+    <% end %>
+
+    <%= render Primer::Beta::Flash.new(scheme: :warning, mb: 3) do %>
+      The option to connect your Enterprise Server instance to an Organization is being deprecated and will soon no longer work.
+      Please connect your Enterprise Server instance to an Enterprise instead.
+      If you do not see an Enterprise option above,
+      <%= render Primer::Beta::Link.new(
+        href: "#{ent_contact_url}?ref_page=/pricing&ref_cta=Contact%20Sales&ref_loc=cards"
+      ) do %>contact us<% end %> so that we can get you set up with an Enterprise account.
+    <% end %>
+
+    <% if owned_organizations.any? %>
+      <div class="Box">
+        <% owned_organizations.each do |org| %>
+          <div class="Box-row d-flex flex-items-center">
+            <div class="col-8">
+              <%= avatar_for org, 20, class: "v-align-middle" %>
+              <strong class="ml-1"><%= link_to org.name, user_path(org) %></strong>
+
+              <% instance_exists = org.enterprise_installations.pluck(:host_name).include?(installations_data['host_name']) %>
+              <% if instance_exists %>
+                <p class="connection-conflict">
+                  <%= primer_octicon(:alert, mr: 1, mt: 2) %> A connection for
+                  <%= link_to installations_data['host_name'], organization_enterprise_installations_list_path(org), class: "Link--inTextBlock" %>
+                  already exists. <br>
+                  Please disconnect the existing instance and try again. If the instance no longer exists,
+                  you can remove it from <%= link_to "known installations", organization_enterprise_installations_list_path(org), class: "Link--inTextBlock" %>.
+                </p>
+              <% end %>
+            </div>
+            <div class="col-4 text-right">
+              <% if org.plan.business_plus? %>
+                <%= button_to "Connect", settings_enterprise_installation_create_path(login: org.display_login, token: params[:token], state: params[:state]),
+                form_class: "inline-form", class: "btn btn-sm ml-2", disabled: instance_exists %>
+              <% elsif org.invoiced? %>
+                <%= button_to "Contact us", ent_contact_url, method: :get, class: "btn btn-sm ml-2" %>
+              <% else %>
+                <%= link_to "Upgrade", upgrade_path(plan: GitHub::Plan.business_plus, target: "organization", org: org.display_login), class: "btn btn-sm ml-2" %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    <% else %>
+      <% if businesses.any? %>
+        <%= render Primer::Beta::Blankslate.new do |c| %>
+          <% c.with_heading(tag: :h2) do %>
+            Please connect to an enterprise account listed above.
+          <% end %>
+
+          <% c.with_secondary_action(href: "#{GitHub.help_url}/github/setting-up-and-managing-your-enterprise/about-enterprise-accounts") do %>
+            Learn more
+          <% end %>
+        <% end %>
+      <% elsif enterprise_owned_orgs.any? %>
+        <%= render Primer::BlankslateComponent.new(
+          title: "Contact an enterprise account owner",
+        ) do %>
+          <p>
+            You are an owner of the
+            <%= enterprise_owned_orgs.pluck(:display_login).to_sentence %>
+            <%= pluralize_without_number enterprise_owned_orgs.count, "organization" %>,
+            which
+            <%= enterprise_owned_orgs.count == 1 ? "is" : "are" %>
+            owned by an
+            <%= link_to "enterprise account", "#{GitHub.help_url}/github/setting-up-and-managing-your-enterprise/about-enterprise-accounts", class: "Link--inTextBlock" %>.
+            Please contact an enterprise account owner to connect to GitHub.com.
+          </p>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Blankslate.new do |c| %>
+          <% c.with_heading(tag: :h2) do %>
+            You are not an owner of any organizations.
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+  </div>
+</div>

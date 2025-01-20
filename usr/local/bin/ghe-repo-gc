@@ -1,0 +1,97 @@
+#!/bin/bash
+#/ Usage: ghe-repo-gc [-hv] [--prune] <repo>
+#/
+#/ Perform garbage collection for a git repository network and optionally
+#/ erase objects that are no longer referenced from any branch, tag, or ref.
+#/ The mandatory <repo> argument is a "user/repo" style repository path.
+#/
+#/ The git object storage for <repo> and all related forks is repacked to
+#/ optimal form and bitmap indexes are rebuilt. With --prune, objects not
+#/ referenced from a branch, tag, or ref are discarded in the process. This is
+#/ most often used to remove all traces of sensitive information accidentally
+#/ committed to a repository.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/        --prune       Discard objects not referenced from any current branch,
+#/                      tag, or ref. This is a destructive operation.
+#/   -v | --verbose     Write verbose output to stderr.
+#/   <repo>             A "user/repo" style repository path.
+#/
+#/ WARNING: This is a potentially destructive operation. Objects discarded due
+#/ to the use of the --prune option are unrecoverable. Use with caution and
+#/ verify that a current backup exists before use.
+#/
+set -e
+
+# only run on cluster nodes with git-daemon service enabled (or standalone VMs)
+if ! /usr/local/share/enterprise/ghe-service-enabled git-daemon; then
+  echo 1>&2 "error: cannot use this command on a cluster node with no git-server role"
+  exit 1
+fi
+
+usage () {
+    grep "^#/" <"$0" | cut -c4-
+    exit ${1:-2}
+}
+
+[ $# -eq 0 ] && usage 1
+
+repo=
+repack_args=
+verbose_out=/dev/null
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,verbose,prune --options hv -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      verbose_out=/dev/stderr
+      ;;
+    --prune)
+      repack_args="$repack_args --pristine"
+      ;;
+    --)
+      repo=$2
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$repo" ]; then
+    echo 1>&2 "error: no repository specified."
+    exit 1
+fi
+
+# run git-nw-gc or git-nw-repack based on presence of network.git.
+# git-nw-gc doesn't support being run in a single repository network.
+gccmd="
+    if git nw-linked -q; then
+       git nw-gc --log $repack_args
+    else
+       git nw-repack --log $repack_args
+    fi
+"
+
+# write output to temp file for display when command fails in non-verbose mode
+logfile="/tmp/ghe-repo-gc.$$"
+trap "rm -f $logfile" EXIT
+
+ghe-repo "$repo" -c "$gccmd" 2> >(tee "$logfile" 1>$verbose_out) || {
+    res=$?
+    if [ $verbose_out = /dev/null ]; then
+        cat "$logfile" 1>&2
+    fi
+    exit $res
+}

@@ -1,0 +1,162 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% page_info title: "#{beta.feature_name} beta signup", selected_link: :betas %>
+
+<%= render layout: "stafftools/stafftools" do %>
+
+  <%= render(Primer::Beta::Breadcrumbs.new) do |component| %>
+    <% component.with_item(href: stafftools_betas_path) do %>Technology Previews<% end %>
+    <% component.with_item(href: stafftools_beta_signup_path) do %><%= beta.feature_name %><% end %>
+  <% end %>
+
+  <%= render(Primer::Beta::Subhead.new(mt: 3)) do |component| %>
+    <% component.with_heading(tag: :h2) do %><%= beta.feature_name %> Waitlist<% end %>
+    <% component.with_description do %>
+      <%= render(Primer::Beta::Link.new(href: devtools_survey_path(beta.survey.slug))) do %>
+        <%= primer_octicon(:question) %>
+        View survey results
+      <% end %>
+      <% unless ["copilot_for_enterprise", "copilot_customization"].include?(beta.feature_slug) %>
+        <%= render(Primer::Beta::Link.new(href: stafftools_add_beta_signup_path, ml: 2)) do %>
+          <%= primer_octicon(:"person-add") %>
+          Bulk onboard members by login
+        <% end%>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if beta.respond_to?(:bulk_onboard_batch_size) %>
+    <%= render(Primer::Box.new(display: :flex, mb: 1, classes: "flex-column")) do |component| %>
+      <span class="color-fg-muted mb-2">
+        <%
+          enabled_percentage = total_count.zero? ? 0 : enabled_count/total_count.to_f * 100
+          percentage = number_to_percentage(enabled_percentage, precision: 1, format: "%n")
+        %>
+        <%= enabled_count %> out of <%= total_count %> enabled
+        (<%= percentage %>%)
+        <%= render(Primer::Beta::ProgressBar.new) do |component| %>
+          <% component.with_item(bg: :accent_emphasis, percentage: percentage) %>
+        <% end %>
+      </span>
+
+      <span class="width-full mt-auto mb-auto">
+        <% if beta.respond_to?(:survey_choices_scoped_to) %>
+          <% beta.survey_choices_scoped_to.each do |choice_short_text| %>
+            <%= render(Primer::Box.new(display: :flex, mb: 1, classes: "flex-column")) do |component| %>
+              <%= form_tag stafftools_onboard_beta_batch_path(choice: choice_short_text), method: :post, data: { turbo: true, pjax: true } do %>
+                <%= render(Primer::Beta::Button.new(type: :submit)) do %>
+                  <%= primer_octicon(:people) %>
+                  Onboard next <%= beta.bulk_onboard_batch_size %> <%= choice_short_text %> users
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= form_tag stafftools_onboard_beta_batch_path, method: :post, data: { turbo: true, pjax: true } do %>
+            <%= render(Primer::Beta::Button.new(type: :submit)) do %>
+              <%= primer_octicon(:people) %>
+              Onboard next <%= beta.bulk_onboard_batch_size %> users
+            <% end %>
+          <% end %>
+        <% end %>
+      </span>
+      <small class="mt-2">Note: bulk onboarding happens in a background job and may take some time to complete. Refresh this page to see updated counts.</small>
+    <% end%>
+
+    <hr>
+  <% end %>
+
+  <%= render(Primer::Box.new(display: :flex, mb: 1)) do |component| %>
+    <%= form_tag stafftools_beta_signup_path, method: :get, class: "d-flex mr-1" do %>
+      <div class="subnav-search flex-auto d-flex mx-0">
+        <input aria-label="Search waitlist members&hellip;"
+              placeholder="Search waitlist members&hellip;"
+              autocapitalize="off"
+              autocomplete="off"
+              class="form-control input-block flex-auto input-lg subnav-search-input"
+              spellcheck="false"
+              type="text"
+              name="query"
+              value="<%= params[:query] %>">
+        <%= render(Primer::Beta::Octicon.new(:search, classes: "subnav-search-icon")) %>
+        <% if params[:query].present? %>
+            <a href="<%= stafftools_beta_signup_path %>"
+              class="issues-reset-query position-absolute top-0 right-0 mt-2 mr-1 rounded-2 text-center btn-link Link--muted"
+              aria-label="Clear filter"
+            >
+            <%= render(Primer::Beta::Octicon.new(:x, classes: "issues-reset-query-icon")) %>
+          </a>
+        <% end %>
+      </div>
+      <%= render(Primer::ButtonComponent.new(type: :submit)) { "Search" } %>
+    <% end %>
+  <% end %>
+  <small>Note: search only supports exact match logins.</small>
+
+  <table class="Box width-full mt-2">
+    <% extra_columns = beta.try(:extra_columns, memberships) || [] %>
+    <tr>
+      <th class="Box-header">Requested By</th>
+      <th class="Box-header">Member</th>
+      <th class="Box-header">Waitlisted</th>
+      <th class="Box-header">Joined GitHub</th>
+
+      <% extra_columns.each do |column| %>
+        <th class="Box-header"><%= column[:header] %></th>
+      <% end %>
+
+      <th class="Box-header">Enabled?</th>
+    </tr>
+    <% memberships.each do |membership| %>
+      <%
+        user = membership.actor || User.ghost
+
+        # Note that an early access member could be a User, Organization, or
+        # Business.
+        member = membership.member
+        next if member.nil?
+      %>
+      <tr class="Box-row" <%= test_selector("waitlist-member") %>>
+        <td class="p-3">
+          <%= avatar_for(user, 24, class: "avatar avatar-small mr-2") %>
+          <%= link_to user.login, user_path(user) %>
+        </td>
+        <td class="p-3">
+          <%= render(GitHub::AvatarComponent.new(actor: member, size: 24)) %>
+          <% if member.is_a? Business %>
+            <%= link_to member.slug, enterprise_path(member) %>
+          <% else %>
+            <%= link_to member.login, user_path(member) %>
+          <% end %>
+        </td>
+        <td class="p-3"><%= membership.created_at.to_date.iso8601 %></td>
+        <td class="p-3"><%= member.created_at.to_date.iso8601 %></td>
+
+        <% extra_columns.each do |column| %>
+          <td class="p-3"><%= column[:get_content].call(member) %></td>
+        <% end %>
+
+        <td class="p-3 text-center">
+          <% if membership.can_onboard %>
+            <%= form_tag stafftools_toggle_beta_path(membership_id: membership.id), class: "js-setting-toggle", "data-autosubmit" => true do %>
+              <input type="checkbox" name="user_beta_status" aria-label="Toggle <%= member %> beta status" <%= "checked" if membership.feature_enabled? %>>
+
+              <span class="status-indicator js-status-indicator">
+                <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+              </span>
+            <% end %>
+          <% end %>
+        </td>
+      </tr>
+    <% end %>
+  </table>
+
+  <div class="paginate-container">
+    <%= will_paginate memberships %>
+  </div>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle :settings %>
+<% end %>

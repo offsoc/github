@@ -1,0 +1,61 @@
+# frozen_string_literal: true
+
+require "#{Rails.root}/config/environment"
+require "optparse"
+
+module GitHub
+  module Transitions
+    class Create<%= class_name %>Feature < Transition
+      def perform<% if options[:flipper_feature_name] %>
+        flipper_feature = FlipperFeature.find_by(name: "<%= options[:flipper_feature_name] %>")
+
+        if flipper_feature.nil?
+          log("Flipper feature does not exist.") if verbose
+
+          if dry_run
+            log("In write mode, the transition will create the flipper feature") if verbose
+          else
+            log("Creating flipper feature...") if verbose
+            flipper_feature = FlipperFeature.create(name: "<%= options[:flipper_feature_name] %>")
+          end
+        end
+<% else %>
+        flipper_feature = nil
+<% end %>
+        feature = Feature.new(
+          public_name: "<%= class_name.titleize %>",
+          <%= options[:description] ? %Q[description: "#{options[:description]}"] : %q[# description: "optional short description of the feature."] %>,
+          flipper_feature_id: flipper_feature&.id,
+          <%= options[:feedback_link] ? %Q[feedback_link: "#{options[:feedback_link]}"] : %q[# feedback_link: "https://example.com"] %>,
+          enrolled_by_default: <%= options[:enrolled_by_default] %>,
+        )
+
+        unless dry_run
+          feature.save
+          log("Feature could not be created: #{feature.errors.messages}") if verbose && feature.errors.any?
+        end
+      end
+    end
+  end
+end
+
+# Run as a single process if this script is run directly
+if $0 == __FILE__
+  options = {}
+  OptionParser.new do |opts|
+    opts.banner = "Usage: feature_transition.rb [options]"
+
+    opts.on("-w", "--write", "Enable writes for the transition - this defaults to false (i.e. a dry_run mode) for safety.") do
+      options[:write] = true
+    end
+
+    opts.on("-v", "--verbose", "Log verbose output") do
+      options[:verbose] = true
+    end
+  end.parse!
+
+  options = options.merge(dry_run: !options[:write])
+
+  transition = GitHub::Transitions::Create<%= class_name %>Feature.new(options)
+  transition.run
+end

@@ -1,0 +1,282 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% view = Stafftools::LargeFilesView.new(:repository => current_repository, :start => params[:start], :prev => params[:prev], :oid => params[:oid]) %>
+
+<div class="boxed-group large-file-storage">
+  <% unless view.can_enable_lfs? %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+      <%= view.git_lfs_button_banner_text %>
+    <% end %>
+  <% end %>
+
+  <h3>Git LFS</h3>
+  <div class="boxed-group-inner clearfix">
+    <% form_method = current_repository.git_lfs_enabled? ? :delete : :post %>
+    <%= form_tag gh_preview_stafftools_repository_large_files_path(current_repository), :method => form_method do %>
+      <div class="billing-section">
+        <div class="section-label">
+          Support
+        </div>
+
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          size: :small,
+          classes: "action-button",
+          disabled: !view.can_enable_lfs?
+        ) do %>
+          <%= view.git_lfs_button_text %>
+        <% end %>
+
+        <div class="section-content">
+          Toggle Git LFS support for this repository.
+        </div>
+      </div>
+    <% end %>
+
+    <% owner = current_repository.network_owner %>
+    <%= form_tag rebuild_status_stafftools_user_path(owner) do %>
+      <div class="billing-section">
+        <div class="section-label">
+          Account Usage
+        </div>
+        <%= render Primer::Beta::Button.new(type: :submit, size: :small, classes: "action-button") do %>
+          Rebuild
+        <% end %>
+        <div class="section-content">
+          <%= render :partial => "billing_settings/bandwidth_storage_bars", :locals => { :target => owner } %>
+        </div>
+      </div>
+    <% end unless GitHub.enterprise? %>
+
+    <div class="billing-section">
+      <div class="section-label">
+        LFS Objects in Archives
+      </div>
+
+      <div class="section-content">
+        <p>
+          <% if current_repository.lfs_in_archives_enabled? %>
+            Enabled
+          <% else %>
+            Disabled
+          <% end %>
+        </p>
+      </div>
+    </div>
+
+    <%= form_tag gh_change_timeout_stafftools_repository_large_files_path(current_repository), "data-autosubmit": true do %>
+      <div class="billing-section">
+        <div class="section-label">
+          Timeout
+        </div>
+
+        <details class="select-menu float-right select-menu-modal-right details-reset details-overlay">
+          <%= render Primer::Beta::Button.new(type: :button, tag: :summary, size: :small, classes: "select-menu-button") do %>
+            <%= primer_octicon("hourglass") %>
+            <span data-menu-button><%= view.lfs_timeout_text(current_repository.lfs_integrity_check_timeout) %></span>
+          <% end %>
+          <details-menu class="position-absolute right-0" style="z-index:99"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="select-menu-modal">
+              <div class="select-menu-header">
+                <span class="select-menu-title"><%= Timeout %></span>
+              </div>
+              <div class="select-menu-list">
+                <% view.lfs_timeout_choices.each do |label, value| %>
+                  <% selected = current_repository.lfs_integrity_check_timeout == value %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    block: true,
+                    classes: "select-menu-item",
+                    disabled: !view.can_enable_lfs?,
+                    role: "menuitemradio",
+                    aria: { checked: selected },
+                    name: "timeout",
+                    value: value
+                  ) do %>
+                    <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                    <div class="select-menu-item-text" data-menu-button-text><%= label %></div>
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+          </details-menu>
+        </details>
+
+        <div class="section-content">
+            LFS integrity check timeout
+        </div>
+
+      </div>
+    <% end %>
+
+    <%= form_tag url_for(:prev => nil, :start => nil, :oid => nil), :method => :get do %>
+      <div class="billing-section">
+        <div class="section-label">
+          <label for="oid">Search</label>
+        </div>
+        <%= render Primer::Beta::Button.new(type: :submit, size: :small, classes: "action-button") do %>Search<% end %>
+        <div class="section-content">
+          <%= text_field_tag :oid, view.oid, :class => "short",
+                             :placeholder => "Object ID" %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="boxed-group dangerzone">
+    <h3>Danger Zone</h3>
+    <div class="boxed-group-inner">
+      <% if view.disable_purge_lfs_objects_button? %>
+        <span class="btn btn-danger boxed-action disabled">
+           Purge LFS objects
+        </span>
+      <% else %>
+        <%= render(Primer::Experimental::Dialog.new(
+          dialog_id: "purge-lfs-objects-dialog",
+          header_variant: :large,
+          width: :large,
+          title: "Purge LFS objects",
+          form_url: gh_purge_objects_stafftools_repository_large_files_path(current_repository),
+          form_method: :post
+        )) do |c| %>
+          <% c.with_show_button(
+            scheme: :danger,
+            classes: "boxed-action"
+          ) do |s| %>
+            Purge LFS objects
+          <% end %>
+          <% c.with_body do %>
+            <p>
+              Are you sure you want to remove all LFS objects from this repository’s
+              network?
+              <% forks_count = current_repository.forks_count %>
+              <% if forks_count > 0 %>
+                This will also affect <%= "#{forks_count} fork".pluralize(forks_count) %>.
+              <% end %>
+            </p>
+          <% end %>
+          <% c.with_button(
+            data: { "close-dialog-id": "purge-lfs-objects-dialog" }
+          ) { "Cancel" } %>
+          <% c.with_button(
+            type: :submit,
+            scheme: :danger,
+            data: { "disable-with": "" }
+          ) { "Delete LFS objects" } %>
+        <% end %>
+      <% end %>
+      <h4>Purge LFS objects</h4>
+      <p>
+      Purge all LFS objects reachable from this repository’s network.
+      <% if view.disable_purge_lfs_objects_button? %>
+        <br>Disabled because all LFS objects are either purged or unpurgable.
+      <% end %>
+      </p>
+    </div>
+
+    <div class="boxed-group-inner">
+      <% if view.disable_restore_lfs_objects_button? %>
+        <span class="btn btn-danger boxed-action disabled">
+           Restore LFS objects
+        </span>
+      <% else %>
+        <%= render(Primer::Experimental::Dialog.new(
+          dialog_id: "restore-lfs-objects-dialog",
+          header_variant: :large,
+          width: :large,
+          title: "Restore LFS objects",
+          form_url: gh_restore_objects_stafftools_repository_large_files_path(current_repository),
+          form_method: :post
+        )) do |c| %>
+          <% c.with_show_button(
+            scheme: :danger,
+            classes: "boxed-action"
+          ) do |s| %>
+            Restore LFS objects
+          <% end %>
+          <% c.with_body do %>
+            <p>
+              Are you sure you want to restore all LFS objects from this repository’s
+              network?
+              <% forks_count = current_repository.forks_count %>
+              <% if forks_count > 0 %>
+                This will also affect <%= "#{forks_count} fork".pluralize(forks_count) %>.
+              <% end %>
+            </p>
+          <% end %>
+          <% c.with_button(
+            data: { "close-dialog-id": "restore-lfs-objects-dialog" }
+          ) { "Cancel" } %>
+          <% c.with_button(
+            type: :submit,
+            scheme: :danger,
+            data: { "disable-with": "" }
+          ) { "Restore LFS objects" } %>
+        <% end %>
+      <% end %>
+      <h4>Restore LFS objects</h4>
+      <p>
+      Restore all LFS objects reachable from this repository’s network.
+      <% if view.disable_restore_lfs_objects_button? %>
+        <br>Disabled because all LFS objects are either restored or unrestorable.
+      <% end %>
+      </p>
+    </div>
+  </div>
+
+  <div class="boxed-group">
+    <h3>Objects</h3>
+    <div class="boxed-group-inner clearfix">
+      <% if view.large_files.any? %>
+        <ul class="boxed-group-list">
+          <% view.large_files.each do |file| %>
+            <li class="stafftools-auditlog">
+              <%= primer_octicon(:"file-binary", :height => 32) %>
+              <div class="js-details-container Details audit-log-entry">
+                <span class="floater"><%= number_to_human_size file.size %></span>
+                <div><strong><%= link_to file.oid, view.storage_blob_url_for(file) %></strong></div>
+                <%= form_tag view.destroy_url_for(file) do %>
+                  <%= render Primer::Beta::Button.new(type: :submit, classes: "boxed-action") do %>
+                    <%= view.destroy_button_text_for(file) %>
+                  <% end %>
+                <% end %>
+                <p>
+                <% if file.pusher -%>
+                  Pushed by
+                  <%= link_to file.pusher, stafftools_user_path(file.pusher), class: "Link--inTextBlock" %>
+                <% else -%>
+                  Copied from fork
+                <% end -%>
+                </p>
+                <p>State: <%= view.large_file_state(file) %></p>
+              </div>
+            </li>
+          <% end %>
+        </ul>
+
+      <% elsif view.oid? %>
+        <p>No large files for OID: <%= view.oid %>.</p>
+      <% else %>
+        <p>No large files yet.</p>
+      <% end %>
+
+      <% if view.paging? %>
+        <p>
+          <% if view.prev_page? %>
+            <%= link_to "Back", url_for(:start => view.prev) %>
+          <% else %>
+            Back
+          <% end %>
+          |
+          <% if view.next_page? %>
+            <%= link_to "Next", url_for(:prev => view.start, :start => view.large_files.last.oid) %>
+          <% else %>
+            Next
+          <% end %>
+        </p>
+      <% elsif view.start_over? %>
+        <p><%= link_to "Back", url_for(:start => nil, :oid => nil) %></p>
+      <% end %>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,47 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-kafka-lite [-hjnv]
+#/
+#/ Check the status of the kafka-lite service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' <"$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+start_output "kafka-lite"
+
+nodes="$(ghe-cluster-nodes)"
+
+for hostname in $nodes; do
+  # Admin health endpoint check
+  if ssh_cmd "$hostname" curl -s --fail --connect-timeout "$CONNECT_TIMEOUT" "localhost:9094/admin/health" | jq ".status" | grep -q "UP"; then
+    check_result "$hostname" "kafka-lite-admin-healthcheck" "ok"
+  else
+    # admin API can be offline and not affect clients
+    check_result "$hostname" "kafka-lite-admin-healthcheck" "warn"
+  fi
+
+  # Kafka Protocol level validation
+  if ssh_cmd "$hostname" kafkacat -b localhost:9093 -L -J 2>/dev/null | jq ".brokers[].name" | grep -q "localhost:9093"; then
+    check_result "$hostname" "kafka-lite-broker-is-reachable" "ok"
+  else
+    check_result "$hostname" "kafka-lite-broker-is-reachable" "error" "broker is unreachable"
+  fi
+done
+
+end_output "kafka-lite"

@@ -1,0 +1,165 @@
+#!/bin/bash
+#/ Usage: ghe-maintenance [-hqseu]
+#/
+#/ Set or unset the maintenance mode on GitHub Enterprise Server
+#/
+#/ OPTIONS:
+#/   -h | --help                Show this message
+#/   -q | --query               Query current mode
+#/   -s | --set                 Set the maintenance mode
+#/   -e | --enable-ip-exception Unset the maintenance mode but make GHES only accessible by IP exception list provided as an argument
+#/        <list of IPv4/IPv6 addresses or CIDR blocks>
+#/   -u | --unset               Unset the maintenance mode
+#/   -m | --message             Set a custom message that will be shown whenever maintenance mode is set.
+#/
+set -e
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+if [ $# -eq 0 ]; then
+  usage
+  exit 2
+fi
+
+check_for_config_run() {
+  # Abort if a config run is currently on-going
+  if [ "$config_run_in_progress" = "true" ]; then
+    echo "A configuration run is currently in progress. Unable to unset maintenance mode. Please try again after the configuration run is completed. You can watch the progress by running \"tail -f /data/user/common/ghe-config.log\""
+    exit 1
+  fi
+}
+
+unset_maintenance_mode() {
+  /usr/local/share/enterprise/ghe-maintenance-banner -u >/dev/null 2>&1 || true
+  rm -f $gh/public/system/maintenance.html $gh/public/system/maintenance-git.html
+  sudo -u enterprise-manage /usr/local/share/enterprise/ghe-cancel-scheduled-maintenance
+}
+
+check_has_active_replica() {
+  if [ -z "$CLUSTER_CLI" ] && [ -f /etc/github/repl-state ] && grep primary -q /etc/github/repl-state ; then
+    grep -q "\"is_cluster_ha_replica_active\":\"true\"" /etc/github/status/nodes.json && return 0
+  fi
+  return 1
+}
+
+check_in_cluster_configuration() {
+  if [ -n "$CLUSTER_CLI" ] || [ -z "$(ghe-config cluster.primary-datacenter)" ] || ghe-config --true cluster.ha; then
+    return 1
+  fi
+  return 0
+}
+
+#Abort if it looks like we are restoring with an old version of backup utils
+if [ -n "$SSH_CLIENT" ] && [ "$(nice)" = "19" ] && [ "$(ionice)" = "idle" ]; then
+  GHEBUVER=${GHEBUVER:-1}
+  if [ "$GHEBUVER" -lt 2 ]; then
+    echo "You must update to the latest version of GitHub Enterprise Server Backup Utils to restore. Exiting."
+    exit 101
+  fi
+fi
+
+current_user=$(whoami)
+[ "$current_user" = "git" ] || {
+  # Store if config run is running in a variable for later use
+  if [ "$current_user" = "admin" ]; then
+    config_run_in_progress=$(/usr/local/share/enterprise/ghe-config-in-progress) || true
+    config_run_in_progress_env="config_run_in_progress=${config_run_in_progress}"
+  fi
+
+  # switch to the git user
+  # disable shellcheck here since config_run_in_progress_env is optional
+  #   and quoting it would confuse sudo when it's absent
+  # shellcheck disable=SC2086
+  if [ -n "$CLUSTER_CLI" ]; then
+    exec sudo -u git CLUSTER_CLI=1 ${config_run_in_progress_env} "$0" "$@"
+  else
+    exec sudo -u git ${config_run_in_progress_env} "$0" "$@"
+  fi
+  echo Run this script as the git user. >&2
+  exit 1
+}
+
+if [ "$GITHUB_CURRENT_PATH" == "" ]; then
+  GITHUB_CURRENT_PATH="/data/github/current"
+fi
+
+gh=$GITHUB_CURRENT_PATH
+
+ARGS=$(getopt --name "$0" --long help,query,set,enable-ip-exception,unset,message --options hqseum -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -s|--set)
+      shift 1
+      if [ $# -gt 1 ]; then
+        sudo -u root /usr/local/share/enterprise/ghe-render-maintenance-page -s "$2" >/dev/null 2>&1 || true
+      else
+        sudo -u root /usr/local/share/enterprise/ghe-render-maintenance-page -s "" >/dev/null 2>&1 || true
+      fi 
+      [ -e $gh/public/system/maintenance.html -a -e $gh/public/system/maintenance-git.html ] || {
+        ln -s $gh/public/maintenance.html $gh/public/system/maintenance.html
+        ln -s $gh/public/maintenance.html $gh/public/system/maintenance-git.html
+      }
+      sudo -u root /usr/local/share/enterprise/ghe-maintenance-ip-exception-list --unset
+      if check_has_active_replica ; then
+        echo "Warning: maintenance mode set on primary, please make sure to set it on any active replica if needed"
+      fi
+      if check_in_cluster_configuration; then
+        echo "Warning: ghe-maintenance only puts the current GHES node into maintenance mode (please see the ghe-cluster-maintenance command)"
+      fi
+      ;;
+    -e|--enable-ip-exception)
+      check_for_config_run
+      sudo -u root /usr/local/share/enterprise/ghe-maintenance-ip-exception-list --set ${@:2}
+      unset_maintenance_mode
+      if check_has_active_replica ; then
+        echo "Warning: limited IP exception list maintenance mode set on primary, please make sure to set it on any active replica if needed"
+      fi
+      ;;
+    -u|--unset)
+      check_for_config_run
+      sudo -u root /usr/local/share/enterprise/ghe-maintenance-ip-exception-list --unset
+      sudo -u root /usr/local/share/enterprise/ghe-render-maintenance-page -s "" >/dev/null 2>&1 || true
+      unset_maintenance_mode
+      if check_has_active_replica ; then
+        echo "Warning: maintenance mode unset on primary, please make sure to unset it on any active replica if needed"
+      fi
+      ;;
+    -q|--query)
+      ACL_LIST="/etc/haproxy/maintenance-ip-exception-list.acl"
+
+      if [ -e $gh/public/system/maintenance.html ]; then
+        echo maintenance mode set
+
+      # if the default IP exception list was modified, we assume it has intentionally been set to the listed IP addresses
+      elif /usr/local/share/enterprise/ghe-maintenance-ip-exception-list --is-non-default; then
+        echo "Limited IP exception list maintenance mode is set, allowing the following IP addresses access (includes default IP addresses required by Enterprise Server):"
+        cat $ACL_LIST
+        echo "Use the '-u|--unset' option to allow unrestricted access"
+      else 
+        echo maintenance mode not set
+        exit 1
+      fi
+      ;;
+    -m|--message)
+      shift 2
+      sudo -u root /usr/local/share/enterprise/ghe-render-maintenance-page -s "$1" >/dev/null 2>&1 || true
+      echo "Maintenance mode message set to: $1"
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done

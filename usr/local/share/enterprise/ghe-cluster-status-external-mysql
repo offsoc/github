@@ -1,0 +1,73 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-external-mysql [-hjnv]
+#/
+#/ Check the status of the MySQL service that is managed externally (part of "Bring Your Own DB" feature)
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+source /usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/lib/ghe-commons
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+if ! is_service_external "mysql" ; then
+  echo "External mysql is not enabled on this appliance."
+  exit 2
+fi
+
+start_output "external-mysql"
+
+external_primary_host=$(ghe-config mysql.external.address)
+
+if mysql_query "SELECT 1" &>/dev/null; then
+  check_result "$external_primary_host" "external-mysql" "ok"
+else
+  check_result "$external_primary_host" "external-mysql" "error" "external mysql service is not running correctly"
+fi
+
+declare -a datacenters_with_active_replica
+nodes_with_active_replica=$(ghe-config --get-regexp cluster\..*.active-replica-server | cut -d. -f1,2)
+for node in $nodes_with_active_replica; do
+  datacenters_with_active_replica+=( "$(ghe-config "$node.datacenter")" )
+done
+
+external_replica_names=$(ghe-config --get-regexp cluster-external-mysql\..*\.address | cut -d. -f2)
+for name in $external_replica_names; do
+  datacenter=$(ghe-config cluster-external-mysql."$name".datacenter)
+  printf '%s\n' "${datacenters_with_active_replica[@]}" | grep -qx "$datacenter" || continue
+  port=$(ghe-config cluster-external-mysql."$name".port)
+  address=$(ghe-config cluster-external-mysql."$name".address)
+  repl_status=$(/usr/local/share/enterprise/ghe-external-mysql "$address" "$port" "SHOW SLAVE STATUS \\G" 2>/dev/null || true)
+  if [ -n "$repl_status" ]; then
+      io_running=$(echo "$repl_status" | grep "Slave_IO_Running:" | awk '{ print $2 }')
+      sql_running=$(echo "$repl_status" | grep "Slave_SQL_Running:" | awk '{ print $2 }')
+      delay=$(echo "$repl_status" | grep "Seconds_Behind_Master:" | awk '{ print $2 }')
+
+      if [ "$io_running" = "No" ] || [ "$sql_running" = "No" ] || [ "$delay" = "NULL" ]; then
+        check_result "$name" "mysql-replication" "error" "MySQL replication link is down"
+        continue
+      fi
+
+      replica_info="MySQL replication delay is ${delay}s"
+      if [ "$delay" -gt 120 ]; then
+        check_result "$name" "mysql-replication" "error" "$replica_info"
+      elif [ "$delay" -gt 0 ]; then
+        check_result "$name" "mysql-replication" "warn" "$replica_info"
+      else
+        check_result "$name" "mysql-replication" "ok" "MySQL replication is in sync"
+      fi
+  else
+    check_result "cluster" "$name" "warn" "MySQL replication is not setup"
+  fi
+done
+
+end_output "external-mysql"

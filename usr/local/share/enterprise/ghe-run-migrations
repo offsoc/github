@@ -1,0 +1,1120 @@
+#!/bin/bash
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+export TURBOSCAN_MIGRATIONS_STEP="${TURBOSCAN_MIGRATIONS_STEP:-0}"
+
+. /usr/local/share/enterprise/lib/ghe-commons
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+. /usr/local/share/enterprise/ghe-repl-lib
+. /etc/github/enterprise-release
+. /usr/local/share/enterprise/lib/instrumentation/otel-trace
+
+migration_run_id=${MIGRATION_RUN_ID:-$(date +%Y%m%d-%H%M%S)}
+need_schema_update=${NEED_SCHEMA_UPDATE:-"0"}
+migration_log_dir=/var/log/dbmigration/$RELEASE_VERSION/$migration_run_id
+declare -A migration_start
+
+function migration_group_list() {
+  ## emit the list of migration groups to be ran
+
+  # Note: dependency-snapshot-api, and dependabot are run based on additional SQL conditionals. So they are not included in the list.
+  echo "github" >> $migration_log_dir/migrations-list.txt
+  echo "turboscan" >> $migration_log_dir/migrations-list.txt
+
+  if ghe-config --true app.dependency-graph.enabled; then
+    echo "dependency-graph" >> $migration_log_dir/migrations-list.txt
+  fi
+
+  if ghe-config --true app.minio.enabled; then
+    echo "minio" >> $migration_log_dir/migrations-list.txt
+  fi
+
+  echo "launch-deployer" >> $migration_log_dir/migrations-list.txt
+  echo "launch-payloads" >> $migration_log_dir/migrations-list.txt
+  echo "kredz" >> $migration_log_dir/migrations-list.txt
+  echo "kredz-varz" >> $migration_log_dir/migrations-list.txt
+  echo "hookshot_go" >> $migration_log_dir/migrations-list.txt
+
+  if ghe-config --true app.code-scanning.enabled; then
+    echo "turboscan-esindex" >> $migration_log_dir/migrations-list.txt
+  fi
+
+  if actions-ever-enabled &&  ! ghe-config --true app.actions.updates-disabled; then
+    echo "actions" >> $migration_log_dir/migrations-list.txt
+  fi
+}
+
+function migration_logging_start() {
+  mkdir -p $migration_log_dir
+
+  # Mark the start of the migration run in the log
+  echo "START migration run $migration_run_id" | ts "%Y/%m/%d %H:%M:%S"
+}
+
+function migration_logging_end() {
+  # Mark the end of the migration run in the log
+  echo "END migration run $migration_run_id" | ts "%Y/%m/%d %H:%M:%S"
+}
+
+function migration_log() {
+  tee -a $migration_log_dir/${1}.log
+}
+
+function migration_begin() {
+  echo "Starting database migrations [name=$1 status=running]" | ts "%Y/%m/%d %H:%M:%S" | migration_log $1
+  migration_start[$1]=$(date +%s.%N)
+
+  local migration_name="$1"
+  local migration_version="${RELEASE_VERSION}"
+  local event_version="v1"
+  local migration_events_file="group-migration-events.json"
+  local start_event=$(date "+%Y-%m-%dT%H:%M:%S.%3N%:z")
+
+  cat <<- EOM | jq -c . >> $migration_log_dir/${migration_events_file}
+{
+  "version": "$migration_version",
+  "name": "$migration_name",
+  "start_time": "$start_event",
+  "event_version": "$event_version",
+  "event_type": "migrate_start"
+}
+EOM
+}
+
+function migration_end() {
+  local name=$1
+  local exitcode=$2
+  local elapsed=$(echo $(date +%s.%N) ${migration_start[$name]} | awk '{printf "%.3f",$1-$2}')
+  local status=success
+
+  local migration_name="$1"
+  local migration_version="${RELEASE_VERSION}"
+  local event_version="v1"
+  local migration_events_file="group-migration-events.json"
+  local end_event=$(date "+%Y-%m-%dT%H:%M:%S.%3N%:z")
+
+  if [ $exitcode != 0 ]; then
+    status=error
+    cat <<- EOM | jq -c . >> $migration_log_dir/${migration_events_file}
+{
+  "version": "$migration_version",
+  "name": "$migration_name",
+  "end_time": "$end_event",
+  "event_version": "$event_version",
+  "event_type": "migrate_error"
+}
+EOM
+  else
+    cat <<- EOM | jq -c . >> $migration_log_dir/${migration_events_file}
+{
+  "version": "$migration_version",
+  "name": "$migration_name",
+  "end_time": "$end_event",
+  "event_version": "$event_version",
+  "event_type": "migrate_end"
+}
+EOM
+
+  fi
+  write_migration_stats $name $exitcode $elapsed
+  echo "Completed database migrations [name=$name status=${status} exitcode=${exitcode} elapsed=${elapsed}s]" | ts "%Y/%m/%d %H:%M:%S" | migration_log $name
+  [ $exitcode == 0 ] || exit $exitcode
+}
+
+function read_migration_log() {
+  [ -f $migration_log_dir/${1}.log ] && cat $migration_log_dir/${1}.log || echo ""
+}
+
+function write_migration_stats() {
+  local name=$1
+  local exitcode=$2
+  local elapsed=$3
+
+  local json_file=$migration_log_dir/migrations.json
+  jq \
+    -nc \
+    --arg migration_run_id "$migration_run_id" \
+    --arg release_version "$RELEASE_VERSION" \
+    --arg name "$name" \
+    --arg exitcode "$exitcode" \
+    --arg duration "$elapsed" \
+    '. | .migration_run_id=$migration_run_id | .release_version=$release_version | .name=$name | .exitcode=($exitcode | tonumber) | .duration=($duration | tonumber)' \
+    >> $json_file
+}
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -Eu root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+set -x
+
+migration_logging_start
+trap "migration_logging_end" EXIT
+
+start_span "Emitting the list of migration groups to be run" "migration_group_list"
+  migration_group_list
+end_span
+
+# Output migration row count to logfile
+start_span "Outputting migration row count" "ghe-mysql-row-count"
+  ghe-mysql-row-count > $migration_log_dir/mysql_row_count.txt
+end_span
+
+function create_default_pre_receive_environment() {
+  # Set up a default pre-receive environment
+  if github-mysql 'SHOW TABLES LIKE "pre_receive_environments"' | grep pre_receive_environments; then
+    github-mysql "SELECT image_url FROM pre_receive_environments WHERE image_url = 'githubenterprise://internal'" | grep -i githubenterprise || {
+      github-mysql "INSERT IGNORE INTO pre_receive_environments (id, name, image_url, checksum, created_at, updated_at) VALUES (1, 'default', 'githubenterprise://internal', '0', NOW(), NOW());"
+    }
+  fi
+}
+
+function run_kredz_migrations() {
+
+  local credz_curr
+  if github-mysql "SHOW TABLES LIKE 'actions_credz_schema_migrations'" | grep "actions_credz_schema_migrations"; then
+    credz_curr=$(github-mysql "SELECT version FROM actions_credz_schema_migrations" | tail -n 1)
+  else
+    credz_curr="0"
+  fi
+
+  start_span "Migrating kredz" "ghe-kredz migrate-credz"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "kredz"
+    ghe-kredz migrate-credz 2>&1 | migration_log "kredz"
+    migration_end "kredz" $?
+  )
+  end_span
+
+  local credz_next
+  credz_next=$(read_migration_log "kredz" | sed -n "s/.*Final migration version: \([0-9]*\)/\1/p")
+
+  if [ "$credz_curr" != "$credz_next" ]; then
+    kredz_need_schema_update=1
+  fi
+
+  echo "run_kredz_migrations: C: $credz_curr==$credz_next - kredz_need_schema_update:$kredz_need_schema_update"
+}
+
+function run_kredz_varz_migrations() {
+
+  local varz_curr
+  if github-mysql "SHOW TABLES LIKE 'actions_varz_schema_migrations'" | grep "actions_varz_schema_migrations"; then
+    varz_curr=$(github-mysql "SELECT version FROM actions_varz_schema_migrations" | tail -n 1)
+  else
+    varz_curr="0"
+  fi
+
+  start_span "Migrating kredz-varz" "ghe-kredz-varz migrate-varz"
+  # even though varz is part of kredz image, migration is kept separate to avoid overlap as much as possible owing to
+  # hard split requirement between variables and secrets.
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "kredz-varz"
+    ghe-kredz-varz migrate-varz 2>&1 | migration_log "kredz-varz"
+    migration_end "kredz-varz" $?
+  )
+  end_span
+
+  local varz_next
+  varz_next=$(read_migration_log "kredz-varz" | sed -n "s/.*Final migration version: \([0-9]*\)/\1/p")
+
+  if [ "$varz_curr" != "$varz_next" ]; then
+    kredz_varz_need_schema_update=1
+  fi
+
+  echo "run_kredz_varz_migrations: C: $varz_curr==$varz_next - kredz_varz_need_schema_update:$kredz_varz_need_schema_update"
+}
+
+function run_launch_migrations() {
+
+  local deployer_curr
+  if github-mysql "SHOW TABLES LIKE 'actions_deployer_schema_migrations'" | grep "actions_deployer_schema_migrations"; then
+    deployer_curr=$(github-mysql "SELECT version FROM actions_deployer_schema_migrations" | tail -n 1)
+  else
+    deployer_curr="0"
+  fi
+
+  local payloads_curr
+  if github-mysql "SHOW TABLES LIKE 'actions_payloads_schema_migrations'" | grep "actions_payloads_schema_migrations"; then
+    payloads_curr=$(github-mysql "SELECT version FROM actions_payloads_schema_migrations" | tail -n 1)
+  else
+    payloads_curr="0"
+  fi
+
+  start_span "Migrating launch-deployer" "ghe-launch migrate-deployer"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "launch-deployer"
+    ghe-launch migrate-deployer 2>&1 | migration_log "launch-deployer"
+    migration_end "launch-deployer" $?
+  )
+  end_span
+
+  local deployer_next
+  deployer_next=$(read_migration_log "launch-deployer" | sed -n "s/.*Final migration version: \([0-9]*\)/\1/p")
+
+  start_span "Migrating launch-payloads" "ghe-launch migrate-payloads"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "launch-payloads"
+    ghe-launch migrate-payloads 2>&1 | migration_log "launch-payloads"
+    migration_end "launch-payloads" $?
+  )
+  end_span
+
+  local payloads_next
+  payloads_next=$(read_migration_log "launch-payloads" | sed -n "s/.*Final migration version: \([0-9]*\)/\1/p")
+
+  if [ "$deployer_curr" != "$deployer_next" ] || [ "$payloads_curr" != "$payloads_next" ]; then
+    launch_need_schema_update=1
+  fi
+  echo "run_launch_migrations: C: $deployer_curr==$deployer_next - C: $payloads_curr==$payloads_next - launch_need_schema_update:$launch_need_schema_update"
+}
+
+function run_dependabot_migrations() {
+  if ghe-config --true app.dependabot.enabled; then
+    # This value is initialized as a placeholder '0' so that dependabot-api can
+    # startup, so _always_ set this value, to ensure it's not stuck at the
+    # placeholder.
+    enterprise_org_id=$(github-mysql 'SELECT id FROM users WHERE login="github-enterprise" LIMIT 1;' | grep -E '[0-9]+')
+    ghe-config 'secrets.dependabot.github-org-id' "$enterprise_org_id"
+
+    if ! github-mysql "SHOW TABLES LIKE 'dependabot_schema_migrations'" | grep "dependabot_schema_migrations"; then
+      ghe-dependabot-env bin/rails --trace db:schema:load
+    else
+      ( # run migration in a subshell
+        set +e -o pipefail
+        migration_begin "dependabot"
+        ghe-dependabot-env bin/rails --trace db:migrate 2>&1 | migration_log "dependabot"
+        migration_end "dependabot" $?
+      )
+    fi
+
+    MINIO_PORT=10005 ghe-service-wait-minio
+    MINIO_PORT=10005 ghe-minio-client mb --ignore-existing minio/dependabot
+    # add policy to expire objects after 24 hours
+    MINIO_PORT=10005 ghe-minio-client ilm add --expiry-days "1" minio/dependabot
+  fi
+}
+
+function run_dependency_snapshots_migrations() {
+  if ghe-config --true app.dependency-graph.enabled; then
+    ( # run migration in a subshell
+      set +e -o pipefail
+      migration_begin "dependency-snapshots-api"
+      ghe-dependency-snapshots-api-env bin/ds-migrate all | migration_log "dependency-snapshots-api"
+      migration_end "dependency-snapshots-api" $?
+    )
+  fi
+}
+
+function run_dependency_graph_migrations() {
+  if ghe-config --true app.dependency-graph.enabled; then
+    ghe-upgrade-progress "Performing dependency-graph-api database migrations."
+    ( # run migration in a subshell
+      set +e -o pipefail
+      migration_begin "dependency-graph-api"
+      ghe-dependency-graph-api-env bin/rake --trace db:migrate ENTERPRISE_TRILOGY_READ_TIMEOUT_OVERRIDE=300 2>&1 | migration_log "dependency-graph-api"
+      migration_end "dependency-graph-api" $?
+    )
+  fi
+}
+
+function create_actions_org() {
+  local config_key="$1" org_names="$2" actions_org_set=0
+
+  host="$(ghe-config 'core.github-hostname')"
+  email="github-actions-admin-noreply@${host}"
+  admin=actions-admin^github-actions-admin^github-actions-org-admin
+
+  if ghe-config --present "$config_key"; then
+    actions_org_set=1
+    org_names="$(ghe-config "$config_key")"
+  fi
+
+  if [ $actions_org_set -eq 0 ] || [ "1" != "$(github-mysql "SELECT count(id) FROM users WHERE type=\"Organization\" AND login=\"$(ghe-config "$config_key")\";" | tail -n 1)" ]; then
+    output="$(github-env bin/rake --trace "enterprise:actions:init_actions_owner_and_org[$email,$admin,$org_names]" 2>&1 || true)"
+    owner="$(echo "$output" | sed -n "s/.*Actions organization name: \(.*\)/\1/p")"
+    if [ -z "$owner" ]; then
+      echo "ERROR: Failed to create actions organization"
+
+      # Set flag to create warning in management console providing doc to manual workaround
+      ghe-config app.actions.setup-failures-detected true
+
+      return 0
+    fi
+    ghe-config "$config_key" "$owner"
+    # Ensure unset idempotency key so repos will be recreated in the new org
+    if ghe-config --exists 'app.actions.actions-repos-sha1sum'; then
+      ghe-config --unset 'app.actions.actions-repos-sha1sum'
+    fi
+  fi
+}
+
+function run_chatops_migration() {
+  set +x
+  if ghe-config --true app.chatops.msteams.enabled || ghe-config --true app.chatops.slack.enabled; then
+    mysql_username=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+    mysql_password=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+
+    local SLACK_GO_SHA
+    SLACK_GO_SHA="$(cat /data/docker-image-tags/slack_image_tag)"
+    local SLACK_IMAGE_TAG="slack:${SLACK_GO_SHA}"
+
+    # chatOps service code expects something like this
+    # "mysql://github:f2f4f41d505bda679a2cdd5e0aa32449013c0668dde46cd147702fafdd7e07b8@localhost:3307/github_enterprise"
+    local DATABASE_URL="mysql://$mysql_username:$mysql_password@localhost:3307/github_enterprise"
+
+    ( # run migration in a subshell
+      set +e -o pipefail
+      migration_begin "chatops"
+      docker run --network host -e CLEAN_DB_TABLES=false -e GHES=true -e RUN_DB_MIGRATION=true -e DROP_DB=false -e DATABASE_URL="$DATABASE_URL" -e REDIS_URL="redis://127.0.0.1:6380" "$SLACK_IMAGE_TAG" 2>&1 | migration_log "chatops"
+      migration_end "chatops" $?
+    )
+  fi
+  set -x
+}
+
+msg="Performing chatops migrations."
+ghe-upgrade-progress "$msg"
+start_span "$msg" "run_chatops_migration"
+  run_chatops_migration
+end_span
+
+function run_hookshot_go_migrations() {
+  set +x
+  mysql_username=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+  mysql_password=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+  local DATABASE_URL="$mysql_username:$mysql_password@tcp(localhost:3307)/github_enterprise"
+
+  local HOOKSHOT_GO_SHA
+  HOOKSHOT_GO_SHA="$(cat /data/docker-image-tags/hookshot_go_image_tag)"
+  local HOOKSHOT_GO_IMAGE_TAG="hookshot-go:${HOOKSHOT_GO_SHA}"
+
+  local curr
+  if github-mysql "SHOW TABLES LIKE 'hookshot_go_schema_migrations'" | grep "hookshot_go_schema_migrations"; then
+    curr=$(github-mysql "SELECT version FROM hookshot_go_schema_migrations" | tail -n 1)
+  else
+    curr="0"
+  fi
+
+  start_span "Migrating Hookshot-Go"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "hookshot_go"
+    docker run --network host --user root --env APP_ENV=production --env PRIMARY_DB_URL="$DATABASE_URL" "$HOOKSHOT_GO_IMAGE_TAG" "/migrate" 2>&1 | migration_log "hookshot_go"
+    migration_end "hookshot_go" $?
+  )
+  end_span
+
+  local next
+  next=$(read_migration_log "hookshot_go" | sed -n "s/.*Final migration version: \([0-9]*\).*/\1/p")
+
+  if [ "$curr" != "$next" ]; then
+    hookshot_go_need_schema_update=1
+  fi
+  echo "run_hookshot_go_migrations: C: $curr==$next - hookshot_go_need_schema_update:$hookshot_go_need_schema_update"
+  set -x
+}
+
+function run_github_migrations() {
+
+  local num_parallel_db_workers
+  num_parallel_db_workers=$(ghe-config --get --default "4" core.num-parallel-database-migration-workers)
+
+  prefetch_advanced_security_backfill_data
+
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "github"
+    # list migrations to be run
+    github-env env MIGRATION_LISTS_FILE=/data/user/tmp/github-migration-list.json bin/rake ghes:migration_status || true
+    # emit migration events to file
+    if ghe-config --true core.use-parallel-database-migrations; then
+      github-env env ENTERPRISE_SKIP_SCHEMA_CACHE=1 ENTERPRISE_NUM_PARALLEL_DATABASE_MIGRATION_WORKERS="$num_parallel_db_workers" ENTERPRISE_MYSQL_ADVISORY_LOCKS=false MIGRATION_METADATA_FILE_PATH=/data/github/shared/migration_metadata.json bin/rake --trace db:migrate:parallel 2>&1 | migration_log "github"
+    else
+      github-env env ENTERPRISE_SKIP_SCHEMA_CACHE=1 MIGRATION_EVENTS_FILE=/data/user/tmp/github-migration-events.json bin/rake --trace db:migrate 2>&1 | migration_log "github"
+    fi
+
+    migration_end "github" $?
+  )
+}
+
+function run_turboghas_migrations() {
+  # Run database migrations
+
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "turboghas"
+    ghe-turboghas transition | migration_log "turboghas"
+    migration_end "turboghas" $?
+  )
+}
+
+function run_turboscan_migrations() {
+  # Run database migrations
+
+  start_span "Migrating turboscan" "ghe-turboscan migratorctl"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "turboscan"
+    TURBOSCAN_LOG_LEVEL=info ghe-turboscan migratorctl --step=$TURBOSCAN_MIGRATIONS_STEP | migration_log "turboscan"
+    migration_end "turboscan" $?
+  )
+  end_span
+
+  # Initialise advanced security integration
+  github-env bin/rake --trace enterprise:code_scanning:upsert[]
+
+  if ghe-config --true app.code-scanning.enabled; then
+    # Set the value of the env vars that give the code scanning bot's login and GRID.
+    if ghe-config --blank app.advanced-security.bot-grid || ghe-config --blank app.advanced-security.bot-login; then
+      # Here we'll recompose the GRID from the bot's id based on the current implementation
+      # of GitHub::Relay::GlobalIdentification#global_relay_id in terms of
+      # GitHub::Relay::GlobalIdentification#legacy_global_id for enterprise environments:
+      #     Base64.strict_encode64(["0", type_name.length, ":", type_name, id.to_s].join)
+      bot_id="$(github-mysql 'SELECT bot_id FROM integrations WHERE name="GitHub Advanced Security" LIMIT 1' | tail -n 1)"
+      bot_login="$(github-mysql "SELECT to_base64(login) FROM users WHERE id='${bot_id}' LIMIT 1" | tail -n 1)"
+      bot_grid_base="03:Bot$bot_id"
+      bot_grid=$(echo -n "${bot_grid_base}" | base64)
+      ghe-config 'app.advanced-security.bot-login' "$bot_login"
+      ghe-config 'app.advanced-security.bot-grid' "$bot_grid"
+    fi
+
+    start_span "Setting access key and secret key for Minio"
+    if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+      MINIO_PORT=10005 ghe-service-wait-minio
+      MINIO_PORT=10005 ghe-minio-client mb --ignore-existing minio/turboscan
+    else
+      ghe-cluster-each --role=storage -- "set -eu; export MINIO_PORT=10004; if nomad status minio > /dev/null; then /usr/local/share/enterprise/ghe-service-wait-minio; ghe-minio-client mb --ignore-existing minio/turboscan; fi"
+    fi
+    end_span
+
+    start_span "Migrating turboscan-esindex"
+    # run the ES index task which will create a new index if necessary
+    # Note that the index will not be backfilled here as that could take a while
+    # and we do not want to block upgrading here.
+    ( # run migration in a subshell
+      set +e -o pipefail
+      migration_begin "turboscan-esindex"
+      ghe-turboscan esindex --indexCleanup | migration_log "turboscan-esindex"
+      migration_end "turboscan-esindex" $?
+    )
+    end_span
+    # Actually migrating the data is done after the web servers have started.
+    # see vm_files/usr/local/share/enterprise/lib/configapply/phase_app_services.rb.
+  fi
+}
+
+function run_minio_migrations() {
+  if ghe-config --true app.minio.enabled; then
+    # A bug in Minio causes old versions to leave a `bitrotscan` option in the configuration which is no longer valid.
+    # This causes Minio to use 100% CPU usage.
+    # If we find this option, we reset the configuration to the default and then restart Minio.
+    MINIO_PORT=10005 ghe-service-wait-minio
+    if MINIO_PORT=10005 ghe-minio-client admin config get minio scanner | grep bitrotscan; then
+      >&2 echo "Minio has bitrotscan option present in the configuration. Resetting it..."
+      MINIO_PORT=10005 ghe-minio-client admin config reset minio scanner
+      MINIO_PORT=10005 ghe-minio-client admin service restart minio
+    fi
+  fi
+}
+
+function prefetch_advanced_security_backfill_data() {
+  # Only used once in a ruby migration, this can be removed two versions after 3.1
+  if [ ! -f /data/user/tmp/code_scanning_active_repos ]; then
+    github-mysql "SELECT DISTINCT repository_id FROM ts_analyses WHERE most_recent = TRUE AND created_at >= DATE(NOW()) - INTERVAL 30 DAY" | tail -n +2 > /data/user/tmp/code_scanning_active_repos
+  fi
+}
+
+function run_authnd_migrations() {
+  set +x
+  local AUTHND_SHA
+  AUTHND_SHA="$(cat /data/docker-image-tags/authnd_image_tag)"
+  local AUTHND_IMAGE_TAG="authnd:${AUTHND_SHA}"
+
+  local authnd_curr
+  if github-mysql "SHOW TABLES LIKE 'authnd_schema_migrations'" | grep "authnd_schema_migrations"; then
+    authnd_curr=$(github-mysql "SELECT version FROM authnd_schema_migrations" | tail -n 1)
+  else
+    authnd_curr="0"
+  fi
+
+  start_span "Migrating authnd"
+  ( # run migration in a subshell
+    set +e -o pipefail
+    migration_begin "authnd"
+    docker run --rm --network host \
+      --entrypoint "/app/bin/migrate" \
+      -e IS_ENTERPRISE_SERVER=true \
+      -e HEAVEN_DEPLOYED_ENV="enterprise" \
+      -e DATABASE_CONFIG_PATH="/app/config/databases-enterprise.yml" \
+      -e MYSQL_USER="$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)" \
+      -e MYSQL_PASSWORD="$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)" \
+      -e MYSQL_ADDRESS="localhost:3307" \
+      "$AUTHND_IMAGE_TAG" 2>&1 | migration_log "authnd"
+    migration_end "authnd" $?
+  )
+  end_span
+
+  local authnd_next
+  authnd_next=$(read_migration_log "authnd" | sed -n "s/.*Final migration version.*\"migration_version\": \([0-9]*\).*/\1/p")
+  if [ "$authnd_curr" != "$authnd_next" ]; then
+    authnd_need_schema_update=1
+  fi
+
+  echo "run_authnd_migrations: C: $authnd_curr==$authnd_next - authnd_need_schema_update:$authnd_need_schema_update"
+  set -x
+}
+
+start_span "Creating default pre-receive environment" "create_default_pre_receive_environment"
+  create_default_pre_receive_environment
+end_span
+
+function update_oauth_app() {
+  local name="$1"
+  local key="$2"
+  local encrypted_secret="$3"
+  local secret_hash="$4"
+  local secret_last_eight="$5"
+  local callback_url=${6:-NULL}
+  local url=${7:-NULL}
+  local dcf=${8:-0}
+
+  echo "+ update_oauth_app $1"
+
+  if [ -n "${encrypted_secret}" ]; then
+    secret_last_eight="${encrypted_secret: -8}"
+    secret_hash=$(echo -n "$encrypted_secret" | openssl sha256 -binary | openssl base64)
+  fi
+
+  if [ "$callback_url" != "NULL" ]; then
+    local callback_url="\"$callback_url\""
+  fi
+  if [ "$url" != "NULL" ]; then
+    local url="\"$url\""
+  fi
+
+  if github-mysql "SELECT id FROM oauth_applications WHERE \`name\` = \"$name\" AND \`user_id\` = \"$enterprise_org_id\" LIMIT 1;" | egrep -q '[0-9]+'; then
+    github-mysql "UPDATE oauth_applications SET
+  \`key\` = \"$key\", \`user_id\` = $enterprise_org_id, \`device_flow_enabled\` = $dcf, \`url\` = $url, \`callback_url\` = $callback_url, \`raw_data\` = NULL, \`updated_at\` = now()
+WHERE \`name\` = \"$name\" AND \`user_id\` = \"$enterprise_org_id\";"
+    github-mysql "UPDATE oauth_application_client_secrets LEFT JOIN oauth_applications ON oauth_application_client_secrets.oauth_application_id = oauth_applications.id
+    SET oauth_application_client_secrets.\`secret_hash\` = \"$secret_hash\",
+        oauth_application_client_secrets.\`secret_last_eight\` = \"$secret_last_eight\",
+       oauth_application_client_secrets.\`updated_at\` = NOW()
+    WHERE oauth_applications.\`name\` = \"$name\" AND oauth_applications.\`user_id\` = \"$enterprise_org_id\";"
+  else
+    github-mysql "INSERT IGNORE INTO oauth_applications (\`name\`, \`key\`, \`user_id\`, \`device_flow_enabled\`, \`url\`, \`callback_url\`, \`raw_data\`, \`created_at\`, \`updated_at\`)
+  VALUES (\"$name\", \"$key\", $enterprise_org_id, $dcf, $url, $callback_url, NULL, now(), now());"
+    github-mysql "INSERT IGNORE INTO oauth_application_client_secrets (\`secret_hash\`, \`secret_last_eight\`, \`creator_id\`, \`oauth_application_id\`, \`created_at\`, \`updated_at\`)
+  SELECT \"$secret_hash\" as \`secret_hash\`, \"$secret_last_eight\" as \`secret_hash_eight\`, users.id as \`creator_id\`, oauth_applications.id as \`oauth_application_id\`, NOW(), NOW()
+    FROM users, oauth_applications
+  WHERE users.login = 'ghost' AND oauth_applications.key = \"$key\";"
+  fi
+}
+
+# DB migration + prep
+start_span "Executing DB migration and prep"
+if service_enabled mysql || is_service_external mysql; then
+  start_span "Getting latest schema versions"
+    app_latest_schema_versions=$(github-env awk '/INSERT INTO \`schema_migrations\`/,/;/' /github/db/structure.sql | sed -E "s/^\('([^\\)]*)'\).*$/\1/" | grep -v version | sort -n | tail -15)
+    app_schema_version=$(echo "$app_latest_schema_versions" | head -1)
+  end_span
+
+  github_need_schema_update=1
+  if [ -n "$app_schema_version" ]; then
+    start_span "Updating schema"
+      db_schema_versions_db=$(github-mysql "SELECT version FROM schema_migrations WHERE cast(version as unsigned) >= $app_schema_version ORDER BY cast(version as unsigned) ASC LIMIT 15" | grep -v version | sort -n | tail -15)
+      if diff -s <(echo "$app_latest_schema_versions") <(echo "$db_schema_versions_db"); then
+        github_need_schema_update=0
+      fi
+    end_span
+  fi
+
+  if [ "$github_need_schema_update" = "1" ]; then
+    msg="Performing database migrations."
+    ghe-upgrade-progress "$msg"
+    start_span "$msg" "run_github_migrations"
+      run_github_migrations
+    end_span
+  fi
+
+  msg="Performing dependency graph migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_dependency_graph_migrations"
+    run_dependency_graph_migrations
+  end_span
+
+  msg="Performing dependency snapshot migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_dependency_snapshots_migrations"
+    run_dependency_snapshots_migrations
+  end_span
+
+  start_span "Waiting for mysql to be healthy"
+    ghe-service-wait-mysql
+  end_span
+
+  msg="Performing Minio migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_minio_migrations"
+    run_minio_migrations
+  end_span
+
+  msg="Performing dependabot database migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_dependabot_migrations"
+    run_dependabot_migrations
+  end_span
+
+  msg="Performing dependabot alerts backfills."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "Backfilling default rule"
+    github-env bin/rake --trace enterprise:dependabot_alerts:create_default_rule
+  end_span
+
+  # Run GitHub Actions migrations
+  msg="Performing launch database migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_launch_migrations"
+    launch_need_schema_update=0
+    run_launch_migrations
+  end_span
+
+  start_span "Performing kredz migrations" "run_kredz_migrations"
+    kredz_need_schema_update=0
+    run_kredz_migrations
+  end_span
+
+  start_span "Performing kredz varz migrations" "run_kredz_varz_migrations"
+    kredz_varz_need_schema_update=0
+    run_kredz_varz_migrations
+  end_span
+
+  # Run Hookshot Go migrations if enabled
+  hookshot_go_need_schema_update=0
+  msg="Performing hookshot-go migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_hookshot_go_migrations"
+    run_hookshot_go_migrations
+  end_span
+
+  # Run code scanning migrations and initialisation
+  msg="Performing code scanning migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_turboscan_migrations"
+    run_turboscan_migrations
+  end_span
+
+  ghe-upgrade-progress "Performing advanced security migrations."
+  start_span "$msg" "run_turboghas_migrations"
+    run_turboghas_migrations
+  end_span
+
+  # Run Authnd migrations
+  msg="Performing authnd database migrations."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "run_authnd_migrations"
+    authnd_need_schema_update=0
+    run_authnd_migrations
+  end_span
+
+  if [ "$need_schema_update" = "1" ] || [ "$launch_need_schema_update" = "1" ] || [ "$github_need_schema_update" = "1" ] || [ "$hookshot_go_need_schema_update" = "1" ] || [ "$kredz_need_schema_update" = "1" ] || [ "$kredz_varz_need_schema_update" = "1" ] || [ "$authnd_need_schema_update" = "1" ]; then
+    msg="Performing schema updates."
+    ghe-upgrade-progress "$msg"
+    set +x
+    (
+      start_span "$msg"
+        start_span "Getting all seed_latest.sql"
+          github-env eval "MYSQL_PWD=\$ENTERPRISE_MYSQL_PASSWORD mysqldump --skip-comments --set-gtid-purged=OFF -u \$ENTERPRISE_MYSQL_USERNAME -h \$ENTERPRISE_MYSQL_HOSTNAME -P \$ENTERPRISE_MYSQL_PORT --no-data \$ENTERPRISE_MYSQL_DATABASE | sed 's/AUTO_INCREMENT=[0-9]*//g' > /data/github/shared/seed_latest.sql"
+      schemas=("schema_migrations" "hookshot_go_schema_migrations" "dg_schema_migrations" "actions_deployer_schema_migrations" "actions_credz_schema_migrations" "actions_varz_schema_migrations" "actions_payloads_schema_migrations" "ts_migrations" "authnd_schema_migrations" "tg_migrations")
+        end_span
+      for schema in "${schemas[@]}"; do
+        start_span "Getting $schema seed_latest.sql"
+          github-env eval "MYSQL_PWD=\$ENTERPRISE_MYSQL_PASSWORD mysqldump --skip-comments --set-gtid-purged=OFF -u \$ENTERPRISE_MYSQL_USERNAME -h \$ENTERPRISE_MYSQL_HOSTNAME -P \$ENTERPRISE_MYSQL_PORT --no-create-info \$ENTERPRISE_MYSQL_DATABASE \"$schema\" >> /data/github/shared/seed_latest.sql"
+        end_span
+      done
+      end_span
+    )
+  fi
+
+  msg="Performing GitHub app configuration updates."
+  ghe-upgrade-progress "$msg"
+  start_span "$msg" "create_default_pre_receive_environment"
+    create_default_pre_receive_environment
+  end_span
+
+  set +x
+  start_span "Updating oauth apps"
+    start_span "Select github-enterprise user"
+      enterprise_org_id=$(github-mysql 'SELECT id FROM users WHERE login="github-enterprise" LIMIT 1;' | grep -E '[0-9]+')
+    end_span
+    start_span "Set GitHub Gist conf" "ghe-config"
+      update_oauth_app "GitHub Gist" "$(ghe-config 'secrets.gist.oauth-client-id')" "$(ghe-config 'secrets.gist.oauth-secret')" "" "" 0
+    end_span
+    start_span "Set GitHub Hookshot conf" "ghe-config"
+      update_oauth_app "GitHub Hookshot" "$(ghe-config 'secrets.hookshot.oauth-client-id')" "$(ghe-config 'secrets.hookshot.oauth-secret')" "" "" "/hookshot/auth/githubber/callback" 0
+    end_span
+    start_span "Set GitHub Pages conf" "ghe-config"
+      update_oauth_app "GitHub Pages" "$(ghe-config 'secrets.pages.oauth-client-id')" "$(ghe-config 'secrets.pages.oauth-secret')" "" "" 0
+    end_span
+    start_span "GitHub for Mac"
+      update_oauth_app "GitHub for Mac" "eac522c6b68c504b2aac" "" "MaLMjIcyD8PddzTMWFQxu0lQbrJYToVFMku8yAK3dxw=" "8243281a" "github-mac://oauth" "https://mac.github.com/" 0
+    end_span
+    start_span "GitHub for Windows"
+      update_oauth_app "GitHub for Windows" "fd5f729d309a7bfa8e1b" "" "Bt6+6v8xUPHCpeGUo1C2HqCoDebmLjPOIhkB1XweM/0=" "f850b6bd" NULL "https://windows.github.com/" 0
+    end_span
+    start_span "GitHub Extension for VS"
+      update_oauth_app "GitHub Extension for Visual Studio" "a200baed193bb2088a6e" "" "CMkcMsAwdKkw26eosp7XDNJ3cPxbYTIbEujlY/9WrUQ=" "f5d228c9" "http://localhost:42549" "https://visualstudio.github.com/" 0
+      github-env bin/rake --trace "enterprise:oauth:set_ghfvs_callback_urls"
+    end_span
+    start_span "Atom"
+      update_oauth_app "Atom" "395e9bb22e83bd612319" "" "BsrpVizUJxWmZkA9s99s7sW384CgCSCDTbJXtRVYRvI=" "29aed2bb" "atom://x-oauth" "https://atom.io/" 0
+    end_span
+    start_span "GitHub Desktop"
+      update_oauth_app "GitHub Desktop" "de0e3c7e9973e1c4dd77" "" "qzIk6WiFyEZJ5T6ulIpg3FcKkTzsKqL70dnMpgR0L1I=" "d961e2a3" "x-github-desktop-auth://oauth" "https://desktop.github.com/" 0
+    end_span
+    start_span "GitHub CLI"
+      update_oauth_app "GitHub CLI" "178c6fc778ccc68e1d6a" "" "0bMZDaz7avFHm+0oZkVcCy3u4RkQTdcLCf+KmR1zNVw=" "ede1cc0b" "http://localhost" "https://github.com/github/gh-cli" 1
+    end_span
+    start_span "hub CLI"
+      update_oauth_app "hub CLI" "20a7719cd6246bdf8b48" "" "zTl/7UYqoouk53G90MPEVbNDQzQEGP14XHq/Pyz9qeM=" "8af04d78" "http://localhost" "https://hub.github.com/" 0
+    end_span
+    start_span "GitHub for Unity"
+      update_oauth_app "GitHub for Unity" "107b906ff287f62a12a4" "" "IEPWz9hMtK76m5AieNsnT2OsZo4F5NUbivE4nzAJ8Ps=" "197d2137" "http://localhost:42424/callback" "https://unity.github.com/" 0
+    end_span
+    start_span "GitHub for VSCode"
+      update_oauth_app "GitHub for VSCode" "01ab8ac9400c4e429b23" "" "+UlnISR77yqymFUi3MoYLKyvJWrq7y9mDVUjKBPLd0I=" "76b86099" "https://vscode.dev/redirect" "https://vscode.github.com" 1
+    end_span
+    start_span "Git Credential Manager"
+      update_oauth_app "Git Credential Manager" "0120e057bd645470c1ed" "" "9Hg/RK9y2E0b7afYjfsIOgnMdZildat8PaUdc6YfGwk=" "83344c90" "http://localhost/" "https://aka.ms/gcmcore" 1
+    end_span
+
+    if ghe-config --blank app.mobile.enabled; then
+      ghe-config app.mobile.enabled true
+    fi
+
+    start_span "GitHub iOS and GitHub Android"
+      if [ "$(ghe-config app.mobile.enabled)" = "false" ]; then
+        start_span "Deleting GitHub iOS and GitHub Android"
+          github-mysql "DELETE from oauth_applications WHERE \`name\` = \"GitHub iOS\" AND \`user_id\` = \"$enterprise_org_id\" LIMIT 1;" || true
+          github-mysql "DELETE from oauth_applications WHERE \`name\` = \"GitHub Android\" AND \`user_id\` = \"$enterprise_org_id\" LIMIT 1;" || true
+        end_span
+      else
+        start_span "GitHub iOS"
+          update_oauth_app "GitHub iOS" "2cfa9b7a1b57de32dd0d" "" "+8y9nQ+YgPIXwOpO9t7FU2bcBKVRRScrikY+sWhHjGg=" "637f332c" "github://com.github.ios" "https://github.com" 0
+        end_span
+        start_span "GitHub Android"
+          update_oauth_app "GitHub Android" "3f8b8834a91f0caad392" "" "ZJj5OINqR3yg2V2p1WlrMWUNiKxF9Ixthz0/63vTOWk=" "fcdc0165" "github://com.github.android/oauth" "https://github.com" 0
+        end_span
+      fi
+    end_span
+  end_span # end of span capturing all oauth apps updates
+
+  set -x
+
+  # setup the global business for this appliance, GitHub.global_business
+  count=$(github-mysql 'SELECT count(id) FROM businesses;' | tail -n 1)
+  [ "$count" = "1" ] || {
+    start_span "Setting up the global business"
+      github-env bin/rake --trace business:create
+      github-env bin/rake --trace enterprise:actions:set_actions_packages_setup_pending
+    end_span
+  }
+
+  start_span "Disable SCIM if needed"
+    github-env bin/rake --trace business:disable_scim
+  end_span
+
+
+  echo "Checking if role and permission reconciliation is needed."
+  if ! ghe-roles-permissions-up-to-date; then
+    msg="Reconciling roles and permissions."
+    echo "$msg"
+    start_span "$msg"
+      github-env bin/reconcile-system-roles -v -w --purge
+    end_span
+  fi
+fi
+end_span
+
+start_span "Enabling Actions"
+if ghe-config --true app.actions.enabled; then
+  if ghe-config --blank app.actions.artifactcache.enabled; then
+    echo "Enabling Actions Cache by default"
+    ghe-config app.actions.artifactcache.enabled true
+  fi
+  # Setup the Actions GitHub App
+  ghe-upgrade-progress "Performing Actions app configuration updates."
+  count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"GitHub Actions\";" | tail -n 1)
+
+  if [ "$count" = "1" ]; then
+    app_id=$(github-mysql "SELECT id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"GitHub Actions\";" | tail -n 1)
+    hook_id=$(github-mysql "SELECT id FROM hooks WHERE installation_target_type=\"Integration\" and installation_target_id=$app_id LIMIT 1;" | tail -n 1)
+    client_id="$(ghe-config 'secrets.launch.client-id')"
+    client_secret="$(ghe-config 'secrets.launch.client-secret')"
+    launch_webhook_secret="$(ghe-config 'secrets.launch.receiver-webhook-secret')"
+
+    github-env bin/rake --trace enterprise:actions:update[$launch_webhook_secret,$client_id,$client_secret]
+  else
+    launch_app_url="http://localhost:5014"
+    launch_webhook_url="http://localhost:5014/webhook"
+    launch_webhook_secret="$(ghe-config 'secrets.launch.receiver-webhook-secret')"
+    client_id="$(ghe-config 'secrets.launch.client-id')"
+    client_secret="$(ghe-config 'secrets.launch.client-secret')"
+    launch_app_public_key_path="/data/user/tmp/launch-app-public-key"
+    ghe-config 'secrets.launch.app-public-key' > $launch_app_public_key_path
+    sudo chown git "$launch_app_public_key_path"
+    insecure_webhook="true"
+
+    # rake task takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :client_id, :client_secret, :public_key]
+    # https://github.com/github/github/blob/2494c02e5b716cda2fc81e907c9c23802b027ace/lib/tasks/enterprise_actions.rake#L5
+    github-env bin/rake --trace enterprise:actions:create[$launch_app_url,$launch_webhook_url,$launch_webhook_secret,$insecure_webhook,$client_id,$client_secret,$launch_app_public_key_path]
+  fi
+
+  # These secrets are unset on initial actions setup, or if there was a ghe-actions-teardown
+  if ghe-config --blank secrets.launch.app-id || ghe-config --blank secrets.launch.app-relay-id || ghe-config --blank secrets.launch.bot-relay-id; then
+    # Set the app-id so the Actions App can use it to generate tokens.
+    app_id=$(github-mysql "SELECT id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"GitHub Actions\";" | tail -n 1)
+    ghe-config 'secrets.launch.app-id' "$app_id"
+    # Get the bot-id
+    bot_id=$(github-mysql "SELECT bot_id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"GitHub Actions\";" | tail -n 1)
+    # Set app-relay-id and app-bot-relay-id so we can detect infinite loops
+    # Combine the retrieval of both relay ids so that there is only one github-env bin/runner command rather than two
+    relay_ids="$(github-env bin/runner "puts Platform::Helpers::NodeIdentification.to_global_id(\"App\", $app_id) + \" \" + Platform::Helpers::NodeIdentification.to_global_id(\"Bot\", $bot_id)")"
+    read -ra relay_ids_arr <<< "$relay_ids"
+    app_relay_id=${relay_ids_arr[0]}
+    bot_relay_id=${relay_ids_arr[1]}
+    ghe-config 'secrets.launch.app-relay-id' "$app_relay_id"
+    ghe-config 'secrets.launch.bot-relay-id' "$bot_relay_id"
+  fi
+
+  # Setup or restore the actions and github organizations
+  create_actions_org app.actions.actions-org actions^github-actions^github-actions-org
+  create_actions_org app.actions.github-org github^github-org^github-github-org
+fi
+end_span
+
+start_span "Enabling Dependabot"
+if ghe-config --true app.dependabot.enabled; then
+  # Setup the Dependabot GitHub App
+  ghe-upgrade-progress "Performing Dependabot app configuration updates."
+  count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Dependabot\";" | tail -n 1)
+
+  if [ "$count" = "1" ]; then
+    dependabot_webhook_url="http://localhost:4006/github_webhooks"
+
+    # rake task takes the following parameters [:webhook_url]
+    # https://github.com/github/github/blob/4174bdc2fccb581014c7e7b04727a6f53fe84dbc/lib/tasks/enterprise_dependabot.rake
+    github-env bin/rake --trace "enterprise:dependabot:update[$dependabot_webhook_url]"
+  else
+    protocol="http"
+    if ghe-config --true github-ssl.enabled; then
+      protocol="https"
+    fi
+    dependabot_app_url="$protocol://$(ghe-config 'core.github-hostname')/_dependabot"
+    dependabot_webhook_url="http://localhost:4006/github_webhooks"
+    dependabot_webhook_secret="$(ghe-config 'secrets.dependabot.receiver-webhook-secret')"
+    dependabot_app_public_key_path="/data/user/tmp/dependabot-app-public-key"
+    ghe-config 'secrets.dependabot.app-public-key' > $dependabot_app_public_key_path
+    sudo chown git "$dependabot_app_public_key_path"
+    insecure_webhook="true"
+
+    # rake task takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :public_key]
+    # https://github.com/github/github/blob/4174bdc2fccb581014c7e7b04727a6f53fe84dbc/lib/tasks/enterprise_dependabot.rake
+    github-env bin/rake --trace "enterprise:dependabot:create[$dependabot_app_url,$dependabot_webhook_url,$dependabot_webhook_secret,$insecure_webhook,$dependabot_app_public_key_path]"
+  fi
+
+  if ghe-config --blank secrets.dependabot.app-relay-id; then
+    # Set the app-id so the Dependabot App can use it to generate tokens.
+    app_id=$(github-mysql "SELECT id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Dependabot\";" | tail -n 1)
+    ghe-config 'secrets.dependabot.app-id' "$app_id"
+    app_relay_id="$(github-env bin/runner "puts Platform::Helpers::NodeIdentification.to_global_id(\"App\", $app_id)")"
+    ghe-config 'secrets.dependabot.app-relay-id' "$app_relay_id"
+    user_id=$(github-mysql "SELECT bot_id FROM integrations where id=\"$app_id\";" | tail -n 1)
+    ghe-config 'secrets.dependabot.github-dependabot-user-id' "$user_id"
+  fi
+
+  # backfill GHSAs in case GitHub Connect was enabled before Dependabot
+  ghe-dependabot-env bin/rails --trace ghsa:schedule_backfill
+fi
+end_span
+
+start_span "Setting up Chatops GitHub App"
+# Setup the Chatops GitHub App
+if ghe-config --true app.chatops.msteams.enabled; then
+  service_url_base="/_msteams"
+  chatops_app_url="https://$(ghe-config 'core.github-hostname')$service_url_base"
+  # Config for Teams
+  count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Microsoft Teams for GitHub\";" | tail -n 1)
+
+  callback_url_teams="https://$(ghe-config 'core.github-hostname')$service_url_base/teams/github/oauth/callback"
+  chatops_webhook_url="$chatops_app_url/github/events"
+  chatops_webhook_secret_teams="$(ghe-config 'secrets.chatops.webhook-secret-teams')"
+  client_id_teams="$(ghe-config 'secrets.chatops.client-id-teams')"
+  client_secret_teams="$(ghe-config 'secrets.chatops.client-secret-teams')"
+  chatops_app_public_key_path_teams="/data/user/tmp/chatops-app-public-key-teams"
+  sudo rm -f $chatops_app_public_key_path_teams
+  ghe-config 'secrets.msteams.app-private-key-pem' > $chatops_app_public_key_path_teams
+  sudo chown git "$chatops_app_public_key_path_teams"
+
+  if [ "$count" = "1" ]; then
+    # rake task to update app takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :client_key, :client_secret, :public_key]
+    github-env bin/rake --trace "enterprise:chatops:update_msteams[$chatops_app_url/,$chatops_webhook_url,$callback_url_teams,$chatops_webhook_secret_teams,$insecure_webhook,$client_id_teams,$client_secret_teams,$chatops_app_public_key_path_teams]"
+  else
+    # rake task takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :client_key, :client_secret, :public_key]
+    github-env bin/rake --trace "enterprise:chatops:create_msteams[$chatops_app_url/,$chatops_webhook_url,$callback_url_teams,$chatops_webhook_secret_teams,$insecure_webhook,$client_id_teams,$client_secret_teams,$chatops_app_public_key_path_teams]"
+  fi
+
+  if ghe-config --blank secrets.chatops.app-id-teams; then
+    # Set the app-id so the chatops App can use it to generate tokens.
+    app_id_teams=$(github-mysql "SELECT id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Microsoft Teams for GitHub\";" | tail -n 1)
+    ghe-config 'secrets.chatops.app-id-teams' "$app_id_teams"
+  fi
+else
+  echo 'Skipped Chatops teams setup since not enabled'
+fi
+end_span
+
+start_span "Setting up Slack"
+if ghe-config --true app.chatops.slack.enabled; then
+  service_url_base="/_slack"
+  chatops_app_url="https://$(ghe-config 'core.github-hostname')$service_url_base"
+  # Config for Slack
+  count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Slack\";" | tail -n 1)
+
+  callback_url_slack="https://$(ghe-config 'core.github-hostname')$service_url_base/github/v2/oauth/callback"
+  chatops_webhook_url="$chatops_app_url/github/events"
+  chatops_webhook_secret_slack="$(ghe-config 'secrets.chatops.webhook-secret-slack')"
+  client_id_slack="$(ghe-config 'secrets.chatops.client-id-slack')"
+  client_secret_slack="$(ghe-config 'secrets.chatops.client-secret-slack')"
+  chatops_app_public_key_path_slack="/data/user/tmp/chatops-app-public-key-slack"
+  sudo rm -f $chatops_app_public_key_path_slack
+  ghe-config 'secrets.slack.app-private-key-pem' > $chatops_app_public_key_path_slack
+  sudo chown git "$chatops_app_public_key_path_slack"
+
+  if [ "$count" = "1" ]; then
+    # rake task to update app takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :client_key, :client_secret, :`public_key`]
+    github-env bin/rake --trace "enterprise:chatops:update_slack[$chatops_app_url/,$chatops_webhook_url,$callback_url_slack,$chatops_webhook_secret_slack,$insecure_webhook,$client_id_slack,$client_secret_slack,$chatops_app_public_key_path_slack]"
+  else
+    # rake task takes the following parameters [:app_url, :webhook_url, :webhook_secret, :insecure_webhook, :client_key, :client_secret, :`public_key`]
+    github-env bin/rake --trace "enterprise:chatops:create_slack[$chatops_app_url/,$chatops_webhook_url,$callback_url_slack,$chatops_webhook_secret_slack,$insecure_webhook,$client_id_slack,$client_secret_slack,$chatops_app_public_key_path_slack]"
+  fi
+
+  if ghe-config --blank secrets.chatops.app-id-slack; then
+    # Set the app-id so the chatops App can use it to generate tokens.
+    app_id_slack=$(github-mysql "SELECT id FROM integrations where owner_id=\"$enterprise_org_id\" and name=\"Slack\";" | tail -n 1)
+    ghe-config 'secrets.chatops.app-id-slack' "$app_id_slack"
+  fi
+else
+  echo 'Skipped Chatops slack setup since not enabled'
+fi
+end_span
+
+# Setup the Memex Automation App
+start_span "Setting up Memex Automation App"
+count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and slug=\"github-project-automation\";" | tail -n 1)
+[ "$count" = "1" ] ||  github-env bin/rake --trace enterprise:memex_automation:create[]
+end_span
+
+start_span "Setting up the Merge Queue app"
+count=$(github-mysql "SELECT count(id) FROM integrations where owner_id=\"$enterprise_org_id\" and slug=\"github-merge-queue\";" | tail -n 1)
+[ "$count" = "1" ] ||  github-env bin/rake --trace enterprise:merge_queue:create[]
+end_span
+
+msg="Performing aqueduct updates."
+ghe-upgrade-progress "$msg"
+start_span "$msg"
+  start_span "Waiting for aqueduct service" "ghe-service-wait-aqueduct"
+    ghe-service-wait-aqueduct
+  end_span
+  start_span "Running aqueduct:import_resque_jobs rake task"
+    github-env bin/rake --trace aqueduct:import_resque_jobs
+  end_span
+end_span
+
+# This block encapsulates operations that only need to be performed on the first config apply run after an upgrade.
+# Operations should be performed before the upgrade file is removed.
+if [ -f /data/user/common/ghe-upgrade-occurred ]; then
+  ghe-upgrade-progress "Performing operations specific to first config apply run after upgrade."
+
+  # Perform post-upgrade tasks for SecurityOverviewAnalytics feature.
+  github-env bin/rake --trace enterprise:security_center:analytics_maintenance
+fi
+
+if actions-ever-enabled; then
+  if ! ghe-config --true app.actions.enabled; then
+    # Actions was enabled, but isn't currently.
+    # Startup MSSQL so we can upgrade Actions
+    start_span "Upgrading Actions database"
+      msg="Starting Actions database."
+      ghe-upgrade-progress "$msg"
+      start_span "$msg" "start-mssql-global"
+        start-mssql-global
+      end_span
+      start_span "Waiting for MSSQL local to restart" "wait-mssql-local-with-restart-alloc"
+        wait-mssql-local-with-restart-alloc
+      end_span
+    end_span
+  fi
+
+  # Perform MSSQL replication certificate rotation if needed
+  if [[ $(repl_role) == "primary" ]] && [[ -f "/etc/github/cluster" ]]; then
+    cert_expiry_query="SET NOCOUNT ON;
+        SELECT 1 FROM sys.certificates
+        WHERE name = 'dbm_certificate'
+            AND expiry_date < DATEADD(Year, 1, GETUTCDATE())"
+    cert_near_expiry=$(ghe-mssql-console -y -n -r -q "$cert_expiry_query")
+    if [[ ${#cert_near_expiry} -gt 0 ]]; then
+        /usr/local/share/enterprise/ghe-mssql-repl-rotate-cert
+    fi
+  fi
+
+  # Do actions update behind a flag so it can be skipped if needed, but never skip things needed for SQL HA
+  if ! ghe-config --true app.actions.updates-disabled; then
+    # Setup the Actions Services
+    msg="Performing Actions database migrations."
+    ghe-upgrade-progress "$msg"
+    start_span "$msg"
+
+    # Perform additional DB initialization
+      start_span "Performing additional DB initialization" "ghe-mssql-initialize"
+        ghe-mssql-initialize
+      end_span
+
+    # Upgrade GitHub Actions
+    # Actions must be guaranteed to be running before starting the update, as some parts of the upgrade are
+    # performed "online" using the running job-agent and api-server containers.
+      start_span "Starting Actions" "ghe-actions-start"
+        ghe-actions-start
+      end_span
+      start_span "Checking Actions" "ghe-actions-check"
+        ghe-actions-check
+      end_span
+
+      start_span "Performing Actions update" "ghe-actions-update"
+      # Now with actions up and running we can perform any update that may be required.
+      ( # run migration in a subshell
+        set +e -o pipefail
+        migration_begin "actions"
+        ghe-actions-update | migration_log "actions"
+        migration_end "actions" $?
+      )
+      end_span
+    end_span
+  fi
+
+  # Make sure to sync states and certificates to any replicas. This is important so that later (in config-apply phase 3) MSSQL replication can be turned on.
+  if [[ $(repl_role) == "primary" ]] && [[ -f "/etc/github/cluster" ]]; then
+    start_span "Syncing Actions states to replicas via ghe-cluster-config-update" "ghe-cluster-config-update -a"
+      ghe-cluster-config-update -a
+    end_span
+  fi
+fi

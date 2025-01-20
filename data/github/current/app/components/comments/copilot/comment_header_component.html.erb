@@ -1,0 +1,154 @@
+<div class="<%= classes %> clearfix d-flex" <%= test_selector("#{comment.id}-comment-header") %> data-morpheus-enabled="false">
+  <div class="timeline-comment-actions flex-shrink-0 d-flex flex-items-center">
+    <% if can_react_on_top? %>
+      <div class="d-none d-md-inline-block">
+        <%= render Reactions::DropdownComponent.new(
+          inline_with_reactions: false,
+          target_global_relay_id: comment.global_relay_id,
+          viewer_reactions: viewer_reactions(comment),
+          reaction_path: comment.reaction_path,
+          available_emotions: comment.respond_to?(:emotions) ? comment.emotions : comment.class.emotions,
+          classes: "timeline-comment-action",
+          px: 1,
+          py: 2,
+          mr: 0
+        ) %>
+      </div>
+    <% end %>
+    <details class="details-overlay details-reset position-relative d-inline-block">
+      <%= render Primer::Beta::Button.new(tag: :summary, scheme: :link, classes: "timeline-comment-action Link--secondary") do %>
+        <%= primer_octicon(:"kebab-horizontal", "aria-label": "Show options") %>
+      <% end %>
+
+      <details-menu
+        class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default"
+        style="width:185px"
+        src="<%= menu_path %>"
+        preload
+        <%= test_selector("comment-header-actions-deferred-menu") %>><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+        <% if menu_path %>
+          <include-fragment class="js-comment-header-actions-deferred-include-fragment">
+            <p class="text-center mt-3" data-hide-on-error>
+              <%= render(Primer::Beta::Spinner.new("aria-label": "Loading...")) %>
+            </p>
+            <p class="ml-1 mb-2 mt-2" data-show-on-error hidden>
+              <%= primer_octicon(:alert) %>
+              Sorry, something went wrong.
+            </p>
+            <button
+              type="button"
+              class="dropdown-item btn-link js-comment-quote-reply"
+              hidden
+              data-hotkey="<%= hotkeys_for(current_user, :pull_request_conversation, :reply) %>"
+              role="menuitem"><%# erblint:counter ButtonComponentMigrationCounter 1 %>
+             Quote reply
+            </button>
+          </include-fragment>
+        <% else %>
+          <%= render Primer::Beta::ClipboardCopy.new("aria-label": "Copy link", classes: "dropdown-item btn-link", for: permalink_id, role: "menuitem", test_selector: "comment-menu-copy-link") do %>
+            Copy link
+          <% end %>
+        <% end %>
+      </details-menu>
+    </details>
+  </div>
+
+  <copilot-review-feedback>
+    <div class="d-none d-sm-flex">
+      <div class="flex-1 d-flex gap-1">
+        <%= render Primer::Beta::Label.new(scheme: :secondary, ml: 1, title: "Label: Alpha", style: "line-height: 2;").with_content("Alpha") %>
+        <%= form_tag(repo_code_review_feedback_path(comment.pull_request.repository.owner.display_login,
+                                                    comment.pull_request.repository.name,
+                                                    comment.pull_request.number), { method: :post, remote: true, data: { target: "copilot-review-feedback.positiveForm" } }) do %>
+          <%= hidden_field_tag :comment_id, comment.id %>
+          <%= hidden_field_tag :feedback, "POSITIVE" %>
+          <%= render(Primer::Beta::IconButton.new(tag: :button,
+                                                  type: :submit,
+                                                  size: :small,
+                                                  scheme: :invisible,
+                                                  "aria-label": "Positive Feedback",
+                                                  icon: :thumbsup,
+                                                  test_selector: "#{comment.id}-comment-copilot-feedback-positive",
+                                                  data: { action: "click:copilot-review-feedback#positiveFeedback",
+                                                          target: "copilot-review-feedback.voteUpButton" } )) %>
+        <% end %>
+        <%= form_tag(repo_code_review_feedback_path(comment.pull_request.repository.owner.display_login,
+                                                    comment.pull_request.repository.name,
+                                                    comment.pull_request.number), method: :post, remote: true, data: { target: "copilot-review-feedback.negativeForm" }) do %>
+          <%= hidden_field_tag :comment_id, comment.id %>
+          <%= hidden_field_tag :feedback, "NEGATIVE" %>
+          <%= render(Primer::Alpha::Dialog.new(title: 'Provide additional feedback',
+                                               subtitle: 'Please help us improve GitHub Copilot by sharing more details about this comment.',
+                                               size: :medium_portrait, position: :center, position_narrow: :bottom, visually_hide_title: false)) do |d| %>
+
+            <% d.with_show_button(icon: "thumbsdown",
+                                  "aria-label": "Negative Feedback",
+                                  scheme: :invisible,
+                                  size: :small,
+                                  test_selector: "#{comment.id}-comment-copilot-feedback-negative",
+                                  disabled: false,
+                                  data: { target: "copilot-review-feedback.voteDownButton" }) %>
+
+            <% d.with_body do %>
+              <%= render(Primer::Alpha::CheckBoxGroup.new(name: "feedback_choice", validation_message: "Please select one or more of the options", mt: 3, mb: 2,
+                                                          data: { action: "change:copilot-review-feedback#validateAnySelected",
+                                                                  target: "copilot-review-feedback.feedbackCheckboxes" } )) do |component| %>
+                <% component.check_box(label: "Comment is harmful or unsafe", value: "OFFENSIVE_OR_DISCRIMINATORY") %>
+                <% component.check_box(label: "Comment is poorly formatted", value: "POORLY_FORMATTED") %>
+                <% component.check_box(label: "Comment is not true", value: "INCORRECT") %>
+                <% component.check_box(label: "Comment is not helpful", value: "UNHELPFUL") %>
+                <% component.check_box(label: "Comment is attached to the wrong line(s)", value: "INCORRECT_LINE") %>
+                <% component.check_box(label: "Code suggestion is harmful or unsafe", value: "SUGGESTION_OFFENSIVE_OR_DISCRIMINATORY") %>
+                <% component.check_box(label: "Code suggestion is poorly formatted", value: "SUGGESTION_POORLY_FORMATTED") %>
+                <% component.check_box(label: "Code suggestion does not solve the problem in the comment", value: "SUGGESTION_UNHELPFUL") %>
+                <% component.check_box(label: "Code suggestion is invalid", value: "SUGGESTION_INVALID") %>
+              <% end %>
+
+              <%= render(Primer::Alpha::TextArea.new(name: "text_response", label: "How could we improve this response?", full_width: true, mt: 2)) %>
+              <%= render(Primer::Beta::Button.new(type: :submit, disable: true, scheme: :primary, float: :right, ml: 2, mt: 5,
+                                                  data: { target: "copilot-review-feedback.submitButton",
+                                                          action: "click:copilot-review-feedback#negativeFeedback" })) do %>
+                Submit feedback
+              <% end %>
+            <% end %>
+          <% end  %>
+        <% end %>
+      </div>
+    </div>
+  </copilot-review-feedback>
+  <h3 class="f5 text-normal d-flex flex-row gap-2" style="flex-grow: 1; justify-content: unset; flex: 1 1 auto;">
+      <div class="d-flex border bgColor-muted borderColor-default flex-justify-center circle flex-items-center avatar-3">
+        <%= render Primer::Beta::Octicon.new(icon: "copilot", size: :xsmall ) %>
+      </div>
+
+      <strong class="ml-1 flex-self-center">
+        <%= render Comments::Copilot::CommentActorComponent.new %>
+      </strong>
+
+      <%= badge %>
+
+      <%= action_text %>
+
+      <% if author_is_dependabot? %>
+        on behalf of <strong <%= test_selector("on-behalf-of-dependabot") %>><%= GitHub.dependabot_github_app.owner.display_login %></strong>
+      <% end %>
+
+      <% if show_datestamp %>
+        <a href="<%= permalink_url || "##{dom_id}" %>" id="<%= permalink_id %>" class="Link--secondary js-timestamp flex-self-center"><%= time_ago_in_words_js datestamp %></a>
+      <% end %>
+
+      <% if comment.created_via_email %>
+        via email <%= primer_octicon(:mail) %>
+      <% end %>
+
+      <%= render Comments::CommentEditHistoryComponent.new(comment: comment, author: author) %>
+
+
+    <% if show_abuse_reports? %>
+      <div class="mt-2">
+        <%= primer_octicon(icon: :report, color: :danger) %> <%= abuse_report_tooltip(comment.report_count, comment.top_report_reason, comment.last_reported_at) %>
+      </div>
+    <% end %>
+  </h3>
+</div>
+

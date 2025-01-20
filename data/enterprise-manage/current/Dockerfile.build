@@ -1,0 +1,72 @@
+FROM octofactory.githubapp.com/docker-remote/debian:buster
+
+ENV PATH="/usr/share/rbenv/shims:${PATH}" DISTRO=buster
+
+WORKDIR /tmp
+
+RUN set -ex \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends --allow-unauthenticated \
+  git curl ca-certificates apt-transport-https gnupg
+
+COPY packages.pub .
+COPY .ruby-version .
+COPY script/docker-bootstrap.sh .
+
+ARG APT_HOST=packages.service.github.net
+
+RUN set -ex \
+  && ./docker-bootstrap.sh \
+  && apt-get install -y --no-install-recommends \
+  rbenv \
+  rbenv-"`cat .ruby-version`"\
+  cmake\
+  gnupg \
+  build-essential \
+  libmysqlclient-dev \
+  dumb-init \
+  gnupg-agent \
+  libfontconfig1 \
+  libjemalloc-dev \
+  libjemalloc2 \
+  libssl-dev \
+  nodejs \
+  openssh-client \
+  pkg-config \
+  sudo \
+  zlib1g \
+  zlib1g-dev \
+  libgmp-dev \
+  && apt-get clean -y \
+  && apt-get autoremove -y \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN set -ex \
+  && gem install bundler -v 2.4.10
+
+RUN rbenv global "`cat .ruby-version`"
+
+ENV LANG C.UTF-8
+
+ARG USERNAME=default
+ARG USER_UID
+ARG USER_GID
+
+ENV HOME=/home/$USERNAME
+
+# Create the user
+RUN (groupadd --gid $USER_GID $USERNAME || true) \
+  && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+  # [Optional] Add sudo support
+  && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+  && chmod 0440 /etc/sudoers.d/$USERNAME \
+  && echo "export PATH=$PATH" >> $HOME/.profile
+
+RUN mkdir -p /workspace/enterprise2/enterprise-manage/vendor/gems && chown -R $USERNAME /workspace/enterprise2
+VOLUME /workspace/enterprise2/enterprise-manage/vendor/gems
+
+USER $USERNAME
+
+WORKDIR /workspace/enterprise2/enterprise-manage
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["./script/test"]

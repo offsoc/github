@@ -1,0 +1,113 @@
+#!/bin/bash
+#/ Usage: ghe-repo REPO
+#/        ghe-repo REPO -c COMMAND-STRING
+#/        ghe-repo REPO [--] COMMAND
+#/
+#/ Run a command or open a shell in a local github repository as the
+#/ `git` user.
+#/
+#/ Options:
+#/
+#/ -c COMMAND-STRING
+#/   COMMAND-STRING is a shell snippet as a single string, to be
+#/   interpreted within the repository using bash; e.g.,
+#/
+#/       ghe-repo torvalds/linux -c 'git fsck | grep -v dangling'
+#/
+#/ COMMAND
+#/   COMMAND is a command and its arguments, as separate words (not
+#/   subject to further shell interpretation); e.g.,
+#/
+#/       ghe-repo rails/rails -- git nw-info -a
+#/
+#/ The REPO argument may take any of the following forms to
+#/ distinguish between normal repositories, wikis, and gists:
+#/
+#/   user/repo        A normal repository.
+#/   user/repo.wiki   A wiki repository.
+#/   gist/id          A gist repository.
+
+# This script is meant to be called from the `ghe-repo` shim. The
+# usage message refers to `ghe-repo`, not `ghe-repo-backend`, because
+# that is the user-facing program that the user would have run.
+
+source /usr/local/share/enterprise/ghe-nomad-lib
+set -euo pipefail
+
+[ $# -eq 0 ] && set -- --help
+
+set_command() {
+    if [ -n "$command" ]; then
+        echo 1>&2 "error: multiple commands specified"
+        exit 1
+    fi
+    command="$1"
+}
+
+repo=
+command=
+print_only=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help|-h)
+            grep '^#/' "$0" | cut -c4-
+            exit
+            ;;
+        -p)
+            print_only=true
+            shift;
+            ;;
+        -c)
+            if [ $# -lt 2 ]; then
+                echo 1>&2 "-c requires an argument"
+                exit 1
+            fi
+            set_command "$2"
+            shift 2
+            ;;
+        --)
+            shift
+            if [ $# -eq 0 ]; then
+                echo 1>&2 "error: no command following '--'"
+                exit 1
+            fi
+            set_command "$(quote_args "$@")"
+            break
+            ;;
+        -*)
+            echo 1>&2 "Unrecognized option: $1"
+            exit 1
+            ;;
+        *)
+            if [ -z "$repo" ]; then
+                repo="$1"
+                shift
+            else
+                set_command "$(quote_args "$@")"
+                break
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$repo" ]; then
+    echo 1>&2 "Repository argument missing"
+    exit 1
+fi
+
+path="$(shard-path "$repo")"
+path="${path#*:}"
+
+if $print_only; then
+    echo "$path"
+    exit 0
+fi
+
+cd "$path"
+
+if [ -n "$command" ]; then
+    exec bash -c "$command"
+else
+    exec bash
+fi

@@ -1,0 +1,3 @@
+export const SLICER_PANEL_MIN_WIDTH = 176
+export const SLICER_PANEL_MAX_WIDTH = 800
+export const SLICER_PANEL_DEFAULT_WIDTH = 392

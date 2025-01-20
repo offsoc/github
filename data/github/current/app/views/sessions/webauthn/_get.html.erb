@@ -1,0 +1,77 @@
+<%
+  # webauthn_user local is provided for all cases except `:passwordless_sign_in`
+
+  case webauthn_reason
+  when :two_factor_sign_in,
+       :two_factor_sudo,
+       :password_reset
+    passkeys_only = false
+  when :passwordless_sign_in
+    passkeys_only = true
+  when :passkey_promote_confirmation
+    passkeys_only = true
+  else
+    # This means that our source code is inconsistent.
+    raise "Invalid webauthn sign request reason"
+  end
+
+  button_text ||= "Use #{webauthn_user.available_u2f_registrations_description(current_device_id, passkeys_only: passkeys_only)}"
+  button_icon ||= ""
+  subtle_login ||= subtle_login
+  description = webauthn_user ? webauthn_user.available_u2f_registrations_description(current_device_id, passkeys_only: passkeys_only) : "passkey"
+  capitalized_description = webauthn_user ? webauthn_user.available_u2f_registrations_description(current_device_id, passkeys_only: passkeys_only, capitalize_first_word: true) : "Passkey"
+%>
+
+<webauthn-get
+  data-target="sudo-credential-options.webauthnGet"
+  data-target="sudo-auth.webauthnGet"
+  data-json="<%= webauthn_sign_request(user: webauthn_user, webauthn_reason: webauthn_reason).to_json %>"
+  <%= "subtle-login" if subtle_login %>
+>
+  <noscript>
+    <p class="webauthn-message js-webauthn-message">
+      <%= render Primer::Alpha::Banner.new(icon: "alert", text_align: :left, mb: 3, p: 0,
+      ) do %>
+        Enable JavaScript to use your <%= description %>.
+      <% end %>
+    </p>
+  </noscript>
+
+  <% if webauthn_user ? webauthn_user.has_registered_passkey? : true %>
+    <%= render Primer::Alpha::Banner.new(scheme: :warning, icon: "alert", text_align: :left, mb: 3, p: 0,
+    "data-target": "webauthn-get.passkeysUnsupportedMessage", hidden: true,
+    ) do %>
+      This browser or device is reporting partial passkey support.
+    <% end %>
+  <% end %>
+
+  <%= render Primer::Alpha::Banner.new(scheme: :warning, icon: "alert", text_align: :left, mb: 3, p: 0,
+   "data-target": "webauthn-get.unsupportedMessage", hidden: true,
+  ) do %>
+    Webauthn isn't supported. Use a different browser or device to use your <%= description %>.
+  <% end %>
+
+  <%= render Primer::Alpha::Banner.new(scheme: :danger, icon: "alert", text_align: :left, mb: 3, p: 0,
+  "data-targets": "webauthn-get.messages", "data-target": "webauthn-get.errorMessage", hidden: true,
+    ) do %>
+    <span role="alert" data-target="webauthn-get.errorText"> Authentication failed. </span>
+  <% end %>
+
+  <p data-targets="webauthn-get.messages" data-target="webauthn-get.waitingMessage" class="my-3 text-center color-fg-muted" hidden>
+    <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :middle, mr: 2)) %>
+    Waiting for input from browser interaction...
+  </p>
+  <%= render(Primer::Beta::Button.new(
+    type: :button,
+    "data-target": "webauthn-get.button",
+    "data-action": "click:webauthn-get#prompt",
+    "data-retry-message": "Retry #{description}",
+    mt: 0,
+    scheme: is_primary_auth_option_in_prompt ? :primary : :default,
+    classes: "js-webauthn-confirm-button btn btn-block#{" btn-large" if mobile? }",
+    disabled: "true",
+  )) do |b| %>
+    <% b.with_leading_visual_icon(icon: button_icon, color: :inherit) unless button_icon.blank? %>
+    <span data-target="webauthn-get.buttonText"><%= button_text %></span>
+  <% end %>
+</webauthn-get>

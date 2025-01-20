@@ -1,0 +1,280 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% raise ArgumentError, "missing keyword: pull_comparison" unless pull_comparison = @pull_comparison %>
+
+<%
+  attribution = @pull.user ? " by #{@pull.user.display_login}" : ""
+  title = [
+    "#{@pull.title}#{attribution}",
+    "Pull Request ##{@pull.number}",
+    current_repository.name_with_display_owner,
+  ].join(" · ")
+
+  pull_title = @pull.title.blank? ? "Untitled" : @pull.title
+
+  page_info \
+    title: title,
+    container_xl: true,
+    selected_link: :repo_pulls,
+    stafftools: gh_stafftools_repository_pull_request_path(@pull),
+    description: @pull.body_text,
+    class: diff_body_class(force_full_width: file_tree_available),
+    html_class: "skip-scroll-target-into-view js-skip-scroll-target-into-view",
+    dashboard_pinnable_item_id: @pull.global_relay_id,
+    breadcrumb_object: @pull,
+    richweb: {
+      title: title,
+      url: "#{GitHub.url}#{issue_permalink_path(@pull.issue)}",
+      description: truncate(@pull.body_text, length: 240),
+      image: avatar_url_for(@pull.safe_user, 400)
+    }
+
+  viewing_commits = (pull_comparison.commits.size == 1 && params[:tab] == "commits") || pull_comparison.range?
+
+  default_hydro_payload = \
+    default_file_tree_hydro_payload(
+      file_count: file_count,
+      pull_request_id: @pull.id
+    )
+%>
+
+<% content_for :head do %>
+  <link data-turbo-transient rel="alternate" type="text/x-diff" href="<%= gh_pull_request_diff_path(@pull) %>">
+  <link data-turbo-transient rel="alternate" type="text/x-patch" href="<%= gh_pull_request_patch_path(@pull) %>">
+  <meta name="diff-view" content="<%= diff_view %>" data-turbo-transient>
+<% end %>
+
+<% contents = stats.record_distribution(:render_content) do %>
+  <% capture do %>
+    <% if aleph_code_navigation_available? && head_repository.owner.present? %>
+      <%= render partial: "code_navigation/popover", locals: { repo: head_repository, ref: tree_name, code_nav_context: :DIFF_VIEW } %>
+    <% end %>
+
+    <div
+      class="<%= class_names(
+        "position-relative",
+        "js-review-state-classes",
+        pull_request_review_state_classes(@current_review),
+        "js-suggested-changes-files-tab" => tab_specified?(:files) && !viewing_commits,
+        "js-suggested-changes-subset-files" => viewing_commits,
+      ) %>"
+      data-pjax
+      data-discussion-hovercards-enabled
+      data-issue-and-pr-hovercards-enabled
+    >
+      <div id="files_bucket" class="files-bucket files-next-bucket clearfix pull-request-tab-content is-visible js-multi-line-comments-enabled">
+        <diff-file-filter>
+          <%= rescue_with_timeout_message("Sorry, this file list is taking too long to generate.") do %>
+            <% simulate_timeout_error_if_param!(GitRPC::Timeout) %>
+
+            <%
+              user_reviewed_files = PullRequestUserReviews.new(@pull, current_user)
+
+              file_list_view = Diff::FileListView.new(
+                :pull             => @pull,
+                :diffs            => pull_comparison.try(:diffs),
+                :pull_comparison  => pull_comparison,
+                :params           => params,
+                :prose_url_hints  => @prose_url_hints,
+                :current_user     => current_user,
+                :commentable      => (pull_comparison && issue_thread_commentable?),
+                # Highlighting was already performed by the controller.
+                :highlight        => false,
+                :progressive      => true,
+                :cap_view_filter  => cap_view_filter,
+                :user_reviewed_files => user_reviewed_files
+              )
+            %>
+
+            <% stats.record_render("comments/title") do %>
+              <%= render :partial => 'comments/title', :locals => {
+                :pull         => @pull,
+                :comment      => @pull.issue,
+                :issue        => @pull.issue,
+                :title        => pull_title
+              } %>
+            <% end %>
+
+            <% stats.record_render("tabs") do %>
+              <%= render "pull_requests/lazy_tabs", pull: @pull %>
+            <% end %>
+
+            <%#
+              Both the pr_toolbar and diff layout sections need to be nested inside
+              <diff-layout> element in order for file tree toggling behavior to work.
+            %>
+            <diff-layout <% if !file_tree_visible?(file_count: file_count) %>sidebar-hidden<% end %>>
+              <%= render Primer::ButtonComponent.new(
+                data: {
+                  hotkey: hotkeys_for(current_user, :pull_request_files_changed, :files_list_open),
+                  action: "click:diff-layout#handleOpenFilesListHotkeyEvent",
+                },
+                hidden: true
+              ) %>
+              <% stats.record_render("pr_toolbar") do %>
+                <div
+                  class="pr-toolbar js-sticky js-position-sticky d-flex"
+                  data-target="diff-layout.diffToolbar"
+                >
+                  <div class="diffbar details-collapse js-details-container Details flex-1 d-flex flex-items-center width-full">
+                    <div class="show-if-stuck mr-2 hide-md hide-sm">
+                      <%= render partial: "pull_requests/state", locals: { pull: @pull } %>
+                    </div>
+
+                    <div class="flex-auto min-width-0">
+                      <div class="show-if-stuck hide-md hide-sm">
+                        <%= render partial: "comments/title/sticky_title", locals: { title: pull_title, number: @pull.number, max_width: "35em" } %>
+                      </div>
+                      <div class="d-flex flex-items-center flex-wrap" style="gap: 4px 16px;" data-pjax="#repo-content-pjax-container" data-turbo-frame="repo-content-turbo-frame">
+                        <% ctrl_f_payload =
+                          hydro_click_tracking_attributes("pull_request.user_action", {
+                            user_id: current_user&.id,
+                            pull_request_id: @pull.id,
+                            category: "files",
+                            action: "ctrl_f",
+                            data: {
+                              file_count: file_count
+                            }
+                        }) %>
+                        <instrument-files
+                          data-hydro-click-payload="<%= ctrl_f_payload["hydro-click"] %>"
+                          data-hydro-click-hmac="<%= ctrl_f_payload["hydro-click-hmac"] %>"
+                        ></instrument-files>
+
+                        <% if file_tree_available %>
+                          <%= render PullRequests::FileTree::ToggleComponent.new(
+                            default_hydro_payload: default_hydro_payload,
+                            split_diff: split_diff?,
+                            file_tree_visible: file_tree_visible?(file_count: file_count),
+                          ) %>
+                        <% end %>
+
+                        <%= render "pull_requests/diffbar/range_menu", view: create_view_model(
+                          PullRequests::RangeMenuView,
+                          :pull_comparison => pull_comparison
+                        ) %>
+
+                        <% if pull_comparison.diffs.available? %>
+                          <%= render(PullRequests::FileTree::FileFilterComponent.new(diff: pull_comparison.diffs, pull_id: @pull.id, pull_codeowners: @pull.codeowners)) %>
+                          <%= render partial: "pull_requests/diffbar/clear_filters", locals: { pull_request_id: @pull.id } %>
+                          <%= render partial: "pull_requests/diffbar/conversations", locals: { pull_comparison: pull_comparison } %>
+                          <%= render partial: "pull_requests/diffbar/toc_menu", locals: {
+                            file_list_view: file_list_view,
+                            pull_comparison: pull_comparison,
+                            responsive_display_classes: (" d-#{file_tree_hide_below_breakpoint}-none" if file_tree_available)
+                          } %>
+                          <%= render partial: "pull_requests/diffbar/diff_settings", locals: { pull_comparison: pull_comparison } %>
+                        <% end %>
+
+                        <% if pull_comparison.current? %>
+                          <%= render :partial => "pull_requests/stale_comparison", :locals => { :pull_comparison => pull_comparison } %>
+                        <% end %>
+                      </div>
+                    </div>
+
+                    <div class="flex-grow-0 flex-shrink-0 pr-review-tools">
+                      <% if logged_in? && with_database_error_fallback(fallback: false) { can_interact_with_repo? } && !@pull.locked_for?(current_user) %>
+                        <%= render :partial => "pull_requests/diffbar/batched_suggested_changes",
+                          :locals => { :pull => @pull, :review => @current_review } %>
+                      <% end %>
+
+                      <% if logged_in? %>
+                        <% if params[:tab] != "commits" %>
+                          <%= render :partial => "pull_requests/diffbar/reviewed_progress", :locals => { pull: @pull, pull_comparison: pull_comparison } %>
+                        <% end %>
+
+                        <% if @pull && !@pull.new_record? && current_repository && with_database_error_fallback(fallback: false) { copilot_chat_enabled_for_current_user? } %>
+                          <div style="display: inline-block; float: left">
+                            <%= render_react_partial(
+                              name: "copilot-code-chat",
+                              ssr: true,
+                              props: {
+                                repoOwner: current_repository.owner.display_login,
+                                repoName: current_repository.name,
+                                prNumber: @pull.number,
+                                startOid: pull_comparison.start_commit.oid,
+                                endOid: pull_comparison.end_commit.oid,
+                              }
+                            ) %>
+                          </div>
+                        <% end %>
+
+                        <%= render :partial => "pull_requests/diffbar/review_in_codespace",
+                          :locals => { :pull => @pull, visibility: visibility } %>
+                        <%= render :partial => "pull_requests/diffbar/reviews",
+                          :locals => { :pull => @pull, :review => @current_review } %>
+                      <% end %>
+                    </div>
+                  </div>
+                </div>
+                <%#
+                  NOTE: our CSS expects this `.toolbar-shadow` div to be an adjacent
+                  sibling to `.pr-toolbar.js-sticky` div above, so if you move either
+                  element, you'll likely need to adjust the CSS as well.
+                %>
+                <div class="toolbar-shadow js-notification-shelf-offset-top" data-original-top="60px"></div>
+              <% end %>
+              <% if file_tree_available %>
+                <%= render(Primer::Alpha::Layout.new(
+                  side: :left,
+                  responsive: true,
+                  gutter: :condensed,
+                  stacking_breakpoint: file_tree_hide_below_breakpoint,
+                  classes: "#{'hx_Layout--sidebar-hidden' unless file_tree_visible?(file_count: file_count)} hx_Layout wants-full-width-container",
+                  data: {
+                    target: "diff-layout.layoutContainer"
+                  },
+                  test_selector: "layout-component"
+                )) do |component| %>
+                  <% component.with_sidebar(
+                    row_placement: :none,
+                    position: :sticky,
+                    classes: "overflow-y-auto hx_Layout--sidebar js-notification-shelf-offset-top",
+                    data: {
+                      target: "diff-layout.sidebarContainer",
+                      action: "scroll:diff-layout.sidebarContainer#handleSidebarScroll"
+                    }
+                  ) do %>
+                    <%= render "pull_requests/lazy_file_tree", pull_comparison:, user_reviewed_files:, default_hydro_payload: %>
+                  <% end %>
+                  <% component.with_main(
+                    data: {
+                      target: "diff-layout.mainContainer",
+                    }
+                  ) do %>
+                    <%= render "pull_requests/diff",
+                      file_list_view: file_list_view,
+                      pull_comparison: pull_comparison,
+                      pull: @pull,
+                      show_checks_status: show_checks_status
+                    %>
+                  <% end %>
+                <% end %>
+              <% else %>
+                <%= render "pull_requests/diff",
+                  file_list_view: file_list_view,
+                  pull_comparison: pull_comparison,
+                  pull: @pull,
+                  show_checks_status: show_checks_status
+                %>
+              <% end %>
+            </diff-layout>
+          <% end %>
+        </diff-file-filter>
+      </div>
+    </div>
+    <%= render :partial => "comments/suggested_changes_validation" %>
+  <% end %>
+<% end %>
+
+<% stats.record_distribution(:render_repo_layout) do %>
+  <%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+    <div class="<%= class_names(
+      "clearfix mt-4",
+      "px-3 px-md-4 px-lg-5" => !skip_responsive_padding?,
+      "p-0" => skip_responsive_padding?
+    ) %>">
+    <%= contents %>
+    </div>
+  <% end %>
+<% end %>

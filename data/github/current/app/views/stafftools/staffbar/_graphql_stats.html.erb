@@ -1,0 +1,128 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<div id="graphql_performance_pane" class="performance-pane" hidden>
+  <div class="inner">
+    <div class="container-lg">
+      <div class="gutter d-flex">
+        <div class="col-6">
+          <div class="input-group">
+            <input class="form-control input-sm js-graphql-query-trace-cutoff-ms" aria-label="Filter by ms" type="text" value="1.0">
+            <span class="input-group-button">
+              <%= render Primer::ButtonComponent.new(variant: :small, classes: "js-graphql-query-trace-filter-ms", "aria-label": "Filter by ms") do %>
+                Filter by ms <%= primer_octicon(:meter) %>
+              <% end %>
+            </span>
+          </div>
+        </div>
+        <div class="col-6">
+          <div class="input-group">
+            <input class="form-control input-sm js-graphql-query-trace-focus-path" value="<%= params[:graphql_query_trace_profile_path] %>" placeholder="eg, node.owner.login" aria-label="Focus on a path" type="text">
+            <span class="input-group-button">
+              <%= render Primer::ButtonComponent.new(variant: :small, classes: "js-graphql-query-trace-expand-path", "aria-label": "Focus on a path") do %>
+                Focus by path <%= primer_octicon(:telescope) %>
+              <% end %>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="graphql-query-trace-node-row">
+      <span class="graphql-query-trace-node-name">
+        Name
+      </span>
+      <span class="graphql-query-trace-total-time">
+        Total
+      </span>
+      <span class="graphql-query-trace-own-time">
+        Own
+      </span>
+      <span class="graphql-query-trace-child-time">
+        Children
+      </span>
+      <span class="graphql-query-trace-gc" title="Ruby objects allocated during this period"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+        Objects
+      </span>
+      <span class="graphql-query-trace-external-calls">
+        External calls
+      </span>
+    </div>
+    <% instrumenter.tracers.each do |tracer| %>
+      <%= render partial: "stafftools/staffbar/graphql_stats_query", locals: { tracer: tracer } %>
+    <% end %>
+  </div>
+
+  <% instrumenter.queries.each_with_index do |query_details, index| %>
+    <div class="inner">
+      <ul class="big-nums">
+        <li><strong><%= "%.3f" % query_details[:stats][:real] %>ms total</strong></li>
+        <li>(<%= "%.3f" % query_details[:stats][:cpu] %>ms CPU + <%= "%.3f" % query_details[:stats][:idle] %>ms idle)</li>
+        <li>
+          <%-
+            mysql_stats_view = Stafftools::Staffbar::MysqlQueriesStatsView.new(
+              tags: ["graphql:true"],
+              html_id: "graphql_mysql_stats_#{index}",
+              controller: controller,
+            )
+          -%>
+          <a href="#graphql_mysql_stats_<%= index %>_query_table">
+            SQL (<%= mysql_stats_view.query_count %> queries)
+          </a>
+        </li>
+        <li>
+          <%-
+            event_traces = GitRPCLogSubscriber.rpc_calls.select do |event_trace|
+              event_trace.tags.include?(query_details[:string])
+            end
+          -%>
+          <% gitrpc_text = "GitRPC (#{event_traces.size} calls)" %>
+          <% if event_traces.any? %>
+            <%= render layout: "shared/details_dialog", locals: {
+              button_text: gitrpc_text,
+              button_class: "btn-link",
+              title: "GitRPC Stats"
+            } do %>
+              <%= render partial: "stafftools/staffbar/event_trace", locals: { event_traces: event_traces } %>
+            <% end %>
+          <% else %>
+            <%= gitrpc_text %>
+          <% end %>
+        </li>
+      </ul>
+
+      <table class="queries">
+        <thead>
+        <tr>
+          <th>Query</th>
+          <th>Variables</th>
+        </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="sql">
+              <div class="highlight">
+                <pre><%=
+                  graphql = query_details[:string]
+                  safe_join(GitHub::Colorize.highlight_one("source.graphql", graphql), "\n")
+                %></pre>
+              </div>
+            </td>
+            <td class="sql">
+              <div class="highlight">
+                <pre><%=
+                  json = JSON.pretty_generate(encode_parameters(query_details[:variables]))
+                  safe_join(GitHub::Colorize.highlight_one("source.json", json), "\n")
+                %></pre>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <% unless Rails.env.test? %>
+      <div class="performance-pane js-mysql-performance-pane">
+        <%= render "stafftools/staffbar/mysql_queries_stats", view: mysql_stats_view %>
+      </div>
+      <% end %>
+    </div>
+  <% end %>
+</div>

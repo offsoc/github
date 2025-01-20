@@ -1,0 +1,42 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+
+require "net/http"
+require "json"
+
+NOMAD_API = "http://localhost:4646/v1"
+
+
+def nomad_dump_api(file_path, endpoint)
+  uri = URI(NOMAD_API + endpoint)
+  req = Net::HTTP::Get.new(uri)
+
+  # Nomad down, no allocations :)
+  begin
+    res = Net::HTTP.start(uri.host, uri.port) do |http|
+      http.request(req)
+    end
+  rescue StandardError
+    return
+  end
+
+  case res
+  when Net::HTTPOK then
+    body = JSON.parse(res.body) || []
+
+    body.each do |obj|
+      name = obj["Name"]
+      name.sub! "/", "_"
+      log_path = file_path + "/" + name + ".json"
+      File.open(log_path, "w") { |file| file.write(JSON.generate(obj)) }
+    end
+  end
+end
+
+if ARGV.length == 1
+  base_path = ARGV[0]
+  nomad_dump_api(base_path, "/jobs")
+  nomad_dump_api(base_path, "/allocations")
+else
+  puts "[ghe-support-nomad] Error: wrong number of arguments"
+end

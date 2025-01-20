@@ -1,0 +1,104 @@
+#!/bin/bash
+#/ Usage: ghe-import-mysql-mysqldump [-h]
+#/
+#/ Import a logical backup taken with ghe-export-mysql. It is invoked by ghe-import-mysql
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the MySQL data from a dump file:
+#/    $ ghe-import-mysql-mysqldump < dump-file
+#/
+#/  Transfer the MySQL data from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-mysql | ghe-import-mysql
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ] || [ -t 0 ]; then
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+fi
+
+function message {
+  echo " --> ${1}" | ts
+}
+
+MYSQL_MAX_PACKET_SIZE=33554432
+
+sudo=sudo
+
+if ghe-config --true 'mysql.external.enabled'; then
+  GHE_MYSQL_HOST="127.0.0.1"
+  MYSQL_PWD=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+  GHE_MYSQL_USER=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+  GHE_MYSQL_PORT="3307"
+  sudo=
+else
+  if [ -f /etc/github/cluster ] && [ -n "$(ghe-config cluster.mysql-master)" ]; then
+    GHE_MYSQL_HOST="$(ghe-config cluster.mysql-master || true)"
+    GHE_MYSQL_USER="$(ghe-config cluster.mysql-username || echo "github")"
+    MYSQL_PWD="$(ghe-config secrets.mysql || true)"
+    sudo=
+  fi
+  /usr/local/share/enterprise/ghe-service-ensure-mysql
+fi
+export MYSQL_PWD
+
+GHE_MYSQL_CONN="-u ${GHE_MYSQL_USER:-root} ${GHE_MYSQL_HOST:+--host="$GHE_MYSQL_HOST"} ${GHE_MYSQL_PORT:+--port="$GHE_MYSQL_PORT"} --default-character-set=utf8"
+
+# Fetch the original packet size so we can restore it later. This
+# is done to protect against future changes in the primary config.
+MYSQL_ORIG_PACKET_SIZE=$($sudo mysql $GHE_MYSQL_CONN -s -e "show variables like 'max_allowed_packet';" | awk {'print $2'})
+
+# Outside of clustering we can drop the database just to be safe
+if [ ! -f /etc/github/cluster ]; then
+  $sudo mysql $GHE_MYSQL_CONN -e "DROP DATABASE IF EXISTS github_enterprise;"
+else
+  # On cluster, purge the binary logs before starting a restore. This
+  # prevents them from building up and consuming too much disk space
+  # during frequent restores.
+  for alloc in $(ghe-nomad-api allocations | jq '.[] | select(.JobID=="mysql") | select(.ClientStatus=="running") | .ID' -r); do
+    nomad alloc exec -i=false -t=false $alloc "/bin/bash" "-c" 'echo "PURGE BINARY LOGS BEFORE DATE_SUB(NOW(), INTERVAL 1 HOUR)" | mysql -su root'
+  done
+fi
+
+# Create database if it isn't there yet
+$sudo mysql $GHE_MYSQL_CONN -e "CREATE DATABASE IF NOT EXISTS github_enterprise;"
+
+# Increase the max_allowed_packet setting to the maximum to allow
+# for large multi-row inserts to succeed (the default is 16MB).
+if [ ${MYSQL_ORIG_PACKET_SIZE:-0} -lt $MYSQL_MAX_PACKET_SIZE ]; then
+  $sudo mysql $GHE_MYSQL_CONN -e "set GLOBAL max_allowed_packet = ${MYSQL_MAX_PACKET_SIZE};"
+fi
+
+tables="fileservers|network_replicas|repository_replicas|repository_checksums|pages_fileservers|pages_partitions|pages_replicas|gist_replicas|storage_replicas|storage_file_servers|cold_networks"
+
+trap 'rm -rf /tmp/seen_tables.txt /tmp/all_tables.txt' INT TERM EXIT
+
+message "Importing MySQL data..."
+cat /dev/stdin | tee >(grep "DROP TABLE IF EXISTS" | perl -pe "s/DROP TABLE IF EXISTS \\\`(.*)\\\`;/\$1/g" > /tmp/seen_tables.txt) |
+      perl -pe "s/DROP TABLE IF EXISTS \\\`($tables)\\\`;//g" |
+      perl -pe "s/CREATE TABLE \\\`($tables)\\\` \\(/CREATE TABLE IF NOT EXISTS \\\`\$1\\\` \\(/g" |
+      ( [ -f /etc/github/cluster ] && perl -pe "s/INSERT INTO \\\`($tables)\\\` VALUES (.*);//g" || cat ) |
+      $sudo mysql $GHE_MYSQL_CONN github_enterprise
+
+# Explicitly mark this table as present. It was introduced after 2.4
+# and is also guarded with proper existence checks so it still works
+echo "gist_replicas|storage_replicas|storage_file_servers" | tr '|' '\n' >> /tmp/seen_tables.txt
+
+# See which tables exists. We need to remove tables that are new
+# because they are stale and would break migrations.
+$sudo mysql $GHE_MYSQL_CONN github_enterprise -B -N -e "SHOW TABLES;" > /tmp/all_tables.txt
+
+tables_to_remove=$(comm <(sort /tmp/all_tables.txt) <(sort /tmp/seen_tables.txt) -23)
+for table_to_remove in $tables_to_remove; do
+  $sudo mysql $GHE_MYSQL_CONN github_enterprise -e "DROP TABLE \`$table_to_remove\`;"
+done
+
+# Restore the original max_allowed_packet size.
+if [ ${MYSQL_ORIG_PACKET_SIZE:-0} -lt $MYSQL_MAX_PACKET_SIZE ]; then
+  $sudo mysql $GHE_MYSQL_CONN -e "set GLOBAL max_allowed_packet = ${MYSQL_ORIG_PACKET_SIZE};"
+fi

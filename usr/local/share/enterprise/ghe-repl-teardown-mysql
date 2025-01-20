@@ -1,0 +1,40 @@
+#!/bin/bash
+#/ Usage: ghe-repl-teardown-mysql [true/false]
+#/
+#/ Removes MySQL replica configuration from the current instance.
+#/ Optionally deletes database seed file from the primary node in addition to the replica.
+#/
+#/ This script is not called directly, but instead through ghe-repl-teardown.
+#/ This script can only be run on replicas.
+#/
+#/ OPTIONS:
+#/   true to clean up the master node as well as the replica
+
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+. ghe-repl-lib
+
+ensure_replica
+
+TEARDOWN_ALL="$1"
+
+# remove mysql replication config
+sudo rm -f /etc/mysql/conf.d/slave.cnf
+query "SET GLOBAL read_only = 0;"
+query "STOP SLAVE; RESET SLAVE ALL;"
+
+OLD_MYSQL_SEED_DIR="/data/user/mysql"
+MYSQL_SEED_DIR="/data/user/common/mysql"
+if $TEARDOWN_ALL; then
+  primary_ssh "sudo find $OLD_MYSQL_SEED_DIR -maxdepth 1 -name database_seed_* -delete" || true
+  if primary_ssh test -d $MYSQL_SEED_DIR ; then
+    primary_ssh "sudo find $MYSQL_SEED_DIR -maxdepth 1 -name database_seed_* -delete" || true
+  fi
+fi
+
+# clean up any previous database seed files
+sudo find $OLD_MYSQL_SEED_DIR -maxdepth 1 -name database_seed_* -delete
+if [ -d $MYSQL_SEED_DIR ]; then
+  sudo find $MYSQL_SEED_DIR -maxdepth 1 -name database_seed_* -delete
+fi

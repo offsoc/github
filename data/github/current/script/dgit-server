@@ -1,0 +1,520 @@
+#!/usr/bin/env ruby
+#/ Usage:
+#/   .spokes server evacuate host reason  Set the evacuation bit to drain all
+#/                                        the repos off a server
+#/   .spokes server unevacuate host       Clear the evacuation bit
+#/   .spokes server embargo host reason   Set the embargo bit to block new
+#/                                        repos on a server
+#/   .spokes server unembargo host        Clear the embargo bit
+#/   .spokes server quiesce host reason   Set the quiescing bit to prevent
+#/                                        read traffic to a server
+#/   .spokes server unquiesce host        Clear the quiescing bit
+#/   .spokes server destroy host          Remove a host and everything routed
+#/                                        to it.  It is recommended but not
+#/                                        required that you evacuate the host
+#/                                        first.  THIS CANNOT BE UNDONE.
+#/   .spokes server retire host           Gracefully destroy a host (with
+#/                                        sanity checks).  THIS CANNOT BE
+#/                                        UNDONE.
+#/   .spokes server online host           Set the online flag, for newly
+#/                                        provisioned hosts.
+#/   .spokes server offline host          Clear the online flag, when destroying
+#/                                        a host.
+#/   .spokes server show {host|status}    Show the embargo, quiesce, and evac
+#/                                        status of a host, or show all hosts
+#/                                        with a given status. Status can be:
+#/                                        inactive, embargoed, quiescing,
+#/                                        evacuating.
+#/   .spokes server provision serial      Provision and install a chassis for
+#/                                        Spokes and deploy apps to it so
+#/                                        that it can begin serving repos.
+#/   .spokes server prepare host          Do initial steps to prepare a host
+#/                                        for Spokes, after it has been
+#/                                        provisioned and installed
+#/   .spokes server ready? host           Check which final steps are needed
+#/                                        before a host can be added to Spokes
+#/   .spokes server resolve host          Update the `ip` column in the fileservers
+#/                                        table for the given host.
+#/   .spokes server unresolve host        Clear the `ip` column in the fileservers
+#/                                        table for the given host (set it to NULL).
+#/   .spokes server add host fqdn <strg>  Add a new fileserver to the database, from
+#/                                        both the short hostname and the fully qualified
+#/                                        name.  Must specify `storage={forcessd|forcehdd}`.
+
+if ARGV.include?("destroy")  # "destroy" needs "throttle"
+  require File.expand_path("../../config/environment", __FILE__)
+else
+  require File.expand_path("../../config/basic", __FILE__)
+end
+require "github/config/mysql"
+require "github/config/gitrpc"
+require "terminal-table"
+
+GitHub.load_activerecord
+
+@json = false
+
+def main
+  @json = true if ARGV.delete("--json")
+  command = ARGV.shift
+  usage if !command || command !~ /\A\w+\z/
+  begin
+    m = method("do_#{command}".to_sym)
+    m.call(*ARGV)
+  rescue NameError, ArgumentError => e
+    puts e.backtrace.join "\n"
+    puts e.message
+    usage
+  end
+end
+
+def usage
+  op = File.read($0).each_line.grep(/^#\/ /).map { |line| line[3..-1] }
+  if GitHub.enterprise?
+    # drop "prepare" and "ready?"
+    idx = op.index { |s| s =~ /server (?:prepare|ready)/ }
+    op = op[0...idx] if idx
+  end
+  puts op
+  exit
+end
+
+def do_evacuate(server, reason)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is already evacuating" if status.evacuating
+  success = GitHub::DGit::Util.set_fileserver_evacuating(server, reason)
+  put_result(success, server, "evacuating")
+end
+
+def do_unevacuate(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is not evacuating" unless status.evacuating
+  success = GitHub::DGit::Util.unset_fileserver_evacuating(server)
+  put_result(success, server, "no longer evacuating")
+end
+
+def do_embargo(server, reason)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is already embargoed" if status.embargoed
+  success = GitHub::DGit::Util.set_fileserver_embargoed(server, reason)
+  put_result(success, server, "embargoed")
+end
+
+def do_unembargo(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is not embargoed" unless status.embargoed
+  success = GitHub::DGit::Util.unset_fileserver_embargoed(server)
+  put_result(success, server, "no longer embargoed")
+end
+
+def do_quiesce(server, reason)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is already quiescing" if status.quiescing
+  success = GitHub::DGit::Util.set_fileserver_quiescing(server, reason)
+  put_result(success, server, "quiescing")
+end
+
+def do_unquiesce(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is not quiescing" unless status.quiescing
+  success = GitHub::DGit::Util.unset_fileserver_quiescing(server)
+  put_result(success, server, "no longer quiescing")
+end
+
+def do_online(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is not offline" if status.online
+  success = GitHub::DGit::Util.set_fileserver_online(server)
+  put_result(success, server, "online")
+end
+
+def do_offline(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "#{server} is not online" unless status.online
+  success = GitHub::DGit::Util.set_fileserver_offline(server)
+  put_result(success, server, "offline")
+end
+
+def emit_storage_server_ip(host)
+  ip = GitHub::DGit::DB::FS::SQL.value("SELECT ip FROM fileservers WHERE host = :host",
+                                       host: host)
+  if ip
+    "Host #{host} has address #{ip}"
+  else
+    "Host #{host} will rely on DNS"
+  end
+end
+
+def do_resolve(host)
+  fqdn = GitHub::DGit::DB::FS::SQL.value("SELECT fqdn FROM fileservers WHERE host = :host",
+                                         host: host)
+
+  ips = [host, fqdn].map { |name| Socket.getaddrinfo(name, nil, Socket::AF_INET, Socket::SOCK_STREAM).first[2] }
+  if ips.uniq.size != 1
+    raise ArgumentError, "IP addresses for #{host} (#{ips[0]}) and #{fqdn} (#{ips[1]}) don't match!"
+  end
+  ip = ips.first
+
+  GitHub::DGit::DB.each_fileserver_db do |db|
+    db.SQL.run("UPDATE fileservers SET ip = :ip WHERE host = :host",
+               host: host, ip: ip)
+  end # each_fileserver_db
+  puts emit_storage_server_ip(host)
+end
+
+def do_unresolve(host)
+  GitHub::DGit::DB.each_fileserver_db do |db|
+    db.SQL.run("UPDATE fileservers SET ip = :ip WHERE host = :host",
+               ip: GitHub::SQL::NULL, host: host)
+  end # each_fileserver_db
+  puts emit_storage_server_ip(host)
+end
+
+def do_add(host, fqdn, storage = "")
+  # host - The String hostname to add.
+  # fqdn - The String fqdn of the server.
+  # storage - The String "forcessd" or "forcehdd" (required).
+  #
+  # Returns the Array of String hostnames after the addition.
+
+  if host != fqdn.gsub(/\..*/, "")
+    raise ArgumentError, "host and fqdn don't match! #{host}, #{fqdn}"
+  end
+
+  ip = Socket.getaddrinfo(fqdn, nil, Socket::AF_INET, Socket::SOCK_STREAM).first[2]
+
+  if !%w[forcessd forcehdd].include? storage
+    raise ArgumentError, "Unrecognised storage argument"
+  end
+
+  result = "DFS server #{host} added (#{fqdn}, #{ip})"
+  binds = { host: host, fqdn: fqdn, ip: ip, datacenter: GitHub::SQL::NULL, rack: GitHub::SQL::NULL, non_voting: 0, hdd_storage: 0, site: GitHub::SQL::NULL }
+
+  begin
+    rpc_url = (Rails.env.test? || Rails.env.development?) ? "file:/" : "bertrpc://#{fqdn}:8149/"
+    rpc = ::GitRPC.new(rpc_url)
+
+    if !GitHub.enterprise? && !rpc.host_encrypted?
+      raise RuntimeError, "Host #{host} is not encrypted!"
+    end
+
+    metadata = rpc.host_metadata
+    dc   = metadata.fetch("datacenter")
+    site = metadata.fetch("site")
+    rack = metadata.fetch("rack", nil) # pe1 doesn't have a rack.
+
+    result << " in #{dc || GitHub.default_datacenter}/#{rack || GitHub.default_rack}"
+    binds.update datacenter: dc, rack: rack, site: site || GitHub::SQL::NULL
+
+    if storage == "forcehdd"
+      binds.update hdd_storage: 1
+      result << " with HDD storage"
+    elsif storage != "forcessd"
+      raise ArgumentError, "No valid storage_class"
+    end
+
+    voting_dcs = GitHub.spokes_voting_datacenters
+    if voting_dcs && !voting_dcs.include?(dc)
+      binds.update non_voting: 1
+    end
+  rescue SocketError,     # e.g. hostname lookup failed
+         SystemCallError, # e.g. bertrpc raised Errno::ETIMEDOUT out while connecting (should this be a GitRPC::ConnectionError?)
+         ::GitRPC::Error, # e.g. ernicorn is down, or the file didn't exist, or the file isn't JSON
+         NoMethodError,   # e.g. the JSON isn't a Hash, so the #fetch method isn't available
+         KeyError => e    # e.g. the Hash doesn't have the "datacenter" field
+    result = "error: Could not set location for #{host}: #{e} (#{e.class})\n#{result}"
+  end
+
+  ActiveRecord::Base.connected_to(role: :writing) do
+    GitHub::DGit::DB.each_fileserver_db do |db|
+      db.SQL.run(<<-SQL, binds)
+        INSERT INTO fileservers (host, fqdn, ip, datacenter, rack, non_voting, hdd_storage, site)
+        VALUES (:host, :fqdn, :ip, :datacenter, :rack, :non_voting, :hdd_storage, :site)
+      SQL
+    end # each_fileserver_db
+  end
+
+  puts result
+end
+
+def do_destroy(server)
+  server = GitHub::DGit::Util.long_host(server)
+  status = get_by_name(server)
+  die "Please take #{server} offline or evacuate it before destroying it" unless !status.online || status.evacuating
+
+  total_deleted = GitHub::DGit::Util.delete_network_replica_records(server)
+  puts "#{total_deleted} rows deleted from network_replicas"
+
+  total_deleted = GitHub::DGit::Util.delete_repo_replica_records(server)
+  puts "#{total_deleted} rows deleted from repository_replicas"
+
+  total_deleted = GitHub::DGit::Util.delete_gist_replica_records(server)
+  puts "#{total_deleted} rows deleted from gist_replicas"
+
+  success = GitHub::DGit::Util.delete_fileserver(server)
+  put_result(success, server, "destroyed")
+end
+
+# This table defines the options for `dgit-server show`
+# Each option corresponds to a hash of conditions that must be met
+Show_opts = {
+  "online": { "online": true },
+  "offline": { "online": false },
+  "embargoed": { "embargoed": true },
+  "unembargoed": { "embargoed": false },
+  "quiescing": { "quiescing": true },
+  "unquiesced": { "quiescing": false },
+  "evacuating": { "evacuating": true },
+  "non-evacuating": { "evacuating": false },
+  "voting": { "non_voting": false },
+  "non-voting": { "non_voting": true },
+  "hdd-storage": { "hdd_storage": true },
+  "non-hdd": { "hdd_storage": false },
+  "inactive": { "embargoed": true, "quiescing": true, "evacuating": true, "online": false },
+
+  # Location-based filters
+  "va3-iad": { "datacenter": "va3iad" },
+  "ac4-iad": { "datacenter": "ac4iad" },
+  "ash1-iad": { "datacenter": "ash1iad" },
+  "sdc42-sea": { "datacenter": "sdc42" },
+}
+
+def do_show(*args)
+
+  filter = {}
+  host = nil
+  bad_args = false
+
+  args.map(&:to_sym).each do |arg|
+    if Show_opts.include?(arg)
+      filter.merge! Show_opts[arg]
+    elsif host.nil?
+      host = arg.to_s
+    else
+      bad_args = true
+    end
+  end
+
+  if host && filter.any?
+    # Probably unrecognized argument, might be
+    # filters + host, or multiple hosts, but these
+    # are unlikely
+    bad_args = true
+  end
+
+  if bad_args
+    known_args = Show_opts.keys.map(&:to_s)
+    die "Unrecognised arguments #{args} - not from #{known_args}"
+  end
+
+  if filter.any?
+    return show_these_hosts(
+      GitHub::DGit::Util.raw_fileserver_rows.select do |row|
+        filter.all? { |k, v| row[k.to_s] == v }
+      end.map { |row| ServerStatus.new(row) },
+    )
+  elsif !host
+    return show_these_hosts(GitHub::DGit::Util.raw_fileserver_rows.map { |row| ServerStatus.new(row) })
+  end
+
+  server = GitHub::DGit::Util.long_host(host)
+  all_status = GitHub::DGit::Util.raw_fileserver_rows_for_host(server).map { |row| ServerStatus.new(row) }
+  die "Host #{server} found #{all_status.size} times" if all_status.size > 1
+  status = all_status.first
+  return show_no_hosts("Host #{server} not found") unless status
+
+  if status.evacuating
+    status.remaining_networks = GitHub::DGit::Util.remaining_networks_on_host(server)
+    status.remaining_gists = GitHub::DGit::Util.remaining_gists_on_host(server)
+  end
+
+  if status.quiescing
+    rpc = GitRPC.new(status.rpc_url)
+    begin
+      status.remaining_fetches = rpc.fetches_running
+    rescue GitRPC::Error => e
+      status.remaining_fetches = "Failed: #{e}"
+    end
+  end
+
+  show_hosts([status])
+end
+
+# `prepare` and `ready?` are implemented in github/shell instead.
+def do_prepare(server)
+  die "Not implemented: prepare #{server}"
+end
+
+def do_ready?(server)
+  die "Not implemented: ready? #{server}"
+end
+
+def show_these_hosts(hosts, no_hosts_msg = nil)
+  if hosts.empty?
+    show_no_hosts(no_hosts_msg || "No hosts found")
+  else
+    show_hosts(hosts)
+  end
+end
+
+def show_no_hosts(message)
+  puts @json ? [].to_json : message
+end
+
+def show_hosts(hosts)
+  @json ? show_json(hosts) : show_rows(hosts)
+end
+
+def show_json(hosts)
+  puts hosts.to_json
+end
+
+def show_rows(hosts)
+  get_age_and_uptime(hosts)
+  headings = %w[Host Online Embargoed Quiescing Evacuating IP Location Voting HDD Age Uptime]
+  rows = hosts.map do |status|
+    [
+      status.host,
+      status.online,
+      status.embargoed  && status.embargoed_reason  ? "true (#{status.embargoed_reason})"  : status.embargoed,
+      status.quiescing  && status.quiescing_reason  ? "true (#{status.quiescing_reason})"  : status.quiescing,
+      status.evacuating && status.evacuating_reason ? "true (#{status.evacuating_reason})" : status.evacuating,
+      status.ip, status.location, status.voting, status.hdd_storage,
+      status.age, status.uptime
+    ]
+  end
+  puts Terminal::Table.new headings: headings, rows: rows
+
+  hosts.each do |status|
+    if status.remaining_networks || status.remaining_gists
+      puts nil, "Remaining content on #{status.host}:"
+      puts "  networks: #{status.remaining_networks}"
+      puts "  gists:    #{status.remaining_gists}"
+    end
+  end
+
+  hosts.each do |status|
+    if status.remaining_fetches.is_a?(String) || status.remaining_fetches.to_i > 0
+      puts nil, "Remaining fetches on #{status.host}:", status.remaining_fetches
+    end
+  end
+end
+
+def get_age_and_uptime(servers)
+  answers, = GitRPC.send_multiple(servers.map(&:rpc_url), :uptime_and_age, [], {}, connect_timeout: 2, timeout: 2)
+  servers.each do |server|
+    if answer = answers[server.rpc_url]
+      server.uptime_seconds = answer[:uptime_seconds]
+      server.provisioned_at = answer[:provisioned_at]
+    end
+  end
+end
+
+class ServerStatus
+  def initialize(row)
+    @host = row.fetch("host")
+    @ip = row.fetch("ip")
+    @online = row.fetch("online")
+    @embargoed = row.fetch("embargoed")
+    @embargoed_reason = row.fetch("embargoed_reason")
+    @quiescing = row.fetch("quiescing")
+    @quiescing_reason = row.fetch("quiescing_reason")
+    @evacuating = row.fetch("evacuating")
+    @evacuating_reason = row.fetch("evacuating_reason")
+    @datacenter = row.fetch("datacenter")
+    @rack = row.fetch("rack")
+    @non_voting = row.fetch("non_voting")
+    @hdd_storage = row.fetch("hdd_storage")
+  end
+
+  attr_reader \
+    :host,
+    :ip,
+    :online,
+    :embargoed,
+    :embargoed_reason,
+    :quiescing,
+    :quiescing_reason,
+    :evacuating,
+    :evacuating_reason,
+    :datacenter,
+    :rack,
+    :non_voting,
+    :hdd_storage
+
+  def location
+    if datacenter.nil?
+      ""
+    elsif rack.nil?
+      datacenter
+    else
+      "#{datacenter}/#{rack}"
+    end
+  end
+
+  def voting
+    !non_voting
+  end
+
+  def age
+    days_since(provisioned_at)
+  end
+
+  def uptime
+    uptime_seconds && format_seconds_as_days(uptime_seconds)
+  end
+
+  def days_since(t)
+    t && format_seconds_as_days(Time.now.to_i - t.to_i)
+  end
+
+  def format_seconds_as_days(sec)
+    "%dd" % (sec / 86400)
+  end
+
+  def rpc_url
+    rpc_host = ip
+    rpc_host ||= "127.0.0.1" if host =~ /\Adgit\d+\z/
+    rpc_host ||= host
+    "bertrpc://#{rpc_host}:8149/tmp"
+  end
+
+  def as_json(options = nil)
+    res = super(options)
+    res.merge!({ remaining_networks: remaining_networks, remaining_gists: remaining_gists }) if remaining_networks || remaining_gists
+    res[:remaining_fetches] = remaining_fetches if remaining_fetches
+    res
+  end
+
+  attr_accessor :remaining_networks, :remaining_gists, :remaining_fetches, :provisioned_at, :uptime_seconds
+end
+
+def get_by_name(server)
+  res = GitHub::DGit::Util.raw_fileserver_rows_for_host(server).map { |row| ServerStatus.new(row) }
+  die "Host #{server} not found" if res.empty?
+  die "Host #{server} found #{res.size} times" if res.size > 1
+  res.first
+end
+
+def die(message)
+  $stderr.puts message
+  exit 1
+end
+
+def put_result(success, server, condition)
+  if success
+    puts "#{server} is #{condition}"
+  else
+    puts "Error marking #{server} #{condition}."
+  end
+end
+
+main

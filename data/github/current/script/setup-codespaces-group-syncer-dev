@@ -1,0 +1,94 @@
+#!/bin/bash
+
+set -e
+
+# Seed the group-syncer integration
+./bin/seed team_sync_integration
+
+while getopts "b:ph" opt; do
+  case $opt in
+    b)
+      BRANCHNAME="$OPTARG"
+      ;;
+    p)
+      PULL="true"
+      ;;
+    h)
+      echo "Usage: $0:"
+      echo "To pull a specific branch use the 'b' flag '$0 -b <branchname>'"
+      echo "To pull the latest version of your branch use the 'p' flag '$0 -p'"
+      echo "To display this message use the 'h' flag '$0 -h'"
+      exit 0
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ $(uname -n) != "codespaces"* ]]; then
+  echo "this script is only available for codespaces"
+  exit
+fi
+
+if [ ! -d "/workspaces/group-syncer" ]; then
+  echo "cloning group-syncer"
+  cd /workspaces
+  git clone https://github.com/github/group-syncer.git
+  cd group-syncer
+fi
+
+if [[ -n "$BRANCHNAME" ]]; then
+  echo "pulling branch $BRANCHNAME"
+  cd /workspaces/group-syncer
+  git checkout $BRANCHNAME
+  git pull
+fi
+
+if [[ -n "$PULL" ]]; then
+  echo "pulling latest version of your branch"
+  cd /workspaces/group-syncer
+  git pull
+fi
+
+echo "configuring secrets for group-syncer"
+# Generate a new key for the team sync integration
+private_key=$(rails runner "
+  integration = Integration.find_by!(slug: 'github-team-synchronization')
+  private_key = OpenSSL::PKey::RSA.new(2048)
+  integration_key = IntegrationKey.new(integration: integration,
+                                        creator: integration.owner,
+                                        skip_generate_key: true)
+  integration_key.private_key = private_key
+  integration_key.public_pem = private_key.public_key.to_pem
+  integration_key.save!
+
+  puts private_key.to_pem
+")
+# Get the integration id for the team sync integration
+integration_id=$(rails runner "
+  integration = Integration.find_by!(slug: 'github-team-synchronization')
+  puts integration.id
+")
+echo "GH_APP_ID=$integration_id" > /workspaces/group-syncer/.env.codespaces
+echo "GH_APP_CLIENT_PEM=\"$private_key\"" >> /workspaces/group-syncer/.env.codespaces
+if [ -z "$GROUP_SYNCER_AZURE_APP_CLIENT_SECRET" ]; then
+  echo "WARNING: GROUP_SYNCER_AZURE_APP_CLIENT_SECRET environment variable is not set, see: https://docs.github.com/codespaces/managing-your-codespaces/managing-encrypted-secrets-for-your-codespaces"
+else
+  echo "AZURE_APP_CLIENT_SECRET=$GROUP_SYNCER_AZURE_APP_CLIENT_SECRET" >> /workspaces/group-syncer/.env.codespaces
+fi
+
+echo "Creating team-sync-user"
+cd /workspaces/github
+bin/rails runner script/seed_team_sync_user.rb
+
+echo "building group-syncer docker image"
+cd /workspaces/group-syncer
+make docker-build
+
+echo "Opening group-syncer codespace"
+code /workspaces/group-syncer
+
+echo "You're all setup!"
+echo "To launch your group-syncer enabled instance run 'script/group-syncer-enabled-server' in this window"

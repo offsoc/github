@@ -1,0 +1,120 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# `view` is an instance of Orgs::Teams::TeamView %>
+
+<%
+  team_row_classes = %w(table-list-item js-team-row js-bulk-actions-item)
+  team_row_classes << "adminable" if view.show_bulk_actions?
+  team_row_classes << view.parent_team_class
+  team_row_classes << view.bg_color_class if view.bg_color_class.present?
+%>
+<li
+  class="<%= team_row_classes.join(" ") %>"
+  data-bulk-actions-id="<%= view.team.slug %>"
+  data-team-slug="<%= view.team.slug %>"
+  <%= test_selector("team-search-results-list") %>
+  <%= "data-parent-team-slug=#{view.parent_team_slug}" if view.parent_team_slug.present? %>
+  itemprop="team"
+  itemtype="http://schema.org/Organization">
+  <div class="nested-team-info table-list-cell v-align-middle">
+    <div class="d-flex flex-items-center">
+    <div class="nested-teams-checkbox <%= "show" if view.show_bulk_actions?%> <%= view.checkbox_indent %>">
+        <% if view.show_bulk_actions?%>
+          <input type="checkbox" name="teams[]" value="<%= view.team.slug %>" class="js-bulk-actions-toggle" data-check-all-item aria-labelledby="team-<%= view.team.slug %>">
+        <% end %>
+      </div>
+      <div class="css-truncate nested-team-name">
+        <%= link_to content_tag(:span, view.team.name, itemprop: "name",
+                                class: "css-truncate-target nested-team-name"),
+                    team_path(view.team),
+                    id: "team-#{view.team.slug}",
+                    class: "lh-condensed f4",
+                    itemprop: :url %>
+
+        <% if view.team.secret? %>
+          <%= render Primer::Beta::Label.new(scheme: :secondary, vertical_align: :middle, title: "Only visible to its members") do %>
+            Secret
+          <% end %>
+        <% end %>
+        <% if view.show_enterprise_label? %>
+          <%= render Primer::Beta::Label.new(scheme: :secondary, vertical_align: :middle, title: "Synced from enterprise team") do %>
+            Enterprise
+          <% end %>
+        <% end %>
+        <% if view.team.description %>
+          <span class="d-block"><%= view.team.description.truncate(80) %></span>
+        <% end %>
+      </div>
+      <% if view.show_external_group? %>
+        <div class="m-2" >
+          <% external_group = view.team.external_group_team.external_group %>
+          <%= render Primer::Beta::Label.new(scheme: :secondary, title: "IdP External Group Team: #{external_group.display_name}") do %>
+            <%= link_to "IdP Group", external_group_members_enterprise_path(slug: view.organization.business.slug, id: external_group.id) %>
+          <% end %>
+        </div>
+      <% end %>
+      <% visible_users_range = view.avatar_range %>
+      <% if visible_users_range.present? %>
+        <div class="shortened-teams-avatars text-right <%= view.avatar_width %>">
+          <% if view.member_ids.count > 0 %>
+            <% view.members[visible_users_range].each do |member| %>
+              <%= link_to(user_path(member), class: "d-inline-block v-align-middle", itemscope: true, itemprop: "member", itemtype: "http://schema.org/Person") do %>
+                <img src="<%= member.primary_avatar_url %>" width="25" height="25" class="<%= avatar_class_names(member) %>" alt="<%= member.display_login %>">
+              <% end %>
+            <% end %>
+            <% if view.member_ids.count > visible_users_range.count %>
+              <a class="d-inline-block v-align-middle no-underline team-member-ellipsis border text-center color-fg-muted rounded-2" href="<%= team_members_path(view.team) %>" aria-label="View all members in <%= view.team.name %>">&#8230;</a>
+            <% end %>
+          <% elsif view.team.ldap_mapped? %>
+            <% if view.team.ldap_mapping.try(:gone?) %>
+                <%= render Primer::Beta::IconButton.new(icon: :alert, size: :small, "aria-label": "This team is missing from LDAP", tooltip_direction: :s, scheme: :invisible) %>
+            <% else %>
+              <%= render Primer::Beta::Button.new(id: "add-member-btn-disabled", aria: { disabled: true }, "data-ga-click": "Orgs, add member ldap, location:team view; text:Add member", size: :small) do |component| %>
+                <% component.with_tooltip(text: "Team members are managed in LDAP", direction: :s) %>
+                Add members
+              <% end %>
+            <% end %>
+          <% elsif view.team.adminable_by?(current_user) && view.team.locally_managed? %>
+            <%= render Primer::Beta::Button.new(tag: :a, href: team_members_path(view.team), "data-ga-click": "Orgs, invite member, location:team view; text:Add member", size: :small) do |_c|
+              "Add members"
+            end %>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="table-list-cell <% if view.show_org_role_assignment_counts? %> team-members-count-with-roles <% else %> team-members-count <% end %>f5 text-right v-align-middle">
+    <%= pluralize view.member_ids.count, 'member', 'members' %>
+  </div>
+
+  <% if view.show_org_role_assignment_counts? %>
+    <div class="table-list-cell team-roles-count f5 pr-3 flex-nowrap text-right v-align-middle">
+        <a class="Link--secondary" href="<%= view.organization_roles_link %>">
+          <%= pluralize(view.organization_roles_count, 'role', 'roles') %>
+        </a>
+    </div>
+  <% end %>
+
+  <div class="table-list-cell team-buttons pr-3 f5 text-right v-align-middle">
+    <% if view.indent_level.present? && view.team.has_child_teams? %>
+      <%= render Primer::ButtonComponent.new("data-child-team-url": "#{child_teams_path(view.organization)}?parent_team_slug=#{view.team.slug}&parent_indent=#{view.indent_level}", scheme: :link, classes: "expand-nested-team Link--muted js-open-child-team", "data-parent-team-slug": view.team.slug, "aria-expanded": "false") do %>
+        <%=
+          pluralize(view.team.descendants.count, 'team', 'teams')
+        %>
+        <span class="octicon-wrapper d-inline-block ml-2">
+          <%= primer_octicon(:"chevron-down") %>
+        </span>
+      <% end %>
+    <% elsif view.team.enterprise_team_managed? %>
+    <span class="mr-2"></span>
+    <span class="octicon-wrapper d-inline-block"></span>
+    <% else %>
+      <span class="mr-2">
+        <%=
+          pluralize(view.team.descendants.count, 'team', 'teams')
+        %>
+      </span>
+      <span class="octicon-wrapper d-inline-block"></span>
+    <% end %>
+  </div>
+</li>

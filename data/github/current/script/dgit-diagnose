@@ -1,0 +1,312 @@
+#!/usr/bin/env ruby
+
+require "digest/sha1"
+require File.expand_path("../../config/basic", __FILE__)
+require "github/dgit"
+require "github/config/mysql"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} [-v] nwo"
+  exit 1
+end
+
+MISSING = "???"
+OFFLINE = "OFFLINE"
+
+include GitHub::DGit::Routing
+include GitHub::DGit::Routing::GistById
+
+def main
+  @verbose = ARGV.delete("-v") || ARGV.delete("--verbose")
+  usage unless ARGV.length == 1 && ARGV[0].split("/").size == 2
+
+  nwo = ARGV[0]
+  owner, name = nwo.split("/", 2)
+
+  case owner
+  when "network"
+    abort "Cannot currently diagnose networks"
+  when "gist"
+    begin
+      gist_id, repo_name = lookup_gist_by_reponame(name)
+      name = repo_name
+      nwo = "gist/#{repo_name}"
+      repo_type = GitHub::DGit::RepoType::GIST
+    rescue GitHub::DGit::RepoNotFound => e
+      abort "Gist #{nwo} not found"
+    end
+  else # NWO
+    begin
+      repo_id, network_id, root_id, is_wiki = lookup_repo(nwo)
+      repo_type = is_wiki ? GitHub::DGit::RepoType::WIKI : GitHub::DGit::RepoType::REPO
+    rescue GitHub::DGit::RepoNotFound => e
+      abort "Repo #{nwo} not found"
+    end
+  end
+
+  # is it found?
+  abort "#{nwo} not found" unless (repo_id && network_id) || gist_id
+
+  @keywidth = 17
+
+  if owner != "gist"
+    puts "Diagnosing #{nwo}: repo_id=#{repo_id} network_id=#{network_id}"
+    maintenance = GitHub::DGit::Util.maintenance_status(network_id)
+    if maintenance == "broken"
+      puts "*WARNING* #{nwo} is currently in BROKEN maintenance status."
+    end
+  else
+    puts "Diagnosing #{nwo}: gist_id=#{gist_id}"
+  end
+
+  show_summary(repo_id, network_id, gist_id, repo_type)
+
+  if repo_type != GitHub::DGit::RepoType::GIST
+    shard_path = GitHub::Routing.nw_storage_path(network_id: network_id).chomp("/") + "/#{repo_id}"
+    shard_path << ".wiki" if is_wiki
+    shard_path << ".git"
+    delegate = GitHub::DGit::Delegate::Network.new(network_id, shard_path)
+  else
+    shard_path = GitHub::Routing.gist_storage_path(repo_name: name)
+    delegate = GitHub::DGit::Delegate::Gist.new(gist_id, shard_path)
+  end
+  routes = delegate.get_all_routes
+
+  show_hard_state(routes)
+  show_refs(routes)
+  show_history(routes)
+end
+
+def show_summary(repo_id, network_id, gist_id, repo_type)
+  is_wiki = repo_type == GitHub::DGit::RepoType::WIKI
+
+  if repo_type != GitHub::DGit::RepoType::GIST
+    results = GitHub::DGit::Util.repo_replicas_summary(network_id, repo_id, repo_type)
+  else
+    results = GitHub::DGit::Util.gist_replicas_summary(gist_id)
+  end
+
+  status = {}
+
+  if is_wiki && results.empty?
+    puts "Wiki routes and checksum not found.  This repo exists but does not have a wiki."
+    exit 1
+  end
+
+  results.each do |row|
+    status[row.fetch("host")] = {
+      state: GitHub::DGit::STATES[row.fetch("state")] || "(unknown)",
+      online: row.fetch("online") == 1,
+      voting: row.fetch("non_voting") == 0,
+      reposum: row.fetch("expected").to_s[0..6],
+      replsum: row.fetch("actual").to_s[0..6],
+    }
+  end
+
+  @reposum = status.values.first[:reposum]
+
+  healthy_count = status.values.count { |row| row[:state] == "ACTIVE" && row[:online] && row[:reposum] == row[:replsum] }
+  print_table(status)
+end
+
+def print_table(table)
+  @hosts = table.keys.sort
+  keys = table.values.map { |row| row.keys }.flatten.uniq
+  @colwidth = (table.keys + table.values.map { |row| row.values }.flatten).map { |s| s.to_s.length }.max
+  @colwidth = 16 if @colwidth < 16
+  puts ("%*s  " % [@keywidth, ""]) + @hosts.map { |h| center(@colwidth, h) }.join("  ")
+  puts header("SQL state")
+  keys.each do |k|
+    puts ("%*s  " % [@keywidth, prettify_label(k)]) + @hosts.map { |h| center(@colwidth, table[h][k]) }.join("  ")
+  end
+end
+
+def center(w, str)
+  "%*s%s%*s" % [(w - str.to_s.length) / 2, "", str, (w + 1 - str.to_s.length) / 2, ""]
+end
+
+def show_hard_state(routes)
+  found = false
+
+  puts header("on-disk state")
+
+  found = put_row("on-disk sum", routes, @reposum) do |rpc|
+    rpc.read_dgit_checksum[0..6]
+  end || found
+
+  found = put_row("info/nwo", routes) do |rpc|
+    rpc.fs_read("info/nwo")[0..@colwidth - 1].chomp
+  end || found
+
+  found = put_row("config", routes) do |rpc|
+    sha(rpc.fs_read("config"))[0..6]
+  end || found
+
+  found = put_row("HEAD", routes) do |rpc|
+    sha(rpc.fs_read("HEAD"))[0..6]
+  end || found
+
+  found = put_row("audit_log", routes) do |rpc|
+    rpc.sha1sum_audit_log
+  end || found
+
+  puts all_the_same unless found
+end
+
+def put_row(label, routes, expected_value = nil)
+  row = RPCCaller.new { |rpc| yield rpc }.call_all(routes)
+  if @verbose ||
+     routes.length != @hosts.length ||
+     row.values.uniq.length != 1 ||
+     row.values.include?(OFFLINE) ||
+     (expected_value && row.values.first != expected_value)
+    puts ("%*s  " % [@keywidth, prettify_label(label)]) + @hosts.map { |h| center(@colwidth, row[h] || MISSING) }.join("  ")
+    true
+  else
+    false
+  end
+end
+
+def show_refs(routes)
+  found = false
+  refs = RPCCaller.new { |rpc| rpc.read_refs }.call_all(routes)
+  allrefs = refs.values.select { |v| v.respond_to? :keys }.map { |hash| hash.keys }.flatten.uniq.sort
+  puts header("refs")
+  allrefs.each do |ref|
+    if @verbose ||
+       routes.length != @hosts.length ||
+       @hosts.map { |h| refs[h][ref] }.uniq.length != 1
+      print "%*s  " % [@keywidth, ref.sub(%r{^refs/heads/}, "")[0..@keywidth - 1]]
+      puts @hosts.map { |h| center(@colwidth, ((refs[h] || {})[ref] || MISSING)[0..6]) }.join("  ")
+      found = true
+    end
+  end
+
+  puts all_the_same unless found
+end
+
+def show_history(routes)
+  found = false
+
+  puts header("history")
+
+  found = put_row("last op", routes) do |rpc|
+    begin
+      ts = rpc.last_audit_log_time
+      ts.strftime("%F@%H:%M:%S")
+    rescue # rubocop:todo Lint/GenericRescue
+      MISSING
+    end
+  end || found
+
+  found = put_row("last commit", routes) do |rpc|
+    rpc.log_last_commit_oneline[0..@colwidth - 1]
+  end || found
+
+  puts all_the_same unless found
+end
+
+class RPCCaller
+  def initialize(&block)
+    @block = block
+  end
+
+  def call_all(routes)
+    rpc_urls = routes.map(&:rpc_url)
+    answers, errors = ::GitRPC.send_multiple(rpc_urls, *rpc_call)
+    res = {}
+    routes.zip(rpc_urls).each do |route, url|
+      res[route.original_host] = resolve_value(answers[url], errors[url])
+    end
+    res
+  end
+
+  private
+
+  def rpc_call
+    return @rpc_call if @rpc_call
+    ::GitRPC::Protocol.register("recorder", RPCRecorder.new)
+    @rpc_call = Fiber.new { |rpc| @block.call(rpc) }.resume(rpc("recorder://"))
+  end
+
+  def resolve_value(answer, error)
+    return OFFLINE if error || answer.nil?
+    ::GitRPC::Protocol.register("resolver", RPCResult.new(answer, rpc_call))
+    @block.call(rpc("resolver://"))
+  end
+
+  def rpc(url)
+    ::GitRPC.new(url, cache: GitHub::Cache::Fake.new)
+  end
+
+  class RPCBackendBase
+    def new(*)
+      self
+    end
+
+    def call(method, *args)
+      send(method, *args)
+    end
+
+    def repository_key
+      "dgit-diagnose:doesnotmatter"
+    end
+
+    def repository_reference_key
+      nil
+    end
+  end
+
+  class RPCRecorder < RPCBackendBase
+    def send_message(call, *args, **kwargs)
+      Fiber.yield [call, args, kwargs]
+      raise "this should not be reached"
+    end
+  end
+
+  class RPCResult < RPCBackendBase
+    def initialize(rpc_result, expected_call)
+      @rpc_result = rpc_result
+      @expected_call, @expected_args, @expected_kwargs = expected_call
+    end
+
+    def send_message(call, *args, **kwargs)
+      if call != @expected_call || args != @expected_args || kwargs != @expected_kwargs
+        raise "unexpected message: #{call.inspect}, #{args.inspect}\nshould have been #{@expected_call.inspect}, #{@expected_args.inspect}, #{@expected_kwargs.inspect}"
+      end
+      @rpc_result
+    end
+  end
+end
+
+def sha(str)
+  Digest::SHA1.hexdigest str # rubocop:disable GitHub/InsecureHashAlgorithm
+end
+
+def header(str)
+  total_width = @keywidth + (@colwidth + 2) * @hosts.length
+  str = "[ #{str} ]"
+  ("-" * ((total_width - str.length) / 2)) + str + ("-" * ((total_width - str.length) / 2))
+end
+
+def all_the_same
+  total_width = @keywidth + (@colwidth + 2) * @hosts.length
+  str = "~~ all the same ~~"
+  (" " * ((total_width - str.length) / 2)) + str + (" " * ((total_width - str.length) / 2))
+end
+
+LABEL_MAP = {
+  replsum: "Replica checksum",
+  reposum: "Expected checksum",
+}.freeze
+
+def prettify_label(str)
+  LABEL_MAP[str] || str
+end
+
+main

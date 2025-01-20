@@ -1,0 +1,239 @@
+# Metered Billing Products
+# ========================
+#
+# This file defines all of GitHub's metered billing products.
+#
+# Concepts
+# --------
+#
+# Product
+#
+#     A product is some kind of feature that we can market, sell, and charge
+#     money for. Examples include GitHub Actions, Packages, and Codespaces.
+#     Products are maintained by other teams and represented by a specific
+#     Catalog Service. Metered usage data is pushed from these products into
+#     the metered billing system.
+#
+# Product SKU
+#
+#     A product can have multiple SKUs which are simply a way to differentiate
+#     levels of service. SKUs define how a particular product is measured --
+#     for example, Actions is measured in minutes. SKUs also map a particular
+#     product and level of service to a product in the Zuora product catalog.
+#
+#     Differentiated pricing, included units, or reporting criteria for
+#     Zuora or Azure will require multiple SKUs. Changing any of the units of
+#     measure for a particular product also requires a new SKU.
+#
+# Rate Plan
+#
+#     A rate plan defines how we bill and charge for a particular product and
+#     SKU, include the price for overage usage. Rate plans also contain
+#     important configuration for how we submit metered usage data to Zuora and
+#     Azure for billing. A SKU can have multiple rate plans, which are defined
+#     by the GitHub plans that they apply to and the effective date. For a
+#     given GitHub plan, the rate plan with the most recent (but not future-
+#     dated) effective date is the current rate plan.
+#
+#     In cases where included usage is shared across SKUs but should be
+#     scaled according to SKU, a multipler field can be used. This field
+#     scales both the overage price and the usage relative to the included
+#     usage entitlement. And example of this is GitHub Actions, where MacOS
+#     included usage is counted at 10 times the rate of Linux usage and
+#     overages are 10 times as expensive.
+#
+#     Changing the price of a product SKU requires a new rate plan, as does
+#     changing the Azure or Zuora products that usage is reported to.
+#
+# Units of Measure
+# ----------------
+#
+# Logical Unit of Measure
+#
+#     The Logical Unit of Measure is the units in which metered usage is stored
+#     in the database. Generally speaking, this must be a unit in which:
+#
+#       1. Metered usage can be recorded as a whole integer (fractional units
+#          are not supported)
+#       2. Fractional units of usage would be rounded prior to being summarized
+#          (for example, Actions could report usage in milliseconds but usage
+#          is rounded to minutes before being summed)
+#
+#     The Logical Unit of Measure is set at the product SKU level. Changing this
+#     unit of measure requires defining a new SKU.
+#
+# Other Units of Measure
+#
+#     Most of the time, the unit of measure we use for storage is not the unit
+#     of measure we want to use for marketing, pricing, etc. For example, we may
+#     want to measure Shared Storage in bytes, but we price overages per
+#     gigabyte since the per-byte price would be extremely small and difficult
+#     to comprehend.
+#
+#     Similarly, we may have different units of measure for reporting usage to
+#     Zuora and Azure.
+#
+#     In all cases, these units of measure are represented by a dictionary
+#     containing the unit of measure name. If the unit of measure is different
+#     from the Logical Unit of Measure, the dictionary must also contain the
+#     scale of the unit of measure reasure to the Logical Unit of Measure.
+#     For example, given "Bytes" as a Logical Unit of Measure:
+#
+#         unit_of_measure:
+#           name: Bytes          # No scale needed when matching the Logical UOM
+#
+#         unit_of_measure:
+#           name: Gigabytes
+#           scale: 1073741824    # There are this many bytes in a gigabyte
+#
+#     For pricing purposes, the unit of measure is defined at the rate plan
+#     level under the "overages" dictionary.
+#
+#     For the purposes of reporting usage to Zuora and Azure, the unit of
+#     measure is defined at the product SKU level under the "azure" and
+#     "zuora" dictionaries. For Zuora, the unit of measure given must match
+#     exactly to what is configured in Zuora, as unit of measure name will
+#     be submitted to Zuora directly.
+#
+# Adding New Products
+# -------------------
+#
+# To add a new product, copy the following example and add it to the end of this
+# file. Some fields are required for all products and some are only required if
+# the product is enabled. This allows products to be defined here prior to
+# completing onboarding with Zuora and Azure. A linting test will let you know
+# if you have missed any required fields.
+#
+# === BEGIN EXAMPLE ===
+# - name: your_product_name
+#   enabled: false
+#   skus:
+#     - name: your_sku_name
+#       unit_of_measure: Watts
+#       rate_plans:
+#         - effective_on: 1955-11-05
+#           github_plans: [free, free_with_addons, pro, business, business_plus]
+#           overages:
+#             price: "1.21"
+#             unit_of_measure:
+#               name: Gigawatts
+# === END EXAMPLE ===
+---
+- name: actions
+  enabled: true
+  budget_group: shared
+  prepaid_budget_group: shared
+  skus:
+    - name: linux
+      unit_of_measure: Minutes
+      rate_plans:
+        - effective_on: 2019-09-03
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.008"
+            unit_of_measure:
+              name: Minutes
+          multiplier: 1.0
+    - name: windows
+      unit_of_measure: Minutes
+      rate_plans:
+        - effective_on: 2019-09-03
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.008"
+            unit_of_measure:
+              name: Minutes
+          multiplier: 2.0
+    - name: macos
+      unit_of_measure: Minutes
+      rate_plans:
+        - effective_on: 2019-09-03
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.008"
+            unit_of_measure:
+              name: Minutes
+          multiplier: 10.0
+
+- name: packages
+  enabled: true
+  budget_group: shared
+  prepaid_budget_group: shared
+  skus:
+    - name: default
+      unit_of_measure: Bytes
+      rate_plans:
+        - effective_on: 2019-09-05
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.5"
+            unit_of_measure:
+              name: Gigabytes
+              scale: 1073741824
+
+- name: shared_storage
+  enabled: true
+  budget_group: shared
+  prepaid_budget_group: shared
+  skus:
+    - name: default
+      unit_of_measure: Byte Hours
+      rate_plans:
+        - effective_on: 2019-09-23
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.000000328"
+            unit_of_measure:
+              name: Megabytes
+              scale: 1048576
+
+- name: codespaces_compute
+  enabled: true
+  budget_group: codespaces
+  prepaid_budget_group: codespaces
+  skus:
+    - name: basic_linux
+      unit_of_measure: Seconds
+      rate_plans:
+        - effective_on: 2020-07-29
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.0846"
+            unit_of_measure: &codespaces_compute_hours
+              name: Hours
+              scale: 3600
+          multiplier: 1.0
+    - name: standard_linux
+      unit_of_measure: Seconds
+      rate_plans:
+        - effective_on: 2020-07-29
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.0846"
+            unit_of_measure: *codespaces_compute_hours
+          multiplier: 1.997635934
+    - name: premium_linux
+      unit_of_measure: Seconds
+      rate_plans:
+        - effective_on: 2020-07-29
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.0846"
+            unit_of_measure: *codespaces_compute_hours
+          multiplier: 3.995271868
+
+- name: codespaces_storage
+  enabled: true
+  budget_group: codespaces
+  prepaid_budget_group: codespaces
+  skus:
+    - name: default
+      unit_of_measure: Byte Hours
+      rate_plans:
+        - effective_on: 2020-07-29
+          github_plans: [free, free_with_addons, pro, business, business_plus]
+          overages:
+            price: "0.000134409"
+            unit_of_measure:
+              name: Gigabyte Hours
+              scale: 1073741824

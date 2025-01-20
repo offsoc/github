@@ -1,0 +1,1080 @@
+<%# erblint:counter DeprecatedComponentsCounter 25 %>
+<%# erblint:counter DeprecatedInPrimerCounter 17 %>
+<% view ||= Stafftools::Staffbar::Stats.new(request: request) %>
+
+<ul class="stats js-stats js-full" data-turbo-replace id="staffbar-stats">
+  <% if view.exceptions? %>
+    <li>
+      <span class="stat-toggle">
+        <a href="/devtools/exceptions">
+          <%= time_ago_in_words_js view.most_recent_exception %>
+        </a>
+        exception
+      </span>
+    </li>
+  <% end %>
+
+  <% if view.job_stats? %>
+    <%= render_nothing_if_database_fails do %>
+      <li>
+        <span class="stat-toggle">
+          <%= render Primer::Tooltip.new(tag: :strong, label: "Pending Jobs", direction: :s) do %>
+            <%= view.pending_jobs %>
+          <% end %>
+          <span><%= "job".pluralize(view.pending_jobs_raw) %></span>
+        </span>
+      </li>
+    <% end %>
+  <% end %>
+
+  <% if view.enterprise? %>
+    <li>
+      <span class="stat-toggle">
+        <strong><%= view.server_status(:elasticsearch) %></strong>
+        elasticsearch
+      </span>
+    </li>
+
+    <li>
+      <span class="stat-toggle">
+        <strong><%= view.server_status(:redis2) %></strong>
+        redis
+      </span>
+    </li>
+
+    <li>
+      <span class="stat-toggle">
+        <strong><%= view.server_status(:memcached) %></strong>
+        cache
+      </span>
+    </li>
+  <% end %>
+
+  <li class="js-pjax-stat" hidden style="line-height: 2.25">
+    <%= render Primer::Tooltip.new(label: "PJAX Navigations", direction: :s) do %>
+      <%= render Primer::Beta::Label.new(scheme: :success, size: :large) do %>
+        ♻️ <span class="js-pjax-count color-text-white">0</span>
+      <% end %>
+    <% end %>
+  </li>
+
+  <% if response_time_stats = view.response_time_stats %>
+    <li id="staff-bar-stats" style="line-height: 2.25">
+      <% if GitHub.enterprise? %>
+        <%= render Primer::Beta::Label.new(scheme: view.label_scheme, size: :large, style: "color: hsla(0, 0%, 100%, 0.5);") do %>
+          <strong class="color-text-white">
+            <%= response_time_stats %>
+          </strong>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Label.new(scheme: view.label_scheme, size: :large, style: "color: hsla(0, 0%, 100%, 0.5);") do %>
+          <strong class="color-text-white">
+            <%= view.glb_to_ngnix_time_stats %>
+          </strong>
+          glb&nbsp;→
+          <strong class="color-text-white">
+            <%= view.nginx_queued_time_stats %>
+          </strong>
+          nginx&nbsp;→
+          <strong class="js-web-server-stats color-text-white" title="<%= GitHub.local_host_name %>: <%= RUBY_DESCRIPTION %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+            <%= response_time_stats %> <%= view.reaction_emoji %>
+          </strong>
+          <span class="js-server-name">unicorn</span>
+          <%= render Stafftools::SoftNav::SoftNavStaffbarComponent.new %>
+          <%= render Stafftools::React::ReactStaffbarComponent.new %>
+          <%= render Stafftools::DataHpc::DatahpcStaffbarComponent.new %>
+        <% end %>
+        <% if view.luc? %>
+          <strong class="color-text-white">
+            [LUC <%= emoji_tag Emoji.find_by_alias("lab_coat"), title: "Using LUC Environment" %>]
+          </strong>
+        <% end %>
+      <% end %>
+    </li>
+  <% end %>
+</ul>
+
+<ul class="stats more-stats js-more-stats" data-turbo-replace id="staffbar-more-stats">
+  <li>
+    <% if Rails.env.development? %>
+      <p class="m-0 d-inline-block switcher">Switch to <%= runtime_switcher_link %></p>
+    <% elsif Rails.env.production? && !GitHub.single_or_multi_tenant_enterprise? && !GitHub.garage_unicorn? %>
+      <%= form_tag labs_path, method: :patch, class: ["switcher", "d-inline", GitHub.employee_unicorn? ? "employee-unicorn" : ""] do %>
+        Switch <%= "back" if GitHub.employee_unicorn? %> to
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          scheme: :link,
+        ).with_content(GitHub.employee_unicorn? ? "GitHub.com" : "GitHub:lab") %>
+      <% end %>
+    <% end %>
+  </li>
+
+  <% if GitHub.stats_ui_enabled? %>
+    <li>
+      <%= render Stafftools::React::ReactProfilingToggleComponent.new %>
+    </li>
+    <% if Rails.env.development? %>
+      <li>
+        <accessibility-scan-toggle>
+          <%= render(Primer::Beta::Button.new(
+            id: "accessibility-scan-button",
+            size: :small,
+            scheme: :link,
+            color: :on_emphasis,
+            "aria-label": "Axe Scan",
+            "data-target": "accessibility-scan-toggle.button",
+            "data-action": "click:accessibility-scan-toggle#toggleAccessibilityScan",
+          )) do |c| %>
+            <% c.with_tooltip(text: "Toggle axe scanning for accessibility issues") %>
+            <%= render(Primer::Beta::Octicon.new(icon: :accessibility, size: :small)) %>
+          <% end %>
+        </accessibility-scan-toggle>
+      </li>
+    <% end %>
+
+    <li>
+      <%= render Primer::Tooltip.new(tag: :a, label: "Enable Api Insights", direction: :s, classes: "color-text-white", href: view.api_insights_pane_path) do %>
+        <%= primer_octicon(:"light-bulb") %>
+      <% end %>
+    </li>
+
+    <% unless view.enterprise? %>
+      <li>
+        <%= render(Primer::Alpha::Dialog.new(id: "staffbar-cache-configure", title: "Cache partitions", subtitle: "Check the partitions you wish to skip")) do |d| %>
+          <% d.with_show_button(scheme: :link, classes: "color-text-white", aria: { label: "Configure cache partitions" }) do |s| %>
+              <% s.with_tooltip(text: "Configure cache partitions") %>
+              <%= primer_octicon(:cache) %>
+          <% end %>
+          <%= form_with url: '.', method: :get, class: "pt-3" do %>
+            <%= d.with_body do %>
+              <% GitHub.cache_partitions.each do |key, partition| %>
+                <div class="form-checkbox">
+                  <label>
+                    <input type="checkbox" name="skipmc[]" <%= "checked" if partition.skip %> value="<%= key %>">
+                    <%= key %>
+                  </label>
+                </div>
+              <% end %>
+            <% end %>
+            <%= d.with_footer(show_divider: true) do %>
+              <%= render(Primer::ButtonComponent.new(scheme: :default, data: { "close-dialog-id": "staffbar-cache-configure" })) { "Cancel" } %>
+              <%= render(Primer::ButtonComponent.new(scheme: :primary, type: :submit)) { "Skip partitions" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.flamegraph_enabled? && !view.enterprise? %>
+      <li>
+        <%= render Primer::Tooltip.new(tag: :a, label: "Vernier profile. Open in https://vernier.prof/", direction: :s, classes: "color-text-white", href: view.vernier_profile_path, download: true) do %>
+          <%= primer_octicon(:graph) %>
+        <% end %>
+      </li>
+
+      <li>
+        <%= render Primer::Tooltip.new(tag: :a, label: "Object Flamegraph", direction: :s, classes: "color-text-white", href: view.flamegraph_object_path, target: "_blank") do %>
+          <%= primer_octicon(:trash) %>
+        <% end %>
+      </li>
+
+      <li>
+        <%= render Primer::Tooltip.new(tag: :a, label: "Speedscope Flamegraph", direction: :s, classes: "color-text-white", href: view.speedscope_flamegraph_path, target: "_blank") do %>
+          <%= primer_octicon(:flame) %>
+        <% end %>
+      </li>
+
+    <% end %>
+
+    <% if view.line_profiler_enabled? %>
+      <li>
+        <%= render Primer::Tooltip.new(tag: :a, label: "View lineprof", direction: :s, classes: "color-text-white", href: view.lineprof_path, "data-turbo": false ) do %>
+          <% if params[:lineprofiler].present? %>
+            <%= primer_octicon(:sync) %>
+          <% else %>
+            <%= primer_octicon(:beaker) %>
+          <% end %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.allocation_tracer_enabled? %>
+      <li>
+        <% if request.GET.has_key?("allocation_tracer") %>
+          <details class="details-reset details-overlay details-overlay-dark" open>
+          <summary class="stat-toggle">
+        <% end %>
+
+        <%= render Primer::Tooltip.new(tag: :a, label: "Enable allocation tracer", direction: :s, classes: "color-text-white", href: view.allocation_tracer_path) do %>
+          <%= primer_octicon(:package) %>
+        <% end %>
+
+        <% if request.GET.has_key?("allocation_tracer") %>
+            </summary>
+            <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column container-xl width-full" aria-label="Allocations"><%# erblint:disable A11yDetailsDialogMigration %>
+              <div class="Box-header">
+                <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                  <%= primer_octicon(:x) %>
+                </button>
+                <h3>Allocations</h3>
+                <p class="color-fg-muted mb-0">
+                  <%= GitHub::AllocationTracerMiddleware::SUMMARY %>
+                </p>
+              </div>
+              <div class="Box-body overflow-auto">
+                <%= GitHub::AllocationTracerMiddleware::TOKEN %>
+              </div>
+            </details-dialog>
+          </details>
+        <% end %>
+      </li>
+    <% end %>
+
+    <li>
+      <% if view.cache_tracer_enabled? %>
+        <details class="details-reset details-overlay details-overlay-dark" open>
+          <summary class="stat-toggle">
+            <%= render Primer::Tooltip.new(tag: :a, label: "Enable cache tracer", direction: :s, classes: "color-text-white", href: view.cache_tracer_path) do %>
+              <%= primer_octicon(:archive) %>
+            <% end %>
+          </summary>
+
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column container-xl width-full" aria-label="Cache Tracer"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Cache Tracer</h3>
+            </div>
+
+            <div class="Box-body overflow-auto">
+              <table class="width-full">
+                <thead>
+                  <tr>
+                    <th>Key</th>
+                    <th>Latency (ms)</th>
+                    <th>Operation</th>
+                  </tr>
+                </thead>
+                <% view.cache_events.each do |event| %>
+                  <tr class="<%= event[:slow] ? "color-bg-attention" : nil %>">
+                    <td>
+                      <% if event[:slow] %>
+                        <details>
+                          <summary>
+                            <%= view.cache_key_utf8_safe(event[:key]) %>
+                          </summary>
+                          <div class="overflow-auto no-wrap">
+                            <% view.cache_event_formatted_stack_locations(event).each do |location| %>
+                              <a href="<%= location.view_source_url %>" target="_blank" class="Link--muted d-block">
+                                <%= location.description %>
+                              </a>
+                            <% end %>
+                          </div>
+                        </details>
+                      <% else %>
+                        <%= view.cache_key_utf8_safe(event[:key]) %>
+                      <% end %>
+                    </td>
+                    <td><%= view.cache_event_formatted_latency(event) %></td>
+                    <td><%= event[:operation] %></td>
+                  </tr>
+                <% end %>
+              </table>
+            </div>
+          </details-dialog>
+        </details>
+      <% else %>
+        <%= render Primer::Tooltip.new(tag: :a, label: "Enable cache tracer", direction: :s, classes: "color-text-white", href: view.cache_tracer_path) do %>
+          <%= primer_octicon(:archive) %>
+        <% end %>
+      <% end %>
+    </li>
+
+    <% unless GitHub.enterprise? %>
+      <li id="staff-bar-web-vitals">
+        <details class="details-reset details-overlay details-overlay-dark">
+          <%= render Primer::Tooltip.new(tag: :summary, label: "Web vitals", direction: :s, classes: "stat-toggle color-text-white") do %>
+            <%= primer_octicon(:heart) %>
+          <% end %>
+
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column" aria-label="Web vitals"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Web vitals</h3>
+              <p class="color-fg-muted mb-0">
+                <abbr title="Time to First Byte">TTFB</abbr> - <span data-metric="ttfb">pending...</span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              </p>
+              <p class="color-fg-muted mb-0">
+                <abbr title="Largest Contentful Paint - enabling staffbar may affect LCP scoring">LCP</abbr> - <span data-metric="lcp">pending...</span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              </p>
+              <p class="color-fg-muted mb-0">
+                <abbr title="Cumulative Layout Shift">CLS</abbr> - <span data-metric="cls">pending...</span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              </p>
+              <p class="color-fg-muted mb-0">
+                <abbr title="First Input Delay">FID</abbr> - <span data-metric="fid">pending...</span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              </p>
+              <p class="color-fg-muted mb-0">
+                <abbr title="Highest Priority Content">HPC</abbr> - <span data-metric="hpc">pending...</span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              </p>
+
+              <p>
+                See <a class="Link--inTextBlock" href="https://catalog.githubapp.com/scorecards/web-performance">here</a> to learn more.<%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+              </p>
+            </div>
+          </details-dialog>
+        </details>
+      </li>
+
+      <li id="staff-bar-bundle-sizes">
+        <bundle-size-stats>
+          <details class="details-reset details-overlay details-overlay-dark">
+            <%= render Primer::Tooltip.new(tag: :summary, label: "Bundle sizes", direction: :s, classes: "stat-toggle color-text-white") do %>
+              <%= primer_octicon(:code) %>
+            <% end %>
+
+            <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column" aria-label="Bundle sizes"><%# erblint:disable A11yDetailsDialogMigration %>
+              <div class="Box-header">
+                <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                  <%= primer_octicon(:x) %>
+                </button>
+                <h3 class="d-flex flex-items-center">
+                  Bundle sizes
+                  <%= render(Primer::Beta::IconButton.new(
+                    scheme: :invisible,
+                    icon: :trash,
+                    variant: :small,
+                    ml: 2,
+                    aria: { "label": "Clear log" },
+                    data: { "action": "click:bundle-size-stats#clearLog" }
+                  )) %>
+                </h3>
+
+
+                <ul data-target="bundle-size-stats.logList" style="max-height: 400px; min-height: 100px; overflow: auto"></ul>
+              </div>
+            </details-dialog>
+          </details>
+        </bundle-size-stats>
+      </li>
+      <li>
+        <%= render Stafftools::AzureExp::StaffbarComponent.new %>
+      </li>
+    <% end %>
+
+    <% if view.render_stats? %>
+      <li <% if !view.render_stats_visible? %>hidden<% end %>>
+        <details class="details-reset details-overlay details-overlay-dark">
+          <summary class="stat-toggle">
+            <strong><%= view.render_time %></strong> render
+          </summary>
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column width-full" aria-label="Rendering"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Rendering</h3>
+              <p class="color-fg-muted mb-0">
+                <%= view.render_time %> total
+              </p>
+            </div>
+            <div class="Box-body overflow-auto render-trace">
+              <%= view.render_trace_html %>
+            </div>
+          </details-dialog>
+        </details>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:gc) %>
+      <li>
+        <span class="stat-toggle">
+          <%= render Primer::Tooltip.new(tag: :strong, label: view.obj_allocated, direction: :s) do %>
+            <%= view.gc_time %> / <%= view.gc_info.count %>
+          <% end %>
+          gc
+        </span>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:redis) %>
+      <li <% if !view.process_stat_visible?(:redis) %>hidden<% end %>>
+        <details class="details-reset details-overlay details-overlay-dark">
+          <summary class="stat-toggle">
+            <strong><%= view.process_stat(:redis_stats) %></strong> redis
+          </summary>
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column" aria-label="Redis"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Redis</h3>
+              <p class="color-fg-muted mb-0">
+                <%= view.process_stat(:redis_stats) %> total
+              </p>
+            </div>
+
+            <%= render partial: "stafftools/staffbar/event_trace", locals: { event_traces: view.redis_trace } %>
+          </details-dialog>
+        </details>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:memcached) %>
+      <% cache_visible = view.process_stat_visible?(:memcached) || (view.process_stat_tracked?(:cache) && view.process_stat_visible?(:cache)) %>
+      <li <% if !cache_visible %>hidden<% end %>>
+        <details class="details-reset details-overlay details-overlay-dark">
+          <summary class="stat-toggle">
+            <% if view.process_stat_tracked?(:cache) %>
+              <%= render Primer::Tooltip.new(tag: :strong, label: "#{view.process_stat(:cache_stats)} GitHub::Cache ops", direction: :s) do %>
+                <%= view.process_stat(:memcached_stats) %>
+              <% end %>
+            <% else %>
+              <strong><%= view.process_stat(:memcached_stats) %></strong>
+            <% end %> cache
+          </summary>
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column width-full" aria-label="Cache"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Cache</h3>
+              <p class="color-fg-muted mb-0">
+                <%= view.process_stat(:memcached_stats) %> total
+                <span class="float-right">
+                  * A cached value of nil is counted as a miss here.
+                </span>
+              </p>
+            </div>
+            <div class="Box-body overflow-auto">
+              <table class="width-full">
+                <tr>
+                  <th>Key</th>
+                  <th class="text-right">Set</th>
+                  <th class="text-right">Hit*</th>
+                  <th class="text-right">Miss*</th>
+                </tr>
+                <% GitHub::Cache::Client.query_keys.each do |key, count| %>
+                  <tr>
+                    <td><%= view.cache_key_utf8_safe(key.inspect) %></td>
+                    <td class="text-right"><%= GitHub::Cache::Client.query_sets[key] %></td>
+                    <td class="text-right"><%= GitHub::Cache::Client.query_hits[key] %></td>
+                    <td class="text-right"><%= GitHub::Cache::Client.query_misses[key] %></td>
+                  </tr>
+                <% end %>
+              </table>
+            </div>
+          </details-dialog>
+        </details>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:es) %>
+      <li <% if !view.process_stat_visible?(:es) %>hidden<% end %>>
+        <details class="details-reset details-overlay details-overlay-dark">
+          <summary class="stat-toggle">
+            <%= render Primer::Tooltip.new(tag: :strong, label: view.es_loader_stats, direction: :s, classes: "preformatted-tooltip") do %>
+              <%= view.process_stat(:es_stats) %>
+            <% end %> es
+          </summary>
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column" aria-label="Elasticsearch"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>Elasticsearch</h3>
+              <p class="color-fg-muted mb-2">
+                <strong><%= view.process_stat(:es_stats) %></strong> total
+              </p>
+            </div>
+            <div class="Box-body overflow-auto">
+              <% Elastomer::QueryStats.instance.each_with_index do |stat, index| %>
+                <div class="Box-row">
+                  <h5 class="mb-1">Request took <%= stat.time %> ms, matching <%= stat.total %> documents</h5>
+                  <div class="input-group">
+                    <input id="site-es-query-curl-<%= index %>" type="text" value="<%= stat.curl %>" class="form-control input-sm" data-autoselect readonly aria-label="Curl command">
+                    <span class="input-group-button">
+                      <%= render Primer::Beta::ClipboardCopy.new(for: "site-es-query-curl-#{index}", "aria-label": "Copy to clipboard", classes: "btn btn-sm zeroclipboard-button") %>
+                    </span>
+                  </div>
+                  <details class="mb-3">
+                    <summary class="mt-3"><%= stat.url %></summary>
+                    <%= stat.hl_body %>
+                  </details>
+                </div>
+              <% end %>
+            </div>
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(block: true, "data-close-dialog": "") do %>Close<% end %>
+            </div>
+          </details-dialog>
+        </details>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:graphql) %>
+      <li <% if !view.process_stat_visible?(:graphql) %>hidden<% end %>>
+        <% graphql_css_class = params[:graphql_query_trace] ? "js-graphql-performance-pane-toggle" : "" %>
+
+        <span class="stat-toggle">
+          <%= link_to(view.graphql_tracer_path, classes: graphql_css_class) do %>
+            <%= render Primer::Tooltip.new(tag: :strong, label: view.graphql_loader_stats, direction: :s, classes: "preformatted-tooltip") do %>
+              <%= view.process_stat(:graphql_stats) %>
+            <% end %>
+          <% end %>
+          graphql
+        </span>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:mysql) %>
+      <li <% if !view.process_stat_visible?(:mysql) %>hidden<% end %>>
+        <span class="stat-toggle">
+          <%= link_to(view.mysql_tracer_path, "data-turbo": false) do %>
+            <%= render Primer::Tooltip.new(tag: :strong, label: view.sql_tooltip, direction: :s, classes: "preformatted-tooltip") do %>
+              <%= view.process_stat(:mysql_stats) %>
+              / <span style="color: #774aa2">
+                <%= GitHub::MysqlInstrumenter.primary_query_count %>
+              </span>
+              / <%= view.query_cache_hits %>
+            <% end %>
+          <% end %>
+          sql
+        </span>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:mysql) %>
+      <li <% if !view.process_stat_visible?(:mysql) %>hidden<% end %>>
+        <% cluster_details = view.bucket_clusters(required_clusters: controller.required_clusters, optional_clusters: controller.optional_clusters) %>
+        <%= render(Primer::Alpha::Dialog.new(title: "MySQL Cluster Stats", size: :auto, color: :default)) do |dialog| %>
+          <% dialog.with_header(show_divider: true) %>
+          <% dialog.with_show_button(scheme: :link, :"aria-label" => "Turbo navigation attempt was unsuccessful. Reason: {reason}", font_size: 6, classes: "normal color-text-white") do %>
+            <%= render Primer::Tooltip.new(
+              tag: :strong,
+              label: view.cluster_details_label(cluster_details),
+              direction: :s,
+              classes: "preformatted-tooltip"
+            ) do %>
+              <%= cluster_details[:required].length %> / <%= cluster_details[:optional].length %> / <%= cluster_details[:undeclared].length %>
+            <% end %>
+            <span class="stat-toggle">clusters</span>
+          <% end %>
+          <% dialog.with_body(classes: 'ws-normal') do %>
+
+            <% if cluster_details[:required].any? %>
+              <h4 class="pb-1">Required clusters:</h4>
+              <p class="pb-1">Clusters required to render this page.</p>
+
+              <%= render "stafftools/staffbar/cluster_details", clusters: cluster_details[:required], disabled_clusters: view.disabled_cluster_names %>
+            <% end %>
+
+            <% if cluster_details[:optional].any? %>
+              <h4 class="pb-1">Optional clusters:</h4>
+              <p class="pb-1">Clusters this page can render without.</p>
+
+              <%= render "stafftools/staffbar/cluster_details", clusters: cluster_details[:optional], disabled_clusters: view.disabled_cluster_names %>
+            <% end %>
+
+            <% if cluster_details[:undeclared].any? %>
+              <h4 class="pb-1">Undeclared clusters:</h4>
+              <p class="pb-1">Clusters that aren't declared. Please declare clusters in your controller via <code>depends_on_cluster</code>.</p>
+              <%= render "stafftools/staffbar/cluster_details", clusters: cluster_details[:undeclared], disabled_clusters: view.disabled_cluster_names %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:gitrpc) %>
+      <li <% if !view.process_stat_visible?(:gitrpc) %>hidden<% end %>>
+        <details class="details-reset details-overlay details-overlay-dark">
+          <summary class="stat-toggle">
+            <%= render Primer::Tooltip.new(tag: :strong, label: view.gitrpc_call_stats, direction: :s, classes: "preformatted-tooltip") do %>
+              <%= view.process_stat(:gitrpc_stats) %>
+            <% end %> gitrpc
+          </summary>
+          <details-dialog class="anim-fade-in fast Box Box--overlay Box-overlay--wide d-flex flex-column" aria-label="GitRPC"><%# erblint:disable A11yDetailsDialogMigration %>
+            <div class="Box-header">
+              <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                <%= primer_octicon(:x) %>
+              </button>
+              <h3>GitRPC</h3>
+              <p class="color-fg-muted mb-0">
+                <%= view.process_stat(:gitrpc_stats) %> total
+              </p>
+            </div>
+            <%= render partial: "stafftools/staffbar/event_trace", locals: { event_traces: view.gitrpc_trace } %>
+          </details-dialog>
+        </details>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:markdown) %>
+      <li <% if !view.process_stat_visible?(:markdown) %>hidden<% end %>>
+        <span class="stat-toggle">
+          <%= render Primer::Tooltip.new(tag: :strong, label: view.markdown_call_stats, direction: :s, classes: "preformatted-tooltip") do %>
+            <%= view.process_stat(:markdown_stats) %>
+          <% end %> md
+        </span>
+      </li>
+    <% end %>
+
+    <% if GitHub.flipper_ui_enabled? && view.process_stat_tracked?(:tested_features) %>
+      <% enabled_features, disabled_features = FlipperSubscriber.tested_features.keys.partition { |feature| FlipperSubscriber.tested_features[feature] } %>
+      <% preloaded_features = FlipperSubscriber.preloaded_features %>
+      <li <% if FlipperSubscriber.tested_features.empty? %>hidden<% end %>>
+        <div class="d-flex">
+          <details class="details-reset details-overlay details-overlay-dark">
+            <summary class="stat-toggle">
+              <strong>
+                <%= number_with_delimiter enabled_features.size %>
+                /
+                <%= number_with_delimiter FlipperSubscriber.tested_features.size %>
+              </strong> features
+            </summary>
+            <details-dialog style="width: 100%" class="Box Box--overlay d-flex flex-column anim-fade-in fast" aria-label="Features"><%# erblint:disable A11yDetailsDialogMigration %>
+              <div class="Box-header">
+                <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                  <%= primer_octicon(:x) %>
+                </button>
+                <h3>Features</h3>
+              </div>
+              <div class="Box-body overflow-auto pb-3">
+                <%= render(Primer::Alpha::TabPanels.new(with_panel: true, label: "Feature flags stats")) do |c| %>
+                  <% c.with_tab(id: "feature-flags-tab", panel_id: "feature-flags-panel", selected: true, href: "#") do |t| %>
+                    <% t.with_text { "Feature Flags" } %>
+                    <% t.with_panel do %>
+                      <% if enabled_features.size %>
+                        <table class="flags-table">
+                          <caption>Enabled features</caption>
+
+                          <thead>
+                            <tr>
+                              <td></td>
+
+                              <th>
+                                Preloaded?
+
+                                <a href="https://thehub.github.com/epd/engineering/dev-practicals/performance/features/#preloading-feature-flags">
+                                  <%= render Primer::Beta::Octicon.new(icon: "info", "aria-label": "View docs") %>
+                                </a>
+                              </th>
+
+                              <th>
+                                Big feature?
+
+                                <a href="https://thehub.github.com/epd/engineering/products-and-services/dotcom/features/feature-flags/big-features/">
+                                  <%= render Primer::Beta::Octicon.new(icon: "info", "aria-label": "View docs") %>
+                                </a>
+                              </th>
+
+                              <th>Toggle in URL</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            <% enabled_features.sort.each do |feature| %>
+                              <tr>
+                                <th>
+                                  <a href="<%= "https://devportal.githubapp.com/feature-flags/#{feature}/overview" %>" >
+                                    <%= feature %>
+                                  </a>
+                                </th>
+
+                                <td>
+                                  <% if preloaded_features.include?(feature) %>
+                                    <span aria-label="Yes" role="img">✅</span>
+                                  <% else %>
+                                    <span aria-label="No" role="img">❌</span>
+                                  <% end %>
+                                </td>
+
+                                <td>
+                                  <% if ::Flipper::Config.big_features.include?(feature.to_s) %>
+                                    <span aria-label="Yes" role="img">✅</span>
+                                  <% else %>
+                                    <span aria-label="No" role="img">❌</span>
+                                  <% end %>
+                                </td>
+
+                                <td>
+                                  <a href="?<%= request.query_parameters.merge(
+                                    _features: [request.query_parameters[:_features], "!#{feature}"].compact.join(",")
+                                  ).to_query %>">
+                                    Disable
+                                  </a>
+                                </td>
+                              </tr>
+                            <% end %>
+                          </tbody>
+                        </table>
+                      <% end %>
+
+                      <% if disabled_features.size %>
+                        <table class="flags-table">
+                          <caption>Disabled features</caption>
+
+                          <thead>
+                            <tr>
+                              <td></td>
+
+                              <th>
+                                Preloaded?
+
+                                <a href="https://thehub.github.com/epd/engineering/dev-practicals/performance/features/#preloading-feature-flags">
+                                  <%= render Primer::Beta::Octicon.new(icon: "info", "aria-label": "View docs") %>
+                                </a>
+                              </th>
+
+                              <th>
+                                Big feature?
+
+                                <a href="https://thehub.github.com/epd/engineering/products-and-services/dotcom/features/feature-flags/big-features/">
+                                  <%= render Primer::Beta::Octicon.new(icon: "info", "aria-label": "View docs") %>
+                                </a>
+                              </th>
+
+                              <th>Toggle in URL</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            <% disabled_features.sort.each do |feature| %>
+                              <tr>
+                                <th>
+                                  <a href="<%= "https://devportal.githubapp.com/feature-flags/#{feature}/overview" %>" >
+                                    <%= feature %>
+                                  </a>
+                                </th>
+
+                                <td>
+                                  <% if preloaded_features.include?(feature) %>
+                                    <span aria-label="Yes" role="img">✅</span>
+                                  <% else %>
+                                    <span aria-label="No" role="img">❌</span>
+                                  <% end %>
+                                </td>
+
+                                <td>
+                                  <% if ::Flipper::Config.big_features.include?(feature.to_s) %>
+                                    <span aria-label="Yes" role="img">✅</span>
+                                  <% else %>
+                                    <span aria-label="No" role="img">❌</span>
+                                  <% end %>
+                                </td>
+
+                                <td>
+                                  <a href="?<%= request.query_parameters.merge(
+                                    _features: [request.query_parameters[:_features], feature].compact.join(",")
+                                  ).to_query %>">
+                                    Enable
+                                  </a>
+                                </td>
+                              </tr>
+                            <% end %>
+                          </tbody>
+                        </table>
+                      <% end %>
+
+                      <div class="mb-4">
+                        <h4>
+                          Adapter details
+                        </h4>
+
+                        <p class="mb-2">
+                          Enabled Adapter: <%= ::Flipper::Config.enabled_adapter.class.to_s %>
+                        </p>
+
+                        <p class="mb-2">
+                          Enabled Dual Adapter: <%= ::Flipper::Config.dual_adapter.enabled_adapter_type %>
+                        </p>
+
+                        <strong>Debug Info:</strong>
+                        <table class="width-full">
+                          <tr>
+                            <td class="border p-2" style="width:35%">Request ID:</td>
+                            <td class="border p-2" style="width:65%"><%= Rack::RequestId.current %></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">In Memory Enabled?:</td>
+                            <td class="border p-2" style="width:65%"><%= ::Flipper::Config.in_memory_enabled? %></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Kube Node:</td>
+                            <td class="border p-2" style="width:65%"><%= ENV.fetch("KUBE_NODE_HOSTNAME", Failbot.hostname) %></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Current Worker PID:</td>
+                            <td class="border p-2" style="width:65%"><%= $$ %></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">In Memory last refreshed</td>
+                            <td class="border p-2" style="width:65%">
+                            <% if time = Flipper::Adapters::InMemory.task_output&.time %>
+                              <%= time_ago_in_words_js time %> (<%= time.iso8601 %>)
+                            <% else %>
+                              Never reloaded
+                            <% end %>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">In Memory last modified</td>
+                            <td class="border p-2" style="width:65%">
+                            <% if time = Flipper::Adapters::InMemory.rollout_last_updated_at %>
+                              <%= time_ago_in_words_js time %> (<%= time.iso8601 %>)
+                            <% else %>
+                              Not loaded
+                            <% end %>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">In Memory Adapter Task:</td>
+                            <td class="border p-2" style="width:65%"><code><%= Flipper::Adapters::InMemory.task_output&.inspect %></code></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">In Memory # of Features:</td>
+                            <td class="border p-2" style="width:65%"><%= Flipper::Adapters::InMemory.all_features&.size || 0 %></td>
+                          </tr>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Adapter Object IDs</td>
+                            <td class="border p-2" style="width:65%">
+                              <p class="mb-0 ml-1">All Features Hash: <%= Flipper::Adapters::InMemory.all_features&.object_id %></p>
+                              <p class="mb-0 ml-1">Reload task: <%= Flipper::Adapters::InMemory.reload_task&.object_id %></p>
+                            </td>
+                          </tr>
+                        </table>
+                      </div>
+
+                      <p class="mb-4">
+                        Time taken to preload <%= preloaded_features.size %> features: <%= sprintf('%.3f', FlipperSubscriber.total_preload_duration * 1000) %>ms
+                      </p>
+
+                      <h4>
+                        <%= FlipperSubscriber.total_enabled_calls %>
+                        Feature#enabled? calls
+                        (<%= sprintf('%.3f', FlipperSubscriber.total_enabled_duration * 1000) %>ms)
+                      </h4>
+
+                      <table class="width-full mb-4">
+                        <tr>
+                          <th>Feature</th>
+                          <th>enabled? call durations (µs)</th>
+                        </tr>
+
+                        <% FlipperSubscriber.tested_feature_timings.sort.to_h.each do |name, durations| %>
+                          <tr>
+                            <td><%= name %></td>
+                            <td><%= durations.map { |duration| (duration * 1_000_000).round }.join(", ") %></td>
+                          </tr>
+                        <% end %>
+                      </table>
+                    <% end %>
+                  <% end %>
+                  <% c.with_tab(id: "feature-previews-tab", panel_id: "feature-previews-panel", href: "#") do |t| %>
+                    <% t.with_text { "Feature Previews" } %>
+                    <% t.with_panel do %>
+                      <%
+                          enabled_feature_previews, disabled_feature_previews = current_user.checked_feature_previews.partition { |k, v| v.fetch(:enabled) }
+                      %>
+                      <%=
+                        render(Site::ServerStats::FeaturePreviewComponent.new(
+                          title: "Enabled Feature Previews",
+                          feature_previews_info: enabled_feature_previews,
+                        ))
+                      %>
+                      <%=
+                        render(Site::ServerStats::FeaturePreviewComponent.new(
+                          title: "Disabled Feature Previews",
+                          feature_previews_info: disabled_feature_previews,
+                        ))
+                      %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </div>
+            </details-dialog>
+          </details>
+
+          <details class="details-reset details-overlay details-overlay-dark">
+            <summary title="See specified features, this may take a moment to load" class="stat-toggle color-text-white pl-2" aria-haspopup="dialog"><%= render Primer::Beta::Octicon.new(icon: "eye", aria: { label: "Show all features", hidden: false }) %></summary><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+            <details-dialog style="width: 100%" class="Box Box--overlay d-flex flex-column anim-fade-in fast"><%# erblint:disable A11yDetailsDialogMigration %>
+              <div class="Box-header">
+                <button class="Box-btn-octicon btn-octicon float-right" type="button" aria-label="Close dialog" data-close-dialog>
+                  <%= render Primer::Beta::Octicon.new(icon: "x", aria: { label: "Close Dialog", hidden: false }) %>
+                </button>
+                <h2 class="Box-title">In-Memory Features</h2>
+              </div>
+              <div class="overflow-auto">
+                <% if (features = params[:show_flipper_features]&.split(",")).present? %>
+                  <div class="Box-body overflow-auto">
+                    <p>Checking features <%= features.to_sentence %></p>
+                    <pre><code><%= JSON.pretty_generate(::Flipper::Adapters::InMemory.all_features.slice(*features)) %></code></pre>
+                  </div>
+
+                  <div class="Box-row Box-row--gray">
+                    <h4 class="Box-title">Detailed Breakdown</h4>
+                  </div>
+                  <div class="Box-body overflow-auto">
+                    <% features.each do |feature| %>
+                      <% actual_feature = GitHub.flipper[feature] %>
+
+                      <table class="mb-5">
+                        <tr class="color-bg-subtle">
+                          <td class="border p-2" colspan="2"><strong><%= feature %></strong></td>
+                        </tr>
+                        <tr class="color-bg-subtle">
+                          <td class="border p-2" colspan="2">Current session objects enabled checks</td>
+                        </tr>
+
+                        <% if logged_in? %>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Enabled for current user (id: <%= current_user.id %>)</td>
+                            <td class="border p-2" style="width:65%">
+                              <%= actual_feature.enabled?(current_user) %>
+                            </td>
+                          </tr>
+                        <% else %>
+                          <tr>
+                            <td class="border p-2" colspan="2">No Current User</td>
+                          </tr>
+                        <% end %>
+
+                        <% if current_repository %>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Enabled for current repository (id: <%= current_repository.id %>)</td>
+                            <td class="border p-2" style="width:65%">
+                              <%= actual_feature.enabled?(current_repository) %>
+                            </td>
+                          </tr>
+                        <% else %>
+                          <tr>
+                            <td class="border p-2" colspan="2">No Current Repository</td>
+                          </tr>
+                        <% end %>
+
+                        <% if current_organization %>
+                          <tr>
+                            <td class="border p-2" style="width:35%">Enabled for current organization (id: <%= current_organization.id %>)</td>
+                            <td class="border p-2" style="width:65%">
+                              <%= actual_feature.enabled?(current_organization) %>
+                            </td>
+                          </tr>
+                        <% else %>
+                          <tr>
+                            <td class="border p-2" colspan="2">No Current Org</td>
+                          </tr>
+                        <% end %>
+
+                        <tr class="color-bg-subtle">
+                          <td class="border p-2" colspan="2">Adapter Comparisons</td>
+                        </tr>
+
+                        <tr>
+                          <td class="border p-2" style="width:35%">In-Memory</td>
+                          <td class="border p-2" style="width:65%">
+                            <%= ::Flipper::Config.in_memory_adapter.get(actual_feature) %>
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td class="border p-2" style="width:35%">MySQL</td>
+                          <td class="border p-2" style="width:65%">
+                            <%= ::Flipper::Config.mysql_adapter.get(actual_feature) %>
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td class="border p-2" style="width:35%">Memcached</td>
+                          <td class="border p-2" style="width:65%">
+                            <%= ::Flipper::Config.memcached_adapter.get(actual_feature) %>
+                          </td>
+                        </tr>
+
+                        <tr class="color-bg-subtle">
+                          <td class="border p-2" colspan="2">General Feature Inspection</td>
+                        </tr>
+
+                        <%
+                          [
+                            :actors_value,
+                            :boolean_value,
+                            :conditional?,
+                            :disabled_gate_names,
+                            :disabled_gates,
+                            :disabled_groups,
+                            :enabled_for_employees_only?,
+                            :enabled_gate_names,
+                            :enabled_gates,
+                            :enabled_groups,
+                            :enabled?,
+                            :gate_values,
+                            :gates,
+                            :groups_value,
+                            :groups,
+                            :key,
+                            :off?,
+                            :on?,
+                            :percentage_of_actors_value,
+                            :percentage_of_time_value,
+                            :state,
+                          ].each do |method|
+                        %>
+                          <tr>
+                            <td class="border p-2" style="width:35%"><%= method %></td>
+                            <td class="border p-2" style="width:65%">
+                              <%= actual_feature.send(method) %>
+                            </td>
+                          </tr>
+                        <% end %>
+                      </table>
+                    <% end %>
+                  </div>
+                <% else %>
+                  <div class="Box-body overflow-auto">
+                    <p>Add a CSV list of features as a URL param <code>show_flipper_features</code> and see the raw feature data</p>
+                  </div>
+                <% end %>
+              </div>
+            </details-dialog>
+          </details>
+        </div>
+      </li>
+    <% end %>
+
+    <% if GitHub.external_identity_session_enforcement_enabled? &&
+          current_external_identity_sessions.any? %>
+      <li>
+        <%
+          tooltip = current_external_identity_sessions.map do |session|
+            identity = session.external_identity
+            "#{identity.saml_user_data.name_id}@#{identity.target} expires #{session.expires_at}\n"
+          end.join("\n")
+        %>
+        <span class="stat-toggle">
+          <%= render Primer::Tooltip.new(tag: :strong, label: tooltip, direction: :s) do %>
+            <%= number_with_delimiter current_external_identity_sessions.size %>
+          <% end %>
+          external <%= "identity".pluralize(current_external_identity_sessions.size) %>
+        </span>
+      </li>
+    <% end %>
+
+    <% if view.process_stat_tracked?(:glb) %>
+      <li>
+        <span class="stat-toggle">
+          <%= render Primer::Tooltip.new(tag: :strong, href: "#glb_performance", label: view.glb_hosts, direction: :s, class: "preformatted-tooltip") do %>
+            <%= view.glb_regions %>
+          <% end %>
+          glb
+        </span>
+
+        <div id="glb_performance" hidden></div>
+      </li>
+    <% end %>
+  <% end %>
+
+  <%= render partial: "stafftools/staffbar/authz", locals: { view: view } %>
+</ul>

@@ -1,0 +1,154 @@
+#!/bin/bash
+set -exo pipefail
+cd "$(dirname "$0")/.."
+
+date=$(date +%Y-%m-%d)
+
+reported="tmp/proxima_namespacing_inventory_results.csv"
+echo -n > $reported
+
+unreported="tmp/proxima_namespacing_unreported_inventory_results.csv" # This contains results for categories that are not covered in the inventory report
+echo -n > $unreported
+
+# --------------- #
+# Grep commands
+# --------------- #
+
+# --------------- #
+# Ruby scripts
+# --------------- #
+
+# Web
+# --------------- #
+
+# Navigation Controllers
+# PRELOAD=1 safe-ruby script/proxima-tenant-namespacing-controllers.rb >> $reported
+
+# --------------- #
+# Rubocop Linters
+# --------------- #
+
+rubocop -f emacs --fail-level fatal \
+  --only GitHub/DoNotAllowLogin,GitHub/DoNotAllowNameWithOwner,GitHub/DoNotAllowOwnerLogin \
+  > tmp/proxima-report-rubocop-offenses.txt
+
+# Filter tmp/proxima-report-rubocop-offenses.txt and categorize findings by category and subcategory
+
+# GraphQL
+# --------------- #
+
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/app/platform/" |
+  grep -v "test" |
+  grep -v "app/platform/provisioning" | # New Category: Provisioning
+  script/proxima-tenant-namespacing-inventory-report.rb --category "GraphQL" --subcategory "GraphQL Ops" >> $reported
+
+# Web
+# --------------- #
+
+# Mailers
+# --------------- #
+
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/app/mailers/" |
+  grep -v "test" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Web" --subcategory "Mailers" >> $reported
+
+# User Interface
+# --------------- #
+
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/app/(views|view_models|components)/" |
+  grep -v "test" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Web" --subcategory "User Interface" >> $reported
+
+
+# Controllers
+# --------------- #
+
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/app/controllers/" |
+  grep -v "test" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Web" --subcategory "Controllers" >> $reported
+
+
+# Lib and Models
+# --------------- #
+
+# Models
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep "app/models" |
+  grep -v "test" |
+  grep -v "newsies" | #Caught in mailers category
+  grep -v "packages/health/app/models/spam/" | #Spam console used by Staff only
+  grep -v "packages/import_export/ " | #Import/Export is used by Octoshift Staff/Solutions team @github/migration-tools-reviewers
+  grep -v "packages/webhooks/app/models/" | # Webhooks models are not handled in webhooks category
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Models" --subcategory "Models" >> $unreported
+
+# Models (App/Helpers)
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep "app/helpers" | \
+  grep -v "test" |
+  grep -v "newsies" |  #Caught in mailers category
+  grep -v "packages/health/app/models/spam/" |  #Spam console used by Staff only
+  grep -v "packages/import_export/ " |   #Import/Export is used by Octoshift Staff/Solutions team @github/migration-tools-reviewers
+  grep -v "packages/webhooks/app/models/" |  # Webhooks models are not handled in webhooks category
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Models" --subcategory "Helpers" >> $unreported
+
+# Jobs
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep "app/jobs" |
+  grep -v "packages/migration" | # Migration is used by Octoshift Staff/Solutions team @github/migration-tools-reviewers
+  grep -v "test" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Models" --subcategory "Jobs" >> $unreported
+
+# Lib : Lib
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep -v "test" |
+  grep -v "newsies" | #Caught in mailers category
+  grep -v "app/models" | # Models category
+  grep -v "codespaces/app" | # New Category: Codespaces
+  grep -v "copilot/app" | # New Category: Copilot
+  grep -v "git_auth" | # New Category: GitAuth
+  grep -v "app/platform/provisioning" | # New Category: Provisioning
+  grep -v "app/platform/**/*" | # Graphql Inventory is being evaluated by greps right now
+  grep -v "app/jobs" | # Tracked in Models: Jobs
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Lib" --subcategory "Lib" >> $unreported
+
+# Services
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep -v "test" |
+  grep "git_auth" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Services" --subcategory "GitAuth" >> $unreported
+
+# Services Codespaces
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep "codespaces/app" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Services" --subcategory "Codespaces" >> $unreported
+
+
+# Services Copilot extensions
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep "copilot/app" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Services" --subcategory "Copilot" >> $unreported
+
+# Services
+cat tmp/proxima-report-rubocop-offenses.txt | grep -E "/(app/(api|models)|packages|lib)/" |
+  grep -v "test" |
+  grep "app/platform/provisioning" |
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Services" --subcategory "Provisioning" >> $unreported
+
+# Tests are not part of any inventory, keeping this here for posterity
+# --------------- #
+# cat tmp/proxima-report-rubocop-offenses.txt | grep "test" | \
+#   script/proxima-tenant-namespacing-inventory-report.rb --category "Tests" --subcategory "Tests" >> $unreported
+
+
+# --------------- #
+# Erb Linters
+# --------------- #
+
+# Web
+# --------------- #
+
+# User Interface
+BOOTSTRAP_ERBLINT=1 bin/bundle exec erblint \
+  --enable-linters rubocop app/views app/components packages/**/app/components app/forms/**/ \
+  -f compact | tail -n +2 | grep -v "No errors were found" | \
+  script/proxima-tenant-namespacing-inventory-report.rb --category "Web" --subcategory "User Interface" --erblint true >> $reported

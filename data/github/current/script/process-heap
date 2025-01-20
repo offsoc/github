@@ -1,0 +1,108 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+##
+# Use this script to process output from `dump-rails-heap` (or any heap dump
+# that had `trace_object_allocations_start` enabled.
+#
+# Show me a summary of memsize and number of allocations by gem:
+#
+# $ process-heap heap.json
+#
+# I'm only interested in allocations by file in active support:
+#
+# $ grep activesupport-4.2.10.github heap.json | bin/process-heap -f
+#
+# I've found the file I care about, now show me the output by line:
+#
+# $ grep filename heap.json | bin/process-heap -l
+#
+# The output is CSV so you can easily plot it in your favorite plotting tool.
+require "optparse"
+require "json"
+require "csv"
+
+class Aggregator
+  def initialize
+    @memsize = Hash.new(0)
+    @count   = Hash.new(0)
+  end
+
+  def add(object)
+    key = get_key(object)
+    @memsize[key] += (object["memsize"] || 0)
+    @count[key] += 1
+    self
+  end
+
+  def each
+    @memsize.sort_by { |_, v| v }.each do |key, v|
+      yield key, v, @count[key]
+    end
+  end
+end
+
+class ByGem < Aggregator
+  private
+
+  def get_key(object)
+    key = object.fetch("file") { return :unknown }
+    key = key.sub(ENV["RAILS_ROOT"], "").sub(/^\//, "")
+    if key =~ /gems\/([^\/]*)\/lib/
+      key = $1
+    else
+      key
+    end
+  end
+end
+
+class ByFile < Aggregator
+  private
+
+  def get_key(object)
+    key = object.fetch("file") { return :unknown }
+    key.sub(ENV["RAILS_ROOT"], "").sub(/^\//, "")
+  end
+end
+
+class ByLine < Aggregator
+  private
+
+  def get_key(object)
+    key = object.fetch("file") { return :unknown }
+    key.sub(ENV["RAILS_ROOT"], "").sub(/^\//, "") + ":" + (object["line"] || 0).to_s
+  end
+end
+
+aggregator = ByGem.new
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: #{__FILE__} [heap-file]"
+
+  opts.on("-f", "--file", "Use per-file stats") do
+    aggregator = ByFile.new
+  end
+
+  opts.on("-l", "--line", "Use per-file and line stats") do
+    aggregator = ByLine.new
+  end
+
+  opts.on("-h", "--help", "Display this screen") do
+    puts opts
+    exit
+  end
+end
+parser.parse!
+
+heap_info = {}
+
+ARGF.each_line do |line|
+  aggregator.add JSON.parse line
+end
+
+CSV do |csv|
+  csv << %w[location memsize allocations]
+  aggregator.each do |location, memsize, count|
+    csv << [location, memsize, count]
+  end
+end

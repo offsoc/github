@@ -1,0 +1,95 @@
+#!/usr/bin/env ruby
+
+case ARGV[0]
+when "listener"
+  require "resqued/listener"
+  Resqued::Listener.exec!
+  exit 0
+when "quit-and-wait"
+  require "resqued/quit-and-wait"
+  Resqued::QuitAndWait.exec!(ARGV.drop(1))
+  exit 0
+end
+
+require "optparse"
+
+options = {}
+daemonize = false
+test = false
+
+opts = OptionParser.new do |opts| # rubocop: disable Lint/ShadowingOuterLocalVariable
+  opts.banner = "Usage: resqued [options] resqued-config-files..."
+
+  opts.on "-h", "--help", "Show this message" do
+    puts opts
+    exit
+  end
+
+  opts.on "-v", "--version", "Show the version" do
+    require "resqued/version"
+    puts Resqued::VERSION
+    exit
+  end
+
+  opts.on "--test", "Report which worker would start" do
+    test = true
+  end
+
+  opts.on "--fast-exit", "Exit quickly on SIGQUIT, SIGTERM" do
+    options[:fast_exit] = true
+  end
+
+  opts.on "-p", "--pidfile PIDFILE", "Store the pid of the master process in PIDFILE" do |v|
+    options[:master_pidfile] = v
+  end
+
+  opts.on "-l", "--logfile LOGFILE", "Write output to LOGFILE instead of stdout" do |v|
+    require "resqued/logging"
+    Resqued::Logging.log_file = v
+  end
+
+  opts.on "-D", "--daemonize", "Run daemonized in the background" do
+    daemonize = true
+  end
+
+  opts.on "--replace FILE", "(internal)" do |v|
+    options[:master_state] = v
+  end
+end
+
+opts.parse!
+options[:config_paths] = ARGV
+
+def require_config_paths!(options, opts)
+  if options[:config_paths].empty?
+    puts opts
+    exit 1
+  end
+end
+
+if test
+  require_config_paths! options, opts
+  require "resqued/config"
+  workers = Resqued::Config.new(options[:config_paths]).build_workers
+  puts "Workers defined in #{options[:config_paths].join(' ')}"
+  workers.each_with_index do |worker, index|
+    puts "#{index + 1}: #{worker.queues.join(',')}"
+  end
+else
+  require "resqued"
+  state = Resqued::MasterState.new
+  if options[:master_state]
+    Resqued::Logging.logger.info "Resuming master from #{options[:master_state]}"
+    Resqued::ReplaceMaster.restore_state(state, options[:master_state])
+  else
+    require_config_paths! options, opts
+    Resqued.capture_start_ctx!
+    state.init(options)
+  end
+  resqued = Resqued::Master.new(state)
+  if daemonize
+    require "resqued/daemon"
+    resqued = Resqued::Daemon.new(resqued)
+  end
+  resqued.run
+end

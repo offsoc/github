@@ -1,0 +1,380 @@
+syntax = "proto3";
+package git_hub.launch.services.credz;
+
+option go_package = "github.com/github/kredz/services/protobuf/credz";
+
+import "google/protobuf/timestamp.proto";
+
+// CredentialsService defines a service which manages credentials.
+service CredentialsService {
+    // Fetch defines an RPC call to fetch a credential and its value from the datastore.
+    rpc Fetch (FetchRequest) returns (FetchResponse);
+    // Exists defines an RPC call to check if a given credential exists in the datastore.
+    rpc Exists (ExistsRequest) returns (ExistsResponse);
+    // Store defines an RPC call to create or update a credential in the datastore.
+    rpc Store (StoreRequest) returns (StoreResponse);
+    // Create defines an RPC call to create a new credential in the datastore.
+    rpc Create(CreateRequest) returns (CreateResponse);
+    // Update defines an RPC call to update a credential in the datastore.
+    rpc Update (UpdateRequest) returns (UpdateResponse);
+    // Delete defines an RPC call to delete a credential from the datastore.
+    rpc Delete (DeleteRequest) returns (DeleteResponse);
+    // List defines an RPC call to list credentials for a given owner.
+    rpc List (ListRequest) returns (ListResponse);
+
+    // ListSecretsForRepository defines an RPC call to list credentials for a
+    // given repository and organization.
+    rpc ListSecretsForRepository (ListSecretsForRepositoryRequest) returns (ListSecretsForRepositoryResponse);
+
+    // DeleteSecretsForOwner defines an RPC call that deletes all of the credentials
+    // for a given owner.
+    rpc DeleteSecretsForOwner (DeleteSecretsForOwnerRequest) returns (DeleteSecretsForOwnerResponse);
+
+    // GetSecretCounts returns the number of secrets for each owner id for a given owner type and integration
+    rpc GetSecretCounts (SecretCountsRequest) returns (SecretCountsResponse);
+}
+
+// Repository defines a GitHub Repository, identified by an ID or a NWO.
+message Repository {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+
+    // New format of global relay ID
+    string new_global_id = 2;
+}
+
+// User defines a GitHub User, identified by an ID.
+message User {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+
+    // New format of global relay ID
+    string new_global_id = 2;
+}
+
+// Organization defines a GitHub Organization, identified by an ID.
+message Organization {
+    // GraphQL global relay ID, e.g. `RmFjdGlvbjox`
+    string global_id = 1;
+
+    // New format of global relay ID
+    string new_global_id = 2;
+}
+
+// Environment defines a GitHub Actions Environment, identified by an ID.
+message Environment {
+  string global_id = 1;
+
+  int64 repository_id = 2;
+
+  // New format of global relay ID
+  string new_global_id = 3;
+}
+
+// Error defines an error encountered during processing.
+message Error {
+    // A unique error number associated with the error.
+    int64 error_number = 1;
+    // An error message describing what went wrong.
+    string error_message = 2;
+    // A backtrace indicating the call stack up to where the error was encountered.
+    string backtrace = 3;
+}
+
+// CredentialOwner defines the owner the credential. It can be one of a:
+//   - Repository
+//   - User
+//   - Organization
+//   - Environment
+message CredentialOwner {
+    oneof owner {
+        // The credential is owned by the single repository.
+        Repository repository = 1;
+        // The credential is owned by one user account and applies to all repositories under account.
+        User user = 2;
+        // The credential is owned by an organization and applies to all repositories under account.
+        Organization organization = 3;
+
+        // The credential is owned by an environment and applies only to this
+        // environment
+        Environment environment = 4;
+    }
+}
+
+// Credential defines a credential. It has an owner, type, a service, and a value.
+// The owner, type, and service define the credential key for lookups.
+message Credential {
+    // Who owns this? Based on Flipper format, e.g. User;1, Repo;2, Organization;3.
+    CredentialOwner owner = 1;
+    // Integration name, as full configuration string e.g. `github-launch/microsoft-vstsci`.
+    string integration = 5;
+    // The credential name, i.e. a unique name to identify it by.
+    string name = 7;
+    // Credential value. This can be a single string or a JSON blob. The client must know how to handle this.
+    bytes value = 4;
+    // The length of the encrypted secret.
+    int64 length = 10;
+    // When this record was created
+    google.protobuf.Timestamp created_at = 8;
+    // When this record was updated
+    google.protobuf.Timestamp updated_at = 9;
+    // The visibility of the credential.
+    Visibility visibility = 11;
+    // selected_repositories returns an array of repositories that can use this secret.
+    // This will only be populated when the visibility is
+    // SELECTED_REPOSITORIES.
+    repeated Repository selected_repositories = 12;
+    // selected_repositories_count returns the number of selected repositories than can use this secret
+    // This will only be populated when the visibility is
+    // SELECTED_REPOSITORIES.
+    int64 selected_repositories_count = 13;
+    // The next_global_id for the credential's integration
+    string integration_next_global_id = 14;
+    // The credential's value encrypted with the owner's next_global_id
+    bytes value_encrypted_with_next_global_id_scope = 15;
+}
+
+// Visibility models the visibility of specific credential.
+enum Visibility {
+  // VISIBILITY_OWNER is returned as the default value, meaning that only the
+  // owner that defined this secret should be able to see it.
+  VISIBILITY_OWNER = 0;
+  // VISIBILITY_ALL_REPOS is returned when the visibility is set to all repos.
+  VISIBILITY_ALL_REPOSITORIES = 1;
+  // VISIBILITY_PRIVATE_REPOS is returned when the visibility is set to only
+  // private repos.
+  VISIBILITY_PRIVATE_REPOSITORIES = 2;
+  // VISIBILITY_SELECTED_REPOS is returned when a distinct set of repos should
+  // have a secret.
+  VISIBILITY_SELECTED_REPOSITORIES = 3;
+}
+
+// StoreRequest defines the request when storing or updating a credential.
+message StoreRequest {
+    // The credential to store. Must include the value if it's a new credential.
+    Credential credential = 1;
+
+    // Flag to indicate if the credential value was encrypted with the NextGlobalID scope of the owner
+    bool is_encrypted_with_next_global_id_scope = 2;
+}
+
+// StoreResponse defines the response when storing a credential.
+message StoreResponse {
+    // Whether the credential was successfully stored.
+    bool stored = 1;
+    // Whether the credential was successfully updated.
+    bool updated = 4;
+    // The credential without the value. This is how you identify the credential later on.
+    Credential credential = 2;
+    // Any errors encountered.
+    Error error = 3;
+}
+
+// CreateRequest defines the request when creating a credential.
+message CreateRequest {
+    // The credential to create.
+    Credential credential = 1;
+
+    // Flag to indicate if the credential value was encrypted with the NextGlobalID scope of the owner
+    bool is_encrypted_with_next_global_id_scope = 2;
+}
+
+// CreateResponse defines the response when creating a credential.
+message CreateResponse {
+    // Whether the credential was successfully created.
+    bool stored = 1;
+    // The credential without the value. This is how you identify the credential later on.
+    Credential credential = 2;
+    // Any errors encountered.
+    Error error = 3;
+}
+
+message UpdateRequest {
+    // The credential to update.
+    Credential credential = 1;
+
+    // Flag to indicate if the credential value was encrypted with the NextGlobalID scope of the owner
+    bool is_encrypted_with_next_global_id_scope = 2;
+}
+
+// StoreResponse defines the response when storing a credential.
+message UpdateResponse {
+    // Whether the credential was updated, because it already existed.
+    bool updated = 1;
+    // The credential without the value. This is how you identify the credential later on.
+    Credential credential = 2;
+    // Any errors encountered.
+    Error error = 3;
+}
+
+
+// FetchRequest defines the request when fetching a credential.
+message FetchRequest {
+    // The repository requesting the credential.
+    Repository repository = 1;
+    // The credential to fetch.
+    Credential credential = 2;
+    // If set, re-encrypt the credential with the requested key.
+    reserved "recrypt_key_name";
+    reserved 3;
+    // Include the encrypted value or not.
+    bool include_value = 4;
+}
+
+// FetchResponse defines the response when fetching a credential.
+message FetchResponse {
+    // The fetched credential with its value populated.
+    Credential credential = 1;
+    // Any errors encountered.
+    Error error = 2;
+}
+
+// ExistsRequest defines the request when determining if a given credential exists.
+message ExistsRequest {
+    // The repository requesting the credential.
+    Repository repository = 1;
+    // The credential to search for.
+    Credential credential = 2;
+}
+
+// ExistsResponse defines the response when determining if a given credential exists.
+message ExistsResponse {
+    // Whether the credential exists & accessible by the actor.
+    bool exists = 1;
+    // Any errors encountered.
+    Error error = 2;
+}
+
+// DeleteRequest defines the request when deleting a credential.
+message DeleteRequest {
+    // The repository deleting the credential.
+    Repository repository = 1;
+    // The credential to delete. The value is disregarded.
+    Credential credential = 2;
+}
+
+// DeleteResponse defines the response when deleting a credential.
+message DeleteResponse {
+    // Whether a credential was deleted.
+    bool success = 1;
+    // Any errors encountered.
+    Error error = 2;
+}
+
+// ListRequest defines the request when listing credentials.
+message ListRequest {
+    // The owner to list credentials for.
+    CredentialOwner owner = 1;
+    // The integration the credentials belong to.
+    string integration = 2;
+    // Include the encrypted value or not.
+    bool include_value = 3;
+    // The NextGlobalID of the integration the credentials belong to.
+    string integration_next_global_id = 4;
+}
+
+// ListResponse defines the response when listing credentials.
+message ListResponse {
+    // Any error that was encountered.
+    Error error = 1;
+
+    // The credentials matching the criteria.
+    repeated Credential credentials = 2;
+}
+
+// ListSecretsForRepositoryRequest defines the request when listing credentials
+// specifically for a repository.
+message ListSecretsForRepositoryRequest {
+  // The repository whose secrets is being requested with their owner.
+  RepositoryWithOwner repository = 1;
+
+  // The integration the credentials belong to.
+  string integration = 2;
+
+  // If the repository is private or not.
+  bool is_private = 3;
+
+  // Include the encrypted value or not.
+  bool include_value = 4;
+
+  // Any environments for the repository
+  repeated CredentialOwner environments = 5;
+
+  // The NextGlobalID of the integration the credentials belong to.
+  string integration_next_global_id = 6;
+}
+
+// ListSecretsForRepositoryResponse defines the response when listing
+// credentials for a repository.
+message ListSecretsForRepositoryResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // Any secrets specifically for the repository.
+  repeated Credential repository_secrets = 2;
+
+  // Any secrets specifically for the organization.
+  repeated Credential organization_secrets = 3;
+
+  // Any secrets specifically for the repository's environments.
+  repeated Credential environment_secrets = 4;
+}
+
+message DeleteSecretsForOwnerRequest {
+  // The owner to delete credentials for.
+  CredentialOwner owner = 1;
+}
+
+message DeleteSecretsForOwnerResponse {
+  int64 deleted_secrets_count = 1;
+}
+
+// An owner id and a count of credentials
+message SecretCount {
+  // global id of owner
+  string owner_global_id = 1;
+
+  // number of credentials
+  int64 count = 2;
+
+  // next global id of the owner
+  string owner_next_global_id = 3;
+}
+
+// SecretCountsRequest defines the request for getting secret counts
+// for a list of owners for a single owner type and integration
+message SecretCountsRequest {
+  // Global ids of the owners, up to 100 ids
+  repeated string owner_global_ids = 1;
+
+  // Type of the owners
+  string owner_type = 2;
+
+  // The integration the credentials belong to.
+  string integration = 3;
+
+  // Next Global ids of the owners, up to 100 ids
+  repeated string owner_next_global_ids = 4;
+
+  // The NextGlobalID of the integration the credentials belong to.
+  string integration_next_global_id = 5;
+}
+
+// SecretCountsResponse contains a list of owner ids and their associated
+// secret count
+message SecretCountsResponse {
+  // Any error that was encountered.
+  Error error = 1;
+
+  // Owner global ids and their associated count
+  repeated SecretCount secret_counts = 2;
+}
+
+// RepositoryWithOwner is a pairing of a repository and its owner.
+message RepositoryWithOwner {
+  // The repository that is being requested.
+  Repository repository = 1;
+
+  // Owner is the owner of the repository, should be a User or Organization
+  CredentialOwner owner = 2;
+}

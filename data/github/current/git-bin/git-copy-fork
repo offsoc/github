@@ -1,0 +1,721 @@
+#! /usr/bin/env ruby
+
+#/ Copy one or more repositories from one (possibly remote) repository
+#/ network to a local repository network. Supports a `--prepare` option
+#/ that moves as much content as possible directly from one network.git
+#/ to the other; this avoids unnecessary redundant transfers of
+#/ objects, especially if multiple forks are to be copied. This script
+#/ uses git commands for most of its work to take advantage of git's
+#/ mechanisms for ensuring consistency.
+#/
+#/ The copy can be done in a single invocation, or the copy can be
+#/ prepared in one step then carried out in a separate step. The
+#/ preparation step, which uses the `--prepare` option, has the
+#/ advantage that it can be done while the source repository is still
+#/ in use. Once the preparation step has been done, the final copy
+#/ should complete very quickly.
+#/
+#/ Usage:
+#/
+#/ git copy-fork [--verbose|-v] [--prepare] <src> <id>...
+#/
+#/   Synchronize the remote repositories with the specified <id>s to
+#/   the local network, including additional files that are not managed
+#/   by git.
+#/
+#/   This command should be run from the destination network's
+#/   network.git directory. The <src> parameter is [<host>:]<path>, where
+#/   <path> is the path of the source network's network.git directory. If
+#/   <host> is specified, it should be the name of the host holding the
+#/   source network, and in this case <path> must be an absolute path;
+#/   otherwise the source network is assumed to be local. The <id>
+#/   parameters are the numerical ids of the forks to be copied.
+#/
+#/   The final copy should be made while the source repositories are in
+#/   read-only mode (though it is OK if other repositories in the
+#/   source network are being modified).
+#/
+#/   To minimize the time that the repositories have to be offline (and
+#/   reduce the total work of copying multiple repositories), it is
+#/   possible to run the command with the `--prepare` option one or
+#/   more times before the final copy. It is OK to run the `--prepare`
+#/   invocation while the source repositories are in use. The
+#/   `--prepare` step synchronizes the local repository to the state of
+#/   the remote repository when it was last nw-synced to its
+#/   network.git.
+#/
+#/   The most efficient way to run this program is as follows:
+#/
+#/       create destination network
+#/       create empty destination repositories
+#/       nw-link the destination repositories as desired
+#/
+#/       git nw-gc the source network
+#/       Run `git janitor --fix` all source repositories. Abort on errors.
+#/       for id in $ids
+#/       do
+#/           Run `git copy-fork --list-unknown-files` in source repo $id. Abort on errors.
+#/       done
+#/       git copy-fork --prepare $src $ids
+#/       for id in $ids
+#/       do
+#/           disable write access to repository $id (at its old location)
+#/           git copy-fork $src $id
+#/           route repository $id to its new location
+#/           enable write access to repository $id (at its new location)
+#/       done
+#/
+#/       git nw-gc the destination network
+#/       for id in $ids
+#/       do
+#/           (cd $id.git && git nw-sync)
+#/           git nw-rm repository $id from the source network
+#/       done
+#/
+#/ git copy-fork [--verbose|-v] --list-copyable-files [<src-repo>]
+#/
+#/   Print the files in repository <src-repo> that are known to be
+#/   copyable via rsync. <src-repo> defaults to the current directory.
+#/
+#/ git copy-fork [--verbose|-v] --list-unknown-files [<src-repo>]
+#/
+#/   Print any files in repository <src-repo> that are unknown (i.e.,
+#/   it is not know whether the files are managed by git or rails or
+#/   whether it should be copied using rsync or not copied at all).
+#/   <src-repo> defaults to the current directory. If any such files
+#/   are found, exit with error code 1; in this situation, copying from
+#/   <src-repo> repository is not guaranteed to work.
+#/
+#/ git copy-fork [--verbose|-v] --estimate-size <id>...
+#/
+#/   Estimate the amount of disk space, in KiB, that will be needed
+#/   at the destination to extract the repositories with the specified
+#/   <id>s. This command must be run from the source network's
+#/   network.git directory. For the best accuracy, "git nw-sync" the fork
+#/   repositories before running this command.
+
+require "optparse"
+require "progeny"
+
+# Match words that need quoting when used within the shell. This list
+# is very approximate, but the output is only used for diagnostic
+# output so it doesn't matter.
+QUOTE_NEEDED = /[^a-zA-Z0-9\/:\-_\.]/
+
+# If necessary, quote word to make it a single shell argument. This
+# function is only approximate.
+def quote_word(word)
+  (QUOTE_NEEDED =~ word) ? "'#{word}'" : word
+end
+
+# Return a string consisting of the words from cmd quoted as necessary
+# to make them look like individual shell arguments. This function is
+# only approximate.
+def quote_command(cmd)
+  cmd.collect do |word|
+    quote_word(word)
+  end.join(" ")
+end
+
+def die(msg, exitstatus = 1)
+  $stderr.puts msg
+  exit exitstatus
+end
+
+HELP_RE = %r{^#/ ?(.*)}
+
+def usage
+  File.open($0, "r") do |f|
+    f.each_line do |line|
+      md = line.match(HELP_RE)
+      puts md[1] if md
+    end
+  end
+end
+
+# File lists: Patterns matching various known files in a fork repo
+# directory. We look for unknown files when copying ADDITIONAL_FILES
+# to make sure that we are not missing anything that we need to copy
+# explicitly. Entries with a trailing "/" suffix denote directories
+# with all of their contents. GIT_MANAGED_FILES, RAILS_MANAGED_FILES,
+# and IGNORE_FILES roughly correspond respectively to files created by
+# a "git init" + "git fetch", the files created at the behest of Ruby
+# or Rails, and temporary/cache/junk files that needn't be copied to
+# the destination. The distinction between GIT_MANAGED_FILES and
+# RAILS_MANAGED_FILES is a bit arbitrary but unimportant, because this
+# script treats the entries in the two lists equivalently.
+
+GIT_MANAGED_FILES = [
+  "/objects/[0-9a-f][0-9a-f]/",
+  "/objects/info",
+  "/objects/info/commit-graph",
+  "/objects/info/commit-graphs/",
+  "/objects/pack/",
+  "/info",
+  "/packed-refs",
+  "/refs/",
+]
+
+RAILS_MANAGED_FILES = [
+  "/HEAD",
+  "/info",
+  "/info/graphs",
+  "/info/nwo",
+  "/objects/info",
+  "/objects/info/alternates",
+  "/hooks", # hooks if it is a symlink
+  "/hooks/", # hooks if it is a directory
+]
+
+IGNORE_FILES = [
+  "/FETCH_HEAD",
+  "/ORIG_HEAD",
+  "/COMMIT_EDITMSG",
+  "/info/nw-repack.log",
+  "/info/nw-gc.log",
+  "/info/last-sync",
+  "/merge-trees/",
+  "/usage",
+  "/last_backup", # FIXME: Verify that this file shouldn't be copied
+  "/fsck",
+  "/gitmon.model",
+  "/dgit-state",
+  "/dgit-state.flock",
+  "/nw-repack.flock",
+  "/packed-refs.new",
+  "/svn_cache/",
+  "*.lock",
+  "*~",
+  "*.bak",
+  "*.txt",
+  "*.md",
+  "*.out",
+]
+
+ADDITIONAL_FILES = [
+  "/config",
+  "/pinned",
+  "/description",
+  "/audit_log",
+  "/ghlog_*/",
+  "/language-stats.cache",
+  "/stacks-stats.cache",
+  "/logs/",
+  "/svn_data/",
+  "/svn.history.msgpack",
+]
+
+ALL_KNOWN_FILES = GIT_MANAGED_FILES +
+                  RAILS_MANAGED_FILES +
+                  IGNORE_FILES +
+                  ADDITIONAL_FILES
+
+PRESERVE_FILES = GIT_MANAGED_FILES +
+                 RAILS_MANAGED_FILES
+
+class Repository
+  def self.rsync_pattern(pattern)
+    if pattern.end_with?("/")
+      "#{pattern}***"
+    else
+      pattern
+    end
+  end
+
+  def self.rsync_copy_options
+    ret = []
+    ADDITIONAL_FILES.each do |pattern|
+      rp = rsync_pattern(pattern)
+      ret.concat(["--include", rp])
+    end
+    PRESERVE_FILES.each do |pattern|
+      rp = rsync_pattern(pattern)
+      ret.concat(["--filter", "P #{rp}"])
+    end
+    ret.concat(["--filter", "-! */"])
+  end
+
+  def get_unknown_files
+    # Return a list of the filenames of unknown files in this Repository
+
+    filter_args = ALL_KNOWN_FILES.flat_map do |pattern|
+      ["--exclude", self.class.rsync_pattern(pattern)]
+    end
+    filter_args.concat(["--include", "/*"])
+    cmd = %w{rsync -r --list-only} +
+      filter_args +
+      [rsync_path + "/", "/tmp/UNUSED"]
+
+    $stderr.puts "Running: #{quote_command(cmd)}" if $verbose
+
+    child = Progeny::Command.new(*cmd)
+    die("error reading file list from #{self}") unless child.success?
+    filenames = child.out.split("\n").collect do |line|
+      if !line.start_with?("d")
+        line.split(" ").last
+      end
+    end.compact
+  end
+
+  def verify_all_files_known
+    unknown_files = get_unknown_files
+    if !unknown_files.empty?
+      $stderr.puts "The following files in #{self} are not recognized!"
+      unknown_files.each do |filename|
+        $stderr.puts "    #{filename}"
+      end
+      exit 1
+    end
+  end
+
+  def get_copyable_files
+    cmd = %w{rsync -r --list-only} +
+      self.class.rsync_copy_options +
+      [rsync_path + "/", "/tmp/UNUSED"]
+
+    $stderr.puts "Running: #{quote_command(cmd)}" if $verbose
+
+    child = Progeny::Command.new(*cmd)
+    die("error reading file list from #{self}") unless child.success?
+    filenames = child.out.split("\n").collect do |line|
+      if !line.start_with?("d")
+        line.split(" ").last
+      end
+    end.compact
+  end
+end
+
+class LocalRepository < Repository
+  def initialize(id, path)
+    @id = id
+    @path = path
+    die("Repository #{self} doesn't exist") unless exist?
+  end
+
+  def to_s
+    "#{@path}"
+  end
+
+  def network
+    LocalRepositoryNetwork.new(File.dirname(@path))
+  end
+
+  def id
+    @id
+  end
+
+  def url
+    "file://#{@path}"
+  end
+
+  def rsync_path
+    @path
+  end
+
+  def exist?
+    Dir.exist?(@path)
+  end
+
+  def system(*args)
+    options =
+      if args[-1].respond_to?(:to_hash)
+        args.pop.to_hash
+      else
+        {}
+      end
+    options[:chdir] = @path
+
+    $stderr.puts "Running: (cd '#{@path}' ; #{quote_command(args)})" if $verbose
+
+    Kernel.system(*args, options)
+  end
+
+  def child(*args)
+    options =
+      if args[-1].respond_to?(:to_hash)
+        args.pop.to_hash
+      else
+        {}
+      end
+    options[:chdir] = @path
+
+    $stderr.puts "Running: (cd '#{@path}' ; #{quote_command(args)})" if $verbose
+
+    Progeny::Command.new(*args, options)
+  end
+
+  def linked?
+    system("git", "nw-linked", "-q")
+  end
+
+  def copy_additional_files(src)
+    cmd = %w{rsync -a -v --delete --prune-empty-dirs} +
+      self.class.rsync_copy_options +
+      [src.rsync_path + "/", rsync_path]
+    if !system(*cmd)
+      die("rsync failed")
+    end
+  end
+
+  def copy(src)
+    # Update dst to the state at src:
+    if !system({ "DGIT_DISABLED" => "1" }, "git", "fetch", "--prune", src.url, "+refs/*:refs/*")
+      die("git fetch failed")
+    end
+
+    src.verify_all_files_known
+    copy_additional_files(src)
+  end
+end
+
+class RemoteRepository < Repository
+  def initialize(id, host, path)
+    @id = id
+
+    @host = host
+
+    # The absolute path of the repository (i.e., of the directory
+    # "<id>.git"):
+    @path = path
+  end
+
+  def to_s
+    "#{url}"
+  end
+
+  def network
+    RemoteRepositoryNetwork.new(@host, File.dirname(@path))
+  end
+
+  def id
+    @id
+  end
+
+  def url
+    "#{@host}:#{@path}"
+  end
+
+  def rsync_path
+    "#{@host}:#{@path}"
+  end
+end
+
+class RepositoryNetwork
+  def network_git
+    repository("network")
+  end
+end
+
+class LocalRepositoryNetwork < RepositoryNetwork
+  def initialize(path)
+    @path = path
+    die("repository does not exist: #{@path}") unless exist?
+  end
+
+  def exist?
+    Dir.exist?(@path)
+  end
+
+  def repository(id)
+    LocalRepository.new(id, "#{@path}/#{id}.git")
+  end
+
+  def estimate_size(ids)
+    return 0 if ids.empty?
+
+    nwgit = network_git
+
+    # First estimate the size of all of the forks' objects as stored
+    # in network.git (in bytes):
+    child = nwgit.child("git", "size-forks", "--cumulative", "--bytes", *ids)
+    die("error running 'git size-forks'") unless child.success?
+    object_size = child.out.strip.to_i
+
+    # Now estimate the disk space used by each of the fork directories
+    # (in KiB). Assuming the network is synced, this number shouldn't
+    # include any object sizes. We could get fancier and exclude the
+    # files that won't be copied to the new network, but this is just
+    # a rough estimate anyway and it is safer to overestimate than to
+    # underestimate:
+    cmd = %w{du -s -k}
+    cmd.concat(ids.collect { |id| "../#{id}.git" })
+    child = nwgit.child(*cmd)
+    die("error running 'du'") unless child.success?
+    forks_size = child.out.split("\n").collect do |line|
+      line.strip.split.first.to_i
+    end.reduce(0, :+)
+
+    (object_size / 1024.0).ceil + forks_size
+  end
+
+  # Prepare the copy of the specified unlinked repositories.
+  def prepare_copy_linked(src_network, dsts)
+    # Fetch the remote references corresponding to the desired
+    # repositories (and all objects necessary for them) from the source
+    # network.git into the destination network.git:
+    refspecs = dsts.collect do |dst|
+      "+refs/remotes/#{dst.id}/*:refs/remotes/#{dst.id}/*"
+    end
+
+    dst_network_git = network_git
+
+    # Do the fetches in groups of 250 to avoid overflowing the command
+    # line:
+    refspecs.each_slice(250) do |batch|
+      cmd = ["git", "fetch", "--prune", src_network.network_git.url, *batch]
+      if !dst_network_git.system(*cmd)
+        die("command failed: #{quote_command(cmd)}")
+      end
+    end
+
+    # Now copy those remote references into each of the destination
+    # repositories.
+    dsts.each do |dst|
+      # We do this by manipulating the references directly because we
+      # know the objects are all there, so we don't need the overhead of
+      # using git. (If we make a mistake, "git update-refs" will
+      # complain.) Please note that we also want to delete any
+      # pre-existing references.
+
+      # A map {refname => command} for refs that have to be updated or
+      # deleted:
+      commands = {}
+
+      child = dst_network_git.child(
+        "git", "for-each-ref", "--format=%(refname) %(objectname)",
+        "refs/remotes/#{dst.id}"
+        )
+      die("error reading references from #{dst_network_git}") unless child.success?
+      child.out.split("\n").each do |line|
+        refname, sha = line.split(" ")
+        refname.sub!(%r{refs/remotes/#{dst.id}/}, "refs/")
+        commands[refname] = "update #{refname} #{sha}\n"
+      end
+
+      child = dst.child("git", "for-each-ref", "--format=%(refname)")
+      die("error reading references from #{dst}") unless child.success?
+      child.out.split("\n") do |refname|
+        if commands[refname].nil?
+          # There is no new value, so delete the old value:
+          commands[refname] = "delete #{refname}\n"
+        end
+      end
+
+      # Convert commands into a list (sorted by refname just to be tidy):
+      commands = commands.sort.collect { |_refname, command| command }
+
+      # Now update all of the refs in dst to the values from dst_network_git:
+      child = dst.child(
+        { "DGIT_DISABLED" => "1" },
+        "git", "update-ref",
+        "-m", "Synchronize from network.git",
+        "--stdin", :input => commands.join("")
+        )
+      die("error updating references in #{dst}") unless child.success?
+
+      # Now copy an initial draft of the additional files:
+      src = src_network.repository(dst.id)
+      src.verify_all_files_known
+      dst.copy_additional_files(src)
+    end
+  end
+
+  # Prepare the copy of the specified unlinked repositories.
+  def prepare_copy_unlinked(src_network, dsts)
+    dsts.each do |dst|
+      dst.copy(src_network.repository(dst.id))
+    end
+  end
+
+  def prepare_copy(src_network, ids)
+    dsts = ids.map { |id| repository(id) }
+    dst_groups = dsts.group_by { |dst| dst.linked? }
+
+    if dst_groups[true]
+      prepare_copy_linked(src_network, dst_groups[true])
+    end
+
+    if dst_groups[false]
+      prepare_copy_unlinked(src_network, dst_groups[false])
+    end
+  end
+
+  def copy(src_network, ids)
+    # The final copy is identical for linked and unlinked repositories:
+    ids.each do |id|
+      repository(id).copy(src_network.repository(id))
+    end
+  end
+end
+
+class RemoteRepositoryNetwork < RepositoryNetwork
+  def initialize(host, path)
+    @host = host
+
+    # The absolute path of the main network directory (i.e., the
+    # directory containing network.git):
+    @path = path
+  end
+
+  def repository(id)
+    RemoteRepository.new(id, @host, "#{@path}/#{id}.git")
+  end
+end
+
+def parse_id(path)
+  File.basename(path).match(/^(.+)\.git$/) do |m|
+    return m[1]
+  end
+  die("the source argument must be the path to a git directory")
+end
+
+def parse_source_repo(src)
+  # Create a Repository instance corresponding to src, which is a
+  # string in the form [<host>:]<path>/<id>.git.
+
+  src_host, src_path = src.split(":")
+
+  if src_path.nil?
+    # No colon in source name -> local repo
+    src_path = File.absolute_path(src)
+    id = parse_id(src_path)
+    LocalRepository.new(id, src_path)
+  else
+    if !src_path.start_with?("/")
+      die("the source path for a remote repo must be an absolute path")
+    end
+    id = parse_id(src_path)
+    RemoteRepository.new(id, src_host, src_path)
+  end
+end
+
+def parse_source_network(src)
+  # Create a RepositoryNetwork instance corresponding to src, which is
+  # a string in the form [<host>:]<path>/network.git.
+
+  src_repo = parse_source_repo(src)
+
+  if src_repo.id != "network"
+    die("the source argument must be the path to a network.git directory")
+  end
+  src_repo.network
+end
+
+# Clear git-related variables from the environment, so that the git
+# commands that we run affect the repository that they are run in
+# rather than one specified by $GIT_DIR or the like.
+def clear_local_git_env
+  vars = `git rev-parse --local-env-vars`.split("\n")
+  vars.each do |var|
+    ENV[var] = nil
+  end
+end
+
+if ARGV.include?("--help")
+  usage
+  exit 0
+end
+
+clear_local_git_env
+
+$verbose = false
+prepare = false
+list_copyable_files = false
+list_unknown_files = false
+estimate_size = false
+
+opts = OptionParser.new
+
+opts.on("--verbose", "-v") do |_value|
+  $verbose = true
+end
+
+opts.on("--prepare") do |_value|
+  prepare = true
+end
+
+opts.on("--list-copyable-files") do |_value|
+  list_copyable_files = true
+end
+
+opts.on("--list-unknown-files") do |_value|
+  list_unknown_files = true
+end
+
+opts.on("--estimate-size") do |_value|
+  estimate_size = true
+end
+
+args = opts.parse(ARGV)
+
+if prepare && list_copyable_files
+  die("--prepare and --list-copyable-files cannot be used together")
+end
+
+if prepare && list_unknown_files
+  die("--prepare and --list-unknown-files cannot be used together")
+end
+
+if list_copyable_files && list_unknown_files
+  die("--list-copyable-files and --list-unknown-files cannot be used together")
+end
+
+if estimate_size && (prepare || list_copyable_files || list_unknown_files)
+  die("--estimate-size cannot be used together with --prepare or --list-*-files")
+end
+
+if list_copyable_files
+  if args.empty?
+    src_path = Dir.pwd
+  elsif args.size == 1
+    src_path = args.first
+  else
+    die("git-copy-fork --list-unknown-files requires 0 or 1 argument")
+  end
+  src = parse_source_repo(src_path)
+
+  filenames = src.get_copyable_files
+  filenames.each do |filename|
+    puts filename
+  end
+  exit 0
+elsif list_unknown_files
+  if args.empty?
+    src_path = Dir.pwd
+  elsif args.size == 1
+    src_path = args.first
+  else
+    die("git-copy-fork --list-unknown-files requires 0 or 1 argument")
+  end
+  src = parse_source_repo(src_path)
+
+  filenames = src.get_unknown_files
+  filenames.each do |filename|
+    puts filename
+  end
+  exit filenames.empty? ? 0 : 1
+elsif estimate_size
+  src_network = parse_source_network(Dir.pwd)
+  if args.empty?
+    die("git-copy-fork --estimate-dest-size requires <id> arguments")
+  end
+  *ids = args
+  puts src_network.estimate_size(ids)
+else
+  if args.size < 2
+    die("usage: git-copy-fork [--prepare] <src> <id>...\n" +
+        "       git-copy-fork --list-unknown-files")
+  end
+
+  src, *ids = args
+
+  src_network = parse_source_network(src)
+
+  dst_network = LocalRepositoryNetwork.new(File.absolute_path(".."))
+
+  if prepare
+    dst_network.prepare_copy(src_network, ids)
+  else
+    dst_network.copy(src_network, ids)
+  end
+end

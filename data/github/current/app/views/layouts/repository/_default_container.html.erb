@@ -1,0 +1,97 @@
+<%
+  raise ArgumentError, "missing keyword: repository" if !local_assigns[:repository]
+  partial_tags = local_assigns.fetch(:tags, [])
+%>
+
+<% track_render_partial("layouts/repository/default_container/organization_banners", partial_tags) do %>
+  <% if repository.owner.organization? %>
+    <%= render "orgs/identity_management/banner", organization: repository.owner %>
+
+    <%= render_nothing_if_database_fails do %>
+      <% if repository.owner.show_notification_restriction_banner?(current_user) %>
+        <% if GitHub.flipper[:notifications_async_verified_domain_banner].enabled?(current_user) %>
+          <%= render(
+            VerifiableDomains::NotificationBannerComponent.new(
+              organization: repository.owner,
+              deferred: true,
+            )
+          ) %>
+        <% else %>
+          <%= render "verifiable_domains/verified_domain_notification_banner", org: repository.owner %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if show_appoint_successor_prompt_for?(repository: repository) %>
+      <%= render "orgs/successor_prompt_banner", organization: repository.owner %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% track_render_partial("layouts/repository/default_container/archived_notice", partial_tags) do %>
+  <% if repository.archived? %>
+    <%= render Repositories::ArchivedNoticeComponent.new(repository: repository) %>
+  <% end %>
+<% end %>
+
+<% track_render_partial("layouts/repository/default_container/migrating_notice", partial_tags) do %>
+  <% if repository.locked_on_migration? %>
+    <%= render partial: "shared/migrating_notice", locals: {
+      trade_controls_read_only: repository.trade_controls_read_only?,
+      trade_notice_dismissed: current_user&.dismissed_notice?(Billing::OFACCompliance::TRADE_CONTROLS_READ_ONLY),
+      repository: repository,
+      can_admin: repository.owner.adminable_by?(current_user)
+    } %>
+  <% end %>
+<% end %>
+
+<% track_render_partial("layouts/repository/default_container/show_abuse_banner", partial_tags) do %>
+  <% if repository.show_abuse_report_banner?(current_user) %>
+    <%= render "repositories/abuse_report_banner", repository: repository, unresolved_abuse_report_count: repository.unresolved_abuse_report_count %>
+  <% end %>
+<% end %>
+
+<% if GitHub.opt_in_to_restricted_repo_enabled? && !dismissed_content_warning_banner? && repository.should_render_content_warning_for?("banner") %>
+  <% track_render_partial("layouts/repository/default_container/show_content_warning_banner", partial_tags + ["content_warning_category:#{repository.network_privilege.content_warning_category}"]) do %>
+    <%= render "repositories/content_warning_banner",
+      category: repository.network_privilege.content_warning_category,
+      sub_category: repository.network_privilege.content_warning_sub_category,
+      custom_sub_category: repository.network_privilege.content_warning_custom_sub_category
+    %>
+  <% end %>
+<% end %>
+
+<% track_render_partial("layouts/repository/default_container/successor_prompt_popular_repositories", partial_tags) do %>
+  <% if show_add_successor_prompt_for_popular_repos?(repository) %>
+    <%= render "repositories/successor_prompt_popular_repositories", repository: repository %>
+  <% end %>
+<% end %>
+
+<% track_render_partial("layouts/repository/default_container/container_header", partial_tags + ["header_redesign:#{header_redesign_enabled?}"]) do %>
+  <%= render partial: "repository/container_header", locals: {repository: repository, partial_tags: partial_tags} %>
+<% end %>
+
+<% @repo_content = capture do %>
+  <div <% unless skip_pjax_container? %>id="repo-content-pjax-container"<% end %> class="repository-content <% if full_height? %>d-flex flex-auto<% end %>" <%= test_selector("repository-content") %>>
+    <%= render partial: "shared/open_in_github_dev", locals: { pull: @pull } %>
+
+    <% track_render_partial("layouts/repository/default_container/hook_failed", partial_tags) do %>
+      <% if @hook_out || flash[:hook_out] %>
+        <%# Pre-receive hook failures go here %>
+        <%= render :partial => "blob/hook_failed", :locals => {
+          :output => @hook_out || flash[:hook_out],
+          :message => @hook_message || flash[:hook_message] } %>
+      <% end %>
+    <% end %>
+
+    <% if flash[:revert_error_heading] %>
+      <%= render "pull_requests/revert_failed", heading: flash[:revert_error_heading], details: flash[:revert_error_details] %>
+    <% end %>
+
+    <%= yield %>
+  </div>
+<% end %>
+
+<turbo-frame id="repo-content-turbo-frame" target="_top" data-turbo-action="advance" class="<% if full_height? %>d-flex flex-auto<% end %>">
+  <%= @repo_content %>
+</turbo-frame>

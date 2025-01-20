@@ -1,0 +1,134 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% page_info title: "Codespaces", stafftools: stafftools_user_codespaces_path(current_user) %>
+
+<h1 class="sr-only">Codespaces</h1>
+
+<%= render(Primer::Alpha::Layout.new(p: 4)) do |component| %>
+  <%= component.with_main do %>
+    <% if query.at_limit? %>
+      <%= render(Primer::Alpha::Banner.new) { "Limit of #{Codespaces::Policy.codespaces_limit(current_user)} codespaces reached. Remove an existing codespace to create a new one." } %>
+    <% end %>
+
+    <% if at_concurrency_limit %>
+      <concurrency-limit>
+        <template id="concurrency-error">
+          <%= render Codespaces::CreateConcurrencyErrorComponent.new(link_to_index: false) %>
+        </template>
+      </concurrency-limit>
+    <% end %>
+
+    <div class="clearfix mt-3 pb-2">
+      <div class="col-md-5 col-sm-12 float-left">
+        <% if query.codespaces.any? %>
+          <h2 class="mb-2">Your codespaces</h2>
+        <% else %>
+          <h2>Your instant dev environment</h2>
+          <p class="color-fg-muted">Go from code to commit faster on any project.</p>
+        <% end %>
+      </div>
+      <div class="col-md-4 col-sm-12 float-right position-relative d-inline-flex flex-justify-end mb-1 <%= query.codespaces.any? ? "" : "mt-3" %>">
+        <a class="btn mr-2" href="<%= docs_url("codespaces/home") %>">Go to docs</a>
+        <%= render(Primer::ButtonComponent.new(tag: :a, href: new_codespace_path, target: "_blank", scheme: :primary).with_content("New codespace")) %>
+      </div>
+    </div>
+    <%= render Codespaces::UnauthorizedOrganizationsComponent.new(classes: "Box mb-2", cap_filter: cap_filter) %>
+
+    <% if Codespaces::Survey.show_survey_prompt_for_user_landing_page?(current_user) %>
+      <div class="clearfix mb-2">
+        <%= render_react_partial name: "codespaces-survey", ssr: true, props: {
+          surveyLink: Codespaces::Survey.survey_url(current_user),
+          surveyOpenCallbackPath: codespaces_survey_open_path,
+          surveyDismissCallbackPath: codespaces_survey_dismiss_path
+        } %>
+      </div>
+    <% end %>
+
+    <% if templates.present? %>
+      <div class="Box color-bg-subtle mt-3 mb-4">
+        <div class="Box-body">
+          <div class="d-flex flex-justify-between flex-items-center mb-0">
+            <h4>Explore quick start templates</h4>
+            <%= render(Primer::Beta::Button.new(scheme: :invisible, tag: :a, href: templates_codespaces_path)) { "See all" } unless user_or_global_feature_enabled?(:codespaces_hide_all_templates) %>
+          </div>
+          <codespace-zero-config>
+              <% responsive_col_class = templates.length > 3 ? "col-lg-3" : "col-lg-4" %>
+              <% non_responsive_col_class = templates.length > 3 ? "col-3" : "col-4" %>
+              <ol class="d-flex flex-wrap list-style-none gutter-condensed">
+                <% templates.each do |template_key, template| %>
+                  <li
+                    class="<%= class_names(
+                      "d-flex flex-content-stretch mt-3",
+                      "col-12 #{responsive_col_class}" => responsive?,
+                      non_responsive_col_class => !responsive?,
+                    ) %>"
+                  >
+                    <%= render(Codespaces::UseTemplateComponent.new(template:)) do |c| %>
+                      <% c.with_form_content do %>
+                        <% if user_feature_enabled?(:codespaces_developer) %>
+                          <input type="hidden" name="codespace[vscs_target]" data-targets="codespace-zero-config.vscsTargets" value="production">
+                          <input type="hidden" name="codespace[vscs_target_url]" data-targets="codespace-zero-config.vscsTargetUrls">
+                          <input type="hidden" name="codespace[location]" data-targets="codespace-zero-config.locations">
+                        <% end %>
+                      <% end %>
+                    <% end %>
+                  </li>
+                <% end %>
+              </ol>
+          </codespace-zero-config>
+          </div>
+      </div>
+    <% end %>
+
+    <% filtered_codespaces = repository_id ? query.codespaces.select { |c| c.repository_id == repository_id } : query.codespaces %>
+    <% filtered_codespaces = unpublished ? filtered_codespaces.select(&:unpublished?) : filtered_codespaces %>
+
+    <% if filtered_codespaces.any? %>
+      <div data-hpc>
+        <%= render Codespaces::IndexListComponent.new(
+          query: query,
+          repository_id: repository_id,
+          unpublished: unpublished)
+        %>
+      </div>
+    <% else %>
+      <div data-hpc>
+        <%= render "codespaces/empty_list_state" %>
+      </div>
+    <% end %>
+
+    <% if user_feature_enabled?(:codespaces_developer) %>
+      <%= javascript_bundle "codespaces-developer" %>
+
+      <%# Allow feature flagged users (our VSCS friends) to select the feature flags to be enabled. %>
+      <div class="m-4 Box Box--condensed" <%= test_selector "codespaces-dev-tools" %>>
+        <%= form_tag toggle_dev_flags_codespaces_path do %>
+          <div class="Box-header d-flex flex-justify-between flex-items-center">
+            <h3 class="Box-title">Codespaces Dev Tools</h3>
+            <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, scheme: :primary, classes: "js-dev-tools-button", disabled: true) do %>Save<% end %>
+          </div>
+          <% CodespacesController::TOGGLEABLE_FLAGS.each do |flag| %>
+            <% human_friendly_name = flag.to_s.remove("codespaces_").remove("_enabled").titleize %>
+            <div class="Box-row p-4">
+              <label class="d-flex flex-items-center">
+                <%= check_box_tag flag, "1", user_feature_enabled?(flag), class: "js-dev-tools-checkbox mr-2" %>
+                Enable <%= human_friendly_name %>
+              </label>
+              <% if flag.to_s == "codespaces_offboarding_force_limit" %>
+                <div class="text-small color-fg-muted">
+                  To toggle this flag for orgs, use
+                  <a class="Link--inTextBlock" href="https://admin.github.com/devtools/feature_flags/codespaces_offboarding_force_limit" target="_blank">devtools</a>.
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+  <% component.with_sidebar(p: 2) do %>
+    <% selected_item_id = repository_id ? repository_id : :all %>
+    <% selected_item_id = :unpublished if unpublished %>
+    <%= render Codespaces::NavListComponent.new(query: query, selected_item_id: selected_item_id) %>
+  <% end %>
+<% end %>

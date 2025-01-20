@@ -1,0 +1,108 @@
+<%
+  event = events.first
+
+  # This logic is a bit messy, because we re-use adapters between pull requests and issues.
+  # This is a safe version to account for the caller of the render.
+  # See https://github.com/github/primer/issues/464
+  subject_type = if event.respond_to?(:closable) && event.closable
+    if event.is_pull_request?
+      :pull_request
+    elsif event.is_issue?
+      :issue
+    elsif event.closable.is_a?(PlatformTypes::PullRequest)
+      :pull_request
+    elsif event.closable.is_a?(PlatformTypes::Issue)
+      :issue
+    end
+  end
+
+  event_name = event.event_name
+  event_reason = event_name == "closed" ? event.state_reason&.downcase : nil
+  event_reason = nil if event_reason == "completed" # handle graphql case where nil is returned as completed
+
+  badge_color = ""
+  if (event_name == "closed" && subject_type == :issue) || event_name == "converted_to_discussion"
+    badge_color = unless event_reason == "not_planned"
+      "color-fg-on-emphasis color-bg-done-emphasis"
+    end
+  elsif event_name == "closed"
+    badge_color = "color-fg-on-emphasis color-bg-closed-emphasis"
+  elsif event_name == "reopened"
+    badge_color = "color-fg-on-emphasis color-bg-open-emphasis"
+  elsif event_name == "locked" || event_name == "unlocked"
+    badge_color = "color-fg-on-emphasis color-bg-emphasis"
+  end
+%>
+<% is_project_event = event.is_a?(PlatformTypes::ProjectEvent) || event.is_a?(Issue::Adapter::ProjectEventAdapter) %>
+<% if ProjectsClassicSunset.projects_classic_ui_enabled?(current_user, org: current_repository&.organization) || !is_project_event %>
+  <div class="TimelineItem js-targetable-element" <%= test_selector("discussion-item-#{event_name}") %> data-team-hovercards-enabled  id="event-<%= event.database_id %>">
+    <div class="TimelineItem-badge <%= badge_color %>">
+      <%= primer_octicon(icon_for_event(event_name, subject_type, event_reason), color: :inherit) %>
+    </div>
+    <div class="TimelineItem-body">
+
+      <%= render "issues/events/actions", event: event %>
+
+      <% if !event.is_a?(PlatformTypes::AddedToProjectEvent) && event.respond_to?(:was_automated?) && event.was_automated? %>
+        <%= render "issues/events/workflow_automation_actor", project: event.project %>
+      <% elsif event.actor && event.actor.display_login == "ghost" %>
+          Repository owner
+      <% else %>
+        <%= render "issues/events/actor", actor: event.actor %>
+      <% end %>
+
+      <% case event %>
+      <% when PlatformTypes::LabeledEvent, PlatformTypes::UnlabeledEvent, Issue::Adapter::LabelEventAdapter %>
+        <%= render "issues/events/labels", events: events %>
+      <% when PlatformTypes::AssignedEvent, PlatformTypes::UnassignedEvent, Issue::Adapter::BaseAssignedEventAdapter %>
+        <%= render "issues/events/assignments", events: events %>
+      <% when PlatformTypes::MilestonedEvent, PlatformTypes::DemilestonedEvent, Issue::Adapter::MilestoneEventAdapter %>
+        <%= render "issues/events/milestones", events: events %>
+      <% when PlatformTypes::MarkedAsDuplicateEvent, PlatformTypes::UnmarkedAsDuplicateEvent, Issue::Adapter::DuplicateEventAdapter %>
+        <%= render "issues/events/marked_as_duplicates", events: events %>
+      <% when PlatformTypes::ClosedEvent, Issue::Adapter::ClosedEventAdapter %>
+        <%= render "issues/events/closed", event: event, subject_type: subject_type %>
+      <% when PlatformTypes::CommentDeletedEvent, Issue::Adapter::CommentDeletedEventAdapter %>
+        <%= render "issues/events/comment_deleted", event: event %>
+      <% when PlatformTypes::ProjectEvent, Issue::Adapter::ProjectEventAdapter %>
+        <%= render "issues/events/project_events", event: event %>
+      <% when PlatformTypes::RenamedTitleEvent, Issue::Adapter::RenameEventAdapter %>
+        <%= render "issues/events/renamed_title", event: event %>
+      <% when PlatformTypes::ReopenedEvent, Issue::Adapter::ReopenedEventAdapter %>
+        reopened this
+      <% when PlatformTypes::LockedEvent, Issue::Adapter::LockedEventAdapter %>
+        <%= render "issues/events/locked", event: event %>
+      <% when PlatformTypes::UnlockedEvent, Issue::Adapter::UnlockedEventAdapter %>
+        unlocked this conversation
+      <% when PlatformTypes::TransferredEvent, Issue::Adapter::TransferredEventAdapter %>
+        <%= render "issues/events/transferred", event: event %>
+      <% when PlatformTypes::PinnedEvent, Issue::Adapter::PinnedEventAdapter %>
+        <%= render "issues/events/pinned", event: event %>
+      <% when PlatformTypes::UnpinnedEvent, Issue::Adapter::UnpinnedEventAdapter %>
+        <%= render "issues/events/unpinned", event: event %>
+      <% when PlatformTypes::UserBlockedEvent, Issue::Adapter::UserBlockedEventAdapter %>
+        <%= render "issues/events/user_blocked", event: event %>
+      <% when PlatformTypes::ConvertedToDiscussionEvent, Issue::Adapter::ConvertedToDiscussionEventAdapter %>
+        <%= render "issues/events/converted_to_discussion", event: event %>
+      <% when Issue::Adapter::AddedToMemexProjectEventAdapter %>
+        <%= render "issues/events/added_to_memex_project_event", events: events %>
+      <% when Issue::Adapter::RemovedFromMemexProjectEventAdapter %>
+        <%= render "issues/events/removed_from_memex_project_event", event: event %>
+      <% when Issue::Adapter::ProjectItemStatusChangedEventAdapter %>
+        <%= render "issues/events/project_item_status_changed_event", event: event %>
+      <% when Issue::Adapter::ConvertedFromDraftEventAdapter %>
+        <%= render "issues/events/converted_from_draft_event", event: event %>
+      <% end %>
+
+      <a href="#event-<%= event.database_id %>" class="Link--secondary"><%= time_ago_in_words_js event.created_at %></a>
+
+      <% if event.via_app.present? %>
+        <%= render "issues/events/via_app", app: event.via_app %>
+      <% end %>
+    </div>
+  </div>
+
+  <% if event.is_a?(PlatformTypes::ClosedEvent) || event.is_a?(PlatformTypes::ConvertedToDiscussionEvent) %>
+    <div class="TimelineItem-break mb-0 height-full"></div>
+  <% end %>
+<% end %>

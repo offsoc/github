@@ -1,0 +1,48 @@
+<%
+  notice_within_box ||= false
+  from ||= nil
+  hide_initial_notice ||= false
+  section ||= ""
+%>
+
+<%
+  banner_text = case section
+    when "recovery-codes"
+      low_recovery_codes = current_user.two_factor_credential&.number_of_remaining_codes < 5
+      year_old_recovery_codes = current_user.feature_enabled?(:actionable_two_factor_security_checkup) &&
+        current_user.two_factor_credential&.recovery_codes_unsaved_after_first_year
+      if low_recovery_codes
+        "You have only #{pluralize(current_user.two_factor_credential&.number_of_remaining_codes, "recovery code")} remaining.
+        #{from == "auth-recovery-codes" ? "Generate" : "View and generate"} new recovery codes now."
+      elsif year_old_recovery_codes
+        "Your two-factor authentication recovery codes have not been downloaded or printed in the last one year.
+        Make sure your recovery codes are up-to-date by#{from == "auth-recovery-codes" ? "" : " viewing and"} downloading or printing them again."
+      end
+    when "emails"
+      if current_user.feature_enabled?(:actionable_two_factor_security_checkup)
+        if current_user.emails.verified.count == 0
+          "You do not have a verified email associated with your GitHub account. Add at least 1 verified email address."
+        elsif current_user.add_additional_verified_emails_after_first_verified_email?
+          "You have a single verified email associated with your GitHub account. Add an additional verified email address in case you lose access to your primary email."
+        end
+      end
+    when "two-factor-methods"
+      if current_user.feature_enabled?(:actionable_two_factor_security_checkup)
+        if current_user.show_low_two_factor_method_banner?(inline: true)
+          "Please configure another 2FA method to reduce your risk of permanent account lockout. #{current_user.two_factor_sms_permitted? ? "If you use SMS for 2FA, we strongly recommend against SMS as it is prone to fraud and delivery may be unreliable depending on your region." : ""}"
+        elsif current_user.show_sms_low_availability_country_banner?(inline: true)
+          "Your SMS 2FA method is prone to fraud and and may be unreliable as it depends on delivery success rates in your region. To ensure consistent access to your account, please configure an additional 2FA method."
+        end
+      end
+    else
+      ""
+    end
+%>
+
+<% if banner_text.present? %>
+  <inline-security-checkup-notice>
+    <%= render Primer::Alpha::Banner.new(hidden: hide_initial_notice, full: notice_within_box, scheme: :warning, test_selector: "inline-security-checkup-notice-from-#{from ? "#{from}-for-#{section}" : section}", classes: "inline-#{section}-banner", data: { target: "inline-security-checkup-notice.inlineSecurityBanner"}) do %>
+      <%= banner_text %>
+    <% end %>
+  </inline-security-checkup-notice>
+<% end %>

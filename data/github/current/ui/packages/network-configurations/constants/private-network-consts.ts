@@ -1,0 +1,65 @@
+export const PrivateNetworkConsts = {
+  addPrivateNetworkButton: 'Add private network',
+  azureNetworkResourceIdLabel: 'Network settings resource ID',
+  azureRegionLabel: 'Region',
+  azureSubscriptionIdLabel: 'Azure subscription ID',
+  resourceNameLabel: 'Resource name',
+  filterResultMessage: (count: number, searchText: string) =>
+    `${count} ${count === 1 ? 'result' : 'results'} result for all networks matching ${searchText}`,
+  backToNetworkingLabel: 'Back to networking',
+  emptySearchDescription: 'Please provide different search criteria.',
+  emptySearchTitle: "This account doesn't have any networks that match.",
+  invalidNameError:
+    'Must be 1-100 characters, and may only contain letters, numbers, periods (.), hyphens (-), and underscores (_).',
+  unexpectedErrorOccurred: 'An unexpected error occurred: ',
+  resourceIdLearnMoreText: 'Learn more on how to get the resource ID.',
+  resourceIdLearnMoreLink: 'https://github.co/VNET_resourceID',
+  learnMoreLink: 'https://github.co/actions-azure-vnet',
+  settingsIdNotFound: 'No resource with the given ID was found.',
+  nameLabel: 'Name',
+  networkSettingsDescription:
+    'Control access to your network by selecting the services that are able to use your shared virtual network.',
+  networkSettingsTitle: 'Network Settings',
+  NetworkSettingsUrl: (businessSlug: string, networkId: string) =>
+    `/enterprises/${businessSlug}/settings/private_networks/${networkId}`,
+  settingsIdAlreadyInUse: 'A network configuration associated with this resource ID already exists.',
+  settingsIdAlreadyInCurrentConfiguration: 'this resource ID is already associated with this configuration.',
+  settingsBelongsToAnotherOrg: 'The private network is registered to another enterprise or organization.',
+  privateNetworkPreviewTitle: 'Private network preview',
+  resourceGroupLabel: 'Resource group',
+  saveChangesButton: 'Save changes',
+  searchBoxPlaceholder: 'Find private network...',
+  servicesAllowedDescription:
+    'Network configuration can be enabled for services. If not selected, network configuration will not be available.',
+  servicesAllowedTitle: 'Services allowed',
+  settingsIdCaption: 'Where can I get the resource ID?',
+  setUpPrivateNetworkTitle: 'New network configuration',
+  setUpPrivateNetworkDescription:
+    'Connect your Azure Virtual Network to align hosted runners to GitHub Actions with your network policies.',
+  setUpPrivateNetworkDescriptionServiceAgnostic:
+    'Connect your Azure Virtual Network to align hosted compute services with your network policies.',
+  subnetLabel: 'Subnet',
+  successResult: 'Success',
+  apiErrorResult: 'apiErrorResult',
+  networkAlreadyRegisteredResult: 'networkAlreadyRegisteredResult',
+  validSettingsId: 'Resource ID is valid',
+  virtualNetworkLabel: 'Virtual network',
+  azurePrivateNetworking: 'Azure Virtual Networks',
+  azurePrivateNetworkingDescription:
+    'Add an Azure Virtual Network to align hosted runners with your Azure network policies.',
+  azurePrivateNetworkingDescriptionServiceAgnostic:
+    'Add an Azure Virtual Network to align hosted compute services with your Azure network policies.',
+  azurePrivateNetworkingNotEmptyError: 'Azure Virtual Network must not be empty.',
+  addAzureVirtualNetwork: 'Add Azure Virtual Network',
+  addAzurePrivateNetwork: 'Add Azure Private Network',
+  noAzurePrivateNetworksAdded: 'No Azure private network added',
+  errorOnResourceIdOrName: 'The resource Id or Name have errors',
+  createConfiguration: 'Create configuration',
+  allowedServicesNoneLabel: 'None',
+  allowedServicesNoneDescription: 'Disable this configuration.',
+  allowedServicesActionsLabel: 'GitHub Actions',
+  allowedServicesActionsDescription:
+    'Allow usage of this configuration when creating runner groups for GitHub-hosted runners.',
+  allowedServicesCodespacesLabel: 'GitHub Codespaces',
+  allowedServicesCodespacesDescription: 'Allow usage of this configuration when creating Codespaces.',
+}

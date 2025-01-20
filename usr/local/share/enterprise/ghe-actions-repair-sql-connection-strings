@@ -1,0 +1,57 @@
+#!/bin/bash
+#/ Usage: ghe-actions-repair-sql-connection-strings [-h]
+#/
+#/ Repairs GitHub Actions connections strings
+#/
+#/ OPTIONS:
+#/   -h | --help              Show this message
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ "${1:-none}" != "none" ]; do
+    case $1 in
+        -h | --help )           usage
+                                ;;
+        * )                     usage
+    esac
+done
+
+
+for service in $(action-services); do
+    db="$(action-db-prefix "$service")_Configuration"
+    # Correction for https://github.com/github/actions-platform-ghes/issues/237
+    echo "Checking ConnectionString in tbl_DataTier for $service using $db"
+
+    # Notes: There should normally be exactly one row in this table
+    #        We need to be careful when attempting to correct the connection string to not introduced duplicates, ConnectionString is the primary key
+    #        The TOP (1) insure that if we have
+    #          Data Source=localhost;Integrated Security=False;Encrypt=True;TrustServerCertificate=True
+    #          Data Source=localhost;Integrated Security=False;Encrypt=True;Trust Server Certificate=True
+    #        We don't attempt to update them both to match
+    #          Data Source=localhost,1443;Integrated Security=False;Encrypt=True;TrustServerCertificate=True
+    ghe-mssql-console -y -q "
+      UPDATE TOP (1) dt1
+      SET    ConnectionString = 'Data Source=localhost,1443;Integrated Security=False;Encrypt=True;TrustServerCertificate=True'
+      FROM   $db.dbo.tbl_DataTier dt1
+      WHERE  NOT EXISTS (
+        SELECT 1
+        FROM $db.dbo.tbl_DataTier dt2
+        WHERE dt2.ConnectionString = 'Data Source=localhost,1443;Integrated Security=False;Encrypt=True;TrustServerCertificate=True'
+    )"
+
+    # Now it is time to remove any that were not updated b/c we already had either found or created an updated row
+    # It should be safe to remove either of them since the encryption keys should still be valid
+    ghe-mssql-console -y -q "
+      DELETE  $db.dbo.tbl_DataTier
+      OUTPUT DELETED.*
+      WHERE  ConnectionString <> 'Data Source=localhost,1443;Integrated Security=False;Encrypt=True;TrustServerCertificate=True'
+    "
+done

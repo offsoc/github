@@ -1,0 +1,69 @@
+#!/bin/bash
+#/ Usage: ghe-actions-cache-disable [-hyf]
+#/
+#/ Disable Actions Cache service in GHES and stop nomad jobs.
+#/ When provided with --force parameter, check for the current state of the service is ignored
+#/
+#/ OPTIONS:
+#/   -h  | --help            Show this message
+#/   -y  | --yes             Do not show the warning prompt.
+#/   -f  | --force           When set, check for the current state of the service is ignored
+#/
+
+force=false
+prompt_less=
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -y|--yes)
+            prompt_less=1
+            shift
+            ;;
+        -f|--force)
+            force=true
+            shift
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+proceed() {
+    if [ -z "$prompt_less" ]; then
+        read -p "Disabling Actions Cache service will lead to loss of cached artifacts and is irreversible. The command takes a few minutes to complete. Continue? [y/N]" -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+
+REPL_STATE=$(cat /etc/github/repl-state 2>/dev/null)
+if [ "$REPL_STATE" = "replica" ]; then
+    echo "Running on Replica. Skipping."
+    exit 0
+fi
+
+if ! $force; then
+    ghe-actions-check -a 1 -s "artifactcache" >/dev/null 2>&1
+    retval=$?
+    if [ "$retval" -ne 0 ]; then
+        echo "Exiting because Actions Cache is not running."
+        exit 1
+    fi
+fi
+
+proceed
+
+# pass force here since we already either already check `ghe-actions-check` OR we passed force to this script to skip doing that.
+ghe-actions-cache-teardown -y -f
+ghe-config app.actions.artifactcache.enabled false
+ghe-config-apply

@@ -1,0 +1,133 @@
+<%# `view` is an instance of Orgs::People::FailedInvitationView %>
+
+<li class="table-list-item member-list-item js-bulk-actions-item <%= "adminable" if view.show_admin_stuff? %>" data-bulk-actions-id="<%= view.invitation.id %>" <%= test_selector("failed-#{view.invitation.class.name}-row") %>>
+  <div class="table-list-cell table-list-cell-checkbox py-3 v-align-middle pr-0 pl-3">
+      <input
+        <%= test_selector "org-failed-inv-checkbox" %>
+        name=<%= invitation_id_param_name(view.invitation) %>
+        value="<%= view.invitation.id %>"
+        data-check-all-item
+        class="js-bulk-actions-toggle"
+        type="checkbox"
+        aria-labelledby="member-<%= view.identifier %>"
+      >
+  </div>
+
+  <div class="table-list-cell py-3 pr-0 text-center v-align-middle" style="width: 72px;">
+    <% if view.email_invitation? %>
+      <div class="d-inline-block">
+        <%= primer_octicon(:mail, height: 48) %>
+      </div>
+    <% else %>
+      <%= linked_avatar_for view.member, 48, img_class: "avatar", url: view.member_url %>
+    <% end %>
+  </div>
+
+  <div class="table-list-cell py-3 v-align-middle css-truncate pl-3" style="width: 200px;">
+  <% if view.email_invitation? %>
+      <span class="d-block css-truncate-target f5 color-fg-default" id="member-<%= view.email %>" itemprop="name" style="max-width: 180px;"><%= view.name %></span>
+    <% else %>
+      <%= profile_link view.member, class: "css-truncate-target f4", id: "member-#{view.member}", style: "max-width: 180px;", url: view.member_url do %>
+        <%= view.member.profile_name.presence || view.member %>
+      <% end %>
+      <span class="d-block css-truncate-target f5 color-fg-default" itemprop="name" style="max-width: 180px;"><%= view.identifier %></span>
+    <% end %>
+  </div>
+
+  <div class="color-fg-muted table-list-cell py-3 v-align-middle f5 pr-3 hide-md hide-sm" <%= test_selector("failed-invitation-repo") %>>
+    <% if view.invitation.is_a?(RepositoryInvitation) %>
+      <%= primer_octicon(:repo, color: :muted) %> <%= view.invitation.repository.name %>
+    <% end %>
+  </div>
+
+  <div class="color-fg-muted table-list-cell py-3 v-align-middle f5 pr-3 hide-md hide-sm" <%= test_selector("failed-invitation-role") %>>
+    <%= invitation_display_role(view.invitation) %>
+  </div>
+
+  <div class="table-list-cell pr-0 v-align-middle hide-md hide-sm">
+    <%= render Primer::Beta::Text.new(color: :muted, py: 2, display: :inline_block) do %>
+      <% case view.invitation.failed_reason %>
+      <% when "no_more_seats" %>
+        No seats available. <a class="Link--inTextBlock" href="<%= org_seats_path(view.organization) %>">Buy seats</a>
+      <% when "trade_controls" %>
+        This user isn’t able to use this feature <a class="Link--inTextBlock" href="<%= GitHub.trade_controls_help_url %>">due to trade regulations</a>.
+      <% when "expired" %>
+        Invitation expired. User did not accept this invite for <%= GitHub.invitation_expiry_period %> days
+      <% else %>
+        <a class="Link--inTextBlock" href="<%= contact_path %>">Contact support</a>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if view.show_admin_stuff? %>
+    <% redirect_url = org_failed_invitations_path(view.organization) %>
+
+    <div class="color-fg-muted table-list-cell py-3 v-align-middle pr-3 f5" style="width: 87px;">
+      <%= render(Primer::Alpha::ActionMenu.new(test_selector: "failed-invitation-menu")) do |menu| %>
+        <% menu.with_show_button(
+          icon: :"kebab-horizontal",
+          scheme: :invisible,
+          test_selector: "failed-invite-kebab",
+          "aria-label": "Edit invitation"
+        ) %>
+
+        <% unless view.scim_invitation? %>
+          <% menu.with_item(
+            tag: :button,
+            test_selector: "retry-failed-invite",
+            content_arguments: { "data-show-dialog-id": "retry_invitation_dialog-#{view.invitation.id}" }
+          ) do %>
+            Retry invitation
+          <% end %>
+        <% end %>
+
+        <% menu.with_item(
+          tag: :button,
+          scheme: :danger,
+          test_selector: "cancel-failed-invite",
+          content_arguments: { "data-show-dialog-id": "cancel_invitation_dialog-#{view.invitation.id}" }
+        ) do %>
+          Cancel invitation
+        <% end %>
+      <% end %>
+
+      <%= render(Primer::Alpha::Dialog.new(
+        title: "Retry invitation from #{view.organization.display_login}",
+        id: "retry_invitation_dialog-#{view.invitation.id}"
+      )) do |dialog| %>
+        <% dialog.with_body do %>
+          <include-fragment class="my-3" loading="lazy" src="<%= org_invitations_action_dialog_path(
+                        view.organization,
+                        invitation_id_param_name(view.invitation) => view.invitation.id,
+                        redirect_to_path: redirect_url,
+                        action_dialog: 'retry'
+                      ) %>" aria-label="Loading...">
+            <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+          </include-fragment>
+        <% end %>
+      <% end %>
+
+      <%= render(Primer::Alpha::Dialog.new(
+        title: "Cancel invitation from #{view.organization.display_login}",
+        id: "cancel_invitation_dialog-#{view.invitation.id}"
+      )) do |dialog| %>
+        <% dialog.with_body do %>
+          <include-fragment class="my-3" loading="lazy" src="<%= org_invitations_action_dialog_path(
+                        view.organization,
+                        invitation_id_param_name(view.invitation) => view.invitation.id,
+                        redirect_to_path: redirect_url,
+                        action_dialog: 'cancel'
+                      ) %>" aria-label="Loading...">
+            <%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %>
+          </include-fragment>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% unless view.organization.direct_or_team_member?(current_user) %>
+    <div class="text-center color-fg-muted table-list-cell py-3 v-align-middle f5 text-right">
+      <%= follow_button view.member %>
+    </div>
+  <% end %>
+</li>

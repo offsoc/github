@@ -1,0 +1,150 @@
+<%# `view` is an instance of Orgs::Invitations::InviteeSuggestionsView %>
+<%
+  enterprise_managed_user_enabled = !!current_organization&.enterprise_managed_user_enabled?
+%>
+
+<% already_selected_warning = capture do %>
+  <p class="js-non-member-warning-reason non-member-note text-small" data-markup="Already selected" hidden></p>
+  <p class="js-non-member-warning-action non-member-action text-small" data-markup="Already selected" hidden></p>
+<% end %>
+
+<% if view.suggestions? %>
+  <% view.suggested_invitees.each do |user, suggested_invitee| %>
+    <%
+      add_hydro = invite_hydro_click_tracking_attributes(invitee: user.display_login, organization: current_organization, actor: current_user, event_type: :ADD_INVITE)
+      add_hydro_payload = add_hydro["hydro-click"]
+      add_hydro_hmac = add_hydro["hydro-click-hmac"]
+    %>
+    <%= render Primer::Beta::AutoComplete::Item.new(
+      value: user.display_login,
+      disabled: !suggested_invitee.item_enabled?,
+      classes: "member-suggestion typeahead-result #{"js-member-suggestion" unless GitHub.bypass_org_invites_enabled?}",
+      test_selector: "#{"multi-user-invite" unless GitHub.bypass_org_invites_enabled?}",
+      "data-name": user.profile_name,
+      "data-hydro-click-hmac": add_hydro_hmac,
+      "data-hydro-click-payload": add_hydro_payload
+    ) do %>
+      <%= avatar_for(user, 24, :class => "avatar") %>
+      <p class="member-suggestion-info">
+        <strong class="member-login" <%= test_selector("invitee-suggestion-user") %>><%= user.display_login %></strong>
+        <span class="member-name">
+          <%= user.profile_name %>
+        </span>
+      </p>
+
+      <% unless GitHub.bypass_org_invites_enabled? %>
+        <% user_invitee_icon = capture do %>
+          <% if params["badge_size"] == "small" %>
+            <%= avatar_for(user, 20, class: "avatar avatar-small mr-2") %>
+          <% else %>
+            <%= avatar_for(user, 32, class: "avatar avatar-small mr-2") %>
+          <% end %>
+        <% end %>
+
+        <%= render partial: "orgs/invitations/invite_badge", locals: {
+          title: user.display_login,
+          subtitle: user.profile_name || user.display_login,
+          icon: user_invitee_icon,
+          value: user
+        } %>
+      <% end %>
+
+      <% if suggested_invitee.invitable? && user.guest_collaborator? %>
+        <p class="non-member-note text-small" <%= test_selector("org-guest-collaborator-label-note") %>>Guest collaborator</p>
+        <p class="non-member-action text-small" <%= test_selector("org-guest-collaborator-label-action") %>>Guest collaborator</p>
+      <% end %>
+
+      <% unless suggested_invitee.invitable? %>
+        <p class="non-member-note text-small color-fg-muted"><%= suggested_invitee.uninvitable_reason_text %></p>
+        <p class="non-member-action text-small color-fg-muted"><%= suggested_invitee.uninvitable_reason_text %></p>
+      <% end %>
+
+      <% if suggested_invitee.warning_reason_text %>
+        <p class="non-member-note text-small"><%= suggested_invitee.warning_reason_text %></p>
+        <p class="non-member-action text-small"><%= suggested_invitee.warning_reason_text %></p>
+      <% else %>
+        <%= already_selected_warning %>
+      <% end %>
+
+      <% if view.email_match?(user) %>
+        <p class="member-email text-small color-fg-muted"><%= view.query %></p>
+      <% end %>
+    <% end %>
+  <% end %>
+<% elsif view.allow_email_invites? && view.email_invitation? %>
+  <%
+    add_hydro = invite_hydro_click_tracking_attributes(invitee: view.query, organization: current_organization, actor: current_user, event_type: :ADD_INVITE)
+    add_hydro_payload = add_hydro["hydro-click"]
+    add_hydro_hmac = add_hydro["hydro-click-hmac"]
+    disable_for_email_verification = current_user.requires_verification_to_invite_by_email? && !GitHub.bypass_org_invites_enabled?
+  %>
+  <%= render Primer::Beta::AutoComplete::Item.new(
+    value: view.query,
+    disabled: disable_for_email_verification,
+    classes: "member-suggestion email-suggestion typeahead-result #{"js-member-suggestion" unless GitHub.bypass_org_invites_enabled?}",
+    "data-hydro-click-hmac": add_hydro_hmac,
+    "data-hydro-click-payload": add_hydro_payload
+  ) do %>
+    <%= primer_octicon(:mail, mt: 1, float: :left, mr: 1) %>
+    <p class="member-suggestion-info">
+      <strong class="member-login" <%= test_selector("invitee-suggestion-email") %>><%= view.query%></strong>
+      <span class="member-name">invite to <%= view.organization %></span>
+    </p>
+
+    <% if disable_for_email_verification %>
+      <p class="non-member-note text-small">Please verify your email address to invite members via email</p>
+      <p class="non-member-action text-small">Please verify your email address to invite members via email</p>
+    <% else %>
+      <%= already_selected_warning %>
+    <% end %>
+
+    <%= primer_octicon(:plus, float: :right) %>
+
+    <% unless GitHub.bypass_org_invites_enabled? %>
+      <% email_invitee_icon = capture do %>
+        <% if params["badge_size"] == "small" %>
+          <%= primer_octicon(:mail, height: 20, mr: 2) %>
+        <% else %>
+          <%= primer_octicon(:mail, height: 32, mr: 2) %>
+        <% end %>
+      <% end %>
+
+      <% view.email_addresses.each do |email| %>
+        <%= render partial: "orgs/invitations/invite_badge", locals: {
+          title: email,
+          subtitle: "Invite by email",
+          icon: email_invitee_icon,
+          value: email
+        } %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% elsif view.email_query? %>
+  <%= render Primer::Beta::AutoComplete::Item.new(
+    value: view.query,
+    disabled: true,
+    classes: "non-member-result typeahead-result"
+  ) do %>
+    <%= view.query %> doesn't have a GitHub account
+  <% end %>
+<% elsif view.business_members_only? %>
+  <%= render Primer::Beta::AutoComplete::Item.new(
+    value: view.query,
+    disabled: true,
+    classes: "non-member-result typeahead-result"
+  ) do %>
+    <% if enterprise_managed_user_enabled %>
+      <%= view.query %> cannot be assigned because there are no more licenses available.
+    <% else %>
+      <%= view.query %> isn't a member of your enterprise or isn't a GitHub member
+    <% end %>
+  <% end %>
+<% elsif view.user_query? %>
+  <%= render Primer::Beta::AutoComplete::Item.new(
+    value: view.query,
+    disabled: true,
+    classes: "non-member-result typeahead-result"
+  ) do %>
+    <%= view.query %> isn't a GitHub member
+  <% end %>
+<% end %>

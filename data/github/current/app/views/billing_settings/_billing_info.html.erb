@@ -1,0 +1,149 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  trade_screening_record = target.trade_screening_record
+  valid_trade_screening_record = target.has_saved_trade_screening_record?
+  trade_screening_error_data = trade_screening_cannot_proceed_error_data(target: target)
+
+  SecureHeaders.append_content_security_policy_directives(
+    request,
+    img_src: [GitHub.paypal_checkout_url],
+    connect_src: [GitHub.braintreegateway_url, GitHub.braintree_analytics_url]
+  )
+%>
+
+<div class="py-3">
+  <div class="clearfix <%= data_collection_enabled ? "mb-3" : "mb-2" %>">
+    <h2 class="float-left">Billing information</h2>
+    <% if data_collection_enabled && target.is_allowed_to_edit_trade_screening_information? %>
+      <div class="float-right js-edit-user-personal-profile-wrapper">
+        <label id="edit-billing-button" class="sr-only">Edit billing information</label>
+        <%= render(Primer::Beta::Button.new(size: :medium, **(data_collection_enabled ? { font_size: 6 } : {}), aria: { labelledby: "edit-billing-button" }, classes: class_names("js-edit-user-personal-profile", "hidden" => !valid_trade_screening_record))) do %>
+          Edit
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+
+  <% if data_collection_enabled && !valid_trade_screening_record && view.needs_valid_payment_method? %>
+    <div class="clearfix pb-3 note">
+      Please confirm your billing details to continue. You only need to do this once.
+    </div>
+  <% end %>
+
+  <div class="clearfix d-sm-flex <%= "flex-items-center" unless data_collection_enabled %>">
+    <div class="col-sm-6 <%= "mb-3 mb-sm-0" unless data_collection_enabled %>">
+      <div class="d-flex flex-items-center">
+        <%= render GitHub::AvatarComponent.new(actor: view.account, size: 48, mr: 2) %>
+        <div>
+          <ul class="list-style-none lh-condensed <%= data_collection_enabled ? "mb-2" : "mb-0"  %>" style="<%= "min-height: 48px;" if data_collection_enabled %>">
+            <li class="text-bold <%= "pb-1" if data_collection_enabled %>">
+              <%= data_collection_enabled ? view.account : view.account.safe_profile_name %>
+            </li>
+            <li class="color-fg-muted text-small">
+              <% if view.account.user? %>
+                Personal account
+              <% else %>
+                Organization
+              <% end %>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="col-sm-6 text-sm-right lh-condensed">
+      <% if data_collection_enabled %>
+        <% if valid_trade_screening_record %>
+          <%= render Billing::Settings::NameAddressSummaryComponent.new(profile: trade_screening_record) %>
+        <% end %>
+      <% else %>
+        <% if view.account.has_valid_payment_method? %>
+          <ul class="list-style-none">
+            <% if view.account.has_paypal_account? %>
+              <li>PayPal: <%= view.account.payment_method.paypal_email %></li>
+            <% else %>
+              <li>
+                <%= render(Primer::Beta::Octicon.new(icon: "credit-card", mr: 1)) %>
+                <strong><%= view.account.payment_method.card_type %>
+                  <% if view.account.payment_method.card_type %>ending <%= view.account.payment_method.last_four %><% end %>
+                </strong>
+              </li>
+              <li class="color-fg-muted text-small">expires <%= view.account.payment_method.formatted_expiration_date %></li>
+            <% end %>
+          </ul>
+          <a href="<%= target_payment_method_path(view.account, {return_to: request.url}) %>" class="text-small">
+            Edit...
+          </a>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% if data_collection_enabled && (view.needs_valid_payment_method? || trade_screening_record.persisted?) %>
+  <div class="js-name-address-collection-wrapper" <%= valid_trade_screening_record ? "hidden" : "" %>>
+    <%= render Billing::Settings::NameAddressFormInputsComponent.new(
+      profile: trade_screening_record,
+      target: view.account,
+      payment_flow_loaded_from: payment_flow_loaded_from
+    ) %>
+    <% if params[:return_to].present? %>
+      <%= hidden_field_tag "return_to", params[:return_to], id: nil %>
+    <% end %>
+    <div class="form-group pt-1">
+      <%= submit_tag "Save and continue", class: "btn btn-primary width-full mt-2", name: 'billing_info_submit_btn', id: "submit_personal_profile", data: { disable_with: false } %>
+    </div>
+  </div>
+<% end %>
+
+<% if view.show_sdn_blocking_notice? %>
+  <div class="border-top py-3">
+    <%= render(Primer::Beta::Flash.new(scheme: trade_screening_error_data[:scheme])) do %>
+      <h3 class="h5">
+        <%= render(Primer::Beta::Octicon.new(trade_screening_error_data[:icon])) %>
+        You can't proceed with your payment
+      </h3>
+      <div class="ml-5" <%= test_selector("trade-screening-message") %>>
+        <%= trade_screening_error_data[:message] %>
+      </div>
+    <% end %>
+  </div>
+<% elsif view.show_payment_form?(current_user) %>
+  <% if data_collection_enabled %>
+    <% if view.allowed_to_submit_payment_information_or_upgrade? %>
+      <div class="border-top py-3 js-payment-methods-wrapper">
+        <div class="clearfix mb-3">
+          <h2 class="float-left">Payment information</h2>
+        </div>
+        <%= render Billing::Settings::PaymentMethodFormComponent.new(
+          target: target,
+          new_name_address_design: true,
+          signature_view_context: Billing::Zuora::HostedPaymentsPage::PLAN_UPGRADE_SIGNATURE_VIEW_CONTEXT,
+          return_to: return_to,
+        ) %>
+      <div>
+    <% end %>
+  <% else %>
+    <div data-login="<%= target.display_login %>"
+        class="js-payment-summary js-billing-section
+              <% if (org_transform? && !current_user.has_valid_payment_method?) || !org_transform? %>
+                PaymentMethod--creditcard
+              <% end %>
+              zuora-billing-section">
+      <% if target.errors[:billing].any? %>
+        <div class="error">
+          <p><%= target.errors[:billing].to_sentence %></p>
+        </div>
+      <% end %>
+        <%= fields_for :organization do |billing_form| %>
+          <%=
+            render partial: "payment_method/fields", locals: {
+              owner: target,
+              form: billing_form,
+              analytics_prefix: analytics_account_prefix(view.account)
+            }
+          %>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

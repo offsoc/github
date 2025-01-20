@@ -1,0 +1,117 @@
+<%
+  status = current_user.user_status_when_not_expired
+  truncate = false unless local_assigns.key?(:truncate)
+  link_mentions = true unless local_assigns.key?(:link_mentions)
+  compact = false unless local_assigns.key?(:compact)
+  circle = false unless local_assigns.key?(:circle)
+  from_side_panel = false unless local_assigns.key?(:from_side_panel)
+  message_html = status&.message_html(viewer: current_user, link_mentions: link_mentions)
+  show_org = status&.organization.present?
+  emoji_only_header = !show_org && !status&.limited_availability?
+  org_limit = status&.limited_availability? ? 10 : 14
+  emoji_html = status&.emoji_html
+  dialog_id ||= "user-status-dialog#{'-compact' if compact}#{'-profile' if profile}"
+  update_format = :html unless local_assigns.key?(:update_format)
+%>
+<%= form_tag user_status_path(truncate: truncate ? "1" : "0", link_mentions: link_mentions ? "1" : "0", compact: compact ? "1" : "0", circle: circle ? "1" : "0"), method: :put, remote: mobile?, class: "js-user-status-form js-user-status-dialog-form", "data-format": update_format do %>
+  <% if from_side_panel %>
+    <input type="hidden" name="from_side_panel" value="yes">
+  <% end %>
+
+  <%= render(Primer::Alpha::Dialog.new(
+    size: mobile? ? :small : :medium_portrait,
+    id: dialog_id,
+    title: "Edit status",
+    classes: "js-user-status-details",
+    data: profile ? {} : { target: "user-drawer-side-panel.statusDialog" },
+    align_self: mobile? ? :start : :center
+  )) do |dialog| %>
+    <% if profile %>
+      <% dialog.with_show_button(
+          scheme: :link,
+          display: :block,
+          classes: "js-toggle-user-status-edit toggle-user-status-edit Link--secondary no-underline min-width-0",
+          data: profile_click_tracking_attrs(:EDIT_USER_STATUS),
+          role: "button",
+        ) do %>
+        <div class="d-flex flex-items-center flex-items-stretch">
+          <div class="<%= class_names(
+            "f6 lh-condensed user-status-header",
+            "d-flex": compact && emoji_only_header,
+            "d-inline-flex": !(compact && emoji_only_header),
+            "user-status-emoji-only-header circle": emoji_only_header,
+            ) %>">
+            <div class="user-status-emoji-container flex-shrink-0 mr-2 d-flex flex-items-center flex-justify-center <%= "lh-condensed-ultra v-align-bottom" if compact && emoji_only_header %>">
+              <%= render_user_status_emoji_or_placeholder(emoji_html, status&.message) %>
+            </div>
+          </div>
+          <div class="<%= class_names(
+            "user-status-message-wrapper f6 min-width-0",
+            "ws-normal": !compact
+          ) %>" <% if compact || mobile? %> style="line-height: 20px;" <% end %>>
+            <div class="css-truncate css-truncate-target width-fit color-fg-default<%= " text-left" if compact %>">
+              <% if status&.limited_availability? || show_org %>
+                <div class="color-fg-default text-bold f6">
+                  <% if show_org %>
+                    <%= truncate(status.organization.name, length: org_limit) %>
+                  <% end %>
+                </div>
+              <% end %>
+              <% if message_html %>
+                <% if truncate %>
+                  <span><%= truncate_html(message_html, 40) %></span>
+                <% else %>
+                  <span><%= message_html %></span>
+                <% end %>
+              <% elsif emoji_html %>
+                <span class="color-fg-muted">Edit status</span>
+              <% else %>
+                <span class="color-fg-muted">Set status</span>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+    <% dialog.with_body(test_selector: "user-status-dialog-body") do %>
+      <div class="d-flex flex-column gap-2 mt-3">
+        <%= render(partial: "user_statuses/dialog", locals: {
+          show_header: false,
+          truncate: truncate,
+          link_mentions: link_mentions,
+          compact: compact,
+          circle: circle,
+        }) %>
+      </div>
+    <% end %>
+    <% dialog.with_footer(
+      show_divider: true,
+      display: :flex,
+      flex_wrap: :nowrap,
+      align_items: :center,
+      justify_content: :space_between,
+      p: compact ? 2 : 3,
+    ) do %>
+      <%= render(Primer::Beta::Button.new(
+        scheme: :primary,
+        type: :submit,
+        w: :full,
+        mr: compact ? 0 : 2,
+        classes: "js-user-status-submit"
+      )) do %>
+        Set status
+      <% end %>
+      <%= render(Primer::Beta::Button.new(
+        disabled: status&.message.blank? && status&.emoji.blank?,
+        w: :full,
+        ml: compact ? 0 : 2,
+        classes: class_names(
+          "js-clear-user-status-button",
+          "js-user-status-exists": status
+        )
+      )) do %>
+        Clear status
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

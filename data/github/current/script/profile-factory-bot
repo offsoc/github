@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+
+$verbose = false
+$traits = nil
+
+parser = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+    Profile a factory_bot factory using stackprof, benchmark, and query counts
+
+    Usage: bin/profile-factory-bot FACTORY_NAME [options]"
+  BANNER
+
+  opts.on("-h", "--help", "Show this message and quit") do
+    puts opts
+    exit 0
+  end
+
+  opts.on("-v", "--verbose", "Print full test output to stdout") do |v|
+    $verbose = v
+  end
+
+  opts.on("-t", "--traits TRAITS", "Run factory with comma-separated TRAITS") do |traits|
+    $traits = traits.split(",")
+  end
+end
+
+parser.parse!
+
+unless ARGV.length == 1
+  puts parser
+  exit 1
+end
+
+ENV["RAILS_ENV"] = "test"
+$: << "test"
+
+unless $verbose
+  $stdout = File.open("/dev/null", "w")
+  ENV["RUBY_DEBUG_LOG_LEVEL"] = "ERROR"
+end
+
+require "stackprof"
+require "benchmark/ips"
+require "test_helper"
+
+class TestTest < GitHub::TestCase
+  FACTORY = ARGV[0]
+  TRAITS = $traits
+  STACKPROF_OUT = "tmp/stackprof-#{FACTORY}-factory.dump"
+  QUERIES_OUT = "tmp/queries-#{FACTORY}-factory.txt"
+
+  def test_test
+    warmup
+    timing
+    query_details
+    stackprof
+  rescue StandardError => e # rubocop:todo Lint/GenericRescue
+    unless $verbose
+      STDERR.puts "Error profiling factory: #{e}"
+      STDERR.puts "Rerun with the --verbose flag for more details"
+    end
+    raise
+  end
+
+  def warmup
+    STDERR.puts "Profiling the '#{FACTORY}' factory..."
+    FactoryBot.create(FACTORY, *TRAITS)
+  end
+
+  def timing
+    report = Benchmark.ips do |bm|
+      bm.report { FactoryBot.create(FACTORY, *TRAITS) }
+    end
+
+    STDERR.puts "Iterations per second: #{report.entries.first.body}"
+  end
+
+  def query_details
+    count = 0
+    queries_file = File.open(QUERIES_OUT, "w")
+
+    callback = -> (event) {
+      count += 1
+      payload = event.payload
+      queries_file.puts "#{payload[:name]} (#{payload[:result].query_time.round(4)}ms) #{payload[:sql]}"
+    }
+
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      FactoryBot.create(FACTORY, *TRAITS)
+    end
+
+    queries_file.close
+
+    STDERR.puts "Performed #{count} queries (saved to #{QUERIES_OUT}"
+  end
+
+  def stackprof
+    StackProf.run(mode: :wall, out: STACKPROF_OUT, raw: true) do
+      10.times { FactoryBot.create(FACTORY, *TRAITS) }
+    end
+
+    STDERR.puts "Stackprof saved to #{STACKPROF_OUT}"
+  end
+end

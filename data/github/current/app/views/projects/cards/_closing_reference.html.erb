@@ -1,0 +1,47 @@
+<%
+  channels = [
+    *GitHub::WebSocket::Channels.pull_request_mergeable(pull_request),
+    GitHub::WebSocket::Channels.pull_request(pull_request),
+    GitHub::WebSocket::Channels.pull_request_state(pull_request)
+  ]
+%>
+
+<%  # generate hydro payload for side bar open telemetry
+    hydro_payload = {
+        user_id: current_user&.id,
+        project_id: card.project.id,
+        card_id: card.id,
+        issue_id: card.content.id,
+        action: :OPEN_SIDEBAR
+    }
+%>
+
+<div class="border rounded-2 mx-2 mb-2 js-socket-channel js-updatable-content"
+  data-channel="<%= channels.map { |name| live_update_view_channel(name) }.join(" ") %>"
+  data-url="<%= project_card_closing_reference_path(card, pull_request) %>"
+>
+  <div class="mb-2 pl-5 p-2 position-relative js-project-issue-details-container">
+    <% repo_owner = pull_request.repository.owner %>
+    <% requires_saml = cap_filter.unauthorized_resources(current_user&.organizations, only: :saml).include?(repo_owner) %>
+    <% unauthorized_ip = cap_filter.unauthorized_resources(current_user&.organizations, only: :ip_allowlist).include?(repo_owner) %>
+    <% if requires_saml || unauthorized_ip %>
+      <% text = "to view this pull request" %>
+      <% link = if requires_saml %>
+        <% restricted_sso_target_link(repo_owner, return_to: request.url, text: text )%>
+      <% elsif unauthorized_ip %>
+        <% restricted_ip_allowlist_target_hint(repo_owner, text: text )%>
+      <% end %>
+      <%= render partial: "projects/cards/unauthorized_reference", locals: { card: pull_request, link: link } %>
+    <% else %>
+      <%= render partial: "projects/cards/issue_details", locals: {
+          issue: pull_request.issue,
+          render_task_list: false,
+          project: card.project,
+          hydro_data: hydro_click_tracking_attributes("project_card_xref_toggle.click", hydro_payload)
+      } %>
+    <% end %>
+  </div>
+  <div class="mt-n2">
+    <%= render partial: "projects/cards/review_status", locals: { pull_request: pull_request } %>
+  </div>
+</div>

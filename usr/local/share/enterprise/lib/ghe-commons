@@ -1,0 +1,47 @@
+#!/bin/bash
+# Common functions for GitHub Enterprise
+
+# Adds a trap command to an existing trap or creates a new trap with your specified command
+# Usage:  trap_add "rm -rf a/tmp/file" EXIT
+trap_add() {
+    trap_add_cmd=$1; shift || fatal "${FUNCNAME} usage error"
+    for trap_add_name in "$@"; do
+        trap -- "$(
+            extract_trap_cmd() { printf '%s\n' "$3"; }
+            eval "extract_trap_cmd $(trap -p "${trap_add_name}")"
+            printf '%s\n' "${trap_add_cmd}"
+        )" "${trap_add_name}" \
+            || fatal "unable to add to trap ${trap_add_name}"
+    done
+}
+
+# Check if a service is managed externally (part of "Bring Your Own X" feature)
+is_service_external()
+{
+  service=$1
+  case $service in
+    "mysql")
+      ghe-config --true "mysql.external.enabled"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Check if the cluster is operating in disaster recover mode
+# i.e. multi-cluster setup with warm standby(s)
+is_cluster_disaster_recovery_configured() {
+   if [ -z "$(ghe-config cluster.mysql-master-replica)" ]; then
+    return 1
+   fi
+   return 0
+}
+
+# if orchestrator service is available and orchestrator-client can be used
+orchestrator_enabled() {	
+  # orchestrator is enabled only in regular cluster (non HA) mode and external database disabled
+  # we didn't use orchestrator_enabled? ruby method since that decides if orchestrator service needs to be run
+  # on appliance, but orchestrator client can be run anywhere from cluster if orchestrator service is on
+  /usr/local/share/enterprise/ghe-call-configrb cluster_regular_enabled? && ! is_service_external "mysql"
+}

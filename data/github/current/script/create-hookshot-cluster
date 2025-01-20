@@ -1,0 +1,47 @@
+#!/bin/bash
+
+if [ $GITHUB_CI ]; then
+  exit 0
+fi
+
+source "script/database-functions"
+source "script/dx/lib/subproject-containers"
+
+unset HOOKSHOT_CLUSTER_CREATE HOOKSHOT_CLUSTER_MIGRATE HOOKSHOT_CLUSTER_RESET \
+      HOOKSHOT_CLUSTER_VERBOSE
+
+for ARG; do
+  case "$ARG" in
+    --create) HOOKSHOT_CLUSTER_CREATE=1 ;;
+    --migrate) HOOKSHOT_CLUSTER_MIGRATE=1 ;;
+    --reset) HOOKSHOT_CLUSTER_RESET=1 ;;
+    --verbose) HOOKSHOT_CLUSTER_VERBOSE=1 ;;
+  esac
+done
+
+if [ -n "$HOOKSHOT_CLUSTER_RESET" ]; then
+  [ -n "$HOOKSHOT_CLUSTER_VERBOSE" ] && echo "===> Dropping webhooks_development"
+  drop_database "webhooks_development"
+fi
+
+# in create mode we need the no-op to be fast so bail early if the DB exists.
+if [ -n "$HOOKSHOT_CLUSTER_CREATE" ] && database_exists "webhooks_development"; then
+  exit 0
+fi
+
+[ -n "$HOOKSHOT_CLUSTER_VERBOSE" ] && echo "===> Creating webhooks_development"
+create_database "webhooks_development"
+
+if [ -n "$HOOKSHOT_CLUSTER_MIGRATE" ]; then
+  [ -n "$HOOKSHOT_CLUSTER_VERBOSE" ] && echo "===> Running hookshot-go dev migrations"
+  HOOKSHOT_VERSION=$(subproject_version "hookshot-go")
+
+  trap 'docker stop hookshot-go-migrate &> /dev/null || true' EXIT HUP INT QUIT PIPE TERM
+
+  docker stop hookshot-go-migrate &> /dev/null || true
+  docker rm hookshot-go-migrate &> /dev/null || true
+
+  docker run --rm --name hookshot-go-migrate --network host \
+    -e APP_ENV=development -e SKIP_SCHEMA_DUMPS=true \
+    "ghcr.io/github/shared-dev/hookshot-go-dev:$HOOKSHOT_VERSION" /migrate
+fi

@@ -1,0 +1,129 @@
+<%
+  page_info(
+    title: "Code scanning tool status · #{current_repository.name_with_display_owner}",
+    container_xl: true,
+    selected_link: :code_scanning,
+  )
+%>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<h1 class='sr-only'>Code scanning tool status: <%= current_repository.name_with_display_owner %></h1>
+<div class="<%= class_names(
+  "clearfix container-xl",
+  "d-flex flex-column flex-auto" => full_height?,
+  "px-3 px-md-4 px-lg-5" => !full_height? && !skip_responsive_padding?,
+  "p-0" => !(!full_height? && !skip_responsive_padding?),
+  "mt-4" => !full_height?
+) %>">
+  <%= render Primer::Alpha::Layout.new do |c| %>
+    <% c.with_sidebar(width: :narrow) do %>
+      <%= render(Primer::Beta::NavList.new(
+        aria: { label: tool.name },
+        selected_item_id: tool.name,
+        data: { pjax: "#repo-content-pjax-container", "turbo-frame": "repo-content-turbo-frame" }
+      )) do |component| %>
+        <% component.with_item(component_klass: CodeScanning::ToolStatus::HeaderComponent, label: "Code scanning", href: repository_code_scanning_results_path) do |item| %>
+          <% item.with_subtitle do %>
+            <h2 class="h3 mt-1 pb-2 pl-1 d-flex flex-items-center">
+              <span class="flex-1">Tools</span>
+              <% if GitHub.actions_enabled? && current_repository.actions_enabled? %>
+                <%= render(Primer::Beta::Button.new(tag: :a, size: :small, href: actions_onboarding_filter_path(repository: current_repository, category: "security", query: "code scanning"))) { "Add tool" } %>
+              <% end %>
+            </h2>
+          <% end %>
+        <% end %>
+        <% tools.each do |tool| %>
+          <% component.with_item(label: tool.name, href: repository_code_scanning_results_tool_status_show_path(
+            user_id: current_repository.owner_display_login, repository: current_repository, tool_name: tool.name
+          ), selected_by_ids: tool.name, truncate_label: true) do |item| %>
+            <% item.with_leading_visual_icon(
+              **CodeScanning::Status::Icon.octicon_kwargs_for(level: ::CodeScanning::Status.max_level(messages.fetch(tool.name)))
+            ) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% c.with_main do %>
+      <%= render(Primer::Beta::Subhead.new(mb: 2)) do |component| %>
+        <% component.with_heading(tag: :h2) do %>
+          <%= tool.name %>
+        <% end %>
+      <% end %>
+
+      <include-fragment
+        class="width-full"
+        src="<%= repository_code_scanning_results_tool_status_files_extracted_path(
+          user_id: current_repository.owner_display_login,
+          repository: current_repository,
+          tool_name: tool.name,
+          ids: tool.categories.map(&:analysis_id)
+        ) %>"
+        <%= test_selector("files_scanned_fragment") %>
+      >
+        <%= render(Primer::Beta::Subhead.new(mt: 4, align_items: :center, hide_border: true)) do |component| %>
+          <% component.with_heading(tag: :h3, font_size: 3) do %>Scanned files<% end %>
+        <% end %>
+        <%= render(Primer::Beta::BorderBox.new(my: 2)) do |c| %>
+          <% c.with_row do %>
+            <span data-hide-on-error>
+              Loading scanned files information <span class="AnimatedEllipsis"></span>
+            </span>
+            <span data-show-on-error hidden>
+              <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+              Sorry, something went wrong loading this data.
+            </span>
+          <% end %>
+        <% end %>
+      </include-fragment>
+
+      <%= render(Primer::Beta::Subhead.new(mt: 4, hide_border: true)) do |component| %>
+        <% component.with_heading(tag: :h3, font_size: 3) do %>Setup types<% end %>
+      <% end %>
+
+      <%= render(Primer::Beta::BorderBox.new(my: 2, test_selector: "setup-types-list")) do |component| %>
+        <% configuration_groups.sort_by { |configuration_group| [configuration_group.setup_type, configuration_group.name] }.each_with_index do |configuration_group, i| %>
+          <% component.with_row do %>
+            <div class="d-flex flex-items-center" <%= test_selector("setup-type-#{i}") %>>
+              <%= render(CodeScanning::Status::Icon.new(level: configuration_group.overall_status)) %>
+              <div class="d-flex flex-column flex-1 ml-3">
+                <p class="mb-1">
+                  <%= render(Primer::Beta::Link.new(scheme: :primary, href: repository_code_scanning_results_tool_status_configurations_path(configuration_group: configuration_group.slug))) do %>
+                    <%= (configuration_group.name || tool.name).dup.force_encoding(Encoding::UTF_8).scrub! %>
+                  <% end %>
+                  <% if configuration_group.missing_workflow? %>
+                    <%= render(Primer::Beta::Label.new(scheme: :secondary)) { "Actions workflow missing" } %>
+                  <% end %>
+                </p>
+                <%= render(Primer::Beta::Text.new(color: :muted, font_size: :small)) do %>
+                  <strong <%= test_selector("setup-type-descriptor")%>><%= configuration_group.setup_type %></strong> · Last scan <%= time_ago_in_words_js(configuration_group.last_scan) %>
+                <% end %>
+              </div>
+              <div>
+                <%= render(Primer::Experimental::ActionMenu.new(menu_id: "actions-menu-#{configuration_group.slug}", anchor_align: :end, test_selector: "action-menu")) do |c| %>
+                  <% c.with_trigger(icon: :"kebab-horizontal", "aria-label": "Menu") %>
+                  <% c.with_item(
+                      tag: :a,
+                      href: repository_code_scanning_results_tool_status_configurations_path(configuration_group: configuration_group.slug),
+                    ) do |item| %>
+                    View setup type
+                  <% end %>
+                  <% if configuration_group.workflow.present? %>
+                    <% c.with_item(
+                      tag: :a,
+                      href: blob_path(configuration_group.workflow_path, current_repository.default_branch, current_repository),
+                      test_selector: "workflow_path_link"
+                    ) do |item| %>
+                      View workflow
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>
+<% end %>

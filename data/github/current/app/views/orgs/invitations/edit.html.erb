@@ -1,0 +1,176 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 2 %>
+<%# `view` is an instance of Orgs::Invitations::EditPageView %>
+
+<%= render "orgs/header", view: create_view_model(
+  Orgs::HeaderView,
+  organization: view.organization,
+  selected_nav_item: :members,
+) %>
+
+<div class="settings-next container-sm p-4" <%= test_selector("add-member-wrapper") %>>
+  <% if view.organization.saml_sso_present_enforced? && !view.organization.scim_managed_enterprise? %>
+    <%= render Primer::Beta::Flash.new(mb: 3, classes: "flash-notice") do %>
+      Membership in this organization is managed by your SAML Identity Provider.
+      <strong><%= view.invitee_name %></strong>
+      will not be able to accept the invitation, or will be removed from the organization, unless they are provisioned with the Identity Provider.
+    <% end %>
+  <% end %>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h1, classes: "h2") do %>
+      <% if view.editing? %>
+        Edit <strong><%= view.invitee_name %>’s</strong> invitation
+      <% else %>
+        <%= "#{view.add_or_invite_action_word} #{view.invitee_name}" %>
+      <% end %>
+
+      to <%= view.organization.safe_profile_name %>
+    <% end %>
+  <% end %>
+
+  <p class="f4">
+    <% if view.editing? && view.existing_invitation.show_inviter? %>
+      Originally invited by <a class="Link--inTextBlock" href="<%= user_path(view.existing_invitation.inviter) %>"><%= view.existing_invitation.inviter.safe_profile_name %></a>. As an owner, you can give <%= view.invitee_name %> a different role and pick different teams for them.
+    <% else %>
+      Give them an appropriate role in the organization and add them to some teams to give access to repositories.
+    <% end %>
+  </p>
+
+  <% if view.enterprise_managed_user_enabled? && !view.email_invitation? && view.invitee.guest_collaborator? %>
+    <p>
+      <%= render(Primer::Beta::Flash.new(test_selector: "org-guest-collaborator-warning", scheme: :warning, mt: 5)) do %>
+        <% if view.organization.default_repository_permission == :none %>
+          <%= "#{view.invitee_name}" %> is a guest collaborator. Because the current organization <a class="Link--inTextBlock" href="https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/setting-base-permissions-for-an-organization" target="_blank" rel="noopener noreferrer">base permission</a> is set to "No permission", adding a guest collaborator to this organization will not grant them the ability to see <a class="Link--inTextBlock" href="https://docs.github.com/enterprise-cloud@latest/repositories/creating-and-managing-repositories/about-repositories#about-internal-repositories" target="_blank" rel="noopener noreferrer">internal repositories</a> that are owned by this organization.
+        <% else %>
+          <%= "#{view.invitee_name}" %> is a guest collaborator. Adding a guest collaborator to this organization will grant them the ability to see all <a class="Link--inTextBlock" href="https://docs.github.com/enterprise-cloud@latest/repositories/creating-and-managing-repositories/about-repositories#about-internal-repositories" target="_blank" rel="noopener noreferrer">internal repositories</a> that are owned by this organization.
+        <% end %>
+      <% end %>
+    </p>
+  <% end %>
+
+  <h2 class="mt-5 h3">Role in the organization</h2>
+
+  <div class="form-checkbox">
+    <label for="role_direct_member">
+      <%= radio_button_tag "role", "direct_member", view.role_input_checked?(:direct_member), class: "js-invitation-radio-role" %>
+      Member
+      <p class="note">
+      Members can see all other members, and can be granted access to repositories.
+      <%= view.member_privileges_text %>
+      </p>
+    </label>
+  </div>
+
+  <div class="form-checkbox">
+    <label for="role_admin">
+      <%= radio_button_tag "role", "admin", view.role_input_checked?(:admin), class: "js-invitation-radio-role" %>
+      Owner
+      <p class="note">
+      Owners have full administrative rights to the organization and have complete access to all
+      repositories and teams.
+      </p>
+    </label>
+  </div>
+
+  <% if view.teams.any? || view.query.present? %>
+    <h3 class="mt-5 mb-2">Teams <span class="color-fg-muted f5 text-normal">&mdash; Optional</span></h3>
+
+    <%= form_tag view.teams_search_path, method: :get, class: "js-org-team-suggestions mb-3 d-block", :"data-autosearch-results-container" => "org-team-suggestions" do %>
+      <% if params[:start_fresh] %>
+        <input type="hidden" name="start_fresh" value="true">
+        <input type="hidden" name="invitee_login" value="<%= params[:invitee_login] %>">
+        <input type="hidden" name="org" value="<%= params[:org] %>">
+      <% end %>
+      <% if view.email_invitation? %><%= hidden_field_tag "email", view.invitee %><% end %>
+
+      <% view.team_ids.each do |team_id| %>
+        <%= hidden_field_tag "team_ids[]", team_id %>
+      <% end %>
+
+      <div class="auto-search-group">
+        <input class="form-control input-block input-contrast auto-search-input" value="<%= view.query %>" type="text" name="query" placeholder="Find a team…" aria-label="Find a team" autocomplete="off" data-throttled-autosubmit>
+        <%= render(Primer::Beta::Octicon.new(icon: "search")) %>
+        <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+      </div>
+    <% end %>
+  <% end %>
+
+  <%= form_tag view.form_path, :method => view.form_method, "class" => "js-org-team-suggestions js-org-member-role", "data-sudo-required" => "true" do %>
+    <%= hidden_field_tag "role", view.existing_invitation.try(:reinstate?) ? "direct_member" : view.role %>
+    <%= hidden_field_tag :enable_tip, params[:enable_tip].presence %>
+
+    <% if view.email_invitation? %>
+      <input type="hidden" name="email" value="<%= view.invitee %>" class="js-invitation-toggle-team">
+    <% else %>
+      <input type="hidden" name="invitee_id" value="<%= view.invitee.id %>" class="js-invitation-toggle-team">
+    <% end %>
+
+    <% if Rails.env.development? && params[:fakestate] %>
+      <input type="hidden" name="fakestate" value="<%= params[:fakestate] %>">
+    <% end %>
+
+    <% if view.teams.any? %>
+      <% view.team_ids.each do |team_id| %>
+        <%= hidden_field_tag "team_ids[]", team_id %>
+      <% end %>
+
+      <div id="org-team-suggestions">
+        <%= render partial: "orgs/invitations/teams/list", locals: { view: view } %>
+      </div>
+    <% end %>
+
+    <hr>
+
+    <div class="d-flex flex-justify-center">
+      <% if view.editing? %>
+        <div class="pr-2">
+          <button type="submit" form="cancel_invitation_form" class="btn btn-danger" data-ga-click="Orgs, cancel, location:edit member invite; text:Cancel invitation">Cancel invitation</button>
+        </div>
+      <% end %>
+      <div>
+        <% if !on_per_seat_pricing?(view.organization) %>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary) do %>
+            <%= view.submit_button_text %>
+          <% end %>
+        <% else %>
+          <button type="submit" class="btn btn-primary mr-3"
+            <%= "disabled" unless view.has_seat_for? && view.has_seat_for?(pending_cycle: true) %>
+            data-ga-click="Orgs, <%= view.editing? ? "update" : "send" %> invitation in edit view, location:edit member invite; text:<%= view.editing? ? "Update" : "Send" %> invitation"
+            data-disable-with="<%= view.submit_button_disable_with_text %>">
+            <%= view.submit_button_text %>
+          </button>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if view.organization.owned_by_metered_plan_business? %>
+    <% if view.organization.owned_by_metered_plan_trial_business? && !view.has_seat_for? %>
+      <div class="text-small text-sm-center pt-4">
+        To add more users,
+        <%= link_to "activate your enterprise subscription", billing_settings_upgrade_enterprise_path(view.organization.business), class: "Link--inTextBlock" %>.
+      </div>
+    <% end %>
+  <% elsif on_per_seat_pricing?(view.organization) && !view.enterprise_managed_user_enabled? %>
+    <div class="text-small text-sm-center pt-4">
+      <% if view.no_seats_left_on_pending_cycle? %>
+        <%= pluralize view.organization.pending_cycle_available_seats, seat_or_license(view.organization) %> left <%= "on pending cycle" if view.organization.pending_cycle_change %> &mdash;
+        <%= form_tag update_pending_plan_change_path(view.organization), method: :put, class: "inline-form" do %>
+          <%= hidden_field_tag :cancel_seats, true %>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, "data-confirm": "Are you sure you want to cancel these pending plan changes?") do %>
+            Cancel pending seat downgrade?
+          <% end %>
+        <% end %>
+      <% else %>
+        <%= pluralize view.organization.total_available_seats, seat_or_license(view.organization) %> left &mdash;
+        <%= more_seats_link_for_organization(view.organization, self_serve_return_to: view.edit_invitation_path) %> <%= "to send this invitation" unless view.has_seat_for? %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if view.editing? %>
+    <%= form_tag cancel_org_invitation_path(view.existing_invitation.organization, view.existing_invitation), method: :put, id: "cancel_invitation_form" %>
+  <% end %>
+</div>

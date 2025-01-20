@@ -1,0 +1,134 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info title: "Authorized OAuth Apps", selected_link: :applications_settings %>
+
+<%= render layout: "settings/settings" do %>
+
+  <%= render :partial => "navigation/application_settings" %>
+
+    <% if @authorizations.empty? %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_heading(tag: :h2) do %>
+          No authorized applications
+        <% end %>
+
+        <% c.with_description do %>
+          You have no applications authorized to access your account.
+        <% end %>
+      <% end %>
+    <% else %>
+
+    <div class="mb-4 mt-4">
+      You have granted <strong><%= @authorizations.count %> <%= pluralize_without_number(@authorizations.count, "application") %></strong> access to your account.
+      <div class="table-list-header-toggle float-right">
+        <%= render layout: "shared/details_dialog", locals: {
+          button_text: "Revoke all",
+          button_class: "btn btn-sm btn-danger",
+          title: "Are you sure you want to revoke access for all applications?",
+          details_class: "float-right"
+        } do %>
+          <div>
+            <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+              <%= render Primer::Alpha::Banner.new(full: true, scheme: :warning) do %>
+                This will revoke access for <strong>all third-party</strong> OAuth applications. This action cannot be undone.
+              <% end %>
+            <% else %>
+              <%= render Primer::Beta::Flash.new(full: true, scheme: :warning) do %>
+                This will revoke access for <strong>all third-party</strong> OAuth applications. This action cannot be undone.
+              <% end %>
+            <% end %>
+
+            <%= form_tag revoke_all_settings_oauth_authorizations_path, :method => :post do %>
+              <div class="Box-body">
+                <p>
+                  Any SSH keys created on your behalf by applications will also be deleted.
+                </p>
+
+                <dl class="form-group mb-0">
+                  <dt><label for="revoke-all-settings-oauth">Type your username to confirm.</label></dt>
+                  <dd>
+                    <input type="text"
+                      id="revoke-all-settings-oauth"
+                      class="form-control input-block"
+                      pattern="<%= case_insensitive_pattern current_user.display_login %>"
+                      autofocus
+                      required>
+                  </dd>
+                </dl>
+              </div>
+
+              <div class="Box-footer">
+                  <%= render Primer::ButtonComponent.new(type: :submit, "data-type": "application", block: true, scheme: :danger, "data-disable-invalid": "") do %>
+                    I understand, revoke access for everything
+                  <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+        <%= render :partial => "oauth_applications/sorts" %>
+      </div>
+    </div>
+
+    <div class="border-bottom">
+      <% @authorizations.each do |authorization| %>
+      <% application = authorization.application %>
+
+      <%# https://github.com/github/github/issues/70370 applications are deleted in background %>
+      <% next if application.nil? %>
+
+          <div id="oauth-authorization-<%= application.key %>" class="js-revoke-item" data-id="<%= application.key %>" data-type="application">
+
+            <div class="border-top">
+
+              <div class="TableObject py-3">
+                <div class="TableObject-item">
+                  <%= link_to settings_oauth_authorization_path(application.key), class: "CircleBadge CircleBadge--small float-left", style: "background-color: ##{application.preferred_bgcolor}" do %>
+                    <%= oauth_application_logo(authorization.safe_app, 30, :class => "CircleBadge-icon", :alt => authorization.safe_app.name) %>
+                  <% end %>
+                </div>
+                <div class="TableObject-item TableObject-item--primary px-3">
+                  <span class="text-bold color-fg-default">
+                    <%= link_to authorization.safe_app.name, settings_oauth_authorization_path(application.key), :class => "developer-app-name" %>
+                    <% if application.suspended? %>
+                      <%= render(Primer::Beta::Label.new(ml: 2, scheme: :danger, title: "Label: Suspended")) { "Suspended" } %>
+                    <% end %>
+                  </span>
+
+                  <% if GitHub.flipper[:alert_on_spammy_apps].enabled? && application.spammy? %>
+                    <%= render Primer::Beta::Label.new(ml: 1, scheme: :danger, title: "Label: Spammy", test_selector: "spammy_label_#{ application.id}") do %>
+                      Spammy
+                    <% end %>
+                  <% end %>
+
+                  <p class="text-small color-fg-muted mb-0 mt-1">
+                    <%=last_authorization_access_description(authorization)%> &middot; Owned by <%= link_to application.display_owner.display_login, application.display_owner.user_path, class: "Link--inTextBlock" %>
+                  </p>
+                </div>
+                <% if GitHub.user_abuse_mitigation_enabled? %>
+                  <%= render partial: "oauth_applications/actions", locals: { authorization: authorization } %>
+                <% elsif Apps::Internal.capable?(:oauth_authorizations_revocable_by_user, app: application) %>
+                  <%= render layout: "shared/details_dialog", locals: {
+                    button_class: "btn btn-sm btn-danger",
+                    button_text: "Revoke",
+                    title: "Are you sure you want to revoke authorization?" } do %>
+                    <%= render partial: "oauth_applications/revoke_access_modal", locals: { authorization: authorization } %>
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+
+          </div>
+
+      <% end %>
+    </div>
+
+    <div class="paginate-container">
+      <%= will_paginate @authorizations %>
+    </div>
+
+    <p class="protip">
+      <%= primer_octicon(:info, classes: "notice-icon") %> Read more about connecting with third-party applications at <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/authorizing-oauth-apps">GitHub Help</a>.
+    </p>
+
+  <% end %>
+<% end %>

@@ -1,0 +1,171 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% page_info \
+    selected_link: :repo_source,
+    container_xl: true,
+    dashboard_pinnable_item_id: current_repository.global_relay_id
+%>
+<% page_title "Upload files · #{current_repository.name_with_display_owner}" %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <% if unblock_secret_success %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :success, icon: :check, dismissible: true, mb: 3, test_selector: "file-upload-push-protection-bypass-success-flash")) do %>
+      Secret allowed. You can now add your files again.
+    <% end %>
+  <% end %>
+  <h1 class="sr-only">Uploading files to <%= [current_repository.name, path_string_for_display].reject(&:blank?).join("/") %></h1>
+
+  <div class="breadcrumb repo-upload-breadcrumb">
+    <h2 class="sr-only">Breadcrumbs</h2>
+    <span class="css-truncate-target">
+      <%= breadcrumb_trail (params[:path] || []), :linker => :repository_upload_breadcrumb_path %>
+    </span>
+  </div>
+
+  <% if logged_in? && current_user_can_push? %>
+    <h2 class="sr-only">Upload files</h2>
+    <div class="js-upload-manifest-file-container">
+      <%= form_tag upload_manifests_path, :class => "d-none js-upload-manifest-form" do %>
+        <input type="hidden" name="repository_id" value="<%= current_repository.id %>">
+        <input type="hidden" name="directory_binary" value="<%= view.binary_path %>">
+      <% end %>
+
+      <%= form_tag upload_path("upload-manifest-files") do %>
+        <%= file_attachment_tag(
+              model: "upload-manifest-files",
+              class: "d-block mb-3 Box blankslate blankslate-spacious js-upload-manifest-file repo-file-upload-target",
+              input: "upload-manifest-files-input",
+              :"data-upload-repository-id" => current_repository.id,
+              :"data-directory-upload-max-files" => UploadManifestFile::MAX_FILES_PER_MANIFEST,
+              directory: true) do %>
+
+          <div class="repo-file-upload-outline"></div>
+          <%= render(Primer::Beta::Octicon.new(icon: "file", height: 32, mb: 2, color: :muted)) %>
+          <span class="repo-file-upload-text initial-text h2">Drag files here to add them to your repository</span>
+          <span class="repo-file-upload-text alternate-text h2">Drag additional files here to add them to your repository</span>
+          <span class="repo-file-upload-drop-text h2">Drop to upload your files</span>
+
+          <p class="repo-file-upload-choose">
+            Or
+            <input type="file" multiple class="manual-file-chooser" id="upload-manifest-files-input" aria-label="Choose your files">
+            <span class="manual-file-chooser-text btn-link" aria-hidden="true" tabIndex="-1">choose your files</span>
+          </p>
+
+          <div class="repo-file-upload-errors">
+            <span class="error too-big">
+              Yowza, that’s a big file. Try again with a file smaller than 25MB.
+            </span>
+            <span class="error too-many">
+              Yowza, that’s a lot of files. Try uploading fewer than 100 at a time.
+            </span>
+            <span class="error empty">
+              This file is empty.
+            </span>
+            <span class="error hidden-file">
+              This file is hidden.
+            </span>
+            <span class="error failed-request">
+              Something went really wrong, and we can’t process that file.
+            </span>
+          </div>
+        <% end %>
+      <% end %>
+
+      <div class="mb-3 js-upload-progress" hidden>
+        <div class="mb-2 f4 js-upload-meter-text">
+          <div class="d-flex flex-items-center mb-1">
+            <%= primer_octicon(:file, mr: 2) %>
+            <div class="js-upload-meter-filename"></div>
+          </div>
+          <div class="f6">
+            Uploading <span class="js-upload-meter-range-start"></span> of <span class="js-upload-meter-range-end"></span> files
+          </div>
+        </div>
+        <div class="Progress Progress--large">
+          <span class="color-bg-success-emphasis js-upload-meter" style="width:0;"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="js-manifest-commit-file-template" hidden>
+      <div class="js-manifest-file-entry Box-row d-flex">
+        <div class="mr-2 flex-shrink-0">
+          <%= primer_octicon(:file) %>
+        </div>
+        <div class="js-filename flex-auto min-width-0 css-truncate css-truncate-target width-fit mr-3"></div>
+        <%= form_tag repo_uploads_path(current_repository.owner, current_repository), :method => :delete, :class => "js-remove-manifest-file-form" do %>
+          <input type="hidden" name="file_id" value="">
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, classes: "Link--primary", "aria-label": "Remove this file") do %>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="Box mb-3 js-manifest-file-list" hidden>
+      <div class="js-manifest-file-list-root"></div>
+    </div>
+
+    <%= form_tag repo_uploads_path(current_repository.owner, current_repository), :class => "file-commit-form manifest-commit-form js-file-commit-form js-manifest-commit-form" do %>
+      <%= avatar_for current_user, 48, :class => "commit-form-avatar float-left rounded-2" %>
+
+      <div class="commit-form position-relative p-3 mb-2 border rounded-2">
+        <h3><%= view.commit_button_copy %></h3>
+
+        <div class="color-fg-severe js-too-long-error d-none">
+          <%= primer_octicon(:"light-bulb") %>
+          <strong>ProTip!</strong> Great commit summaries contain fewer than 50 characters. Place extra information in the extended description.
+        </div>
+
+        <label for="commit-summary-input" class="sr-only">
+          Commit summary
+        </label>
+        <input id="commit-summary-input"
+          type="text"
+          class="form-control input-block input-contrast js-new-blob-commit-summary js-quick-submit"
+          placeholder="Add files via upload"
+          autocomplete="off"
+          name="message">
+
+        <label for="commit-description-textarea" class="sr-only">
+          Optional extended description
+        </label>
+        <textarea id="commit-description-textarea" name="description"
+          class="form-control input-block input-contrast comment-form-textarea js-quick-submit" placeholder="Add an optional extended description…"></textarea>
+
+        <%= render Repositories::DcoLabelComponent.new(repo: view.parent_repo) %>
+
+        <% if view.quick_pull_choice? %>
+          <%= render "web_commit/quick_pull", view: view %>
+        <% else %>
+          <input type="hidden" name="commit-choice" value="direct">
+        <% end %>
+        <input type="hidden" name="manifest_id">
+      </div>
+
+      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, classes: "js-blob-submit", "data-edit-text": view.direct_edit_submit_message, "data-pull-text": view.quick_pull_submit_message) do %>
+        <%= view.commit_button_copy %>
+      <% end %>
+
+      <%= link_to "Cancel", repository_path(current_repository), :class => "btn btn-danger" %>
+    <% end %>
+
+  <% else %>
+    <%= render Primer::Beta::Blankslate.new do |c| %>
+      <% c.with_visual_icon(icon: "lock") %>
+
+      <% c.with_heading(tag: :h2) do %>
+        Uploads are disabled.
+      <% end %>
+
+      <% c.with_description do %>
+        File uploads require push access to this repository.
+      <% end %>
+    <% end %>
+  <% end %>
+</div>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "editor" %>
+<% end %>

@@ -1,0 +1,477 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<security-analysis-ghas>
+  <% ghas_licensing_info = capture do %>
+      <% extra_seats = @owner.seat_usage_increase_if_advanced_security_enabled_for_all_repos %>
+      <% show_remaining_seats = !@owner.advanced_security_license.unlimited_seats? %>
+      <% if show_remaining_seats %><% remaining_seats = @owner.advanced_security_license.remaining_seats %><% end %>
+      This will use
+      <b>
+        <%= extra_seats %>
+        <% if show_remaining_seats %>
+          out of <%= remaining_seats %> remaining
+        <% end %>
+        GitHub Advanced Security
+      </b>
+      <%= pluralize_without_number(show_remaining_seats ? remaining_seats : extra_seats, "license") %>.
+  <% end %>
+
+  <% ghas_enable_dialog_text = -> (ghas_licensing_info, addl_products = "") {
+    capture do %>
+    <p <%= test_selector("hierarchical-enablement-dialog-content")%>><strong>This will turn on GitHub Advanced Security<%=addl_products%> for all repositories.</strong></p>
+    <p>
+      GitHub Advanced Security features are billed per active committer<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " in ", conditional_suffix: " repositories") %>.
+      You can still disable GitHub Advanced Security<%=addl_products%> at the repository level.
+      <% if advanced_security_billing_learn_more_link %><%= link_to "Learn more about GitHub Advanced Security", advanced_security_billing_learn_more_link, class: "Link--inTextBlock" %>.<% end %>
+    </p>
+    <p>
+      <%= ghas_licensing_info %>
+    </p>
+  <%
+    end
+  }
+  %>
+
+  <%# Determine whether the new GHAS committer based billing UI should be shown %>
+  <div <%= test_selector("ghas-org-settings") %>>
+    <% if advanced_security_blocked_by_policy? %>
+      <%= render(Settings::SecurityAnalysisEnterprisePolicyNotificationComponent.new(owner: owner, product: :advanced_security)) %>
+    <% elsif advanced_security_blocked_by_connect? %>
+      <%= render(Primer::Beta::Flash.new(scheme: :warning, mt: 3, test_selector: "ghas-connect-error")) do %>
+        <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+        Advanced Security is in metered mode. Please configure GitHub Connect and License Sync.
+      <% end %>
+    <% elsif @owner.enforce_advanced_security_committers_limits? &&
+            @owner.enabling_advanced_security_for_all_repos_would_exceed_seat_allowance? %>
+      <%= render(Primer::Beta::Flash.new(scheme: :warning, mt: 3, test_selector: "ghas-banner-seats-exceeded")) do %>
+        <%= render(Primer::Beta::Octicon.new(icon: "alert")) %>
+        GitHub Advanced Security cannot be enabled because <%= advanced_security_blocked_by_seat_count_message(target: @owner, seats_needed: @owner.seat_usage_increase_if_advanced_security_enabled_for_all_repos) %>
+      <% end %>
+    <% end %>
+    <div class="d-flex flex-justify-between pt-3 pb-2">
+      <div style="white-space: normal;">
+        <h3 class="h4">
+          GitHub Advanced Security
+        </h3>
+        <p class="mb-0">
+          GitHub Advanced Security features are billed per active committer<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " in ", conditional_suffix: " repositories", includes_public: true) %>.
+          <% if advanced_security_billing_learn_more_link %><%= link_to "Learn more about GitHub Advanced Security", advanced_security_billing_learn_more_link, class: "Link--inTextBlock" %>.<% end %>
+        </p>
+      </div>
+      <div style="white-space: normal;">
+        <div class="BtnGroup d-flex flex-shrink-0">
+
+          <% ghas_disable_dialog_text = capture do %>
+            <p><strong>This will turn off GitHub Advanced Security for all repositories.</strong></p>
+            <p>You can still enable GitHub Advanced Security at the repository level.</p>
+          <% end %>
+
+          <% if advanced_security_blocked_by_in_progress_setting? %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-disable-all-button-disabled-by-blocking-enablement",
+              test_selector: "ghas-disable-all-button-disabled-by-blocking-enablement",
+              aria: { label: "Disable all GitHub Advanced Security", disabled: true },
+              mr: 1,
+              scheme: :danger
+            )) do |c| %>
+              <% c.with_tooltip(
+                text: tooltip_text
+              )%>
+              Disable all
+            <% end %>
+          <% else %>
+            <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+              <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                summary_button_text: "Disable all",
+                confirm_button_text: "Disable all",
+                warning_text: security_config_warning_banner_text(value: false),
+                disabled: button_disabled_no_repos,
+                button_class: "btn btn-danger mr-1",
+                title: button_disabled_no_repos_title("Disable for all repositories?"),
+                button_aria_label: "Disable all GitHub Advanced Security",
+                dialog_text: ghas_disable_dialog_text,
+                input_name: "advanced_security",
+                input_value: "disable_all",
+                test_selector: "advanced-security-disable-all-button"
+              )) %>
+            <% end %>
+          <% end %>
+
+          <% if advanced_security_blocked_by_policy? %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-enable-all-button-disabled-by-policy",
+              test_selector: "ghas-enable-all-button-disabled-by-policy",
+              aria: { label: "Enable GitHub Advanced Security", disabled: true },
+            )) do |c| %>
+              <% c.with_tooltip(
+                text: "GitHub Advanced Security #{Settings::SecurityAnalysisEnterprisePolicyNotificationComponent::POLICY_BLOCK_TEXT}"
+              )%>
+              Enable all
+            <% end %>
+          <% elsif advanced_security_blocked_by_connect? %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-enable-all-button-disabled-by-connect",
+              test_selector: "ghas-enable-all-button-disabled-by-connect",
+              aria: { label: "Enable GitHub Advanced Security", disabled: true },
+            )) do |c| %>
+              <% c.with_tooltip(text: "Please enable GitHub Connect and License Sync") %>
+              Enable all
+            <% end %>
+          <% elsif @owner.enforce_advanced_security_committers_limits? &&
+              @owner.enabling_advanced_security_for_all_repos_would_exceed_seat_allowance? %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-enable-all-button-disabled-by-seats-exceeded",
+              test_selector: "ghas-enable-all-button-disabled-by-seats-exceeded",
+              aria: { label: "Enable GitHub Advanced Security", disabled: true }
+            )) do |c| %>
+              <% c.with_tooltip(
+                text: advanced_security_blocked_by_seat_count_message(
+                  target: @owner, seats_needed: @owner.seat_usage_increase_if_advanced_security_enabled_for_all_repos
+                )
+              )%>
+              Enable all
+            <% end %>
+          <% elsif advanced_security_blocked_by_in_progress_setting? %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-enable-all-button-disabled-by-blocking-enablement",
+              test_selector: "ghas-enable-all-button-disabled-by-blocking-enablement",
+              aria: { label: "Enable all GitHub Advanced Security", disabled: true }
+            )) do |c| %>
+              <% c.with_tooltip(text: tooltip_text) %>
+              Enable all
+            <% end %>
+          <% elsif @owner.is_a?(::Business) && EnterpriseTeam.enabled_for_organization_security_manager?(@owner) %>
+            <%#
+              # Until enterprise teams have been reimplemented without org team sync, we will disable the button when ESM is enabled.
+              # https://github.com/github/security-center/issues/6109
+            %>
+            <%= render(Primer::Beta::Button.new(
+              id: "ghas-enable-all-button-disabled-by-esm",
+              test_selector: "ghas-enable-all-button-disabled-by-esm",
+              aria: { label: "Enable all GitHub Advanced Security", disabled: true }
+            )) do |c| %>
+              <% c.with_tooltip(text: "Enable all is currently unavailable at the enterprise level when the enterprise security manager feature is enabled") %>
+              Enable all
+            <% end %>
+          <% else %>
+            <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+              <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                summary_button_text: "Enable all",
+                confirm_button_text: "Enable all",
+                warning_text: security_config_warning_banner_text(value: true),
+                disabled: button_disabled_no_repos,
+                title: button_disabled_no_repos_title("Enable for all repositories?"),
+                button_aria_label: "Enable all GitHub Advanced Security",
+                dialog_text: ghas_enable_dialog_text.call(ghas_licensing_info),
+                input_name: "advanced_security",
+                input_value: "enable_all",
+                test_selector: "advanced-security-enable-all-button"
+              )) %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+    <div class="pb-3 width-full">
+      <div class="d-flex flex-justify-start" style="white-space: normal;">
+        <% if advanced_security_blocked_by_policy? %>
+          <div class="js-setting-toggle d-flex flex-items-center">
+            <input
+              type="checkbox"
+              <%= test_selector("ghas-new-repos-checkbox-disabled-by-policy") %>
+              name="advanced_security_enabled_new_repos_disabled"
+              id="advanced-security-enabled-new-repos-disabled"
+              class="mr-2"
+              aria-disabled="true"
+              data-action="click:security-analysis-ghas#checkDisabledCheckbox"
+              style="opacity: 0.5"
+            >
+            <% checkbox_tooltip = "GitHub Advanced Security #{Settings::SecurityAnalysisEnterprisePolicyNotificationComponent::POLICY_BLOCK_TEXT}" %>
+            <%= render(Primer::Alpha::Tooltip.new(for_id: "advanced-security-enabled-new-repos-disabled", type: :description, text: checkbox_tooltip, direction: :se)) %>
+            <label for="advanced-security-enabled-new-repos-disabled">
+              Automatically enable for new<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ") %> repositories
+            </label>
+          </div>
+        <% elsif advanced_security_blocked_by_in_progress_setting? %>
+          <div class="js-setting-toggle d-flex flex-items-center">
+            <input
+              type="checkbox"
+              <%= test_selector("ghas-new-repos-checkbox-disabled-by-blocking-enablement") %>
+              name="advanced_security_enabled_new_repos_disabled"
+              id="advanced-security-enabled-new-repos-disabled"
+              class="mr-2"
+              <%= @owner.advanced_security_enabled_on_new_repos? ? 'checked' : '' %>
+              aria-disabled="true"
+              data-action="click:security-analysis-ghas#checkDisabledCheckbox"
+              style="opacity: 0.5"
+            >
+            <%= render(Primer::Alpha::Tooltip.new(for_id: "advanced-security-enabled-new-repos-disabled", type: :description, text: tooltip_text, direction: :se)) %>
+            <label for="advanced-security-enabled-new-repos-disabled">
+              Automatically enable for new<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ") %> repositories
+            </label>
+          </div>
+        <% else %>
+          <advanced-security-new-repos>
+            <%#
+              Although this form tag doesn't include data-autosubmit, it can be automatically
+              submitted via the code which triggers the dialog - see security-analysis.ts
+            %>
+            <%= form_tag(security_analysis_update_path(@owner),
+              class: "js-setting-toggle d-flex flex-items-center", method: :put,
+              data: { "target" => "advanced-security-new-repos.form" }) do
+            %>
+              <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+                name: "advanced_security_enabled_new_repos",
+                id: "advanced-security-enabled-new-repos",
+                test_selector: "advanced-security-enabled-new-repos-checkbox",
+                classes: "mr-2",
+                checked_condition: @owner.advanced_security_enabled_on_new_repos?,
+                label_text: "Automatically enable for new#{advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ")} repositories",
+                data_attributes: {
+                  "action" => "click:advanced-security-new-repos#toggle",
+                  "target" => "advanced-security-new-repos.checkbox"
+                }
+              } %>
+
+              <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1"
+                data-target="advanced-security-new-repos.status"
+              >
+                <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+              </span>
+                <% if GitHub.flipper[:dialog_migration].enabled?(current_user) %>
+                  <%= render(Primer::Alpha::Dialog.new(
+                    id: "advanced-security-new-repos-dialog",
+                    title: "Automatically enable for new#{advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ")} repositories?",
+                    data: {"target": "advanced-security-new-repos.dialog", "action": "cancel:advanced-security-new-repos#close"}
+                  )) do |c| %>
+                    <% c.with_body do %>
+                      <p>Any new<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ") %> repositories created will have GitHub Advanced Security enabled and billed on a per-committer basis.</p>
+                    <% end %>
+                    <% c.with_footer do %>
+                      <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "advanced-security-new-repos-dialog" })) { "Cancel" } %>
+                      <%= render(Primer::Beta::Button.new(scheme: :primary, type: :button, data: { "action": "click:advanced-security-new-repos#confirm" })) { "Enable for new repositories" } %>
+                    <% end %>
+                  <% end %>
+                <% else %>
+                  <%= render(Primer::Experimental::Dialog.new(
+                    dialog_id: "advanced-security-new-repos-dialog",
+                    width: :large,
+                    title: "Automatically enable for new#{advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ")} repositories?",
+                    data: {"target": "advanced-security-new-repos.dialog", "action": "cancel:advanced-security-new-repos#close"}
+                  )) do |c| %>
+                    <% c.with_body do %>
+                      <p>Any new<%= advanced_security_billed_repositories_description(owner: @owner, conditional_prefix: " ") %> repositories created will have GitHub Advanced Security enabled and billed on a per-committer basis.</p>
+                    <% end %>
+                    <% c.with_button(data: { "close-dialog-id": "advanced-security-new-repos-dialog" }) { "Cancel" } %>
+                    <% c.with_button(
+                      scheme: :primary,
+                      data: { "action": "click:advanced-security-new-repos#confirm" }
+                    ) { "Enable for new repositories" } %>
+                  <% end %>
+                <% end %>
+            <% end %>
+          </advanced-security-new-repos>
+        <% end %>
+      </div>
+    </div>
+
+    <% if show_enterprise_user_settings? %>
+      <div class="ml-4" <%= test_selector("ghas-settings-for-user-repos") %>>
+        <div class="d-flex flex-justify-between pt-3 pb-2">
+          <div style="white-space: normal;">
+            <h3 class="h4">
+              GitHub Advanced Security for user namespace repositories
+            </h3>
+            <p class="mb-0">
+              GitHub Advanced Security features are billed per active committer in user namespace repositories.
+            </p>
+          </div>
+          <div style="white-space: normal;">
+            <div class="BtnGroup d-flex flex-shrink-0">
+
+              <% ghas_disable_dialog_text = capture do %>
+                <p><strong>This will turn off GitHub Advanced Security for all user namespace repositories.</strong></p>
+                <p>You can still enable GitHub Advanced Security at the repository level.</p>
+              <% end %>
+
+              <% if advanced_security_blocked_by_in_progress_setting? %>
+                <%= render Primer::Beta::Button.new(
+                    type: :button,
+                    scheme: :danger,
+                    test_selector: "ghas-user-namespace-disable-all-button-disabled-by-blocking-enablement",
+                    aria: { label: "Disable all GitHub Advanced Security", disabled: true },
+                    title: tooltip_text,
+                    mr: 1,
+                  ).with_content("Disable all")
+                %>
+              <% else %>
+                <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                  <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                    summary_button_text: "Disable all",
+                    confirm_button_text: "Disable all",
+                    warning_text: security_config_warning_banner_text(value: false),
+                    disabled: false,
+                    button_class: "btn btn-danger mr-1",
+                    title: button_disabled_no_repos_title("Disable for all repositories?"),
+                    button_aria_label: "Disable all GitHub Advanced Security",
+                    dialog_text: ghas_disable_dialog_text,
+                    input_name: "advanced_security_user_namespace",
+                    input_value: "disable_all",
+                    test_selector: "advanced-security-user-namespace-disable-all-button"
+                  )) %>
+                <% end %>
+              <% end %>
+
+              <% if advanced_security_blocked_by_policy? %>
+                <%= render Primer::Beta::Button.new(
+                    type: :button,
+                    scheme: :default,
+                    test_selector: "ghas-user-namespace-enable-all-button-disabled-by-policy",
+                    aria: { label: "Enable GitHub Advanced Security", disabled: true },
+                    title: "GitHub Advanced Security #{Settings::SecurityAnalysisEnterprisePolicyNotificationComponent::POLICY_BLOCK_TEXT}",
+                  ).with_content("Enable all")
+                %>
+              <% elsif @owner.enforce_advanced_security_committers_limits? &&
+                  @owner.enabling_advanced_security_for_all_repos_would_exceed_seat_allowance? %>
+                <%= render Primer::Beta::Button.new(
+                    type: :button,
+                    scheme: :default,
+                    test_selector: "ghas-user-namespace-enable-all-button-disabled-by-seats-exceeded",
+                    aria: { label: "Enable GitHub Advanced Security", disabled: true },
+                    title: advanced_security_blocked_by_seat_count_message(target: @owner, seats_needed: @owner.seat_usage_increase_if_advanced_security_enabled_for_all_repos),
+                  ).with_content("Enable all")
+                %>
+              <% elsif advanced_security_blocked_by_in_progress_setting? %>
+                <%= render Primer::Beta::Button.new(
+                    type: :button,
+                    scheme: :default,
+                    test_selector: "ghas-user-namespace-enable-all-button-disabled-by-blocking-enablement",
+                    aria: { label: "Enable GitHub Advanced Security", disabled: true },
+                    title: tooltip_text,
+                  ).with_content("Enable all")
+                %>
+              <% else %>
+                <%= form_tag security_analysis_update_path(@owner), method: :put do %>
+                  <%= render(SecurityAnalysis::SettingsDialogComponent.new(
+                    summary_button_text: "Enable all",
+                    confirm_button_text: "Enable all",
+                    warning_text: security_config_warning_banner_text(value: true),
+                    title: "Enable for all repositories?",
+                    button_aria_label: "Enable all GitHub Advanced Security",
+                    dialog_text: ghas_enable_dialog_text.call(ghas_licensing_info),
+                    input_name: "advanced_security_user_namespace",
+                    input_value: "enable_all",
+                    test_selector: "advanced-security-user-namespace-enable-all-button"
+                  )) %>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+        <div class="pb-3 width-full">
+          <div class="d-flex flex-justify-start" style="white-space: normal;">
+            <% if advanced_security_blocked_by_policy? %>
+              <div class="js-setting-toggle d-flex flex-items-center">
+                <input
+                  type="checkbox"
+                  <%= test_selector("ghas-user-namespace-new-repos-checkbox-disabled-by-policy") %>
+                  name="advanced_security_enabled_new_repos_disabled"
+                  id="advanced-security-enabled-new-user-repos-disabled"
+                  class="mr-2"
+                  aria-disabled="true"
+                  data-action="click:security-analysis-ghas#checkDisabledCheckbox"
+                  style="opacity: 0.5"
+                >
+                <% checkbox_tooltip = "GitHub Advanced Security #{Settings::SecurityAnalysisEnterprisePolicyNotificationComponent::POLICY_BLOCK_TEXT}" %>
+                <%= render(Primer::Alpha::Tooltip.new(for_id: "advanced-security-enabled-new-user-repos-disabled", type: :description, text: checkbox_tooltip, direction: :se)) %>
+                <label for="advanced-security-enabled-new-user-repos-disabled">
+                  Automatically enable for new user namespace repositories
+                </label>
+              </div>
+            <% elsif advanced_security_blocked_by_in_progress_setting? %>
+              <div class="js-setting-toggle d-flex flex-items-center">
+                <input
+                  type="checkbox"
+                  <%= test_selector("ghas-user-namespace-new-repos-checkbox-disabled-by-blocking-enablement") %>
+                  name="advanced_security_enabled_new_repos_disabled"
+                  id="advanced-security-enabled-new-user-repos-disabled"
+                  class="mr-2"
+                  <%= @owner.advanced_security_enabled_on_new_repos? ? 'checked' : '' %>
+                  aria-disabled="true"
+                  data-action="click:security-analysis-ghas#checkDisabledCheckbox"
+                  style="opacity: 0.5"
+                >
+                <%= render(Primer::Alpha::Tooltip.new(for_id: "advanced-security-enabled-new-user-repos-disabled", type: :description, text: tooltip_text, direction: :se)) %>
+                <label for="advanced-security-enabled-new-user-repos-disabled">
+                  Automatically enable for new user namespace repositories
+                </label>
+              </div>
+            <% else %>
+              <advanced-security-new-repos>
+                <%#
+                  Although this form tag doesn't include data-autosubmit, it can be automatically
+                  submitted via the code which triggers the dialog - see security-analysis.ts
+                %>
+                <%= form_tag(security_analysis_update_path(@owner),
+                  class: "js-setting-toggle d-flex flex-items-center", method: :put,
+                  data: { "target" => "advanced-security-new-repos.form" }) do
+                %>
+                  <%= render partial: "settings/organization/security_analysis_enable_checkbox", locals: {
+                    name: "advanced_security_enabled_new_user_namespace_repos",
+                    id: "advanced-security-enabled-new-user-namespace-repos",
+                    test_selector: "advanced-security-enabled-new-user-namespace-repos-checkbox",
+                    classes: "mr-2",
+                    checked_condition: @owner.advanced_security_enabled_on_new_user_namespace_repos?,
+                    label_text: "Automatically enable for new user namespace repositories",
+                    data_attributes: {
+                      "action" => "click:advanced-security-new-repos#toggle",
+                      "target" => "advanced-security-new-repos.checkbox"
+                    }
+                  } %>
+
+                  <span class="status-indicator js-status-indicator d-flex flex-items-start mb-1"
+                    data-target="advanced-security-new-repos.status"
+                  >
+                    <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                    <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+                  </span>
+                    <% if GitHub.flipper[:dialog_migration].enabled?(current_user) %>
+                      <%= render(Primer::Alpha::Dialog.new(
+                        id: "advanced-security-new-user-namespace-repos-dialog",
+                        title: "Automatically enable for new user namespace repositories?",
+                        data: {"target": "advanced-security-new-repos.dialog", "action": "cancel:advanced-security-new-repos#close"}
+                      )) do |c| %>
+                        <% c.with_body do %>
+                          <p>Any new user namespace repositories created will have GitHub Advanced Security enabled and billed on a per-committer basis.</p>
+                        <% end %>
+                        <% c.with_footer do %>
+                          <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "advanced-security-new-repos-dialog" })) { "Cancel" } %>
+                          <%= render(Primer::Beta::Button.new(scheme: :primary, type: :button, data: { "action": "click:advanced-security-new-repos#confirm" })) { "Enable for new repositories" } %>
+                        <% end %>
+                      <% end %>
+                    <% else %>
+                      <%= render(Primer::Experimental::Dialog.new(
+                        dialog_id: "advanced-security-new-user-namespace-repos-dialog",
+                        width: :large,
+                        title: "Automatically enable for new user namespace repositories?",
+                        data: {"target": "advanced-security-new-repos.dialog", "action": "cancel:advanced-security-new-repos#close"}
+                      )) do |c| %>
+                        <% c.with_body do %>
+                          <p>Any new user namespace repositories created will have GitHub Advanced Security enabled and billed on a per-committer basis.</p>
+                        <% end %>
+                        <% c.with_button(data: { "close-dialog-id": "advanced-security-new-repos-dialog" }) { "Cancel" } %>
+                        <% c.with_button(
+                          scheme: :primary,
+                          data: { "action": "click:advanced-security-new-repos#confirm" }
+                        ) { "Enable for new repositories" } %>
+                      <% end %>
+                    <% end %>
+                <% end %>
+              </advanced-security-new-repos>
+            <% end %>
+          </div>
+        </div>
+      </div>
+    <% end %>
+  </div>
+</security-analysis-ghas>

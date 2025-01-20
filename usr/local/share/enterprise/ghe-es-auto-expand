@@ -1,0 +1,160 @@
+#!/bin/bash
+#/ Usage: ghe-es-auto-expand
+#/
+#/ Set or check auto_expand_replicas values for current indexes and templates
+#/
+#/ OPTIONS:
+#/
+#/   -h   Show this message.
+#/   -c   Only check actual value in indices and templates.
+#/   -l   Use local ES port, i.e: 9200, and not the HA proxy port 9201 that can point to a remote ES instance.
+#/   -v   Supply an 'auto_expand_replicas' value. Common choices are: 'false' or '0-all'. (see https://www.elastic.co/guide/en/elasticsearch/reference/5.6/index-modules.html#dynamic-index-settings for more information) * This setting should only be modified with the direction of GitHub Support
+#/   -q   Quiet check: do not output indices and templates that need to be synced.
+set -e
+
+# Expected value of auto_expand_replicas
+expected_value=""
+
+# Only check whether or not all auto_expand_replicas
+# values are set to $expected_value
+only_check=false
+
+# ES port
+port="9201"
+
+# Quiet check
+quiet=false
+
+usage(){
+    grep '^#/' < "$0" | cut -c4-
+    exit 2
+}
+
+auditlog_templates(){
+  if ! output=$(curl -s localhost:${port}/_template/audit_log*?pretty | jq -r 'keys | .[]'); then
+    return
+  fi
+
+  if templates=$(echo "$output" | grep audit_log); then
+    echo "$templates"
+  fi
+}
+
+set_es_auto_expand(){
+  local auto_expand=$1
+
+  for t in $(auditlog_templates); do
+    set_es_auto_expand_template "$t" $auto_expand
+  done
+  set_es_auto_expand_indices  $auto_expand
+}
+
+set_es_auto_expand_template(){
+  local template=$1
+  local auto_expand=$2
+
+  curl -s localhost:$port/_template/$template \
+    | jq ".[] | .settings.index.auto_expand_replicas = \"$auto_expand\"" \
+    | curl -s -XPUT localhost:$port/_template/$template -d @- -H 'Content-Type:application/json'  >/dev/null || {
+    echo "Warning: set_es_auto_expand_template failed" >&2
+  }
+}
+
+set_es_auto_expand_indices(){
+  local auto_expand=$1
+
+  value="{\"index\":{\"auto_expand_replicas\":\"$auto_expand\"}}"
+  curl -s -XPUT http://localhost:$port/*/_settings -d "$value" -H 'Content-Type:application/json' >/dev/null || {
+    echo "Warning: set_es_auto_expand_indices failed" >&2
+  }
+}
+
+check_auto_expand(){
+  local value=$1
+
+  local templates=$(check_endpoint _template $value)
+  local indices=$(check_endpoint */_settings $value)
+
+  if [ -z "$templates" ] && [ -z "$indices" ]; then
+    if ! $quiet; then
+      echo "all indices and templates are correctly configured"
+    fi
+
+    return 0
+  fi
+
+  if ! $quiet; then
+    echo "the following indices or templates are incorrectly configured:"
+    echo "$templates"
+    echo "$indices"
+  fi
+
+  return 1
+}
+
+check_endpoint(){
+  local endpoint=$1
+  local value=$2
+
+  local auto_expand=".value.settings.index.auto_expand_replicas"
+  local response
+  response=$(curl -s localhost:$port/$endpoint -H 'Content-Type:application/json')
+
+  if [[ $response == *"error"* ]] && [[ $response == *"root_cause"* ]]; then
+    echo "Error: Failed to retrieve data from the endpoint: Response from localhost: $response"
+    return 1
+  fi
+
+  if ! jq -e . >/dev/null 2>&1 <<<"$response"; then
+    echo "Error: Invalid JSON data returned from the endpoint"
+    return 1
+  fi
+
+  local keys
+  keys=$(jq -r "to_entries | map(select($auto_expand!=\"$value\")) | .[].key" <<<"$response")
+  echo "$keys"
+  return 0
+}
+
+while getopts "hv:clq" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      ;;
+    v)
+      expected_value=$OPTARG
+      ;;
+    c)
+      only_check=true
+      ;;
+    l)
+      port="9200"
+      ;;
+    q)
+      quiet=true
+      ;;
+    ?)
+      usage
+      ;;
+  esac
+done
+
+if [ -z "$expected_value" ]; then
+  usage
+fi
+
+# Pre-flight check, making sure Elasticsearch is running.
+if ! curl -s localhost:$port 2>&1 | grep -q "You Know, for Search"; then
+  echo "Elasticsearch isn't listening on tcp/$port."
+  exit 1
+fi
+
+if check_auto_expand $expected_value; then
+  exit 0
+fi
+
+if $only_check; then
+  exit 11
+fi
+
+set_es_auto_expand $expected_value

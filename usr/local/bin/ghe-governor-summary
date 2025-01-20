@@ -1,0 +1,120 @@
+#!/bin/bash
+#/ Usage: ghe-governor-summary [options]
+#/
+#/ Uses data from ghe-governor to display Git activity summary.
+#/
+#/ OPTIONS:
+#/   -h | --help                  Show this message.
+#/   -t | --threshold <float>     Only show activity summary if number of Git reqs/sec exceeds threshold (default = 1.0).
+#/   -p | --hours <integer>       Specify time period considered in hours (default = 24).
+#/   -r | --show-repos            Ignore threshold and always show top repos.
+#/   -u | --show-users            Ignore threshold and always show top users.
+#/   -i | --show-ips              Ignore threshold and always show top IPs.
+#/   -s | --show-info             Ignore threshold and always show activity summary (equivalent to -r -u -i).
+#/
+
+set -o errexit -o nounset -o pipefail
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+set_show_all() {
+  show_repos=1
+  show_users=1
+  show_ips=1
+}
+
+hours=24
+threshold=1
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,threshold:,hours:,show-repos,show-users,show-ips,show-info --options ht:p:ruis -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -r|--show-repos)
+      show_repos=1
+      ;;
+    -u|--show-users)
+      show_users=1
+      ;;
+    -i|--show-ips)
+      show_ips=1
+      ;;
+    -s|--show-info)
+      set_show_all
+      ;;
+    -t|--threshold)
+      threshold=$2
+      shift
+      ;;
+    -p|--hours)
+      hours=$2
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+#calculate number of Git ops within the time period
+end_time=$(date +%s)
+start_time=$(($end_time - $hours * 3600))
+ops_report=$(ghe-governor aggregate program count -P upload-pack -P spokes-receive-pack -t $start_time -u $end_time | sed '1d' || true)
+
+if [ -n "$ops_report" ]; then
+  total_ops=$(echo -n "$ops_report" | awk '{ sum += $2 } END { print sum }')
+  ops_per_sec=$(echo - | awk "{ print $total_ops / ( $hours * 3600 ) }")
+else
+  total_ops=0
+  ops_per_sec=0
+fi
+
+if ! awk "BEGIN { exit ($ops_per_sec > $threshold) }" < /dev/null; then
+  set_show_all
+  flag_polling=1
+fi
+
+[ -n "${flag_polling:-}" ] && {
+  echo "Heavy Git activity detected in the last $hours hours."
+}
+
+#display Git activity stats
+cat <<eof
+Total number of Git requests (fetches, clones, and pushes): $total_ops
+Average number of Git requests: $ops_per_sec ops/sec
+eof
+echo
+
+[ -n "${show_repos:-}" ] && {
+   echo "TOP REPOS"
+   echo "---------"
+   ghe-governor aggregate repo count -P spokes-receive-pack -P upload-pack -t $start_time -u $end_time
+   echo
+}
+
+[ -n "${show_users:-}" ] && {
+   echo "TOP USER IDs"
+   echo "------------"
+   ghe-governor aggregate user_id count -P spokes-receive-pack -P upload-pack -t $start_time -u $end_time
+   echo
+}
+
+[ -n "${show_ips:-}" ] && {
+   echo "TOP IPs"
+   echo "-------"
+   ghe-governor aggregate ip count -P spokes-receive-pack -P upload-pack -t $start_time -u $end_time
+   echo
+}

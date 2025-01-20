@@ -1,0 +1,250 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+
+# Invokes a limited subset of methods of Enterprise::ConfigApply::Run.new
+#
+# Examples:
+#  ghe-call-configrb memory
+#  ghe-call-configrb memory_budget web-server
+#  ghe-call-configrb cluster_nodes '[null, true]'
+#  ghe-call-configrb hostnames_with_role '["web-server", "default", false]'
+#
+#  ghe-call-configrb --present vpn_node_ip
+#  ghe-call-configrb --blank vpn_node_ip
+#
+# The ultimate escape hatch, thanks to `#send` (Not for use from scripts):
+#  UNSAFE_CALL_CONFIGRB=1 /usr/local/share/enterprise/ghe-call-configrb instance_eval 'puts cluster_config["cluster"].size'
+#
+# TODO: accept another input param of config JSON so this can be used
+# from consul-template as a plugin without reading local config files
+# Aspirationally, this could be called from consul-template, after populating $configdata appropriately, with:
+#   {{ $configdata | toJSON | plugin "ghe-call-configrb" "hostnames_with_role" '["web-server", "default", false]' }}
+# the last arg there will implicly be the $configdata as a json string
+
+require "optparse"
+require "/usr/local/share/enterprise/lib/config"
+
+# Methods that perform writes, or call `system_log`, are not allowed here
+allowed_methods = %w(
+  actions_enabled?
+  actions_ever_enabled?
+  alambic_node_count
+  all_node_uuids_available?
+  cluster_datacenter
+  cluster_dr_enabled?
+  cluster_enabled?
+  cluster_ha_enabled?
+  cluster_ha_primary
+  cluster_ha_primary_external_ip
+  cluster_ha_primary_ip
+  cluster_ha_primary?
+  cluster_ha_replica_active?
+  cluster_ha_replica_cache?
+  cluster_ha_replica_cache_domain
+  cluster_ha_replica_disabled?
+  cluster_ha_replica_enabled?
+  cluster_ha_replica?
+  cluster_index
+  cluster_interface
+  cluster_local_node?
+  cluster_multi_dc?
+  cluster_node_name
+  cluster_nodes
+  cluster_nodes_in_datacenter
+  cluster_nodes_in_datacenter_count
+  cluster_nodes_online
+  cluster_regular_enabled?
+  cluster_replica?
+  cluster_roles
+  cluster_vpn_subnet
+  consul_acl_datacenter
+  consul_acl_replication_master_server?
+  consul_advertise_addr
+  consul_datacenter
+  consul_hostnames_with_role
+  consul_primary_datacenter
+  consul_primary_datacenter?
+  consul_replicate?
+  consul_retry_join_ips
+  consul_server?
+  consul_servers
+  cpus
+  dependabot_rules_enabled?
+  dependency_graph_enabled?
+  dev_mode
+  domain_host_ips
+  domain_host_names
+  dump_exportable_methods
+  eap_enabled?
+  elasticsearch_budget_cap
+  enabled_service?
+  expected_containers
+  external_mysql_address
+  external_mysql_enabled?
+  external_node_ip
+  fileserver_nodes
+  fileserver_nodes_with_role
+  get_service_list
+  ghes_cluster_delegate
+  ghes_cluster_delegate?
+  ghes_nomad_delegate?
+  git_server_count
+  git_servers
+  gitauth_unicorns
+  github_ernicorns
+  github_unicorns
+  haproxy_nbthread
+  hostname
+  hostnames_with_role
+  hosts_nodes
+  interface_mtu
+  job_plus_git_server_count
+  job_server_count
+  list_consul_servers_with_consul_dc
+  local_consul_servers_ips
+  migrations_enabled?
+  memcache_nodes
+  memcache_service_budget
+  memory
+  memory_budget
+  metrics_server?
+  metrics_servers
+  metrics_servers_ips
+  mysql_active_replicas?
+  mysql_budget_cap
+  mysql_enabled?
+  mysql_master
+  mysql_master_param
+  mysql_master_port
+  mysql_master_replica
+  mysql_master_replica?
+  mysql_master?
+  mysql_max_connections
+  mysql_innodb_flush_no_fsync
+  mysql_max_memory
+  mysql_password
+  mysql_replica_ports
+  mysql_replicas
+  mysql_server_id
+  mysql_service_budget
+  mysql_slave_net_timeout
+  mysql_username
+  mssql_master
+  mssql_master_ip
+  nes_enabled?
+  node_ip
+  node_uuid
+  nomad_cluster_roles
+  nomad_datacenter
+  nomad_primary_datacenter
+  nomad_render_jobs
+  nomad_run_github_jobs
+  nomad_server_bootstrap_expect
+  nomad_server_enabled
+  nomad_server_peers
+  nonvoting_copies
+  nonvoting_fileserver_count
+  nonvoting_pages_fileserver_count
+  nonvoting_storage_fileserver_count
+  normalized_hostname
+  packages_debug?
+  packages_enabled?
+  pages_enabled?
+  pages_fileserver_nodes
+  primary_dc_consul_servers_ips
+  pt_archiver_enabled?
+  redis_master
+  redis_master?
+  redis_service_budget
+  redis_max_memory_gb
+  resqued_high_workers
+  resqued_jobs_enabled
+  resqued_low_workers
+  resqued_maint_workers
+  resqued_maintenance_enabled
+  running_containers
+  search_nodes
+  search_nodes_by_datacenter
+  search_nodes_replica_count
+  service_budget_caps
+  service_budgets
+  single_node_hostname
+  is_gce?
+  is_aws?
+  single_node?
+  storage_fileserver_nodes
+  timerd_node_count
+  total_workers
+  uuid_nodename
+  validate_services
+  voting_copies
+  voting_fileserver_count
+  voting_pages_fileserver_count
+  voting_storage_fileserver_count
+  vpn_node_ip
+  wait_for_nomad
+  web_plus_active_replica_count
+  web_server?
+  web_server_count
+  webserver_nodes
+  wireguard_enabled?
+  wireguard_hub_and_spoke?
+  wireguard_mtu
+  wireguard_peers
+  wireguard_private_key
+)
+
+params = {}
+
+def parse_flags(into_params)
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: /usr/local/share/enterprise/ghe-call-configrb [options] <configapply_method> <method_args_json>"
+
+    opts.on("--present", "Exits 0 (true) if method result is non-empty; 1 (false) otherwise")
+    opts.on("--blank", "Exits 0 (true) if method result is nil or empty string; 1 (false) otherwise")
+    opts.on("--verbose", "Prints additional info to STDERR")
+
+    opts.on_tail("-h", "--help", "Prints this help") do
+      warn opts
+      exit 2
+    end
+  end
+  parser.parse!(into: into_params)
+
+  if ARGV.empty?
+    warn parser
+    exit 2
+  end
+end
+
+parse_flags params
+
+called_method = ARGV.shift
+raise "Method #{called_method} is not in allowed list" unless allowed_methods.include?(called_method) || ENV["UNSAFE_CALL_CONFIGRB"]
+
+input_raw = ARGV.shift
+args = input_raw.nil? ? [] : /^\[.+\]$/.match?(input_raw) ? JSON.parse(input_raw) : [input_raw]
+
+result = Enterprise::ConfigApply::Run.new.send(called_method.to_sym, *args)
+
+if params[:present]
+  if result.to_s.empty? && params[:verbose]
+    warn "Value for #{called_method} is not present"
+  end
+
+  exit result.to_s.empty? ? 1 : 0
+elsif params[:blank]
+  if !result.to_s.empty? && params[:verbose]
+    warn "Value for #{called_method} is not blank"
+  end
+
+  exit result.to_s.empty? ? 0 : 1
+else
+  case result
+  when TrueClass then exit 0
+  when FalseClass then exit 1
+  when NilClass then exit 0
+  when String then print result
+  else print JSON.pretty_generate(result)
+  end
+end

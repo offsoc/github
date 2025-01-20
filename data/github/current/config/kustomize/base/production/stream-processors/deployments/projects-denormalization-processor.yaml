@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: projects-denormalization-processor
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "projects-denormalization-processor"
+        heaven.githubapp.com/image-placeholder: "github"
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        moda.github.net/inject-otel-env-vars-into-containers: "projects-denormalization-processor"
+spec:
+    selector:
+        matchLabels:
+            service: projects-denormalization-processor
+    replicas: 19
+    template:
+        metadata:
+            annotations:
+                observability.github.com/splunk_index: rails
+                observability.github.com/logger: fluent-bit
+                fluentbit.io/parser: logfmt_sloppy
+            labels:
+                service: projects-denormalization-processor
+        spec:
+            restartPolicy: Always
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            containers:
+                - name: projects-denormalization-processor
+                  image: github
+                  imagePullPolicy: IfNotPresent
+                  args: ["bin/projects-denormalization-processor"]
+                  resources:
+                    requests:
+                        cpu: 1.0
+                        memory: "2G"
+                    limits:
+                        cpu: 1.0
+                        memory: "4G"
+                  volumeMounts:
+                    - name: github-metadata
+                      mountPath: /etc/github/metadata.json
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                  env:
+                    - name: RAILS_ENV
+                      value: production
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_HOSTNAME
+                      value: github.com
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-stream-processor"
+                  envFrom:
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets

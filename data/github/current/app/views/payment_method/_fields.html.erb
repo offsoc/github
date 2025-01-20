@@ -1,0 +1,101 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  # This partial renders the fields for our payment forms. It requires:
+  #
+  # owner - The User/Organization whose account we're updating.
+  # form  - A Rails FormBuilder to use as context for this form.
+
+  view = BillingSettings::PaymentMethodFieldsView.new(owner, form)
+  condensed_view ||= false
+  zuora_maintenance_enabled = GitHub.flipper[:zuora_maintenance].enabled?(owner)
+
+  SecureHeaders.append_content_security_policy_directives(
+    request,
+    img_src: [GitHub.paypal_checkout_url],
+    connect_src: [GitHub.braintreegateway_url, GitHub.braintree_analytics_url],
+    frame_src: [GitHub.zuora_payment_page_server]
+  )
+%>
+
+<%= render Billing::Settings::ZuoraMaintenanceBannerComponent.new(
+  zuora_maintenance_enabled: zuora_maintenance_enabled,
+) %>
+
+<% unless zuora_maintenance_enabled %>
+  <div class="payment-methods js-payment-methods <%= "has-paypal-account" if owner.has_paypal_account? %> <%= "condensed-payment-methods" if condensed_view %>">
+    <% unless condensed_view %>
+      <span class="strong-label">Choose your payment method</span>
+    <% end %>
+
+    <div class="radio-group clearfix" role="radiogroup">
+      <input name="payment_method_<%= owner.display_login %>" type="radio" value="credit_card" <%= "checked" unless owner.has_paypal_account? %>
+          class="js-payment-method radio-input"
+          data-selected-tab="pay-by-credit-card"
+          id="pay-by-credit-card-<%= owner.display_login %>">
+      <label class="radio-label" for="pay-by-credit-card-<%= owner.display_login %>" role="radio"
+        <%= safe_analytics_click_attributes(
+          category: "#{local_assigns[:analytics_prefix]} credit card",
+          action: "click to choose credit card",
+          label: "ref_cta:Credit card;ref_loc:account_upgrade"
+        ) if local_assigns[:analytics_prefix]
+        %>
+      >
+        Credit or debit card
+      </label>
+      <input name="payment_method_<%= owner.display_login %>" type="radio" value="paypal" <%= "checked" if owner.has_paypal_account? %>
+        class="js-payment-method radio-input"
+        data-selected-tab="pay-with-paypal"
+        id="pay-with-paypal-<%= owner.display_login %>">
+      <label class="radio-label" for="pay-with-paypal-<%= owner.display_login %>" role="radio"
+        <%= safe_analytics_click_attributes(
+          category: "#{local_assigns[:analytics_prefix]} paypal",
+          action: "click to choose paypal",
+          label: "ref_cta:PayPal account;ref_loc:account_upgrade"
+       ) if local_assigns[:analytics_prefix]
+        %>
+      >
+        PayPal account
+      </label>
+    </div>
+
+    <div class="js-selected-payment-method selected-payment-method pay-by-credit-card <%= "active" unless owner.has_paypal_account? %>">
+      <div class="js-zuora-spinner d-flex flex-items-center my-4">
+        <%= image_tag "spinners/octocat-spinner-32.gif", class: "mr-2", size: "16x16", alt: "", valign: "top" %>
+        Loading payment information…
+      </div>
+      <%= render Billing::Settings::ZuoraHppContainerComponent.new(
+        user_id: current_user.id,
+        signature_path: zuora_payment_page_signature_path,
+        container_class: "js-zuora-payment-page",
+        hidden: true,
+        hydro_payload: {
+          account_id: owner.id,
+        },
+        organization_id: (owner.display_login if owner.organization? && owner.persisted?),
+      ) %>
+      <%= render Billing::Settings::ZuoraBillingInfoComponent.new(
+        target: owner,
+        mt: 3,
+        border: true,
+        border_radius: 2,
+        px: 3,
+        py: 2,
+        mb: 3,
+        display: :none,
+      ) do %>
+        <p class="d-flex flex-justify-between mb-0">
+          <span class="">
+            <%= primer_octicon(:"credit-card", color: :muted) %>
+            <strong class="js-new-card-type"></strong> ending
+            <span class="js-new-card-number"></span>
+          </span>
+          <%= render Primer::ButtonComponent.new(scheme: :link, font_size: 6, classes: "js-edit-card-details") do %>Edit<% end %>
+        </p>
+      <% end %>
+    </div>
+
+    <div class="js-selected-payment-method selected-payment-method pay-with-paypal <%= "active" if owner.has_paypal_account? %>">
+      <%= render :partial => "payment_method/paypal_fields", :locals => { :view => view, :condensed_view => condensed_view } %>
+    </div>
+  </div>
+<% end %>

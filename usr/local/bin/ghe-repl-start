@@ -1,0 +1,198 @@
+#!/bin/bash
+#/ Usage: ghe-repl-start [-hv]
+#/
+#/ Start replication of all major datastores.
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message.
+#/   -v | --verbose     Run with verbose output.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help --options cvh -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+cluster=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c)
+      cluster=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      GHE_REPL_VERBOSE=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+. ghe-repl-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+
+exit_success () {
+  echo "Success: replication is running for all services."
+  echo "Run \`ghe-repl-status' to monitor replication health and progress."
+  stat --printf='%Y' /proc/1 | sudo tee /etc/github/repl-running >/dev/null
+  exit 0
+}
+
+trap cleanup EXIT SIGINT SIGTERM
+
+start_cron_from_primary () {
+  online_replicas_count=0
+  # Cleanup cron on primary if there is any enabled replica left
+  for node in $(ghe-cluster-nodes --replica --no-cache); do
+    if [ $(ghe-config cluster.$node.replica || true) = "enabled" ]; then
+      online_replicas_count=$((online_replicas_count + 1))
+    fi
+  done
+
+  # Start cron on primary if there is an online non-cache replica
+  if [ $online_replicas_count -ge 1 ]; then
+    echo "Starting cron for git-hooks ..."
+    # hourly resync
+    primary_ssh sudo ln -sf /usr/local/share/enterprise/ghe-repl-sync-git-hooks /etc/cron.hourly/ghe-repl-sync-git-hooks
+    # initial sync
+    primary_ssh /usr/local/share/enterprise/ghe-repl-sync-git-hooks 2>/dev/null
+  fi
+}
+
+ensure_replica_stopped
+
+PRIMARY_IP=$(ghe-cluster-nodes --primary --ip | cut -f 2)
+if ! ssh_check $PRIMARY_IP; then
+  echo "Error: Primary node $PRIMARY_IP is unavailable." >&2
+  exit 255
+fi
+
+ensure_primary_and_replica_compatible
+
+if ! $cluster; then
+  check_for_config_run
+
+  sudo touch /tmp/repl-starting
+  node=$(cat /etc/github/cluster)
+  primary_ssh "ghe-config cluster.$node.replica" "enabled"
+
+  primary_ssh sudo systemctl start ghe-dc-setup
+
+  echo "Updating configuration..."
+
+  export HA_CLUSTER=1
+
+  : ${GHE_REPL_VERBOSE:=false}
+  $GHE_REPL_VERBOSE && set -x
+
+  primary_ssh /usr/bin/env HA_CLUSTER=1 ghe-cluster-config-apply
+
+  # Start cron on primary outside of config apply to avoid race
+  start_cron_from_primary
+
+  # Actions cleanup 
+  if actions-ever-enabled; then
+    LOGFILE=/data/user/common/ghe-config.log
+    # Primary MSSQL is stopped at the very end of the process because it is needed at various phases 
+    if ! ghe-config --true app.actions.enabled; then
+      echo "Stopping primary MSSQL container after replication, Actions is disabled" >> $LOGFILE
+      primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && stop-mssql-global" >> $LOGFILE || true
+    fi
+  fi
+else
+  acquire_repl_lock
+
+  # Whether to enable set -x debug output.
+  : ${GHE_REPL_VERBOSE:=false}
+  export GHE_REPL_VERBOSE
+
+  # Turn on shell debugging
+  $GHE_REPL_VERBOSE && set -x
+
+  # Set ssh retry count to 5 to avoid ssh connection issues
+  GHE_REPL_SSH_RETRY_COUNT=5
+  export GHE_REPL_SSH_RETRY_COUNT
+
+  sudo touch /tmp/repl-starting
+
+  if ! is_service_external "mysql" ; then
+    /usr/local/share/enterprise/ghe-service-wait-mysql 5 || {
+      echo "MySQL is not running, fail to setup replication"
+      exit 1
+    }
+
+    echo "Starting MySQL replication ..."
+    ghe-repl-start-mysql
+  fi
+
+  if actions-ever-enabled; then
+    if ! ghe-config --true app.actions.enabled; then
+      # Best effort try to make sure mssql container is running on the primary an actions disabled system
+      echo "Making sure MSSQL container is running to start replication for disabled Actions service"
+      primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && start-mssql-global && wait-mssql-local-with-restart-alloc" || echo "failed ($?) to start MSSQL on Primary - continuing"
+    fi
+    if is_cache_replica; then
+      echo "Stopping MSSQL replication ..."
+      # Best effort stop MSSQL replication, this only needed if cache replica was previously a "normal" replica
+      ghe-repl-stop-mssql || echo "failed ($?) to stop replication locally - continuing"
+    else
+      echo "Starting MSSQL replication ..."
+      ghe-repl-start-mssql
+    fi
+  fi
+
+  echo "Starting Redis replication ..."
+  ghe-repl-start-redis
+
+  if is_cache_replica; then
+    echo "Stopping Pages replication ..."
+    ghe-repl-stop-pages
+  else
+    echo "Starting Pages replication ..."
+    ghe-repl-start-pages
+  fi
+
+  echo "Starting Alambic replication ..."
+  ghe-repl-start-alambic
+
+  echo "Starting Git replication ..."
+  ghe-repl-start-git
+
+  echo "Starting Consul replication ..."
+  ghe-repl-start-consul
+
+  # Run Elasticsearch start last as it will take a while
+  echo "Starting Elasticsearch replication ..."
+  ghe-repl-start-es
+
+  # Perform one final sync of the custom CA certs and settings to cover situations
+  # where customers have made changes whilst replication has been stopped but not
+  # torn down.
+  /usr/local/share/enterprise/ghe-repl-sync-ca-certificates > /dev/null
+
+  if [ -e /data/github/current/public/system/maintenance.html -a -f /data/github/current/public/index.html ]; then
+    sudo rm -f /data/github/current/public/system/maintenance.html
+  fi
+fi
+
+{ set +x; } 2>/dev/null
+
+exit_success

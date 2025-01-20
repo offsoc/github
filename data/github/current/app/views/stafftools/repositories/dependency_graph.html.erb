@@ -1,0 +1,222 @@
+<% view = Stafftools::RepositoryViews::NetworkView.new(:repository => current_repository) %>
+
+<% page_info title: "#{current_repo.name_with_owner} - Dependency Graph" %>
+
+<% if current_repo.public? %>
+  <div class="Box mb-3">
+    <div class="Box-header">
+      <span class="float-right">Query time: <%= (timing.real * 1000).round %>ms</span>
+      <h5>Packages</h5>
+    </div>
+
+    <div class="Box-body">
+      <p class="Box-row p-0">
+        Packages are algorithmically linked to repositories. The packages below
+        have been assigned to this repository; if any of the assignments is
+        incorrect, reassign them as appropriate.
+      </p>
+
+      <% if packages.none? %>
+        <p class="text-bold m-0">No associated packages found</p>
+      <% else %>
+        <ul>
+          <% packages.each_with_index do |package, i| %>
+            <li class="Box-row pl-0 pr-0">
+              <span class="float-right">
+                <%= render(Primer::Experimental::Dialog.new(
+                  dialog_id: "reassign_#{i}",
+                  header_variant: :large,
+                  width: :large,
+                  title: %Q[Reassign Package "#{package.name}"],
+                  form_url: stafftools_dependency_graph_assign_packages_path,
+                  form_method: :post
+                )) do |c| %>
+                  <% c.with_show_button(
+                    scheme: :danger,
+                    size: :small
+                  ) do |s| %>
+                    Reassign this package
+                  <% end %>
+                  <% c.with_body do %>
+                    <p>
+                      Reassign a package to a different repository if it has been incorrectly assigned to this one.
+                    </p>
+                    <%= hidden_field_tag :package_manager, package.package_manager %>
+                    <%= hidden_field_tag :package_name, package.name %>
+                    <dl class="form-group">
+                      <dt><label for="target-repository">Reassign to:</label></dt>
+                      <dd>
+                        <input type="text" name="target_repository" class="form-control" id="target-repository" placeholder="Enter repository in format owner/name" autofocus>
+                      </dd>
+                    </dl>
+                  <% end %>
+                  <% c.with_button(
+                    data: { "close-dialog-id": "reassign_#{i}" }
+                  ) { "Cancel" } %>
+                  <% c.with_button(
+                    type: :submit,
+                    scheme: :danger,
+                    data: { "disable-with": "" }
+                  ) { "Reassign" } %>
+                <% end %>
+              </span>
+              <div class="summary">
+                <dl class="m-0 flattened">
+                  <dt>Package</dt>
+                  <dd <%= test_selector("repository-package-name") %>><%= package.name %></dd>
+                  <dt>Package manager</dt>
+                  <dd><%= package.package_manager_human_name %></dd>
+                  <dt>Repository dependents</dt>
+                  <dd><%= package.repository_dependents_count %></dd>
+                  <dt>Package dependents</dt>
+                  <dd><%= package.package_dependents_count %></dd>
+
+                  <% if package.debug_should_be_associated_to_repo %>
+                    <dt><%= primer_octicon(:check) %> Assigned to repo</dt>
+                  <% else %>
+                    <dt><%= primer_octicon(:"no-entry") %> Not assigned to repo</dt>
+                    <dd><%= package.debug_association_explanation %></dd>
+                  <% end %>
+                </dl>
+              </div>
+            </li>
+          <% end %>
+        </ul>
+      <% end %>
+    </div>
+  </div>
+
+  <% unless GitHub.enterprise? %>
+    <div class="Box mb-3">
+      <div class="Box-header">
+        <h5>Used by button</h5>
+      </div>
+      <div class="Box-body">
+        <p class="Box-row p-0">
+          The Used By button will be displayed in the repository header based off of the Packages listed above.
+          If a package is listed below, it should match what is displayed in the header.
+          Display of the Used By button can be toggled below if a user requests.
+        </p>
+
+        <% if packages.none? %>
+          <p class="text-bold m-0">Used by should not be displayed because no associated packages were found.</p>
+        <% else %>
+          <% displayed_package = packages.find { |package|
+            package.id == current_repo.used_by_package_id
+          } || packages.first %>
+          <% display_verb = current_repo.used_by_enabled? ? "will" : "would" %>
+
+          <p>
+            Used by button <%= display_verb %> display: <%= content_tag :b, displayed_package.name %>
+            <%= pluralize((number_with_delimiter displayed_package.repository_dependents_count), "repository") %>
+          </p>
+        <% end %>
+
+        <p class="mt-4 mb-2">
+          <%= form_tag gh_set_used_by_stafftools_repository_path(current_repo) do %>
+            <% if current_repo.used_by_enabled? %>
+              <%= render Primer::Beta::Button.new(
+                type: :submit,
+                mb: 1,
+                name: "used_by_enabled",
+                value: "0"
+              ) do %>
+                Disable used by button
+              <% end %>
+            <% else %>
+              <%= render Primer::Beta::Button.new(
+                type: :submit,
+                mb: 1,
+                name: "used_by_enabled",
+                value: "1"
+              ) do %>
+                Enable used by button
+              <% end %>
+            <% end %>
+          <% end %>
+        </p>
+      </div>
+    </div>
+  <% end %>
+<% end %>
+
+<div class="Box mb-3">
+  <div class="Box-header">
+    <h5>Detected manifest files</h5>
+  </div>
+  <div class="Box-body">
+    <p>
+      Manifest files on the default branch for this repository that have been detected since the last push.
+    </p>
+    <% if manifest_paths.any? %>
+      <ul class="boxed-group-list bottom-border">
+        <% manifest_paths.sort.each do |file| %>
+          <li><a href="<%= blob_path(file, current_repo.default_branch, current_repo) %>"><%= file %></a></li>
+        <% end %>
+      </ul>
+    <% else %>
+      <p>No manifest files detected.</p>
+    <% end %>
+    <p class="mt-4 mb-2">
+      <%= form_tag gh_clear_dependencies_stafftools_repository_path(current_repo) do %>
+        <%= render Primer::Beta::Button.new(type: :submit, mb: 1) do %>Clear dependencies<% end %>
+      <% end %>
+      Clears this repository's manifests and dependencies from the dependency graph.
+    </p>
+    <p class="mt-3">
+      <%= form_tag gh_detect_manifests_stafftools_repository_path(current_repo) do %>
+        <%= render Primer::Beta::Button.new(type: :submit, mb: 1) do %>Redetect manifests<% end %>
+      <% end %>
+      Queue a background job to detect this repository’s manifest files.
+
+    </p>
+  </div>
+</div>
+
+<div class="Box mb-3">
+  <div class="Box-header">
+    <h5>Canonical Snapshots</h5>
+  </div>
+  <div class="Box-body">
+    <p>
+      These are the snapshots that are used to calculate the current dependencies for this repository.
+      If you exclude a snapshot, it will not be deleted but it will no longer be used for dependency calculation.
+    </p>
+    <p class="mt-4 mb-2">
+      <% if snapshots_or_error.is_a? String %>
+        <%= snapshots_or_error %>
+      <% else %>
+        <% if snapshots_or_error.any? %>
+          <table>
+            <tr>
+              <th>Snapshot ID</th>
+              <th>Detector</th>
+              <th>Correlator</th>
+              <th>Actions</th>
+            </tr>
+            <% snapshots_or_error.each do |snapshot| %>
+              <% snapshot_id = snapshot[:snapshot_id] %>
+              <tr>
+                <td class="p-2 text-left"> <%= snapshot_id %> </td>
+                <td class="p-2"><%= snapshot[:detector] %></td>
+                <td class="p-2 text-right"><%= snapshot[:correlator] %></td>
+                <td class="p-2">
+                  <%= link_to "Download", gh_download_dependency_snapshot_stafftools_repository_path(current_repo, snapshot_id) %>
+                    |
+                  <%= link_to "Exclude", gh_exclude_dependency_snapshot_stafftools_repository_path(current_repo, snapshot_id) %>
+                </td>
+              </tr>
+            <% end %>
+          </table>
+          <p class="mt-4">
+            <%= form_tag gh_clear_snapshot_dependencies_stafftools_repository_path(current_repo) do %>
+              <%= render Primer::Beta::Button.new(type: :submit, mb: 1, "data-confirm": "Are you sure you want to clear all canonical snapshots? This can't be undone.") do %>Clear all canonical snapshots<% end %>
+            <% end %>
+          </p>
+        <% else %>
+          <p>No canonical snapshots found.</p>
+        <% end %>
+      <% end %>
+    </p>
+  </div>
+</div>

@@ -1,0 +1,99 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  filter_values = local_assigns.fetch(:filter_values, nil)
+  feeds_dev_analytics = local_assigns.fetch(:feeds_dev_analytics, nil)
+  exp_context = local_assigns.fetch(:exp_context, nil)
+  feed_v2_classes = user_feature_enabled?(:feeds_v2) ? "color-bg-overlay" : ""
+  feed_error = local_assigns[:error]
+  requested_from_filter_event = local_assigns[:requested_from_filter_event]
+%>
+
+<turbo-frame id="conduit-feed-frame" class="js-for-you-feed-items" <%= test_selector("for-you-feed") %> data-repository-hovercards-enabled <% if feeds_dev_analytics %>data-dev-analytics-enabled<% end %>>
+    <feed-live-container>
+      <div data-target="feed-live-container.container" class="sr-only js-feed-live-region">
+        <% if requested_from_filter_event %>
+          <% if feed_error %>
+            <span>There was an error in loading the activity feed.</span>
+          <% else %>
+            <span><%= feed.total %> Results</span>
+          <% end %>
+        <% end %>
+      </div>
+    </feed-live-container>
+    <% if feed_error %>
+      <div class="mt-4">
+        <%= render Primer::Beta::Blankslate.new(
+            border: true,
+            bg: :default,
+            border_radius: 2,
+            test_selector: "for-you-feed-error",
+          ) do |c| %>
+            <% c.with_heading(tag: :h3) do %>
+              Uh oh!
+            <% end %>
+
+            <% c.with_description do %>
+              <p class="color-fg-muted my-2 mb-2">There was an error in loading the activity feed. <a <%= test_selector("for-you-feed-error-reload") %> class="Link--inTextBlock" href="<%= conduit_for_you_feed_path %>" aria-label="Reload this page">Reload this page</a>.</p>
+            <% end %>
+        <% end %>
+      </div>
+    <% else %>
+      <% if feed.empty? %>
+        <% if feed.filtered? || feed.error_context? %>
+          <%= render Primer::BlankslateComponent.new(
+            border: true,
+            bg: :default,
+            border_radius: 2,
+            mt: 4,
+            title: "That's all for now",
+            test_selector: "filtered-empty-state",
+          ) do %>
+            <p>You can adjust your <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-feed-filter-trigger") do %> feed filter<% end %> to see more content, or visit <a class="Link--inTextBlock" href="<%= explore_path %>" >Explore.</a></p>
+          <% end %>
+        <% else %>
+          <%= render Feed::GetStartedComponent.new %>
+        <% end %>
+      <% else %>
+        <% feed.items.each do |item| %>
+          <% renderer = Conduit::Web::Renderer.new(item:, exp_context:, viewer: viewer) %>
+          <%# catching exception from rendering individual card so that the feed itself doesn't fail %>
+          <% begin %>
+            <%= render renderer.component.new(
+              item:,
+              feed:,
+              show_star_repo_buttons:,
+              stats_timer_method: show_stats.method(:record_render),
+              stats: renderer.stats,
+            ) %>
+          <% rescue Exception => e %>
+            <% Failbot.report(e) %>
+          <% end %>
+        <% end %>
+        <% if feed.has_more? %>
+          <%
+            data_attrs = hydro_click_tracking_attributes("feeds.feed_click", {
+                click_target: "page=#{feed.next_page}",
+                original_request_id: feed.request_id,
+              }).
+              merge(disable_with: "Loading more&hellip;").
+              merge(test_selector_hash("feed-load-more-button"))
+          %>
+          <%= form_tag next_page_path, method: :get, class: "ajax-pagination-form js-ajax-pagination", data: test_selector_hash("feed-load-more-form") do %>
+            <% button_tag type: :submit, class: "ajax-pagination-btn #{feed_v2_classes}", data: data_attrs do %>
+              More
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if feed.profile_activity_context? %>
+        <template id= "hidden-event-label" >
+          <%= render Primer::Beta::Label.new(scheme: :accent, inline: true, ml: 3, px: 1) do %>
+            <%= render(Primer::Beta::Octicon.new(:"eye-closed")) %> hidden
+          <% end %>
+        </template>
+      <% end %>
+      <%= render FeedPosts::Templates::InlineCommentFormComponent.new %>
+    <% end %>
+</turbo-frame>
+

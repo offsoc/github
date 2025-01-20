@@ -1,0 +1,78 @@
+#!/usr/bin/env ruby
+# GHE server side script to calculate repository routes.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one network_path per line, something like:
+#
+# a/nw/a8/3f/02/100000855
+# a/nw/a8/bc/8d/100000880
+# a/nw/a5/06/81/100000659
+# a/nw/a5/84/6f/100000708
+# a/nw/a5/e0/01/146
+# ...
+#
+# Returns a list of <network_path> <server1> <server2> <server3>:
+#
+# a/nw/a8/3f/02/100000855 dgit-node1 dgit-node2 dgit-node3
+# a/nw/a8/bc/8d/100000880 dgit-node1 dgit-node2 dgit-node4
+# a/nw/a5/06/81/100000659 dgit-node3 dgit-node2 dgit-node4
+# ...
+#
+require File.expand_path("../../config/basic", __FILE__)
+require "github/sql"
+require "github/dgit"
+require "github/config/mysql"
+
+GitHub.load_activerecord
+
+def skip_archived_networks?
+  !!ENV["SKIP_ARCHIVED_NETWORKS"]
+end
+
+def skip_active_networks?
+  !!ENV["SKIP_ACTIVE_NETWORKS"]
+end
+
+def archived_network_exists?(network_id)
+  ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql("SELECT 1 FROM archived_repositories WHERE source_id=:id LIMIT 1", id: network_id)).present?
+end
+
+def network_exists?(network_id)
+  ApplicationRecord::Domain::Repositories.connection.select_value(Arel.sql("SELECT 1 FROM repository_networks WHERE id=:id", id: network_id)).present?
+end
+
+def host_picker
+  @picker ||= GitHub::DGit::HostPicker.new
+end
+
+def process(network_path)
+  network_id = network_path.split("/").last.to_i
+
+  if network_exists?(network_id)
+    return if skip_active_networks?
+  elsif archived_network_exists?(network_id)
+    return if skip_archived_networks?
+  else
+    # Exit to prevent networks created after the MySQL dump, but before the repo rsync
+    # from being restored. See github/enterprise2#7623
+    return
+  end
+
+  # Only select nodes that are part of the current cluster layout
+  replicas = GitHub::DGit::Routing.all_hosts_for_network(network_id) & GitHub::DGit.get_hosts
+
+  if replicas.empty?
+    replicas = host_picker.pick_fileservers(GitHub.dgit_default_copies, exclusions: [], far_from: []).map { |fs| fs.name }
+    if GitHub.dgit_non_voting_copies.to_i > 0
+      replicas += GitHub::DGit::pick_non_voting_hosts(GitHub.dgit_non_voting_copies, [])
+    end
+  end
+
+  puts "#{network_path} #{replicas.join(' ')}"
+end
+
+while line = $stdin.gets
+  process(line.chomp)
+end

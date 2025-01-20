@@ -1,0 +1,179 @@
+#!/bin/bash
+#/ Usage: ghe-mssql-health-check [-y]
+#/
+#/ Runs checks on the state of the mssql server, including backups and transaction logs.
+#/
+#/ OPTIONS:
+#/   -y | --yes        Prevents the script showing interactive dialogs
+#/
+
+set -e
+
+# Display usage information and quit.
+usage() {
+    sed -n 's|^#/ \?||p' < "$0"
+    exit 2
+}
+noninteractive=
+
+# Process command line arguments.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -y|--yes)
+      noninteractive=1
+      ;;
+    *)
+      >&2 echo "Unrecognized argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+
+  shift
+done
+
+if [[ $- == *i* ]]; then
+    noninteractive=1
+fi
+
+error=''
+
+##### Check for stale backups #####
+backups=$(ghe-mssql-console -y -n -q "
+    SET NOCOUNT ON;
+    SELECT sys.databases.name AS [Database],
+           FORMAT(COALESCE(MAX(msdb.dbo.backupset.backup_finish_date), sys.databases.create_date), 'yyyy-MM-ddThh:mm+ss') AS [LastBackup],
+           MIN(DATEDIFF(MINUTE, COALESCE(msdb.dbo.backupset.backup_finish_date, sys.databases.create_date), GETUTCDATE())) AS [ElapsedMinutes]
+    FROM   sys.databases
+    LEFT JOIN msdb.dbo.backupset
+           ON msdb.dbo.backupset.database_name = sys.databases.name
+    WHERE  sys.databases.recovery_model_desc = 'FULL'
+           AND sys.databases.name NOT IN ('master', 'model', 'tempdb', 'msdb', 'Resource')
+    GROUP  BY sys.databases.name, sys.databases.create_date
+    ORDER  BY COALESCE(MAX(msdb.dbo.backupset.backup_finish_date), sys.databases.create_date) ASC")
+
+# Print last backup dates
+while read -r line
+do
+    read -r -a db_backups <<< "$line"
+    db=$(tr -d ' ' <<< "${db_backups[0]}")
+    last_backup=$(tr -d ' ' <<< "${db_backups[1]}")
+    elapsed_minutes=$(tr -d ' ' <<< "${db_backups[2]}")
+    printf "%-52s: Last backup on $last_backup ($elapsed_minutes mins ago)\n" "$db"
+done <<< "$backups"
+
+# Get top line of result, this should be the oldest backup
+read -r line <<< "$backups"
+read -r -a oldest_backup <<< "$line"
+oldest_backup_db=$(tr -d ' ' <<< "${oldest_backup[0]}")
+oldest_backup_date=$(tr -d ' ' <<< "${oldest_backup[1]}")
+elapsed_minutes=$(tr -d ' ' <<< "${oldest_backup[2]}")
+
+ # Using the cadence for differential backup here, this is a good 'medium' point
+backup_cadence_minutes=$((48*60))
+if (ghe-config --exists mssql.backup.cadence); then
+    IFS=',' read -r -a backup_cadence_array <<< "$(ghe-config mssql.backup.cadence)"
+    if [[ "${backup_cadence_array[1]}" =~ ^[0-9]+$ ]]; then
+        backup_cadence_minutes="${backup_cadence_array[1]}"
+    fi
+fi
+
+if [[ "${elapsed_minutes}" =~ ^[0-9]+$ ]] && [ "$elapsed_minutes" -gt "$backup_cadence_minutes" ]; then
+    warn_stale_backups=1
+fi
+
+
+##### Check for large transaction logs #####
+log_stats=$(ghe-mssql-console -y -r -n -q "
+SET NOCOUNT ON;
+SELECT rtrim(pc1.instance_name) AS [Database],
+       pc2.cntr_value/1024.0 AS [Logical Log Size (MB)],
+       pc1.cntr_value/1024.0 AS [Physical Log Size (MB)],
+       cast(pc2.cntr_value*100.0/pc1.cntr_value as dec(18,2)) AS [Log Space Used (%)]
+FROM   sys.dm_os_performance_counters as pc1
+JOIN   sys.dm_os_performance_counters as pc2
+       ON pc1.instance_name = pc2.instance_name
+WHERE  pc1.instance_name NOT IN ('mssqlsystemresource', 'master', 'model', 'tempdb', 'msdb', 'Resource')
+       AND pc1.object_name LIKE '%Databases%'
+       AND pc2.object_name LIKE '%Databases%'
+       AND pc1.counter_name = 'Log File(s) Size (KB)'
+       AND pc2.counter_name = 'Log File(s) Used Size (KB)'
+       AND pc1.cntr_value > 0")
+
+total_found=
+while read -r line
+do
+    read -r -a db_stats <<< "$line"
+    db=$(tr -d ' ' <<< "${db_stats[0]}")
+    printf "%-52s: Log file usage: ${db_stats[1]} / ${db_stats[2]} MB (${db_stats[3]}%%) \n" "$db"
+
+    # If we want to do single DB checks, we can add them here
+
+    # Check disk usage of logs (only for _Total)
+    if [ -z "$total_found" ] && [ "$db" == '_Total' ]; then
+        total_found=1
+        disk_size=$(df --block-size=M --output=target,size /data/user|sed -n 's#^/.* \([0-9]*\)M#\1#p')
+        log_size="${db_stats[1]%.*}" # This truncates instead of rounding, don't think we care
+        if [ -n "$disk_size" ]; then
+            disk_usage=$((100 * log_size))
+            disk_usage_percent=$((disk_usage / disk_size))
+            if (( disk_usage_percent > 15 )); then
+                warn_log_size=1
+            fi
+        else
+            error="Failed to find /data/user drive, df output: \n$(df)"
+        fi
+
+        # Check utilization of logs
+        log_utilization="${db_stats[2]%.*}"
+        if [[ $log_utilization -lt 40 ]]; then
+            warn_log_utilization=1
+        fi
+    fi
+done <<< "$log_stats"
+
+if [ -z "$total_found" ]; then
+    error="Unexpected format for 'log_stats'"
+fi
+
+if [ -n "$error" ]; then
+    echo -e "$error"
+fi
+
+if [ -n "$warn_log_utilization" ]; then
+    # Not currently using this one. Probably we would want to warn on something like
+    # 1. We are more than 75% of the way through the backup window
+    # 2. Logs are < 50% utilized
+    echo "MSSQL transaction log utilization is ${log_utilization}%"
+    echo "The transaction logs may be using more disk than they need to be. Consider shrinking them to their current size using ghe-mssql-shrinkfile."
+    echo ""
+fi
+
+if [ -n "$warn_stale_backups" ]; then
+    echo "MSSQL indicates that the oldest database backup ($oldest_backup_db on $oldest_backup_date) is $((elapsed_minutes / 60)) hours old."
+    echo "If full database recovery mode is enabled, or using database replication, regular backups must be taken."
+    echo "1. If backup-utils are configured, confirm they are working and being taken regularly."
+    echo "2. If backup-utils are not configured, and this is a prod system, then they really should be. See https://docs.github.com/en/enterprise-server/admin/configuration/configuring-backups-on-your-appliance for more details."
+    echo "3. If this is a test or staging instance, then you can run ghe-export-mssql to backup to local disk. This can be scheduled with cron or a similar scheduling service in order to avoid seeing this message again. Note that only the most recent backup will be preserved."
+    echo ""
+    if [ -z "$noninteractive" ]; then
+        echo "Press enter to acknowledge"
+        read -r
+    fi
+fi
+
+if [ -n "$warn_log_size" ]; then
+    echo "MSSQL transaction logs are currently using $log_size MB, ${disk_usage_percent}% of the disk."
+    echo "1. If backup-utils are configured, consider scheduling backups more regularly."
+    echo "2. If backup-utils are not configured, and this is a prod system, then they really should be. See https://docs.github.com/en/enterprise-server/admin/configuration/configuring-backups-on-your-appliance for more details."
+    echo "3. If this is a test or staging instance, then you can run ghe-export-mssql to backup to local disk. This can be scheduled with cron or a similar scheduling service in order to avoid seeing this message again."
+    echo ""
+    if [ -z "$noninteractive" ]; then
+        echo "Press enter to acknowledge"
+        read -r
+    fi
+fi

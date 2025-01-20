@@ -1,0 +1,244 @@
+#!/bin/bash
+set -e
+
+chroot="$1"
+repo="$2"
+script_path="$3"
+
+prep_export_string() {
+  hub_var="$1"
+  sockstat_var="$2"
+  val="${!sockstat_var}"
+  if [ -n "$val" ]; then
+    val=${val#bool\:}
+    export $hub_var="$val"
+  fi
+}
+
+prep_export_string GITHUB_USER_LOGIN GIT_SOCKSTAT_VAR_user_login
+prep_export_string GIT_DIR repo
+prep_export_string GITHUB_USER_IP GIT_SOCKSTAT_VAR_real_ip
+prep_export_string GITHUB_REPO_NAME GIT_SOCKSTAT_VAR_repo_name
+prep_export_string GITHUB_PULL_REQUEST_AUTHOR_LOGIN GIT_SOCKSTAT_VAR_pr_author_login
+prep_export_string GITHUB_REPO_PUBLIC GIT_SOCKSTAT_VAR_repo_public
+prep_export_string GITHUB_REPO_ANONYMOUS_ACCESS_ENABLED GIT_SOCKSTAT_VAR_repo_anonymous_access_enabled
+prep_export_string GITHUB_PUBLIC_KEY_FINGERPRINT GIT_SOCKSTAT_VAR_pubkey_fingerprint
+prep_export_string GITHUB_PULL_REQUEST_HEAD GIT_SOCKSTAT_VAR_pull_request_head
+prep_export_string GITHUB_PULL_REQUEST_BASE GIT_SOCKSTAT_VAR_pull_request_base
+prep_export_string GITHUB_VIA GIT_SOCKSTAT_VAR_via
+prep_export_string GIT_PUSH_OPTION_COUNT GIT_SOCKSTAT_VAR_push_option_count
+prep_export_string GIT_USER_AGENT GIT_SOCKSTAT_VAR_git_user_agent
+
+# Web pushes don't set this, so fall back to 0 as default
+export GIT_PUSH_OPTION_COUNT=${GIT_PUSH_OPTION_COUNT:-0}
+
+for ((n=0; n<$GIT_PUSH_OPTION_COUNT; n++)) ; do
+	prep_export_string GIT_PUSH_OPTION_$n GIT_SOCKSTAT_VAR_push_option_$n
+done
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  exit 1
+}
+
+# For additional protections against symlink attacks isolate process to its own mount namespace
+if [ -z "${UNSHARED_MOUNT_NS}" ]; then
+  export UNSHARED_MOUNT_NS=1
+  exec unshare --propagation slave --mount -- "$0" "$@"
+  exit
+fi
+
+shift 3
+
+script=$@
+repo=$(readlink -f "$repo" )
+network=$(dirname "$repo" )
+
+if [ ! -d "$chroot" ]; then
+  echo Hook environment is not installed >&2
+  exit 1
+fi
+
+if [ ! -d "$script_path" ]; then
+  echo Repository with hooks is not checked out >&2
+  exit 1
+fi
+
+detect_overlayfs() {
+  local fs=$(cat /proc/filesystems | cut -f2 | grep '^overlay\(fs\)\?$' | sort | head -n1)
+  if [ -z "$fs" ] ; then
+    fs=$(cat /proc/filesystems | cut -f2 | grep '^aufs$' | head -n1)
+  fi
+  echo "$fs"
+}
+
+check_for_symlink() {
+  local fullpath
+
+  for fullpath in "$@"; do
+    if [ -L "${fullpath}" ]; then
+      realpath=$(realpath "${fullpath}")
+      # any symlinks in the jailed environment must point to a location within the environment
+      if ! [[ "$realpath" == "${OVERLAY}"* ]]; then
+        echo error: Symlink "$fullpath" in hook environment points outside the jailed environment. >&2
+        exit 1
+      fi
+    fi
+  done
+}
+
+OVERLAYFS=$(detect_overlayfs)
+
+if [ -z "$OVERLAYFS" ] ; then
+  modprobe overlayfs > /dev/null 2>&1 || true
+  modprobe overlay > /dev/null 2>&1 || true
+  modprobe aufs > /dev/null 2>&1 || true
+  OVERLAYFS=$(detect_overlayfs)
+fi
+
+if [ -z "$OVERLAYFS" ] ; then
+  echo "Kernel doesn't support AUFS or OverlayFS!" 1>&2
+  exit 78 # <- EX_CONFIG from sysexits.h
+fi
+
+cleanup() {
+  local attempts=5
+  local interval=1
+  local cleanup_succeeded=0
+
+  for i in $(seq 1 "$attempts"); do
+    [ "$i"  -eq 1 ] || sleep "$interval"
+    ! mountpoint -q "${OVERLAY}${script_path}" || umount "${OVERLAY}${script_path}" || continue
+    ! mountpoint -q "${OVERLAY}${network}" || umount "${OVERLAY}${network}" || continue
+    ! mountpoint -q "${OVERLAY}/sys" || umount "${OVERLAY}/sys" || continue
+    ! mountpoint -q "$OVERLAY" || umount "$OVERLAY" || continue
+    ! mountpoint -q "$DIR" || umount "$DIR" || continue
+    [ ! -d "$OVERLAY" ] || rm  -rf "$OVERLAY" || continue
+    [ ! -d "$DIR" ] || rm -rf "$DIR" || continue
+    cleanup_succeeded=1 && break
+  done
+  if [ "$cleanup_succeeded" -ne "1" ]; then
+    echo "Hook environment cleanup failed" 2>&1
+    exit 1
+  fi
+}
+
+trap "cleanup" INT TERM EXIT
+
+DIR=$(mktemp -d /tmp/hooks-tmpfs-XXXXXX)
+OVERLAY=$(mktemp -d /tmp/hooks-overlay-XXXXXX)
+
+mount -t tmpfs tmpfs "$DIR"
+if [ "$OVERLAYFS" = "aufs" ] ; then
+  mount -t aufs -o "br=$DIR:$chroot,nowarn_perm" none "$OVERLAY"
+else
+  mkdir "$DIR/upper" "$DIR/work"
+  if [ "$OVERLAYFS" = "overlay" ] ; then
+    mount -t "$OVERLAYFS" "$OVERLAYFS" -o "lowerdir=$chroot,upperdir=$DIR/upper,workdir=$DIR/work" "$OVERLAY"
+  else
+    mount -t "$OVERLAYFS" "$OVERLAYFS" -o "lowerdir=$chroot,upperdir=$DIR/upper" "$OVERLAY"
+  fi
+fi
+
+check_for_symlink "${OVERLAY}${network}"
+check_for_symlink "${OVERLAY}${script_path}"
+check_for_symlink "${OVERLAY}"/dev
+check_for_symlink "${OVERLAY}"/run
+check_for_symlink "${OVERLAY}"/sys
+check_for_symlink "${OVERLAY}"/tmp
+check_for_symlink "${OVERLAY}"/{proc,proc/self/fd}
+check_for_symlink "${OVERLAY}"/{var,var/tmp}
+check_for_symlink "${OVERLAY}"/{etc,etc/{passwd,group,resolv.conf,nsswitch.conf,hostname,localtime}}
+check_for_symlink "${OVERLAY}"/home/githook
+check_for_symlink "${OVERLAY}"/data/{repositories,user/repositories}
+
+mkdir -p "$OVERLAY"/{dev,proc,run,sys,var/run,var/tmp,var/log,tmp,etc,$network,$script_path,home/githook}
+touch "$OVERLAY"/dev/{null,random,urandom,zero} 	## Must match bind mounted device files in /etc/nsjail/hook.cfg
+cp /etc/{passwd,group,resolv.conf,nsswitch.conf,hostname,localtime} "${OVERLAY}/etc"
+chown root:root "${OVERLAY}/run" "${OVERLAY}/tmp" "${OVERLAY}/dev" "${OVERLAY}/proc" "${OVERLAY}/sys" "${OVERLAY}/var/tmp" "${OVERLAY}/etc" "${OVERLAY}/etc/resolv.conf"
+
+chmod 1777 "${OVERLAY}/tmp"
+chown githook:githook "${OVERLAY}/home/githook"
+chmod 700 "${OVERLAY}/home/githook"
+
+# For backwards compatibility, add a symlink to make the repository
+# accessible under both `/data/repositories` and
+# `/data/user/repositories` (whichever one is not mounted along with
+# `$network` itself):
+case "$network" in
+/data/repositories/*)
+  mkdir -p "${OVERLAY}/data/user"
+  ln -s "/data/repositories" "${OVERLAY}/data/user/repositories"
+  ;;
+/data/user/repositories/*)
+  ln -s "/data/user/repositories" "${OVERLAY}/data/repositories"
+  ;;
+esac
+
+touch "${OVERLAY}/var/run/utmp"
+
+# fixes problems with bash subshells eg `sed s/foo/bar/ <(echo foo)`
+ln -s "/proc/self/fd" "${OVERLAY}/dev/fd"
+
+mount --bind "/sys" "${OVERLAY}/sys" || { sleep .1; mount --bind "/sys" "${OVERLAY}/sys"; }
+mount --bind "$network" "${OVERLAY}${network}" || { sleep .1; mount --bind "$network" "${OVERLAY}${network}"; }
+mount --bind "$script_path" "${OVERLAY}${script_path}" || { sleep .1; mount --bind "$script_path" "${OVERLAY}${script_path}"; }
+mount --bind -o remount,ro "${OVERLAY}${network}" || { sleep .1; mount --bind -o remount,ro "${OVERLAY}${network}"; }
+mount --bind -o remount,ro "${OVERLAY}${script_path}" || { sleep .1; mount --bind -o remount,ro "${OVERLAY}${script_path}"; }
+
+payload=$(mktemp "${OVERLAY}/tmp/githook-payload.XXXXXXXX")
+cat > "${payload}" <<EOF
+#!/bin/sh
+set -e
+EOF
+{
+  printf 'export GITHUB_USER_LOGIN=%q\n' "${GITHUB_USER_LOGIN}"
+  printf 'export GIT_DIR=%q\n' "${GIT_DIR}"
+  printf 'export GITHUB_USER_IP=%q\n' "${GITHUB_USER_IP}"
+  printf 'export GITHUB_REPO_NAME=%q\n' "${GITHUB_REPO_NAME}"
+  printf 'export GITHUB_PULL_REQUEST_AUTHOR_LOGIN=%q\n' "${GITHUB_PULL_REQUEST_AUTHOR_LOGIN}"
+  printf 'export GITHUB_REPO_PUBLIC=%q\n' "${GITHUB_REPO_PUBLIC}"
+  printf 'export GITHUB_PUBLIC_KEY_FINGERPRINT=%q\n' "${GITHUB_PUBLIC_KEY_FINGERPRINT}"
+  printf 'export GITHUB_PULL_REQUEST_HEAD=%q\n' "${GITHUB_PULL_REQUEST_HEAD}"
+  printf 'export GITHUB_PULL_REQUEST_BASE=%q\n' "${GITHUB_PULL_REQUEST_BASE}"
+  printf 'export GITHUB_VIA=%q\n' "${GITHUB_VIA}"
+  printf 'export GIT_PUSH_OPTION_COUNT=%q\n' "${GIT_PUSH_OPTION_COUNT}"
+  printf 'export GIT_USER_AGENT=%q\n' "${GIT_USER_AGENT}"
+  printf 'export PATH=%q\n' "/usr/local/bin:/usr/local/sbin:${PATH}"
+} >> "${payload}"
+
+# If there's a quarantine, pass its env through to the hook's jail.
+# See https://github.com/github/gitrpcd/blob/bcf11e77ddb172698b303b6e2c2aa36788d3d128/internal/quarantine/env.go
+if [ -n "${GIT_OBJECT_DIRECTORY}" ]; then
+  printf 'export GIT_OBJECT_DIRECTORY=%q\n' "${GIT_OBJECT_DIRECTORY}" >> "${payload}"
+fi
+if [ -n "${GIT_ALTERNATE_OBJECT_DIRECTORIES}" ]; then
+  printf 'export GIT_ALTERNATE_OBJECT_DIRECTORIES=%q\n' "${GIT_ALTERNATE_OBJECT_DIRECTORIES}" >> "${payload}"
+fi
+if [ -n "${GIT_QUARANTINE_PATH}" ]; then
+  printf 'export GIT_QUARANTINE_PATH=%q\n' "${GIT_QUARANTINE_PATH}" >> "${payload}"
+fi
+
+if [ -n "${GITHUB_REPO_ANONYMOUS_ACCESS_ENABLED}" ]; then
+  printf 'export GITHUB_REPO_ANONYMOUS_ACCESS_ENABLED=%q\n' "${GITHUB_REPO_ANONYMOUS_ACCESS_ENABLED}" >> "${payload}"
+fi
+
+for ((n=0; n<$GIT_PUSH_OPTION_COUNT; n++)) ; do
+  variable="GIT_PUSH_OPTION_$n"
+  printf 'export %q=%q\n' "$variable" "${!variable}" >> "${payload}"
+done
+cat >> "${payload}" <<EOF
+cd "$repo"
+"$script_path/$script"
+EOF
+chmod 755 "$payload"
+
+# If the overlay has shared memory add an argument to set up nsjail to allow read/write there
+# See https://github.com/github/enterprise2/pull/41187 for context
+mount_arg=""
+if [ -d "${OVERLAY}/dev/shm" ]; then
+  mount_arg="--mount none:/dev/shm:tmpfs:rw,size=8388608"
+fi
+
+timeout 10s nsjail --rw --config=/etc/nsjail/hook.cfg --rlimit_fsize inf --rlimit_nofile 32768 --rlimit_as inf --rlimit_cpu inf --quiet --mode=o --user=githook:githook --group=githook:githook --chroot="$OVERLAY" --disable_clone_newnet --seccomp_policy=/etc/nsjail/hook.seccomp $mount_arg -- /bin/sh "${payload#$OVERLAY}"
+

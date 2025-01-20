@@ -1,0 +1,311 @@
+#!/bin/bash
+
+NETWORK_NAME='github-services'
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Using the `--debug` flag enables debuggers such as pry and byebug to work as expected.
+# when in debug mode, all other overmind output is sent to tmp/app.log, you can tail this
+# file if that output is needed.
+#
+# When in debug mode, auto dependency updates still work, but the output is sent to
+# tmp/app.log and the main terminal appears to hang until the updates are finished.
+#
+
+# Parse options
+while [[ "$#" -gt 0 ]]; do case $1 in
+  -d|--debug) debug="1"; shift;;
+  --codespaces) codespaces="1"; shift;;
+  --lab) lab="1"; shift;;
+  --rdbg) rdbg="1"; shift;;
+  --dap) dap="1"; shift;;
+  --log-output) log="1"; shift;;
+  --multi-tenant) multi_tenant="1"; shift;;
+  --rate-limiting) rate_limiting="1"; shift;;
+  *) echo "Unknown parameter passed: $1"; exit 1;;
+esac; done
+
+if gh medic --help &> /dev/null; then
+  gh medic --no-docker --no-port-forward --no-procfile
+else
+  if [ -n "$CODESPACES" ]; then
+    status_code=$(curl -L \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $(gh auth token)" \
+    https://api.github.com/repos/github/gh-medic -i --silent --write-out %{http_code} --output /dev/null)
+    if [ $status_code -eq 404 ]; then
+      echo -e "${ORANGE}⚠️ The GITHUB_TOKEN in use is missing some permissions and may lead to errors running script/server.${NC}"
+      echo -e "This may be have been caused by creating this codespace via the gh cli with the ${BLUE}--default-permisions${NC} flag."
+      echo -e "If this is the case, we recommend recreating the codespace via the web interface, or without the ${BLUE}--default-permisions${NC}.\n\n"
+      echo -e "To exit press Ctrl+C, or any key to continue."
+      read -n 1 -r -s
+    fi
+  fi
+fi
+
+# Never attempt to upload packages during server run.
+unset GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE
+
+if [ -n "$multi_tenant" ]; then
+  export MULTI_TENANT_ENTERPRISE=1
+  export PRIVATE_MODE="true"
+
+  #  in codespaces, this env var has a different name than other environments
+  export LFS_AZURE_ACCESS_KEY=$LFS_AZURE_STORAGE_ACCESS_KEY
+else
+  export S3_ALAMBIC_ACCESS_KEY=$AWS_DEV_ACCESS_KEY_ID
+  export S3_ALAMBIC_SECRET_KEY=$AWS_DEV_SECRET_ACCESS_KEY
+fi
+
+if ([ -n "$log" ] && [ -n "$debug" ]); then
+  echo "The flags '--log-output' and '--debug' are incompatible"
+  exit 1
+fi
+
+if [ -n "$rate_limiting" ]; then
+  echo "Setting up tenant bound rate limiting"
+  export RATE_LIMITING=1
+  export GH_REQUEST_LIMITING=1
+fi
+
+# If we're on a BP-Dev instance, then pretend we're on Codespaces.
+if [ -f ".bpdev" ]; then
+  export CODESPACES=1
+fi
+
+# Notifyd now runs by default, unless explicitly disabled
+if [ -n "$NOTIFYD_DISABLED" ]; then
+  echo "NOTIFYD_DISABLED is set, disabling notifyd setup"
+  unset NOTIFYD_ENABLED
+else
+  export NOTIFYD_ENABLED=1
+fi
+
+if [ -n "$NOTIFYD_ENABLED" ]; then
+  echo "Loading notifyd env variables"
+  source ./vendor/notifyd/dotcom-codespaces-development/.env
+  if [ -n "$NOTIFYD_ENABLE_FLAGS" ]; then
+     echo "Enabling notifyd feature flags"
+    ./vendor/notifyd/dotcom-codespaces-development/feature-flags
+  fi
+fi
+
+if [ -n "$CODESPACES" ]; then
+  # Derive GH_UNICORN_WORKER_COUNT from CODESPACES_UNICORN_WORKER_COUNT if set, otherwise default to 4.
+  if [ -n "$CODESPACES_UNICORN_WORKER_COUNT" ]; then
+    export GH_UNICORN_WORKER_COUNT=$CODESPACES_UNICORN_WORKER_COUNT
+  else
+    export GH_UNICORN_WORKER_COUNT=4
+  fi
+
+  # Create or reuse a password for basic auth when sharing over public ports from a codespace
+  public_port_file=tmp/public_port_pw
+  if [ -f $public_port_file ]; then
+    export GH_PUBLIC_FORWARDED_CODESPACE_PW=$(cat tmp/public_port_pw)
+  else
+    export GH_PUBLIC_FORWARDED_CODESPACE_PW=$(openssl rand -base64 16)
+    echo $GH_PUBLIC_FORWARDED_CODESPACE_PW > tmp/public_port_pw
+  fi
+
+  # Wait until codespace setup is complete to start server
+  timeout 300s bash <<SHELL
+if [[ -f "tmp/bootstrap-setup.lock" ]]; then
+  echo -n "Waiting for Codespace setup to complete"
+  while (test -f "tmp/bootstrap-setup.lock"); do
+    echo -n "."
+    sleep 1
+  done
+fi
+SHELL
+
+  # Set GH_HOSTNAME if it's not already set and the user is using PFS URLs or a random port.
+  if [ -z "$GH_HOSTNAME" ]; then
+
+    # warn if tunnel doesn't look right
+    if [ ! -f "$GITHUG_WEB_TUNNEL_PATH" ]; then
+      echo "WARNING: The tunnel file doesn't exist. This *probably* means script/server was run before the GitHug extension finished activating. We're going to assume you're using localhost but this might be wrong."
+      echo "If you're developing in the browser or planning on sharing the UI over a public port, open a new terminal."
+    fi
+
+    # set GH_HOSTNAME and other environment variables that are conditional on MULTI_TENANT_ENTERPRISE
+    source $SCRIPT_DIR/setup-server-env
+
+    # process tunnel file
+    if [ -f "$GITHUG_WEB_TUNNEL_PATH" ]; then
+      codespace_port=$(jq .port $GITHUG_WEB_TUNNEL_PATH -r)
+
+      if [ "$codespace_port" != "null" ]; then
+        # codespace in vscode
+        if [ "$codespace_port" != "80" ] && [ -n "$CODESPACES_CUSTOM_PORT_OPT_OUT" ]; then
+          echo "🚨 Port 80 is being forwarded as $codespace_port instead of 80! 🚨"
+          echo "
+  To fix this, go to the \"Ports\" tab in VS Code, right-click on port 80, choose
+  \"Change Local Address Port\", and change it to 80.
+  If you have nginx running locally, you may need to stop it first: \`brew services stop nginx\`"
+          exit 1
+        fi
+
+        if [ -z "$CODESPACES_BROWSER_OPEN_OPT_OUT" ]; then
+          if [ -n "$CODESPACES_CUSTOM_PORT_OPT_OUT" ]; then
+            "${BROWSER}" "http://${GH_HOSTNAME}"
+          else
+            "${BROWSER}" "http://${DOMAIN_NAME}:10042/.devcontainer/server_starting.html?devServerPort=${codespace_port}&domainName=${DOMAIN_NAME}"
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+
+# Checksum
+if [[ -f "./bootstrap.md5" ]]; then
+  cksum $(cat bootstrap.deps) > bootstrap-check.md5
+  cmp --silent "./bootstrap.md5" "bootstrap-check.md5"
+  exit_code=$(echo $?)
+  if [[ $exit_code -eq 0 ]]; then
+    echo "Bootstrap checksums match. Continuing setup..."
+    rm bootstrap-check.md5
+  else
+    echo "#############################################"
+    echo "Bootstrap checksums do not match. Script may not behave as expected. To get the most up to date dependencies, please run script/bootstrap again. pausing for 5 seconds..."
+    echo "#############################################"
+    rm bootstrap-check.md5
+    sleep 5
+  fi
+else
+  echo "No bootstrap.md5 file found. Please run script/bootstrap first."
+  exit 1
+fi
+
+# Setup ngrok for public port forwarding/testing
+if [ -n "$codespaces" ]; then
+
+  bin/safe-ruby $SCRIPT_DIR/setup-codespaces
+
+  if [ -z "$NGROK_AUTHTOKEN" ]; then
+    echo "Unable to find ngrok auth token. Please provide it as NGROK_AUTHTOKEN and try again."
+    exit 1
+  else
+    echo "Found ngrok auth token in environment."
+  fi
+
+  # Set GITHUB_USER is not already set (which is the case when running locally)
+  if [ -z "$GITHUB_USER" ]; then
+    echo "To set up ngrok, you must provide your github username. To prevent having to manually enter it,"
+    echo "set GITHUB_USER in your environment."
+    echo
+    read -p "Enter GitHub username: " github_username
+    GITHUB_USER="$github_username"
+  fi
+
+  # all this command does is set the token in the ~/.ngrok2/ngrok.yml file.  it doesn't validate
+  ngrok authtoken $NGROK_AUTHTOKEN
+
+  if [ $? -eq 0 ]; then
+    echo "Attempting to open tunnel."
+
+    # Start ngrok in the background
+    ngrok http -subdomain="ghdev-$GITHUB_USER" -host-header=rewrite $NGROK_HOST > /dev/null &
+    # get the https public url
+    TUNNEL_NAME=$(curl -s  http://127.0.0.1:4040/api/tunnels | jq '.tunnels[] | select(.proto=="https").public_url')
+    n=0
+    # wait for ngrok to start
+    echo "Waiting for ngrok to start."
+    until [ "$n" -ge 10 ] || [ -n "$TUNNEL_NAME" ]
+    do
+      TUNNEL_NAME=$(curl -s  http://127.0.0.1:4040/api/tunnels | jq '.tunnels[] | select(.proto=="https").public_url')
+      n=$((n+1))
+      sleep 1
+    done
+
+    # if tunnel name isn't set, then ngrok failed to start
+    if [ -z "$TUNNEL_NAME" ]
+    then
+          echo "Failed to start ngrok. Please validate ngrok setup and try again."
+          echo
+          echo "Be sure that you have access to the ngrok GitHub organization. If you don't have it, you can request it from IT via a Zendesk ticket: https://github-it.zendesk.com/hc/en-us/requests/new"
+          exit 1
+    else
+          export NGROK_HOSTNAME="ghdev-$GITHUB_USER.ngrok.io"
+          export USE_API_PATH_PREFIX=1
+          echo "Successfully opened tunnel. Tunnel is now available at https://$NGROK_HOSTNAME"
+    fi
+  else
+    echo "Failed to authenticate with ngrok. Please check your auth token and try again."
+    exit 1
+  fi
+fi
+
+# start script in parallel that will collect script/server metrics
+$SCRIPT_DIR/collect-server-start-metric &
+
+if [ "${lab:-"0"}" -eq 1 ]; then
+  cleanup() {
+    echo "Processes are still running! To shut everything down once you're done:"
+    echo ""
+    echo "  make -C config/kubernetes clean"
+  }
+
+  trap cleanup EXIT
+
+  make -C config/kubernetes server
+  exit 0
+fi
+
+if [ "${GITHUB_USE_DOCKER:-"0"}" -eq 1 ]; then
+  # create a custom network for services to use
+  NETWORK_CHECK=`docker network ls --format "{{.Name}}" -f name=$NETWORK_NAME`
+  if [ -z "$NETWORK_CHECK" ];then
+    echo "==> $NETWORK_NAME docker network not found, Creating.."
+    docker network create --driver bridge github-services
+  fi
+fi
+
+# send metrics on script/server usage to datadog
+bin/safe-ruby $SCRIPT_DIR/report-script-server-usage
+
+# To get overmind to allow other processes to die, export your own list
+#   export OVERMIND_CAN_DIE=my-other-thing,gpgverify,hookshot-go,dev-identity-provider-ruby
+#   script/server
+if [ -z "$OVERMIND_CAN_DIE" ]; then
+  export OVERMIND_CAN_DIE=gpgverify,hookshot-go,dev-identity-provider-ruby
+fi
+
+# To get overmind to restart process other than just alive, export your own list
+#   export OVERMIND_AUTO_RESTART=alive,js-assets
+#   script/server
+if [ -z "$OVERMIND_AUTO_RESTART" ]; then
+  export OVERMIND_AUTO_RESTART=alive
+fi
+
+# Ensure bootstrapped before we start everything in parallel
+bin/safe-ruby -e ""
+
+# Cleanup Overmind socket if it's still around but not running.
+if ! $($SCRIPT_DIR/overmind-running); then
+  rm -f .overmind.sock /tmp/overmind.sock
+fi
+
+export SERVER_START_DEBUG="$debug"
+export SERVER_START_RDBG="$rdbg"
+export SERVER_START_DAP="$dap"
+export SERVER_START_LOG="$log"
+
+# Set default to let downstream scripts use "set -u"
+export DX_EDGE="${DX_EDGE:-false}"
+
+if [ "$DX_EDGE" = true ]; then
+  echo "Pulling subproject images"
+  ./script/dx/subproject-image-pull
+fi
+
+if [ -n "$FEATURE_DAEMONIZE_SCRIPT_SERVER" ]; then
+  echo "Starting overmind in daemonized mode..."
+  exec ./script/server-start-daemonized
+else
+  echo "Starting overmind in non-daemonized mode..."
+  exec ./script/server-start
+fi

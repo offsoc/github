@@ -1,0 +1,251 @@
+#!/bin/bash
+#/ Usage: ghe-actions-dump [options]
+#/
+#/ Creates a dump of GitHub Action Services.
+#/ You can also use this command to upload the support bundle, and any other file,
+#/ directly to GitHub Enterprise support.
+#/
+#/ OPTIONS:
+#/   -h | --help                  Show this message.
+#/   -u | --upload                Upload bundle to Enterprise Support.
+#/   -t <id> | --ticket <id>      Upload bundle to Enterprise Support with a ticket ID.
+#/   -s | --service               The service name (actions, mps, token, artifactcache, launch-deployer, launch-receiver, launch-worker or launch-hydro-consumer), default to actions
+#/   -r | --role                  Role (frontend, backend, none), default to frontend, default to none for launch-* services
+#/   -y | --yes                   Do not show the warning prompt.
+#/
+#/ EXAMPLES:
+#/   Send a dump to support:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-actions-dump -u'
+#/
+#/   Send a dump to support and associate it with a support ticket:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-actions-dump -t ticket-id'
+#/
+#/
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-support-lib
+. ghe-support-lib
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+
+PROMPT_LESS=
+UPLOAD=
+SERVICE=actions
+ROLE=frontend
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+proceed() {
+    if [ -z "$PROMPT_LESS" ]; then
+        echo "$(basename "$0") should only be used when requested by the GitHub Enterprise Support team. Incorrect use could cause damage or data loss."
+        read -p "Proceed with ghe-actions-dump? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+
+
+upload-dump() {
+  DUMP_LOC=$1
+  DUMP_LOC_TAR=$2
+  FILE_NAME=$3
+  message "Creating ${DUMP_LOC_TAR}..."
+  # tar the Dump
+  tar -cf "${DUMP_LOC_TAR}" -C "/data/user/actions/dumps" "$FILE_NAME" -I pigz
+
+  [ -f "${DUMP_LOC_TAR}" ] || {
+    echo "Failed to create dump at ${DUMP_LOC_TAR}." >&2
+    exit 1
+  }
+
+  message "Cleaning ${DUMP_LOC}..."
+  # Clean up
+  rm -rf "$DUMP_LOC"
+
+  # Correct permissions
+  chown admin:admin "${DUMP_LOC_TAR}"
+
+  [ -z "$UPLOAD" ] || {
+    if [ -z "$MANUAL_UPLOAD" ]; then
+      upload_file ${TICKET_ID:+--ticket="$TICKET_ID"} -d "[$(hostname)] $FILE_NAME.tar.gz" "$DUMP_LOC_TAR"
+      message "Since we uploaded, cleaning up ${DUMP_LOC_TAR}..."
+      rm "$DUMP_LOC_TAR"
+    else
+      manual_upload_help "$DUMP_LOC_TAR" 1 "$TICKET_ID"
+    fi
+  }
+
+  if [ -f "${DUMP_LOC_TAR}" ]; then
+    message "Dump available at ${DUMP_LOC_TAR}!"
+  fi
+}
+
+run-actions-dump() {
+  ALLOCS=$(ghe-nomad-api "job/$SERVICE/allocations")
+
+  # Cleanup previous dump
+  rm -rf "$DUMP_LOC"
+
+  ensure-service-name "$SERVICE"
+
+  ALLOC_IDS=$(echo "$ALLOCS" |
+    jq -r "
+    [.[]
+    | select(.JobID == \"$SERVICE\" and .TaskGroup == \"$ROLE\")
+    | .ID]
+    | join(\" \")" )
+
+  [ -n "$ALLOC_IDS" ] || {
+    echo "Failed to find allocations for $SERVICE:$ROLE" >&2
+    exit 1
+  }
+
+  for ALLOC_ID in $ALLOC_IDS
+  do
+      FILE_NAME="$(date -u '+%FT%H-%M-%SZ')-$ALLOC_ID-$SERVICE-$ROLE-coredump"
+      DUMP_LOC="/data/user/actions/dumps/$FILE_NAME"
+      DUMP_LOC_TAR="$DUMP_LOC.tar.gz"
+
+      message "Creation of dump ${DUMP_LOC_TAR} started..."
+
+      DOTNET_VERSION=$(nomad alloc exec "$ALLOC_ID" ls /usr/share/dotnet/shared/Microsoft.NETCore.App)
+
+      message "Creating dump inside container (dotnet $DOTNET_VERSION)..."
+      # Create dump in nomad
+      nomad alloc exec "$ALLOC_ID" /usr/share/dotnet/shared/Microsoft.NETCore.App/"$DOTNET_VERSION"/createdump 1 -u -f "/var/log/coredumps/${FILE_NAME}"
+
+      upload-dump "$DUMP_LOC" "$DUMP_LOC_TAR" "$FILE_NAME"
+  done
+}
+
+run-launch-dump() {
+  ALLOCS=$(ghe-nomad-api "job/$SERVICE/allocations")
+
+  ALLOC_IDS=$(echo "$ALLOCS" |
+    jq -r "
+    [.[]
+    | select(.JobID == \"$SERVICE\")
+    | .ID]
+    | join(\" \")" )
+
+  [ -n "$ALLOC_IDS" ] || {
+    echo "Failed to find allocations for $SERVICE" >&2
+    exit 1
+  }
+
+  for ALLOC_ID in $ALLOC_IDS
+  do
+    DIR_NAME="$(date -u '+%FT%H-%M-%SZ')-$ALLOC_ID-$SERVICE-coredump"
+    DUMP_DIR="$TMP_DIR/$DIR_NAME"
+    DUMP_DIR_TAR="$DUMP_DIR.tar.gz"
+
+    message "Creation of dump ${DUMP_DIR_TAR} started..."
+
+    # Cleanup previous dump
+    rm -rf "$DUMP_DIR_TAR"
+    rm -rf "$DUMP_DIR"
+
+    mkdir -p "$DUMP_DIR"
+
+    PORTS=$(ghe-nomad-api allocation/"$ALLOC_ID" |
+    jq "(.AllocatedResources.Tasks.\"$SERVICE\".Networks[].ReservedPorts[] | select(.Label==\"http\") | .Value)")
+
+    for PORT in $PORTS
+    do
+      URL="http://127.0.0.1:$PORT"
+      message "Capturing data for $URL.."
+      echo "Capturing health.."
+      curl -sS "$URL"/_health > "$DUMP_DIR/health.$PORT"
+      echo "Capturing vars.."
+      curl -sS "$URL"/_debug/vars > "$DUMP_DIR/vars.$PORT"
+      echo "Capturing heap.."
+      curl -sS "$URL"/_debug/pprof/heap > "$DUMP_DIR/heap.$PORT"
+      echo "Capturing mutex.."
+      curl -sS "$URL"/_debug/pprof/mutex > "$DUMP_DIR/mutex.$PORT"
+      echo "Capturing block.."
+      curl -sS "$URL"/_debug/pprof/block > "$DUMP_DIR/block.$PORT"
+      echo "Capturing threadcreate.."
+      curl -sS "$URL"/_debug/pprof/threadcreate > "$DUMP_DIR/threadcreate.$PORT"
+      echo "Capturing profile.."
+      curl -sS "$URL"/_debug/pprof/profile > "$DUMP_DIR/profile.$PORT"
+      echo "Capturing symbol.."
+      curl -sS "$URL"/_debug/pprof/symbol > "$DUMP_DIR/symbol.$PORT"
+      echo "Capturing trace.."
+      curl -sS "$URL"/_debug/pprof/trace > "$DUMP_DIR/trace.$PORT"
+      echo "Capturing goroutine.."
+      curl -sS "$URL"/_debug/pprof/goroutine > "$DUMP_DIR/goroutine.$PORT"
+    done
+
+    upload-dump "$DUMP_DIR" "$DUMP_DIR_TAR" "$DIR_NAME"
+  done
+}
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+[ -n "$LOCKED_GHE_ACTIONS_DUMP" ] || {
+  export LOCKED_GHE_ACTIONS_DUMP=1
+  exec lockrun --lockfile=/var/run/ghe-actions-dump.lock -- "$0" "$@"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -u|--upload)
+      UPLOAD=1
+      ;;
+    -t|--ticket)
+      UPLOAD=1
+      TICKET_ID="$2"
+      shift
+      ;;
+    -y|--yes)
+      PROMPT_LESS=1
+      ;;
+    -s|--service)
+      SERVICE="$(to-lower "$2")"
+      shift
+      ;;
+    -r|--role)
+      ROLE="$(to-lower "$2")"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+proceed
+
+if [ -n "$UPLOAD" ]; then
+  if ! check_connectivity; then
+    if ! prompt_manual_upload; then
+      exit
+    fi
+    MANUAL_UPLOAD=1
+  fi
+fi
+
+if [[ "$SERVICE" == launch-* ]]; then
+  run-launch-dump
+else
+  run-actions-dump
+fi
+
+
+
+
+trap "" EXIT

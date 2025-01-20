@@ -1,0 +1,187 @@
+#!/bin/bash
+#/ Usage: ghe-repl-stop [-hfv]
+#/
+#/ Stop replication of all major datastores.
+#/
+#/ OPTIONS:
+#/   -h | --help       Show this message.
+#/   -v | --verbose    Run with verbose output.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+force=0
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,force --options cvhfp -- "$@") || {
+  usage
+  exit 2
+}
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+cluster=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c)
+      cluster=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      GHE_REPL_VERBOSE=true
+      shift
+      ;;
+    -p|--promote)
+      promote=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+trap cleanup EXIT
+
+stop_cron_from_primary() {
+  online_replicas_count=0
+  # Cleanup cron on primary if there is any enabled replica left
+  for node in $(ghe-cluster-nodes --replica --no-cache); do
+    if [ $(ghe-config cluster.$node.replica|| true) = "enabled" ]; then
+      online_replicas_count=$((online_replicas_count + 1))
+    fi
+  done
+
+  # if we have non more online non-cache replicas, we can remove the cron job
+  if [ $online_replicas_count -eq 0 ]; then
+    echo "Stopping cron for git-hooks ..."
+    primary_ssh sudo rm -f /etc/cron.hourly/ghe-repl-sync-git-hooks
+  fi
+}
+
+ensure_replica_running
+
+# Whether to enable set -x debug output.
+: ${GHE_REPL_VERBOSE:=false}
+export GHE_REPL_VERBOSE
+
+# Turn on shell debugging
+$GHE_REPL_VERBOSE && set -x
+
+# Override the force variable if the primary is not available.
+if ! primary_reachable; then
+  echo "Warning: Primary node is unavailable." >&2
+  echo "Attemping to stop replication without cleaning up on the primary side."
+  force=1
+fi
+
+if ! $cluster; then
+  if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+    echo "Replication is not set up correctly. Please run 'ghe-repl-setup' first."
+    exit 1
+  fi
+
+  if [ "$promote" = true ]; then
+    ghe-repl-stop-es --promote || [ $force = 1 ]
+  else
+    ghe-repl-stop-es || [ $force = 1 ]
+  fi
+
+  node=$(cat /etc/github/cluster)
+  primary_ssh "ghe-config cluster.$node.replica" "disabled" || [ $force = 1 ]
+
+  echo "Updating configuration..."
+
+  export HA_CLUSTER=1
+  primary_ssh /usr/bin/env HA_CLUSTER=1 ghe-cluster-config-apply || {
+    ghe-config "cluster.$node.replica" disabled && ghe-single-config-apply || exit 1
+  }
+
+  stop_cron_from_primary
+
+  # Actions cleanup
+  if actions-ever-enabled; then
+    LOGFILE=/data/user/common/ghe-config.log
+    # Primary MSSQL is stopped at the very end of the process because it is needed at various phases
+    if ! ghe-config --true app.actions.enabled; then
+      echo "Stopping primary MSSQL container, Actions is disabled" >> $LOGFILE
+      primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && stop-mssql-global" >> $LOGFILE || true
+    fi
+  fi
+else
+  acquire_repl_lock
+
+  if [ $force = 1 ]; then
+    echo "Skipping Pages, Alambic, git-hooks and Git replication cleanup on primary ..."
+    echo "Attempting to stop Elasticsearch ..."
+    if [ "$promote" = true ]; then
+      ghe-repl-stop-es --promote || true
+    else
+      ghe-repl-stop-es || true
+    fi
+
+  else
+    echo "Stopping Pages replication ..."
+    ghe-repl-stop-pages
+
+    echo "Stopping Git replication ..."
+    ghe-repl-stop-git
+
+    echo "Stopping Alambic replication ..."
+    ghe-repl-stop-alambic
+
+    echo "Stopping Elasticsearch replication ..."
+    if [ "$promote" = true ]; then
+      ghe-repl-stop-es --promote || true
+    else
+      ghe-repl-stop-es || true
+    fi
+  fi
+
+  if ! is_service_external "mysql" ; then
+    echo "Stopping MySQL replication ..."
+    ghe-repl-stop-mysql
+  fi
+
+  if actions-ever-enabled; then
+    if ! ghe-config --true app.actions.enabled; then
+      # Best effort try to make sure mssql containers are running on an actions disabled system
+      echo "Making sure MSSQL containers are running to stop replication for disabled Actions service"
+      echo "Starting MSSQL on primary"
+      primary_ssh ". /usr/local/share/enterprise/ghe-mssql-lib && start-mssql-global && wait-mssql-local-with-restart-alloc" || echo "failed ($?) to start MSSQL on Primary - continuing"
+      echo "Starting MSSQL locally"
+      start-mssql-global || echo "failed ($?) to start MSSQL locally - continuing"
+      wait-mssql-local-with-restart-alloc || echo "failed ($?) to wait for MSSQL locally - continuing"
+    fi
+
+    echo "Stopping MSSQL replication ..."
+    ghe-repl-stop-mssql
+  fi
+
+  echo "Stopping Redis replication ..."
+  ghe-repl-stop-redis
+
+  echo "Stopping Consul replication ..."
+  ghe-repl-stop-consul
+fi
+
+{ set +x; } 2>/dev/null
+
+echo "Success: Replication was stopped for all services."
+echo "To disable replica mode and remove all replica configuration, run 'ghe-repl-teardown'."
+sudo rm -f /etc/github/repl-running

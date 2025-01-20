@@ -1,0 +1,134 @@
+# typed: true
+# frozen_string_literal: true
+
+require_relative "../../helper"
+
+class <%= fully_qualified_class_name %>::HydrateEventTest < Api::Internal::Twirp::RPCTestCase
+  include Events::PayloadTestHelper
+
+  rpc <%= fully_qualified_class_name %>, :hydrate
+
+  fixtures do
+    @<%= event_type %> = create :<%= event_type %>
+    @guid = "87b4dbf6-5c08-11ef-8e55-7649d9a6c7d1"
+    @business = create(:business, name: "github")
+    @organization = create(:organization, login: "github", business: @business)
+    @repository = create(:repository, owner: @organization)
+    @user = create(:user)
+  end
+
+  context "validation" do
+    test "disallowed client is not allowed access" do
+      rpc_request("disallowed")
+      assert_disallowed last_response
+    end
+
+    test "missing tier1_event" do
+      response_json = rpc_request("allowed", **{
+        tier1_event: nil,
+      })
+
+      assert_equal 400, last_response.status, last_response.body
+      assert_equal "missing tier1_event", response_json["msg"]
+    end
+
+    test "missing event_type" do
+      request_body = request(guid: @guid,
+        action: Hydro::Schemas::EventsPlatform::V0::Entities::EventAction::EVENT_ACTION_CREATED,
+        <%= event_type %>_attachment: attachment(@<%= event_type %>))
+      request_body[:tier1_event][:type] = nil
+      rpc_request("allowed", **request_body)
+
+      assert_equal 400, last_response.status, last_response.body
+      assert_equal "invalid event type", JSON.parse(last_response.body)["msg"]
+    end
+  end
+
+  context "successful requests" do
+    test "<%= event_type %> deleted" do
+      <%= event_type %>_attachment = attachment(@<%= event_type %>)
+      @<%= event_type %>.destroy!
+
+      request_body = request(guid: @guid,
+        action: Hydro::Schemas::EventsPlatform::V0::Entities::EventAction::EVENT_ACTION_DELETED,
+        <%= event_type %>_attachment: <%= event_type %>_attachment)
+      request_body[:tier1_event][:event_attachment] = {
+        type_url: "type.googleapis.com/hydro.schemas.github.event_payload_attachment.v0.<%= entity_class_name %>Attachment",
+        message: Base64.strict_encode64(T.unsafe(Hydro::Schemas::Github::EventPayloadAttachment::V0::<%= entity_class_name %>Attachment).encode(<%= event_type %>_attachment))
+      }
+      response_json = events_rpc_request(@event_type,  "deleted", "allowed", **request_body)
+      assert_equal 200, last_response.status
+
+      refute_nil response_json
+      result = response_json["results"].first
+      assert_equal "RESULT_CODE_SUCCESS", result["code"]
+
+      result_payload = JSON.parse(result["payload"])
+
+      assert_equal "deleted", result_payload["action"]
+      assert_equal @<%= event_type %>.id, result_payload["<%= event_type %>"]["id"]
+      assert_equal @repository.organization.id, result_payload["organization"]["id"]
+      assert_equal @repository.organization.business.id, result_payload["enterprise"]["id"]
+    end
+  end
+
+  test "<%= event_type %> created" do
+    request_body = request(guid: @guid, action: Hydro::Schemas::EventsPlatform::V0::Entities::EventAction::EVENT_ACTION_CREATED)
+    response_json = events_rpc_request(@event_type, "created", "allowed", **request_body)
+    assert_equal 200, last_response.status, last_response.body
+
+    refute_nil response_json
+    result = response_json["results"].first
+    assert_equal "RESULT_CODE_SUCCESS", result["code"]
+
+    result_payload = JSON.parse(result["payload"])
+
+    assert_equal "created", result_payload["action"]
+    assert_equal @user.id, result_payload["sender"]["id"]
+    assert_equal @repository.organization.id, result_payload["organization"]["id"]
+    assert_equal @repository.organization.business.id, result_payload["enterprise"]["id"]
+  end
+
+  private
+
+  def attachment(<%= event_type %>)
+    Hydro::Schemas::Github::EventPayloadAttachment::V0::<%= entity_class_name %>Attachment.new({
+      <%= event_type %>: Hydro::Schemas::Github::EventPayloadAttachment::V0::Entities::<%= entity_class_name %>.new({
+        id: <%= event_type %>.id,
+      })
+    })
+  end
+
+  def request(guid:, action:, <%= event_type %>_attachment: nil)
+    {
+      tier1_event: {
+        guid: @guid,
+        type: Hydro::Schemas::EventsPlatform::V0::Entities::EventType::<%= event_type_enum_value %>,
+        action: action,
+        target: {
+          primary_entity: {
+            type: Hydro::Schemas::EventsPlatform::V0::Entities::EntityType::<%= event_type_enum_value %>,
+            id: @<%= event_type %>.id.to_s
+          },
+          related_entities: [
+            {
+              type: :ENTITY_TYPE_REPOSITORY,
+              id: @repository.id.to_s,
+              graphql_global_relay_id: @repository.global_relay_id,
+              graphql_next_global_id: @repository.next_global_id,
+            }
+          ]
+        },
+        triggered_at: Time.now,
+        actor: {
+          type: Hydro::Schemas::EventsPlatform::V0::Entities::EntityType::ENTITY_TYPE_USER,
+          id: @user.id.to_s
+        },
+        event_attachment: nil,
+        target_repository_id: @repository.id,
+        target_organization_id: @repository.organization_id,
+        target_business_id: @repository.organization&.business&.id,
+      }
+    }
+  end
+end

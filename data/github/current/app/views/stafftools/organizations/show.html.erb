@@ -1,0 +1,427 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info :title => "#{this_user.login} - Site admin" %>
+
+<% view = Stafftools::Organization::ShowView.new(organization: this_user, current_user: current_user) %>
+
+<div class="site-admin-container">
+  <%= render \
+        partial: "stafftools/accounts/landing_info",
+        locals: {
+          view: Stafftools::User::ShowView.new(user: this_user, current_user: current_user),
+          counts: @counts,
+          error_states: @error_states,
+          obfuscated_dupe_emails: @obfuscated_dupe_emails,
+          spam_flag_timestamp: @spam_flag_timestamp,
+        } %>
+
+  <% if GitHub.billing_enabled? %>
+    <%= render \
+          partial: "stafftools/accounts/landing_billing",
+          locals: {account: this_user, last_transaction: @last_transaction} %>
+  <% end %>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= primer_octicon(:lock) %>
+      <%= link_to "Security", stafftools_user_security_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <% if view.show_two_factor_requirement_status? %>
+        <li>
+          <% if view.organization.two_factor_requirement_enabled? %>
+            <%= primer_octicon(:lock) %>
+          <% else %>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          <% end %>
+          <% if viewer_can_search_audit_log? %>
+            <%= stafftools_selected_link_to view.two_factor_requirement_link_text,
+              stafftools_audit_log_path(query: view.two_factor_requirement_audit_log_query) %>
+          <% else %>
+            <%= view.two_factor_requirement_link_text%>
+          <% end %>
+        </li>
+      <% end %>
+      <% if view.organization.business_plus? %>
+        <li>
+          <%= primer_octicon(view.saml_sso_octicon) %>
+          <%= view.saml_sso_enforcement_link %>
+        </li>
+      <% end %>
+      <li>
+        <%= primer_octicon(:key) %>
+        <%= view.ssh_cas_link %>
+      </li>
+      <% if GitHub.ip_allowlists_available? %>
+        <li>
+          <% if view.organization.ip_allowlist_enabled? %>
+            <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+          <% else %>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          <% end %>
+          <%= view.ip_allowlist_link %>
+        </li>
+      <% end %>
+      <% if viewer_can_search_audit_log? %>
+        <li>
+          <%= render Primer::Beta::Octicon.new(icon: "history") %>
+          <%= stafftools_selected_link_to \
+                "Search audit logs",
+                stafftools_audit_log_path(query: view.audit_log_query) %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <%= render \
+        partial: "stafftools/accounts/landing_repositories",
+        locals: {account: this_user, counts: @counts} %>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= primer_octicon(:"code-square") %>
+      <%= link_to "Gists", stafftools_user_gists_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <% if @counts[:gists] > 0 %>
+        <li>
+          <%= primer_octicon(:lock) %>
+          <%= pluralize(@counts[:secret_gists], "secret gist") %>
+        </li>
+        <li>
+          <%= primer_octicon(:"code-square") %>
+          <%= link_to \
+                pluralize(@counts[:public_gists], "public gist"),
+                stafftools_user_gists_path(this_user) %>
+        </li>
+        <li>
+          <%= primer_octicon(:trash) %>
+          <%= link_to \
+                pluralize(@counts[:deleted_gists], "deleted gist"),
+                deleted_stafftools_user_gists_path(this_user) %>
+        </li>
+      <% else %>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          No gists
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= primer_octicon(:project) %>
+      <%= link_to \
+            "Projects",
+            stafftools_user_projects_path(this_user) %>
+    </h4>
+    <% classic_ui_enabled = ProjectsClassicSunset.projects_classic_ui_enabled?(this_user) %>
+    <% if classic_ui_enabled %>
+      <ul class="site-admin-detail-list">
+        <% if @counts[:owned_projects] > 0 %>
+          <li>
+            <%= primer_octicon(:project) %>
+            <%= link_to \
+                  "#{pluralize(number_with_delimiter(@counts[:owned_projects]), "project")} (classic)",
+                  stafftools_user_projects_path(this_user) %>
+          </li>
+        <% else %>
+          <li>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            No organization-wide projects (classic)
+          </li>
+        <% end %>
+      </ul>
+    <% end %>
+    <% if GitHub.projects_new_enabled? %>
+      <ul class="site-admin-detail-list">
+        <% beta_label = classic_ui_enabled ? "(beta)" : nil %>
+        <% if @counts[:owned_projects_beta] > 0 %>
+          <li>
+            <%= primer_octicon(:table) %>
+            <%= link_to \
+                  "#{pluralize(number_with_delimiter(@counts[:owned_projects_beta]), "project")} #{beta_label}",
+                  stafftools_projects_beta_path(this_user) %>
+          </li>
+        <% else %>
+          <li>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            No organization-wide projects <%= beta_label %>
+          </li>
+        <% end %>
+      </ul>
+    <% end %>
+
+    <% unless this_user.organization_projects_enabled? %>
+      <ul class="site-admin-detail-list">
+        <li><%= primer_octicon(:x) %> Organization projects are disabled</li>
+      </ul>
+    <% end %>
+  </div>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= primer_octicon(:people) %>
+      <%= link_to "Members & Teams", stafftools_user_teams_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <%= render(Stafftools::SummaryCounterComponent.new(
+        icon: :organization,
+        count: @counts[:admins],
+        singular: "owner",
+        path: owners_stafftools_user_path(this_user)
+      )) %>
+      <%= render(Stafftools::SummaryCounterComponent.new(
+        icon: :people,
+        count: @counts[:teams],
+        singular: "team",
+        path: stafftools_user_teams_path(this_user)
+      )) %>
+      <%= render(Stafftools::SummaryCounterComponent.new(
+        icon: :person,
+        count: @counts[:members],
+        singular: "member",
+        path: members_stafftools_user_path(this_user),
+        max_threshold: Organization::MEGA_ORG_MEMBER_THRESHOLD
+      )) %>
+      <% if GitHub.billing_enabled? %>
+        <%= render(Stafftools::SummaryCounterComponent.new(
+          icon: :"credit-card",
+          count: @counts[:billing_managers],
+          singular: "billing manager",
+          path: billing_stafftools_user_path(this_user)
+        )) %>
+      <% end %>
+      <% if @counts[:ignored_by] > 0 &&
+        stafftools_action_authorized?(controller: Stafftools::Users::InteractionsController, action: :index) %>
+        <li>
+          <%= primer_octicon(:stop, classes: "alert") %>
+          Blocked by
+          <%= link_to \
+                pluralize(number_with_delimiter(@counts[:ignored_by]), "user"),
+                stafftools_user_interactions_path(this_user) %>
+        </li>
+      <% end %>
+      <% if @counts[:blocked_users] > 0 &&
+        stafftools_action_authorized?(controller: Stafftools::Users::InteractionsController, action: :index) %>
+        <li>
+          <%= primer_octicon(:"bell-slash") %>
+          Blocking
+          <%= link_to \
+                pluralize(number_with_delimiter(@counts[:blocked_users]), "user"),
+                stafftools_user_interactions_path(this_user) %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <% if current_user.patsv2_enabled? %>
+    <div class="site-admin-box">
+      <h4>
+        <%= render(Primer::Beta::Octicon.new(icon: "key")) %>
+        Personal access tokens
+      </h4>
+
+      <ul class="site-admin-detail-list">
+        <%= render Stafftools::SummaryCounterComponent.new(
+          icon: :terminal,
+          count: @counts[:personal_access_tokens],
+          singular: "active token",
+          path: stafftools_user_personal_access_tokens_path(this_user)
+        ) do |component| %>
+          <% component.with_after_counter do %>
+            <%= render(Primer::Beta::Label.new(label: "Beta", title: "Label: Beta", ml: 1, scheme: :success))  { "Beta" } %>
+          <% end %>
+        <% end %>
+
+        <%= render(Stafftools::SummaryCounterComponent.new(
+          icon: :terminal,
+          count: @counts[:personal_access_token_requests],
+          singular: "pending request",
+          path: requests_pending_approval_stafftools_user_personal_access_tokens_path(this_user)
+        )) %>
+      </ul>
+    </div>
+  <% end %>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= render(Primer::Beta::Octicon.new(icon: "link")) %>
+      <%= link_to "GitHub Apps", stafftools_user_apps_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <li>
+        <% if @counts[:owned_integrations] > 0 %>
+          <%= primer_octicon(:hubot) %>
+        <% else %>
+          <%= primer_octicon(:x) %>
+        <% end %>
+
+        <%= link_to \
+          pluralize(number_with_delimiter(@counts[:owned_integrations]), "owned integration"),
+          stafftools_user_apps_path(this_user) %>
+      </li>
+      <li>
+        <% if @counts[:owned_integrations] > 0 %>
+          <%= primer_octicon(:"link-external") %>
+        <% else %>
+          <%= primer_octicon(:x) %>
+        <% end %>
+
+        <%= link_to \
+          pluralize(number_with_delimiter(@counts[:installed_integrations]), "installed integration"),
+          stafftools_user_installations_path(this_user) %>
+      </li>
+      <% unless GitHub.enterprise? %>
+        <li>
+          <% if @counts[:enterprise_installations] > 0 %>
+            <%= primer_octicon(:server) %>
+          <% else %>
+            <%= primer_octicon(:x) %>
+          <% end %>
+
+          <%= link_to \
+            pluralize(number_with_delimiter(@counts[:enterprise_installations]), "connected enterprise installation"),
+            stafftools_user_enterprise_installations_path(this_user) %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= render(Primer::Beta::Octicon.new(icon: "link")) %>
+      <%= link_to \
+            "OAuth applications",
+            stafftools_user_applications_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <% if GitHub.oauth_application_policies_enabled? %>
+        <li>
+          <% if this_user.restricts_oauth_applications? %>
+            <%= primer_octicon(:thumbsup) %>
+            <%= link_to "App restrictions", stafftools_user_security_path(this_user) %>
+            enabled
+          <% else %>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            <%= link_to "App restrictions", stafftools_user_security_path(this_user) %>
+            disabled
+          <% end %>
+        </li>
+      <% end %>
+      <% if @counts[:owned_apps] > 0 %>
+        <li>
+          <%= primer_octicon(:squirrel) %>
+          <%= link_to \
+                pluralize(number_with_delimiter(@counts[:owned_apps]), "owned application"),
+                stafftools_user_applications_path(this_user) %>
+        </li>
+      <% else %>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          Owns no applications
+        </li>
+      <% end %>
+      <% if GitHub.hookshot_enabled? %>
+        <% if @counts[:webhooks] > 0 %>
+          <li>
+            <%= primer_octicon(:plug) %>
+            <%= link_to \
+                  pluralize(number_with_delimiter(@counts[:webhooks]), "webhook"),
+                  stafftools_org_hooks_path(this_user) %>
+          </li>
+        <% else %>
+          <li>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+            No webhooks
+          </li>
+        <% end %>
+      <% end %>
+    </ul>
+  </div>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= render(Primer::Beta::Octicon.new(icon: "comment-discussion")) %>
+      Organization Discussions
+    </h4>
+    <ul class="site-admin-detail-list">
+      <% if this_user.discussion_repository.present? %>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "thumbsup")) %>
+          Enabled
+        </li>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "repo")) %>
+          <%= link_to \
+                this_user.discussion_repository.repository.nwo,
+                gh_stafftools_repository_discussions_path(this_user.discussion_repository.repository) %>
+        </li>
+      <% else %>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          Disabled
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <%= render \
+        partial: "stafftools/accounts/landing_registry_packages",
+        locals: {account: this_user, counts: @counts} %>
+
+  <%= render "stafftools/accounts/landing_codespaces" %>
+
+  <%= render partial: "stafftools/accounts/landing_copilot", locals: { copilot_org: Copilot::Organization.new(this_user), view: Stafftools::User::ShowView.new(user: this_user, current_user: current_user) } %>
+
+  <div class="site-admin-box">
+    <h4>
+      <%= render(Primer::Beta::Octicon.new(icon: "stopwatch")) %>
+      <%= link_to \
+        "Scheduled Reminders",
+        stafftools_user_reminders_path(this_user) %>
+    </h4>
+    <ul class="site-admin-detail-list">
+      <% if @counts[:reminders] > 0 %>
+        <li>
+          <%= primer_octicon(:project) %>
+          <%= link_to \
+            pluralize(@counts[:reminders], "scheduled reminder"),
+            stafftools_user_reminders_path(this_user) %>
+        </li>
+      <% else %>
+        <li>
+          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          Has no scheduled reminders
+        </li>
+      <% end %>
+    </ul>
+  </div>
+
+  <% if GitHub.trust_tiers_enabled? %>
+    <div class="site-admin-box">
+      <h4>
+        <%= render(Primer::Beta::Octicon.new(icon: "stack")) %>
+        <%= link_to \
+              "Trust Tiers",
+              stafftools_user_trust_tiers_path(this_user) %>
+      </h4>
+      <ul class="site-admin-detail-list">
+        <%
+          # tiering now returns an TierResult object
+          tier = TrustTiers::Tier.for_billable_owner(this_user).tier
+          forced_tier = this_user.settings.get(:trust_tier)
+        %>
+        <li>
+          <%= render Primer::Beta::Label.new(test_selector: "tier-label", scheme: tier == 1 ? :success : tier == 2 ? :purple : :warning) do %>
+            <% if forced_tier > 0 %><%= TrustTiers::Tier.tier_name(forced_tier) %> (forced)<% else %><%= TrustTiers::Tier.tier_name(tier) %>
+              (calculated)<% end %>
+          <% end %>
+        </li>
+        <li>
+          <%= primer_octicon(:gear) %> <%= link_to "View settings", stafftools_user_trust_tiers_path(this_user) %>
+        </li>
+      </ul>
+    </div>
+  <% end %>
+</div>

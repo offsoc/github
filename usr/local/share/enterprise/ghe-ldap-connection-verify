@@ -1,0 +1,49 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+require "timeout"
+require "socket"
+require "openssl"
+
+settings = {}
+ARGV.each do |a|
+  s = a.split(":")
+  settings[s[0]] = s[1] || true
+end
+
+def maybe_connect(settings, timeout = 5)
+  Timeout::timeout(timeout) do
+    client_socket = TCPSocket.new(settings["host"], settings["port"])
+    ssl_socket = OpenSSL::SSL::SSLSocket.new(client_socket)
+    begin
+      ssl_socket.connect
+    ensure
+      ssl_socket.sysclose
+    end
+  end
+end
+
+if settings["connection-check"]
+  begin
+    Timeout.timeout(5) do
+      client_socket = TCPSocket.new(settings["host"], settings["port"])
+      client_socket.close
+    end
+  rescue Timeout::Error
+    puts "connection timed out"
+    exit 1
+  rescue StandardError => e
+    puts "connection is invalid: #{e.message}"
+    exit 1
+  end
+
+  if settings["ssl"] == "true"
+    begin
+      maybe_connect(settings)
+    rescue => e
+      puts "cannot establish TLS session to LDAP server: #{e}"
+      exit 1
+    end
+  end
+
+  exit 0
+end

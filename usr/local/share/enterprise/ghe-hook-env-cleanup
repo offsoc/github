@@ -1,0 +1,126 @@
+#!/bin/bash
+#/ Deletes an pre-receive hook environment from GitHub Enterprise
+#/ When run in a cluster, it also deletes the environment from other git nodes
+#/ Usage:
+#/          ghe-hook-env-cleanup environment-id [target-sha] [options]
+#/
+#/    target-sha is the sha256sum that makes up part of the path to this environment instance.
+#/
+#/ Options:
+#/          -h | --help           Show this message
+#/          -n                    Do not push delete request to other cluster nodes
+#/          -a                    Delete all versions of this environment regardless of the sha
+#/
+#/ Exit codes:
+#/          0                     Everything went swimmingly
+#/          3                     Invalid arguments
+
+set -e
+
+[ "$(whoami)" = "git" ] || {
+  exec sudo -u git "$0" "$@"
+  echo Run this script as the git user. >&2
+  exit 1
+}
+
+export GHE_LIBDIR="${GHE_LIBDIR:-"/usr/local/share/enterprise/lib"}"
+[ -z "$SKIP_GHE_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-commons"
+[ -z "$SKIP_GHE_CLUSTER_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-cluster-commons"
+
+main() {
+  while [ "$1" ]; do
+    case "$1" in
+      -n)
+        no_push_to_nodes=1
+        ;;
+      -a)
+        delete_all=1
+        ;;
+      -h)
+        usage
+        exit
+        ;;
+      *)
+        if [ -z "$ENVIRONMENT_ID" ]; then
+          ENVIRONMENT_ID="$1"
+        elif [ -z "$TARGET_SHA" ]; then
+          TARGET_SHA="$1"
+        else
+          exit_invalid_args "Unknown argument '$1'!"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$ENVIRONMENT_ID" ] || exit_invalid_args "environment-id is required"
+  [ -n "$TARGET_SHA" ] && [ -n "$delete_all" ] && exit_invalid_args "You must set either -a or target-sha, not both"
+  [ -z "$TARGET_SHA" ] && [ -z "$delete_all" ] && exit_invalid_args "You must set either -a or target-sha"
+
+  if [[ -z "$no_push_to_nodes" ]]; then
+    [[ -n "$delete_all" ]] && push_target="-a"
+    [[ -n "$TARGET_SHA" ]] && push_target="$TARGET_SHA"
+    nodes=$(ghe-cluster-nodes -x -r git) && {
+      for node in $nodes; do
+        >&2 ssh_node $node "/usr/local/share/enterprise/ghe-hook-env-cleanup $ENVIRONMENT_ID \"$push_target\" -n"
+      done
+    }
+
+  fi
+
+  if local_update_eligible; then
+    HOOK_ENV_DIR=${HOOK_ENV_DIR:-"/data/user/git-hooks/environments"}
+    if [[ -n "$TARGET_SHA" ]]; then
+      set -u
+      chmod -R u+w "$HOOK_ENV_DIR/$ENVIRONMENT_ID/$TARGET_SHA" || true
+      rm -rf "$HOOK_ENV_DIR/$ENVIRONMENT_ID/$TARGET_SHA"
+      rm -rf "$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID/$TARGET_SHA"
+      set +u
+    elif [[ -n "$delete_all" ]]; then
+      set -u
+      chmod -R u+w "$HOOK_ENV_DIR/$ENVIRONMENT_ID" || true
+      rm -rf "$HOOK_ENV_DIR/$ENVIRONMENT_ID"
+      rm -rf "$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID"
+      set +u
+    fi
+    trigger_ha_replica
+  fi
+}
+
+trigger_ha_replica() {
+  if [ -f /etc/github/cluster ]; then
+    return 0
+  fi
+
+  . /usr/local/share/enterprise/ghe-repl-lib
+  if [ "$REPL_STATE" = "primary" ]; then
+    /usr/local/share/enterprise/ghe-repl-sync-git-hooks
+  fi
+}
+
+# This will return 0 if either
+# - This is a non-clustered instance
+# - This is a git server
+local_update_eligible() {
+# return 0 if this isn't a cluster
+  is_in_cluster || return 0
+# now that we know it's a cluster, just return whether it has the git-server role
+  cluster_node_has_role git-server "$(cluster_local_node_name)"
+}
+
+exit_invalid_args() {
+  echo "$1" >&2
+  usage
+  exit 3
+}
+
+err_exit() {
+  [ -n "$2" ] && echo "$2" >&2
+  exit $1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+main "$@"

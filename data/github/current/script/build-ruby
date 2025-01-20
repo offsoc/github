@@ -1,0 +1,196 @@
+#!/bin/bash
+#/ Usage: build-ruby
+#/ Build an app local version of Ruby from https://github.com/github/ruby
+
+set -e
+
+# show usage
+if [ "$1" = "--help" ]; then
+    grep '^#/' <"$0" |cut -c4-
+    exit
+fi
+
+# change into root project dir
+cd "$(dirname "$0")/.."
+RAILS_ROOT="$(pwd -P)"
+
+RUBY_SHA="${1:-$(config/ruby-version)}"
+RUBY_SHA_ABBREV="${RUBY_SHA:0:10}"
+
+if [ -n "$BOOTSTRAP_NUKE_FROM_ORBIT" ]; then
+  rm -rf "vendor/ruby"
+  rm -rf "vendor/gems"
+fi
+
+if [ "$RAILS_ROOT" = "/workspaces/github-devcontainer/github" ]; then
+  export DEVCONTAINER=1
+fi
+
+# resolve vendor/ruby symlink (if any)
+mkdir -p "vendor/ruby"
+cd "vendor/ruby"
+ROOT="$(pwd -P)"
+SRC_DIR="$ROOT/src"
+PREFIX="$ROOT/$RUBY_SHA"
+BASERUBY_PREFIX="$RAILS_ROOT/vendor/ruby/baseruby"
+
+check_ruby() {
+  if [ ! -x "$PREFIX/bin/ruby" ] && [ ! -x "$PREFIX/bin/bundle" ]; then
+    echo "Building Ruby $RUBY_SHA, which is missing"
+    rm -rf "$PREFIX"
+    return 1
+  fi
+
+  # Check if OpenSSL is working; if it's not, we need to rebuild.
+  # This can happen if the system libraries were upgraded, and dynamic linkage is broken.
+  if ! "$PREFIX"/bin/ruby -ropenssl -e '' ; then
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "Ruby's openssl library doesn't seem functional."
+    echo "If you can't resolve the error above, you can rebuild ruby by running:"
+    echo "  rm -rf vendor/ruby"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+    exit 1
+  fi
+  return 0
+}
+
+build_baseruby() {
+  RUBY_TARBALL_URL="https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.0.tar.gz"
+  RUBY_TARBALL_SHA256="96518814d9832bece92a85415a819d4893b307db5921ae1f0f751a9a89a56b7d"
+
+  echo "Building BASERUBY from $RUBY_TARBALL_URL..."
+
+  RUBY_TARBALL_NAME="baseruby.tar.gz"
+  RUBY_TARBALL_PATH="$RAILS_ROOT/tmp/$RUBY_TARBALL_NAME"
+
+  START_TIME="$(date +%s)"
+
+  mkdir -p "$RAILS_ROOT/tmp"
+  cd "$RAILS_ROOT/tmp"
+
+  curl $RUBY_TARBALL_URL > $RUBY_TARBALL_PATH
+  echo -n "$RUBY_TARBALL_SHA256 $RUBY_TARBALL_PATH" > "$RUBY_TARBALL_PATH.sha256"
+
+  sha256sum --check --status "$RUBY_TARBALL_PATH.sha256"
+  if [ $? != 0 ]; then
+    echo "SHA256 mismatch for $RUBY_TARBALL_NAME"
+    exit 1
+  fi
+
+  mkdir -p baseruby
+  tar -xzf $RUBY_TARBALL_PATH --strip-components=1 -C baseruby
+  cd baseruby
+
+  CORES="$(getconf _NPROCESSORS_ONLN)"
+  CORES="${CORES:-4}"
+
+  ./configure --prefix="$BASERUBY_PREFIX" --disable-install-doc
+  make -j"$CORES"
+  make install
+
+  if [ $? != 0 ] || ! [ -x "$BASERUBY_PREFIX/bin/ruby" ]; then
+    echo "Failed to build BASERUBY"
+    exit 1
+  fi
+
+  echo "Built BASERUBY in $(($(date +%s) - $START_TIME)) seconds."
+}
+
+build_ruby() {
+  if [ ! -d "$SRC_DIR" ]; then
+    git clone https://github.com/github/ruby.git "$SRC_DIR"
+  fi
+
+  echo "Building Ruby at $RUBY_SHA_ABBREV..."
+
+  cd "$SRC_DIR"
+
+  START_TIME="$(date +%s)"
+
+  # Count CPUs for Make jobs
+  CORES="$(getconf _NPROCESSORS_ONLN)"
+  CORES="${CORES:-4}"
+
+  set +e
+  set -o pipefail
+  (
+    set -ex
+    git reset --hard "$RUBY_SHA" || {
+      git fetch origin --prune
+      git fetch --tags -f
+      git reset --hard "$RUBY_SHA"
+    }
+    git clean -fdx >/dev/null
+
+    perl -pi -e "s/development/$RUBY_SHA_ABBREV/" version.h
+    cp version.h version.h.pristine
+
+    # Remove Homebrew on Linux from the PATH, it seems to pull in the wrong
+    # buildchain from the PATH which breaks the build.
+    PATH=$(echo "$PATH" | sed -e 's|:/home/linuxbrew/.linuxbrew/bin||g' -e 's|:/home/linuxbrew/.linuxbrew/sbin||g')
+
+    # ruby needs a relatively recent version of ruby to bootstrap itself
+    export PATH="/usr/share/rbenv/versions/2.1.7-github/bin:$PATH"
+
+    autoreconf --install --symlink
+    ./configure --with-baseruby="$BASERUBY_PREFIX/bin/ruby" --prefix="$PREFIX" --disable-werror --disable-install-doc --enable-load-relative --with-jemalloc $CONFIGURE_ARGS cppflags="-DNDEBUG"
+
+    make -j"$CORES"
+    make install
+  ) | tee ../ruby-build.log
+
+  if [ $? != 0 ] || ! [ -x "$PREFIX/bin/ruby" ] || ! [ -x "$PREFIX/bin/bundle" ]; then
+    echo "Failed to build Ruby"
+    exit 1
+  fi
+
+  # If openssl wasn't available, Ruby will have built anyway;
+  # we want to make sure the extension was built by loading it.
+  # This exits 1 if openssl can't be required.
+  if ! "$PREFIX/bin/ruby" -ropenssl -eexit >/dev/null 2>&1; then
+    echo "Failed to build OpenSSL extension to Ruby"
+    exit 1
+  fi
+
+  "$RAILS_ROOT/script/install-bundler" $PREFIX
+
+  echo "Built Ruby in $(($(date +%s) - $START_TIME)) seconds."
+}
+
+if check_ruby; then
+  echo "Ruby build $RUBY_SHA_ABBREV is up-to-date."
+elif [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+     [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+     "${RAILS_ROOT}/script/subproject-prebuild" -d "${ROOT}/${RUBY_SHA}" -v $RUBY_SHA download ruby &&
+     check_ruby; then
+  echo "Ruby build $RUBY_SHA_ABBREV is up-to-date."
+else
+  build_baseruby
+  build_ruby
+
+  if [[ "${GITHUB_REF_NAME}" == upgrade-ruby-next-* ]] ; then
+    echo "Ruby Next branch detected. Deleting vendored gems."
+
+    rm -rf "${RAILS_ROOT}/vendor/gems" # force all gems to install again
+  fi
+
+  if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    # Never fail the build on a failed upload.
+    "${RAILS_ROOT}/script/subproject-prebuild" -d "${ROOT}/${RUBY_SHA}" -v $RUBY_SHA upload ruby || true
+  fi
+fi
+
+# Run install-bundler again in case we've upgraded bundler
+# (no-ops if the correct version of bundler is already installed)
+"$RAILS_ROOT/script/install-bundler" $PREFIX
+
+ln -sfn $RUBY_SHA "$ROOT/current"
+
+cd "$ROOT"
+
+# Update the timestamp on the current Ruby to consider it most recent
+touch -c "$RUBY_SHA"
+
+# only keep 4 most recent rubies
+ls -t | grep -Ev '^(current|src|bin|lib|include|share|ruby-build.log)' | tail -n +5 | xargs -r --verbose rm -rf

@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# ghe-start-haproxy-frontend:
+# Responsible for starting haproxy-frontend on un-initialized nodes
+#
+
+check_haproxy() {
+  curl -ks https://localhost:8443
+}
+
+find_haproxy_job() {
+  /usr/local/bin/ghe-nomad-api jobs?prefix=haproxy-frontend | jq -e '.[] | .Status == "running"'
+}
+
+if check_haproxy; then
+  echo "haproxy-frontend already active, exiting"
+  exit
+fi
+if find_haproxy_job; then
+  echo "haproxy-frontend job is already running in nomad and should be placed soon"
+  exit
+fi
+
+if [ -f /data/docker-image-tags/haproxy_image_tag ] && [ -f /data/docker-image-tags/haproxy_image_id ]; then
+  echo "loading haproxy docker image"
+  HAPROXY_IMAGE_TAG=$(cat /data/docker-image-tags/haproxy_image_tag)
+  HAPROXY_IMAGE_ID=$(cat /data/docker-image-tags/haproxy_image_id)
+  IMAGE_EXPORT_PATH=/data/docker-images/haproxy\:${HAPROXY_IMAGE_TAG}\#${HAPROXY_IMAGE_ID}.tar
+  if [ -f "$IMAGE_EXPORT_PATH" ]; then
+    /usr/bin/docker load -i $IMAGE_EXPORT_PATH
+  fi
+fi
+
+# since the container can fail to place after the evaluation completes i should come up with a better check
+if ! check_haproxy; then
+  echo "starting haproxy-frontend"
+  /usr/bin/nomad run /etc/nomad-jobs/haproxy/haproxy-frontend.hcl
+
+  # Wait for haproxy to be available before returning success
+  WAIT_FOR_HAPROXY=$(($SECONDS + 60))
+  while [ $SECONDS -lt $WAIT_FOR_HAPROXY ]; do
+    if check_haproxy; then
+      echo "haproxy-frontend is online"
+      exit
+    fi
+    sleep 5
+  done
+  echo "haproxy-frontend failed to be started before timeout, exiting"
+  exit 1
+fi
+	

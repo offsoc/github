@@ -1,0 +1,219 @@
+<% if active_notice_name == "enterprise_cloud_trial" %>
+  <%= render Organizations::EnterpriseCloudTrialBannerComponent.new(organization: this_organization, on_dashboard: current_page?(user_path(this_organization))) %>
+<% elsif active_notice_name == "spammy" && GitHub.flipper[:hide_spammy_banner].enabled? %>
+  <div></div>
+<% elsif render_security_banners? %>
+  <%= render Primer::Alpha::Banner.new(id: "global-notice-#{security_banner_info[:id]}", full: true, icon: :alert, scheme: :warning, test_selector: "global_notice_next", classes: "js-notice", tag: :section, aria: { label: "Warning" }) do |b| %>
+    <%= security_banner_info[:banner_text] %>
+    <% if security_banner_info[:link].present? %>
+      <% b.with_action_content(align_items: :center, display: :flex) do %>
+        <%= render Primer::Beta::Button.new(
+          tag: :a,
+          href: security_banner_info[:link],
+        ) do %>
+          <%= security_banner_info[:button_text] %>
+        <% end %>
+        <% if security_banner_info[:dismiss_path] && security_banner_info[:dismiss_aria_label] %>
+          <%= form_tag security_banner_info[:dismiss_path], class: "js-notice-dismiss" do %>
+            <%= render Primer::Beta::CloseButton.new(type: :submit, mx: 2, aria: { label: security_banner_info[:dismiss_aria_label] }) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% else %>
+  <section aria-label="<%= type.to_s.capitalize %>" class="flash flash-full js-notice flash-<%= type %>" <%= test_selector("global_notice_next") %>>
+    <div>
+      <% case active_notice_name
+          when "ofac_flagged" %>
+        <%= form_tag dismiss_notice_path(Billing::OFACCompliance::USER_NOTICE_FLAG), class: "js-notice-dismiss" do %>
+          <%= render Primer::Beta::CloseButton.new(type: :submit, float: :right, aria: { label: "Hide this notice" }) %>
+        <% end %>
+        <div class="container-md" role="alert">
+          <%= helpers.trade_controls_user_account_restricted_notice %>
+        </div>
+      <% when "verified_emails" %>
+        <% if current_user.must_verify_email? %>
+          <%= link_to settings_email_preferences_url(:host => GitHub.urls.host_name), :class => "flash-action btn btn-sm compact" do %>
+            Configure email settings
+            <%= render Primer::Beta::Octicon.new(icon: "arrow-right") %>
+          <% end %>
+          <h4 class="f4">
+            Please verify your email address to access all of GitHub’s features.
+          </h4>
+          An email containing verification instructions was sent to <%= current_user.primary_user_email.email %>.
+        <% else %>
+          <h4 class="f4">
+            You don’t have any verified emails.  We recommend <%= link_to("verifying", settings_email_preferences_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock") %> at least one email.
+          </h4>
+          Email verification helps our support team verify ownership if you lose account access
+            and allows you to receive all the notifications you ask for.
+        <% end %>
+      <% when "billing_email" %>
+        <h4 class="f4">
+          Your billing email is invalid. Please update it in your <%= link_to("settings", settings_email_preferences_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock") %>.
+        </h4>
+        We send receipts and billing notifications to your billing email so it’s important that it works.
+      <% when "sponsorship_rollback" %>
+        <%= form_tag dismiss_notice_path(:sponsorship_rollback), class: "js-notice-dismiss-remote position-absolute top-0 right-0 m-2 mr-3" do %>
+          <%= button_tag nil, type: "submit", class: "btn-link color-fg-muted", "aria-label" => "Dismiss" do %>
+            <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+          <% end %>
+        <% end %>
+        <h4 class="f4">
+          We had a problem billing your account, and your sponsorship has been cancelled.
+          Please check your <%= link_to("billing settings", billing_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock") %>
+          to update your billing information. After your billing information is updated, you‘ll need to recreate your sponsorship.
+        </h4>
+      <% when "personal_billing_trouble" %>
+        <h4 class="f4">
+          We are having a problem billing your account. Please <%= link_to("update your payment method", billing_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock") %>
+          or check with your payment provider for details on why the transaction failed.
+        </h4>
+        <% unless current_user.over_billing_attempts_limit? %>
+          We’ll try billing your account again on <%= current_user.next_billing_date(with_dunning: true).to_formatted_s(:long) %>.
+        <% end %>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+      <% when "org_billing_trouble" %>
+        <h4 class="f4">
+          We are having a problem billing the <%= troubled_org.name %> organization.
+          Please <%= link_to("update your payment method", org_payment_url(troubled_org, :host => GitHub.urls.host_name), class: "Link--inTextBlock") %>
+          or call your payment provider for details on why the transaction failed.
+        </h4>
+        <% unless troubled_org.over_billing_attempts_limit? %>
+          We’ll try billing <%= troubled_org.name %> again on <%= troubled_org.next_billing_date(with_dunning: true).to_formatted_s(:long) %>.
+        <% end %>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+      <% when "business_billing_trouble" %>
+        <h4 class="f4">
+          The <%= troubled_business.name %> enterprise has been downgraded because we are having a problem billing it.
+          Please <%= link_to("update your payment method", settings_billing_tab_enterprise_path(
+            troubled_business, :payment_information, host: GitHub.urls.host_name), class: "Link--inTextBlock") %>
+          or call your payment provider for details on why the transaction failed.
+        </h4>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+      <% when "personal_manual_dunning" %>
+        <h4 class="f4">
+          Your current bill for usage on GitHub is overdue for payment.
+          Please <%= link_to "make a payment", bill_pay_new_path, class: "Link--inTextBlock" %> by <strong><%= current_user.manual_payment_due_date.strftime("%B %e, %Y") %></strong> to
+          continue to use paid services with your GitHub account.
+        </h4>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions, or <%= link_to "check out the docs", GitHub.rbi_manual_payment_url, class: "Link--inTextBlock" %> for the latest information.
+      <% when "org_manual_dunning" %>
+        <h4 class="f4">
+          The current bill for the <%= manual_dunning_org.name %> organization is overdue for payment.
+          Please <%= link_to "make a payment", org_bill_pay_new_path(organization_id: manual_dunning_org.display_login), class: "Link--inTextBlock" %> by <strong><%= manual_dunning_org.manual_payment_due_date.strftime("%B %e, %Y") %></strong> to
+          continue to use paid services with the <%= manual_dunning_org.name %> account.
+        </h4>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions, or <%= link_to "check out the docs", GitHub.rbi_manual_payment_url, class: "Link--inTextBlock" %> for the latest information.
+      <% when "business_manual_dunning" %>
+        <h4 class="f4">
+          The current bill for the <%= manual_dunning_business.name %> enterprise is overdue for payment.
+          Please <%= link_to "make a payment", billing_settings_one_time_payment_enterprise_path(manual_dunning_business), class: "Link--inTextBlock" %>
+          by <strong><%= manual_dunning_business.manual_payment_due_date.strftime("%B %e, %Y") %></strong> to
+          continue to use paid services with the <%= manual_dunning_business.name %> account.
+        </h4>
+        You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions,
+        or <%= link_to "check out the docs", GitHub.rbi_manual_payment_url, class: "Link--inTextBlock" %> for the latest information.
+      <% when "disabled_org_repos" %>
+        <% if over_plan_limit_org %>
+          <h4 class="f4">
+            The organization <%= over_plan_limit_org.name %> is over its private repository subscription limit
+            (<%= private_repository_overage(over_plan_limit_org) %>). Please
+            <%= link_to('upgrade your subscription', settings_org_billing_url(over_plan_limit_org, :host => GitHub.urls.host_name), class: "Link--inTextBlock") %>,
+            make private repositories public, or remove private repositories so that
+            <%= over_plan_limit_org.name %> is within its subscription limit.
+          </h4>
+          The private repositories under the <em><%= over_plan_limit_org.name %></em>
+          account have been locked until this is resolved. Thanks for understanding.
+          You can <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+        <% end %>
+      <% when "disabled_personal_billing" %>
+        <% if current_user.invoiced? %>
+          <h4 class="f4">
+            We have not received payment for your most recent invoice.
+          </h4>
+        <% else %>
+          <h4 class="f4">
+            We are having a problem billing your account. Please <a class="Link--inTextBlock" href="<%= billing_url(:host => GitHub.urls.host_name) %>">update your payment method</a>
+            or call your payment provider for details on why the transaction failed.
+          </h4>
+        <% end %>
+        You can <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+      <% when "expired_education_coupon" %>
+        <h4 class="f4">
+          Your GitHub academic discount coupon has expired
+        </h4>
+        <ul class="pl-4 mb-2">
+          <li>If you’re still eligible, you may <a class="Link--inTextBlock" href="https://education.github.com/benefits">re-apply</a>.</li>
+          <li>If you’re no longer eligible, you may either <a class="Link--inTextBlock" href="<%= billing_url(host: GitHub.urls.host_name) %>">update your payment information</a>, or <a class="Link--inTextBlock" href="<%= plans_url(host: GitHub.urls.host_name) %>">downgrade your account</a>.</li>
+        </ul>
+        <p>
+          If you have any questions, please visit the <a class="Link--inTextBlock" href="<%= GitHub.education_community_url %>">GitHub Education Community</a>.
+        </p>
+      <% when "disabled_org_billing" %>
+        <% if disabled_org %>
+          <% if disabled_org.invoiced? %>
+            <h4 class="f4">
+              We have not received payment for the most recent invoice for <%= disabled_org.name %>.
+              Please <a class="Link--inTextBlock" href="<%= ent_contact_url %>">contact GitHub Sales</a> to resolve.
+            </h4>
+          <% else %>
+            <h4 class="f4">
+              We are having a problem billing the <%= disabled_org.name %> organization.
+              Please <%= link_to('update your payment information', settings_org_billing_url(disabled_org, :host => GitHub.urls.host_name), class: "Link--inTextBlock") %>
+              or call your payment provider for details on why the transaction failed.
+              You can <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+            </h4>
+          <% end %>
+        <% end %>
+      <% when "billingless_org" %>
+        <% if billingless_org %>
+          <h4 class="f4">
+            Please <%= link_to("enter a billing email", settings_org_profile_url(billingless_org, :host => GitHub.urls.host_name), class: "Link--inTextBlock") %>
+            for your <em><%= billingless_org.name %></em> organization.
+          </h4>
+          We need this address to send you receipts and contact you if there’s a problem. Thanks.
+        <% end %>
+      <% when "spammy" %>
+        <h4 class="f4">Your account has been flagged.</h4>
+        Because of that, your profile is hidden from the public. If you believe this is a mistake, <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url %>/reinstatement">contact support</a> to have your account status reviewed.
+      <% when "spammy_orgs" %>
+        <% if spammy_orgs.size == 1 %>
+          <h4 class="f4">The <%= spammy_orgs.first.display_login %> organization has been flagged.</h4>
+          Because of that, your organization is hidden from the public. If you believe this is a mistake, <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url %>/reinstatement">contact support</a> to have your organization’s status reviewed.
+        <% else %>
+          <h4 class="f4">Several of your organizations have been flagged.</h4>
+          Because of that, these organizations are hidden from the public. If you believe this is a mistake, please <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url %>/reinstatement">contact support</a> to have your organizations’ statuses reviewed.
+        <% end %>
+      <% when "spammy_businesses" %>
+        <% if spammy_businesses.size == 1 %>
+          <h4 class="f4">The <%= spammy_businesses.first.name %> enterprise has been flagged.</h4>
+          Because of that, organizations within your enterprise are hidden from the public.
+          If you believe this is a mistake, <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a>
+          to have your enterprise’s status reviewed.
+        <% else %>
+          <h4 class="f4">Several of your enterprises have been flagged.</h4>
+          Because of that, organizations within these enterprises are hidden from the public.
+          If you believe this is a mistake, please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a>
+          to have your enterprises’ statuses reviewed.
+        <% end %>
+      <% when "two_factor_recovery_codes" %>
+        <h4 class="f4">You could lose access to your GitHub account</h4>
+        You enabled two-factor authentication, but you haven’t viewed your recovery codes.
+        If you lose your two-factor device, GitHub support will not be able to recover your account for you. Go to the
+        <%= link_to 'two-factor recovery codes page', settings_auth_recovery_codes_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock" %>
+        to view and print your <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/downloading-your-two-factor-authentication-recovery-codes">recovery codes</a>.
+      <% when "check_staff_has_two_factor_enabled" %>
+        <h4 class="f4">You do not have two-factor authentication enabled.</h4>
+        <% if GitHub.single_business_environment? && GitHub.global_business %>
+          <%= link_to 'Enable two-factor authentication', settings_user_2fa_intro_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock" %>.
+          Then sign out, and sign back in again if you would like access to administrator-only features.
+        <% else %>
+          <%= link_to 'Enable two-factor authentication', settings_user_2fa_intro_url(:host => GitHub.urls.host_name), class: "Link--inTextBlock" %>
+          if you would like access to staff-only features.
+        <% end %>
+      <% end %>
+    </div>
+  </section>
+<% end %>

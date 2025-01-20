@@ -1,0 +1,176 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% view = Stafftools::Application::ShowView.new(:user => this_user, :app => @app) %>
+
+<% page_info :title => view.page_title, :selected_link => :developers_stafftools_user_apps %>
+
+<div class="boxed-group">
+  <h3>
+    <a href="<%= stafftools_user_applications_path(this_user) %>" class="boxed-group-breadcrumb" data-pjax="true">Applications /</a>
+    <%= @app.name %>
+  </h3>
+  <div class="boxed-group-inner">
+    <p> </p>
+    <div class="summary clearfix">
+      <dl>
+        <dt>ID</dt>
+        <dd>
+          <%= @app.id %>
+            &ndash;
+            <%= stafftools_selected_link_to "Search audit logs for this application",
+                        stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? @app.audit_log_kql_query : @app.audit_log_query) %>
+        </dd>
+      </dl>
+
+      <dl>
+        <dt>Name</dt>
+        <dd>
+          <%= val = view.field("Name") %>
+          <% if @app.synchronized_dotcom_app? %>
+            | This app is synchronized from GitHub.com.
+            <%= link_to "View on GitHub.com", @app.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+          <% end %>
+        </dd>
+      </dl>
+
+      <dl>
+        <dt>Description</dt>
+        <dd><%= view.field("Description") %></dd>
+      </dl>
+
+      <dl>
+        <dt>Owner</dt>
+        <dd>
+          <%= link_to @app.user.login, stafftools_user_path(@app.user.login), class: "Link--inTextBlock" %>
+          <% if @app.synchronized_dotcom_app? %>
+            | This app is synchronized from GitHub.com.
+            <%= link_to "View on GitHub.com", @app.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+          <% end %>
+        </dd>
+      </dl>
+      <dl>
+        <dt>URL</dt>
+        <dd><%= link_to @app.url, @app.url %></dd>
+      </dl>
+
+      <% ["Callback URL", "Client ID", "State", "Created", "Total Users"].each do |field| %>
+        <dl>
+          <dt><%= field %></dt>
+          <dd><%= view.field(field) %></dd>
+        </dl>
+      <% end %>
+
+      <dl>
+        <dt>Marketplace Listing</dt>
+        <% if view.has_marketplace_listing? %>
+          <dd><a href="<%= biztools_marketplace_listing_path(view.listing.slug) %>">View in Biztools</a></dd>
+        <% else %>
+          <dd class="text-italic">No listing</dd>
+        <% end %>
+      </dl>
+
+      <% if GitHub.rate_limiting_enabled? %>
+        <dl>
+          <dt>Rate Limit</dt>
+          <dd><%= view.rate_limit %></dd>
+        </dl>
+        <dl>
+          <dt>GHEC Rate Limit</dt>
+          <% if @app.owner.is_a?(Organization) && Api::RateLimitConfiguration.qualifies_for_higher_limit?(@app.owner) %>
+            <dd><%= view.ghec_rate_limit %> (runway: <%= view.ghec_rate_limit_runway %>)</dd>
+          <% else %>
+            <dd>This app is not owned by a GHEC org, but it might get an elevated limit if a GHEC org explicitly allows it.</dd>
+          <% end %>
+        </dl>
+        <dl>
+          <dt>Using Temporary Rate Limit</dt>
+          <dd><%= view.using_temporary_rate_limit? %></dd>
+        </dl>
+      <% end %>
+    </div>
+
+    <% unless GitHub.enterprise? %>
+      <hr>
+      <p><strong>OAuth Applications are no longer permitted to be full trust.</strong></p>
+      <p>If you would like your application to have capabilities like locked in scopes or auto authorization check out our <a class="Link--inTextBlock" href="https://thehub.github.com/engineering/development-and-ops/dotcom/apps/github-apps/internal-apps/">Internal Apps documentation</a>.</p>
+    <% end %>
+
+    <% if GitHub.rate_limiting_enabled? %>
+      <%= render partial: "stafftools/applications/rate_limit_form", locals: {
+        view: view,
+        path: stafftools_user_application_path(this_user, @app)
+      } %>
+    <% end %>
+
+    <% if GitHub.runtime.dotcom? %>
+      <hr>
+      <h3 class="f5">Pinned API Version</h3>
+      <%= render partial: "stafftools/pinned_api_versions/form", locals: { actor: @app } %>
+    <% end %>
+  </div>
+</div>
+
+<%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+  <% component.with_heading(tag: :h2, danger: true) { "Danger Zone" } %>
+<% end %>
+
+<%= render(Primer::Beta::BorderBox.new(border_color: :danger_emphasis)) do |box| %>
+  <% box.with_row(display: :flex, align_items: :center) do %>
+    <div class="flex-auto">
+      <strong><%= view.suspend_title %></strong>
+      <div class="text-small color-fg-muted">
+        Suspended applications cannot register new users or make requests on behalf of their users.
+      </div>
+    </div>
+
+      <%= render(Primer::Alpha::Dialog.new(
+        size: :medium_portrait,
+        title: view.suspend_title,
+      )) do |dialog| %>
+        <% dialog.with_show_button(scheme: :danger) { view.suspend_title } %>
+        <%= render(Primer::Alpha::Dialog::Body.new) do %>
+          <%= render(Primer::Beta::Flash.new(
+            icon: :stop,
+            scheme: :danger,
+          )) do %>
+            Are you sure you want to <%= view.suspend_title %>?
+          <% end %>
+
+          <%= form_tag view.suspend_form do %>
+            <%= submit_tag view.suspend_title, class: "btn btn-danger" %>
+          <% end %>
+        <% end %>
+      <% end %>
+  <% end %>
+
+  <% box.with_row(display: :flex, align_items: :center) do %>
+    <div class="flex-auto">
+      <strong>Transfer Ownership</strong>
+      <div class="text-small color-fg-muted">
+        <p>Transfer this OAuth App to another owner</p>
+      </div>
+    </div>
+
+      <%= render(Primer::Alpha::Dialog.new(
+        size: :medium_portrait,
+        title: "Transfer Ownership",
+      )) do |dialog| %>
+        <% dialog.with_show_button(scheme: :danger) { "Transfer Ownership" } %>
+        <%= render(Primer::Alpha::Dialog::Body.new) do %>
+          <%= form_tag stafftools_user_application_transfer_path(this_user, @app) do %>
+            <label for="search-member">Target Username</label>
+            <auto-complete src="<%= transfer_suggestions_stafftools_user_application_transfer_path(this_user, @app) %>" for="transfer-app-complete-results" class="position-relative d-block">
+              <input type="text" name="username" id="search-member" class="form-control js-add-repo-access-field" autofocus required>
+              <ul id="transfer-app-complete-results" class="autocomplete-results"></ul>
+            </auto-complete>
+
+            <%= submit_tag "Transfer App", class: "btn btn-danger" %>
+          <% end %>
+        <% end %>
+      <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle :settings %>
+<% end %>

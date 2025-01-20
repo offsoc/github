@@ -1,0 +1,73 @@
+#!/bin/bash
+#/ Usage: ghe-actions-stop [-h]
+#/
+#/ Stops GitHub Actions on this GitHub Enterprise appliance.
+#/
+#/ OPTIONS:
+#/   -h | --help       Show this message.
+#/   -w | --wait       Wait for containers to stop before exiting.
+#/   -s | --services    Nomad job(s) to be stopped. Stops all actions and launch nomad jobs by default.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+wait=false
+# The Nomad jobs for GitHub Actions and Launch, in the order they are shut down.
+nomad_jobs="$(reverse "$(action-services)") $(launch-services)"
+
+while [ "${1:-none}" != "none" ]; do
+    case $1 in
+        -h | --help )  usage
+                       ;;
+        -w | --wait)   shift
+                       wait=true
+                       ;;
+        -s|--services)
+                       nomad_jobs="$(to-lower "$2")"
+                       shift 2
+                       ;;
+        * )            >&2 echo "Unrecognized argument: $1"
+                       usage
+    esac
+done
+
+for job in $nomad_jobs; do
+    # the token actions job shares its prefix with the token-scanning nomad jobs, and that misbehaves when running nomad stop. we use the nomad api for
+    # confirming that the 'token' job exists. This prevents a case where nomad stop asks if 'token-scanning' should be stopped because it didn't find 
+    # a job named 'token'
+    echo "Attempting to stop $job"
+    job_id="$(ghe-nomad-api jobs?prefix="$job" | jq -r '.[] | select(.ID == "'"$job"'") | .ID')"
+    if [ -z "$job_id" ]; then
+        echo "Did not find a running instance of $job"
+        continue
+    fi
+    if ! nomad stop "$job_id"; then
+        >&2 echo "Failed to stop $job"
+    fi
+done
+
+if $wait; then
+    # wait until containers have been stopped
+    count=0
+    dockers=""
+    for job in $nomad_jobs; do
+        dockers="$dockers -e $job"
+    done
+    check_running_docker="docker ps --format '{{.Image}} {{.Names}}' | grep '^\(actions\|launch\)' | cut -d ' ' -f 2 | grep -i $dockers"
+    while [[ $(eval "$check_running_docker") ]]
+    do
+        if [[ $count -ge 30 ]]; then
+            echo 'Timeout waiting for containers to stop'
+            exit 1
+        fi
+        echo 'Waiting for containers to stop...'
+        sleep 1
+        count=$((count+1))
+    done
+fi

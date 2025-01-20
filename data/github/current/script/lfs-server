@@ -1,0 +1,84 @@
+#!/bin/bash
+
+export ADDR=127.0.0.1:3004
+# This port is arbitrary
+export INTERNAL_ADDR=127.0.0.1:6061
+export API_INTERNAL_LFS_HMAC_KEY="octocat"
+export GIT_SHA=$(cat config/lfs-server-version)
+export LOG_DEBUG="true"
+export MYSQL_DB="github_lfs"
+export MIGRATE_DB=true
+export MIGRATIONS_DIR="vendor/lfs-server/migrations"
+
+if [ -n "$MULTI_TENANT_ENTERPRISE" ]; then
+  export PROXY_ENDPOINT="http://api.ghe.localhost/lfs"
+  export API_ENDPOINT="http://api.ghe.localhost"
+else
+  export PROXY_ENDPOINT="http://api.github.localhost/lfs"
+  export API_ENDPOINT="http://api.github.localhost"
+fi
+
+bin/dbconsole development -e "CREATE DATABASE IF NOT EXISTS github_lfs"
+
+# Set LOCAL_LFS_PATH to opt out of docker flow (for lfs developers)
+# Set either directly to the vendored bin, ie:
+#    LOCAL_LFS_PATH=/workspaces/github/vendor/lfs-server/bin/lfs-server.bin ./script/server
+# Or when cycling outside of github/github, some other path:
+#    LOCAL_LFS_PATH=/workspaces/lfs-server/bin/lfs-server.bin ./script/server
+if [[ -n "$LOCAL_LFS_PATH" ]]; then
+  exec $LOCAL_LFS_PATH
+elif [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  source $SCRIPT_DIR/dx/lib/subproject-containers
+
+  IMAGE=ghcr.io/github/lfs-server/lfs-server-focal
+
+  pushd $SCRIPT_DIR/..
+
+  # Ensure we clean up any existing containers
+  cleanup_docker() {
+    echo "Stopping lfs-server..."
+    docker stop lfs-server || true
+    exit 0
+  }
+  trap cleanup_docker EXIT INT QUIT TERM HUP
+
+  # Make sure we don't have something leftover
+  docker stop lfs-server &> /dev/null || true
+  docker rm lfs-server &> /dev/null || true
+
+  cat > /tmp/lfs-server.env <<EOL
+ADDR=$ADDR
+INTERNAL_ADDR=$INTERNAL_ADDR
+API_INTERNAL_LFS_HMAC_KEY=$API_INTERNAL_LFS_HMAC_KEY
+GIT_SHA=$GIT_SHA
+LOG_DEBUG=$LOG_DEBUG
+MYSQL_DB=$MYSQL_DB
+MIGRATE_DB=$MIGRATE_DB
+MIGRATIONS_DIR=/app/migrations
+
+PROXY_ENDPOINT=$PROXY_ENDPOINT
+API_ENDPOINT=$API_ENDPOINT
+EOL
+
+  docker run -d --rm --name lfs-server \
+    --env-file /tmp/lfs-server.env \
+    --volume $(pwd)/tmp/lfs-server:/tmp/ \
+    --network host "$IMAGE:$GIT_SHA"
+
+  docker logs --follow lfs-server&
+  # for trap to work, we can't foreground "docker logs"; need to wait
+  wait
+else
+  script/build-subproject lfs-server || exit 1
+
+  LFS_SERVER_BIN="vendor/lfs-server/bin/lfs-server.bin"
+  until [ -x $LFS_SERVER_BIN ]; do
+    # keeps this process alive, which keeps overmind alive.
+    # we can remove this if we're sure _all_ GitHub devs can build lfs-server
+    # successfully.
+    sleep 60
+  done
+
+  exec $LFS_SERVER_BIN
+fi

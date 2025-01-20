@@ -1,0 +1,459 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<% view = Businesses::BillingSettings::ShowView.new(current_user: current_user, business: this_business) %>
+<% storage_view = Businesses::BillingSettings::ProductUsageView.new(current_user: current_user, business: this_business) %>
+<% page_info title: billing_page_title(current_tab), selected_link: :business_billing_settings,
+  stafftools: stafftools_enterprise_path(this_business) %>
+
+<%= render layout: "businesses/layout",
+  locals: {
+    business: this_business,
+    title: "Billing",
+    container_attributes: "itemscope itemtype='http://schema.org/Enterprise'"
+  } do %>
+
+  <% if flash[:success].present? %>
+    <%= render(Primer::Beta::Flash.new(scheme: :success, dismissible: true, icon: :check, mb: 3)) { flash[:success] } %>
+  <% end %>
+
+  <% if this_business.feature_enabled?(:ghe_sales_serve_renewals) %>
+    <%= render Billing::Settings::EnterpriseContractExpirationBannerComponent.new(business: this_business, current_user: current_user) %>
+  <% end %>
+
+  <% budgets_flash.each do |type, message| %>
+    <%= render(Billing::Settings::BillingBudgetStateBannerComponent.new(
+      message: message,
+      type: type,
+    ))%>
+  <% end %>
+
+  <%= render Settings::EnterpriseTrialSetupBannerComponent.new(business: this_business, current_user: current_user) %>
+  <% if view.show_migration_banner? %>
+    <%= render Primer::Alpha::Banner.new(icon: :info, mb: 4, test_selector: "vnext-migration-banner") do %>
+      <p class="text-semibold">Upcoming changes to enterprise billing</p>
+      Your enterprise account will transition to the new enhanced billing experience on <%= this_business.vnext_planned_migration_date.strftime("%B %d, %Y") %>.
+      This will allow you to track your usage and spending with greater control and granularity. No action is required
+      from you at this time. Learn more about the <%= render Primer::Beta::Link.new(href: "https://docs.github.com/en/enterprise-cloud@latest/billing/using-the-enhanced-billing-platform-for-enterprises/about-the-enhanced-billing-platform-for-enterprises", underline: :false).with_content("new billing features") %>.
+    <% end %>
+  <% end %>
+
+
+  <%=
+    render Billing::Settings::DepletedPrepaidCreditsBannerComponent.new(
+      is_enabled: view.show_depleted_prepaid_credits_banner?,
+      is_invoiced: this_business.invoiced?,
+      has_dismissed_notice: current_user.dismissed_business_notice?("depleted_prepaid_credits", business_id: this_business.id),
+      dismissal_path: enterprise_notice_path(this_business, notice: "depleted_prepaid_credits")
+    )
+  %>
+
+  <%= render Billing::Settings::LfsBillingBannerComponent.new(account: this_business, dismissible: true) %>
+
+  <%= render(Billing::Settings::UsageLoaderComponent.new(
+    source: settings_billing_usage_notification_enterprise_path(this_business))) %>
+
+  <% if this_business.eligible_for_self_serve_payment? %>
+    <div class="d-flex flex-justify-between pb-4 gutter-condensed" <%= test_selector("self-serve-payment-overview") %>>
+      <% if view.business_budget_permission.show_spending_limit_tab? %>
+        <div class="flex-auto">
+          <%= render "businesses/billing_settings/spending_on_metered_services_overview", this_business: this_business %>
+        </div>
+      <% end %>
+      <div class="flex-auto ml-3">
+        <%= render "businesses/billing_settings/your_latest_bill_overview", this_business: this_business %>
+      </div>
+      <% unless this_business.metered_plan %>
+        <div class="flex-auto ml-3">
+          <%= render "businesses/billing_settings/payment_information_overview", this_business: this_business %>
+        </div>
+      <% end %>
+    </div>
+    <% if this_business.pending_cycle.changing_duration? %>
+      <div class="d-flex flex-column" <%= test_selector "pending-change-warning" %>>
+        <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+          <%= render(Primer::Alpha::Banner.new(scheme: :warning, mb: 4, icon: "clock")) do |component| %>
+            <strong>
+              Switch to <%= this_business.pending_cycle.plan_duration.downcase %>ly billing effective on <%= this_business.pending_cycle.active_on.strftime("%b %d, %Y") %>
+            </strong>
+            <% component.with_action_content do %>
+              <%= form_tag business_update_pending_plan_change_path, class: "float-right", method: :put do %>
+                <%= hidden_field_tag :cancel_plan_duration, true %>
+                <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, "data-confirm": "Are you sure you want to cancel this pending billing duration change?") do %>
+                  Cancel changes
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning, mb: 4, icon: "clock")) do |component| %>
+            <strong>
+              Switch to <%= this_business.pending_cycle.plan_duration.downcase %>ly billing effective on <%= this_business.pending_cycle.active_on.strftime("%b %d, %Y") %>
+            </strong>
+            <% component.with_action do %>
+              <%= form_tag business_update_pending_plan_change_path, class: "float-right", method: :put do %>
+                <%= hidden_field_tag :cancel_plan_duration, true %>
+                <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, "data-confirm": "Are you sure you want to cancel this pending billing duration change?") do %>
+                  Cancel changes
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  <% else %>
+    <% if view.business_budget_permission.show_spending_limit_tab? %>
+      <div class="d-flex pb-4 gutter-condensed" <%= test_selector("invoice-overview") %>>
+        <div class="col-5">
+          <%= render "businesses/billing_settings/spending_on_metered_services_overview", this_business: this_business %>
+        </div>
+
+        <% if view.show_invoice_overview? %>
+          <%= render Billing::Settings::InvoiceOverviewComponent.new(
+            invoice_balance_dollars: view.invoice.balance,
+            invoice_due_on: view.invoice.due_on,
+            past_invoices_href: settings_billing_tab_enterprise_path(this_business.slug, :past_invoices),
+            pay_invoice_href: invoice_payment_method_enterprise_path(this_business.slug, view.invoice.number&.downcase),
+            show_invoice_href: show_invoice_enterprise_path(this_business.slug, view.invoice.number&.downcase)) %>
+        <% end %>
+      </div>
+    <% else %>
+      <% if view.show_invoice_overview? %>
+        <%= render "businesses/billing_settings/invoices", view: view %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if view.has_past_prepaid_credits? && view.prepaid_credit_balance %>
+    <div class="d-inline-flex flex-items-center f5 color-fg-muted pt-2 mb-4 ml-1" <%= test_selector "prepaid-credit-balance" %>>
+      <span class="d-inline-flex circle color-bg-success flex-items-center flex-justify-center mr-2" style="height: 32px; width: 32px"><%= primer_octicon(:"credit-card", color: :success) %></span>
+      <span>You have <span class="text-bold"><%= number_to_currency view.prepaid_credit_balance %></span> remaining in prepaid credits. <%= link_to "Contact sales", ent_contact_url, class: "Link--inTextBlock" %> to increase balance.</span>
+    </div>
+  <% end %>
+
+  <% if view.has_education_bundle? %>
+    <div class="d-inline-flex flex-items-center f5 color-fg-muted pt-2 mb-4 ml-1">
+      <span class="d-inline-flex circle color-bg-success flex-items-center flex-justify-center mr-2" style="height: 32px; width: 32px">
+        <%= render(Primer::Beta::Octicon.new(:"credit-card", color: :success)) %>
+      </span>
+      <span>Your account is currently on the <span class="text-bold"><%= view.education_bundle_text %></span> plan.</span>
+    </div>
+  <% end %>
+
+  <nav class="UnderlineNav" aria-label="Billing navigation">
+    <div class="UnderlineNav-body">
+      <% view.navigation_tabs.each do |tab| %>
+        <a href="<%= tab[:path] %>#<%= tab[:name].parameterize %>" class="UnderlineNav-item <%= current_page?(tab[:path]) ? "selected" : "" %>"><%= tab[:name] %></a>
+      <% end %>
+    </div>
+    <%= render "billing_settings/metered_export_form",
+      url: metered_exports_enterprise_path,
+      email: Billing::MeteredUsageReportGenerator.email_for_export(requester: current_user, target: this_business) %>
+  </nav>
+
+  <% if current_tab == "spending_limit" && view.show_spending_limits_tab? %>
+    <% if view.business_budget_permission.show_metered_billing_configuration? %>
+      <%= render "businesses/billing_settings/spending_limit", view: view %>
+    <% end %>
+
+    <% if view.business_budget_permission.show_billing_privileges? %>
+      <%= render "businesses/billing_settings/billing_privileges", view: create_view_model(
+        Businesses::BillingSettings::BillingPrivilegesView,
+        business: this_business
+      ) %>
+    <% end %>
+  <% elsif current_tab == "marketplace_apps" && view.show_marketplace_apps_tab? %>
+    <div
+        class="js-marketplace-apps-container"
+        data-src="<%= settings_billing_marketplace_apps_enterprise_path(this_business, page: marketplace_apps_page)%>"
+        data-ref="<%= MarketplaceAppsLinkRenderer::PAGE_PARAM %>"
+      >
+      <div class="mt-3" data-loading>
+        <h5><%= "Loading Marketplace data..." %></h5>
+        <%= render(Primer::Beta::Spinner.new(size: :small, mt: 1)) %>
+      </div>
+      <div class="ml-1 mb-2 mt-2" data-show-on-error hidden>
+        <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+        Sorry, something went wrong loading this data.
+      </div>
+      <div data-content-container></div>
+    </div>
+  <% elsif current_tab == "budgets" && view.show_budgets_tab? %>
+    <%= render "businesses/billing_settings/budgets/budgets", view: view %>
+  <% elsif current_tab == "past_invoices" && view.show_past_invoices_tab? %>
+    <%= render Billing::Settings::PastInvoicesComponent.new(
+      target: this_business,
+      invoices: view.invoices,
+      invoice_path_builder: method(:show_invoice_enterprise_path)) %>
+  <% elsif current_tab == "payment_information" && view.show_payment_information_tab?  %>
+    <% if this_business.billed_through_azure_subscription? %>
+      <%= render "businesses/billing_settings/azure_subscription_payment_information", view: view %>
+    <% else %>
+      <% if this_business.eligible_for_self_serve_payment? %>
+        <%= render "businesses/billing_settings/self_serve_payment_information", business: this_business, show_form: !this_business.has_saved_trade_screening_record?, show_invoice_email_form: false %>
+      <% end %>
+      <%= render Businesses::Billing::AzureMeteredPaymentComponent.new(
+        view: view,
+        metered_via_azure: this_business.metered_via_azure?,
+        self_serve: this_business.eligible_for_self_serve_payment?,
+        trial: this_business.trial?,
+        trial_cancelled: this_business.trial_cancelled?
+      ) %>
+    <% end %>
+  <% elsif current_tab == "billing_emails" %>
+    <%= render "businesses/billing_settings/billing_emails", business: this_business %>
+  <% elsif current_tab == "sponsorships" && view.show_sponsorships_tab? %>
+    <%= render "businesses/billing_settings/sponsorships", view: view %>
+  <% else %>
+    <%# Usage tab %>
+    <% if view.copilot_standalone? %>
+      <%= render "businesses/billing_settings/copilot_usage", this_business: this_business, view: view %>
+    <% else %>
+      <%= render(Billing::Settings::IncorrectLineItemUsageProcessingNoticeComponent.new) %>
+
+      <!-- Actions -->
+      <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+        <% component.with_heading(tag: :h2, classes: "h2") do %>Actions monthly usage<% end %>
+      <% end %>
+
+      <%= render(Billing::Settings::UsageLoaderComponent.new(
+        loading_text: "Loading Actions data...",
+        source: settings_billing_actions_usage_enterprise_path(this_business),
+        classes: "mt-3")) %>
+
+      <!-- Packages -->
+      <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+        <% component.with_heading(tag: :h2, classes: "h2") do %>Packages monthly usage<% end %>
+      <% end %>
+
+      <%= render(Billing::Settings::UsageLoaderComponent.new(
+        loading_text: "Loading Packages data...",
+        source: settings_billing_packages_usage_enterprise_path(this_business),
+        classes: "mt-3")) %>
+
+      <!-- Storage -->
+      <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+        <% component.with_heading(tag: :h2, classes: "h2") do %>Storage for Actions and Packages<% end %>
+      <% end %>
+
+
+      <% if this_business.feature_enabled?(:shared_storage_async_loading) %>
+        <%= render(Billing::Settings::UsageLoaderComponent.new(
+          loading_text: "Loading Storage data...",
+          source: settings_billing_shared_storage_overview_enterprise_path(this_business),
+          classes: "mt-3",
+          test_selector: "shared-storage-overview")) %>
+
+      <% else %>
+        <div class="col-6">
+          <div class="p-3 color-shadow-small border color-border-default rounded-2" style="height: 100%">
+            <label class="f5 text-normal text-small color-fg-muted text-uppercase d-block mb-2">Included Storage</label>
+            <% if storage_view.shared_storage_usage_has_error? %>
+              <div class="f4 mb-2">
+                <%= render(Primer::Beta::Octicon.new(icon: "stop", classes: "lfs-data-icon dark")) %>
+                Unable to share storage usage.
+              </div>
+            <% else %>
+              <div class="f4 mb-2">
+                <span class="text-bold">
+                  <%= number_with_delimiter(storage_view.shared_storage_estimated_monthly_private_gigabytes) %>GB
+                </span>
+                <span class="f5">
+                  of <%= number_with_delimiter(storage_view.shared_storage_included_gigabytes) %>GB
+                </span>
+              </div>
+              <%= render(Primer::Beta::Text.new(tag: :p, font_size: :small, color: :muted)) do %>
+                Shared storage consists of Actions artifacts and Packages usage. This graph shows the account's storage usage in GB-months. Removing stored artifacts will not reduce this number, but it will lower its rate of growth. To see your account's current storage, download a usage report.
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+
+      <%= render(Billing::Settings::UsageHeaderComponent.new(headers: ["Organization", "Private Storage Usage"])) %>
+
+      <% if GitHub.flipper[:shared_storage_pagination].enabled?(this_business) %>
+        <div
+            class="js-shared-storage-usage-container"
+            data-src="<%=settings_billing_shared_storage_enterprise_path(this_business, page: shared_storage_page)%>"
+            >
+            <div class="mt-3" data-loading>
+              <h5><%= "Loading Storage for Actions and Packages data..." %></h5>
+              <%= render(Primer::Beta::Spinner.new(size: :small, mt: 1)) %>
+            </div>
+            <div class="ml-1 mb-2 mt-2" data-show-on-error hidden>
+              <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+              Sorry, something went wrong loading this data.
+            </div>
+            <div data-content-container></div>
+        </div>
+      <% else %>
+        <%= render(Billing::Settings::UsageLoaderComponent.new(
+          loading_text: "Loading Storage for Actions and Packages data...",
+          source: settings_billing_shared_storage_enterprise_path(this_business, page: shared_storage_page),
+          classes: "mt-3")) %>
+      <% end %>
+
+      <!-- Codespaces -->
+      <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+        <% component.with_heading(tag: :h2, classes: "h2") do %>Codespaces monthly usage<% end %>
+      <% end %>
+
+      <%= render Billing::Settings::Codespaces::UsageComponent.new(
+        account: this_business,
+      ) %>
+
+    <%= render(Billing::Settings::UsageHeaderComponent.new(
+      headers: ["Organization", "Compute Usage", "Storage Usage", "Spending"])) %>
+
+    <%= render(Billing::Settings::UsageLoaderComponent.new(
+      loading_text: "Loading Codespaces data...",
+      source: settings_billing_codespaces_org_usage_enterprise_path(this_business),
+      classes: "mt-3")) %>
+
+    <!-- Copilot -->
+    <%= render "businesses/billing_settings/copilot_usage", this_business: this_business, view: view %>
+
+    <%# LFS Start%>
+    <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+      <% component.with_heading(tag: :h2, classes: "h2") do %>Git LFS<% end %>
+      <% if this_business.can_self_serve? && this_business.organizations.any? && !this_business.feature_enabled?(:lfs_disable_datapacks) %>
+        <% component.with_actions do %>
+          <%= render(Primer::Beta::Button.new(
+            tag: :a,
+            type: :button,
+            align_self: :end,
+            href: data_packs_enterprise_path(this_business),
+            test_selector: "purchase-more-data-packs"
+          )) { "Purchase more data packs" } %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if !this_business.feature_enabled?(:lfs_disable_datapacks) %>
+    <p>
+    Each data pack gives you an additional 50 GB storage, 50 GB/month bandwidth.
+    </p>
+  <% end %>
+
+  <% if this_business.feature_enabled?(:billing_platform_lfs_enabled) %>
+
+    <div <%= test_selector("lfs-billing-platform-link") %> class="p-3 color-shadow-small border color-border-default rounded-2" >
+      <p> Use the <%= link_to  "new Billing(beta)", enterprise_billing_usage_path(slug: this_business), class: "Link--inTextBlock" %> to manage metered billing for Git Large File Storage (Git LFS). Refer to <a class="Link--inTextBlock" target="_blank" rel="noopener noreferrer" href="https://github.com/orgs/community/discussions/61362"> LFS billing FAQ </a> for more details.</p>
+    </div>
+
+  <%else%>
+    <%= render(Billing::Settings::UsageHeaderComponent.new(headers: ["Organization", "Bandwidth", "Storage"])) %>
+
+    <%= render(Billing::Settings::UsageLoaderComponent.new(
+      loading_text: "Loading Git LFS data...",
+      source: settings_billing_lfs_usage_enterprise_path(this_business),
+      classes: "mt-3",
+      test_selector: "lfs-datapack-usage")) %>
+  <% end %>
+  <%# LFS End %>
+
+  <% if this_business.advanced_security_purchased? %>
+    <%= render Primer::Beta::Subhead.new(mb: 3, mt: 6, classes: "flex-items-center", hide_border: true) do |component| %>
+      <% component.with_heading(tag: :h2, classes: "h2") do %>GitHub Advanced Security<% end %>
+    <% end %>
+
+    <%# Summary boxes %>
+    <div class="d-flex mb-4 gutter-condensed">
+      <div class="col-4" <%= test_selector("ghas-license-summary-used")%>>
+        <%= render Billing::Settings::HeaderBoxComponent.new(
+          title: "In Use",
+          amount: this_business.advanced_security_license.consumed_seats,
+          context: pluralize_without_number(this_business.advanced_security_license.consumed_seats, "license")
+        ) do |c| %>
+        <% c.with_subtitle do %>
+          Licenses used by unique committers
+        <% end %>
+      <% end %>
+      </div>
+      <div class="col-4" <%= test_selector("ghas-license-summary-unused")%>>
+        <%= render Billing::Settings::HeaderBoxComponent.new(
+          title: "Unused",
+          amount:  this_business.advanced_security_license.unlimited_seats? ? "Unlimited" : this_business.advanced_security_license.remaining_seats,
+          context: this_business.advanced_security_license.unlimited_seats? ? nil : "licenses"
+        ) do |c| %>
+        <% c.with_subtitle do %>
+          Licenses available
+        <% end %>
+      <% end %>
+      </div>
+      <div class="col-4" <%= test_selector("ghas-license-summary-purchased")%>>
+        <% if this_business.advanced_security_metered_for_entity? %>
+          <%= render Billing::Settings::HeaderBoxComponent.new(
+            title: "Purchased",
+            context: "This account is using metered billing",
+          ) do |c| %>
+          <% c.with_subtitle do %>
+            <div><%= link_to "View enterprise licensing", enterprise_licensing_path(this_business) %></div>
+          <% end %>
+        <% end %>
+      <% else %>
+        <%= render Billing::Settings::HeaderBoxComponent.new(
+          title: "Purchased",
+          amount: this_business.advanced_security_license.seats,
+          context: "licenses"
+        ) do |c| %>
+        <% c.with_subtitle do %>
+          <div><%= link_to "View enterprise licensing", enterprise_licensing_path(this_business) %></div>
+        <% end %>
+      <% end %>
+    <% end %>
+      </div>
+    </div>
+    <%# End summary boxes %>
+
+    <div
+        class="js-ghas-entity-list-container"
+        data-src="<%= settings_business_advanced_security_orgs_list_enterprise_path(page: advanced_security_organizations_page) %>"
+        data-ref="<%= AdvancedSecurityEntitiesLinkRenderer::PAGE_PARAM %>"
+        <%= test_selector("ghas-org-list") %>
+        >
+        <div class="mt-3" data-loading>
+          <%= render(Billing::Settings::UsageHeaderComponent.new(headers: ["Organization", "Active Committers", "Unique Committers", ""])) %>
+          <p class="text-center mt-3">
+          <%= render(Primer::Beta::Spinner.new("aria-label": "Loading...")) %>
+          </p>
+        </div>
+        <p class="ml-1 mb-2 mt-2" data-show-on-error hidden>
+        <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+        Sorry, something went wrong loading this data.
+        </p>
+
+        <div data-content-container>
+        </div>
+    </div>
+
+    <% if view.show_ghas_usage_for_user_repos? %>
+      <div
+          class="js-ghas-entity-list-container"
+          data-src="<%= settings_business_advanced_security_users_list_enterprise_path(page: advanced_security_users_page) %>"
+          data-ref="<%= AdvancedSecurityUsersLinkRenderer::PAGE_PARAM %>"
+          <%= test_selector("ghas-user-list") %>
+          >
+          <div class="mt-3" data-loading>
+            <%= render(Billing::Settings::UsageHeaderComponent.new(headers: ["User Namespace", "Active Committers", "Unique Committers", ""])) %>
+            <p class="text-center mt-3">
+            <%= render(Primer::Beta::Spinner.new("aria-label": "Loading...")) %>
+            </p>
+          </div>
+          <p class="ml-1 mb-2 mt-2" data-show-on-error hidden>
+          <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+          Sorry, something went wrong loading this data.
+          </p>
+
+          <div data-content-container>
+          </div>
+      </div>
+    <% end %>
+
+    <% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+      <%= javascript_bundle "settings" %>
+    <% end %>
+  <% end %>
+<% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,122 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%
+  fail "Card wasn't passed through redactor" unless card.passed_redaction?
+
+  card_classes = class_names(
+    # Custom
+    "issue-card project-card",
+    # Utilities
+    "position-relative rounded-2 color-shadow-small my-2 mx-0 border ws-normal",
+    # JS
+    "js-project-column-card js-socket-channel js-updatable-content",
+    # Conditional
+    {
+      "js-redacted-project-column-card color-bg-subtle" => card.redacted?,
+      "draggable" => card_movable?(card),
+      "js-keyboard-movable" => card.project.writable_by?(current_user)
+    }
+  )
+%>
+<article class="<%= card_classes %>"
+  id="card-<%= card.id || [card.content_type, card.content_id].join('-') %>"
+  tabindex="0"
+  data-retain-focus
+  <% if card.live_updates_enabled? %>
+    data-channel="<%= card.channel(viewer: current_user).map { |name| live_update_view_channel(name) }.join(" ") %>"
+  data-url="<%= project_card_path(card) %>"
+  <% end %>
+  data-card-id="<%= card.id %>"
+  data-column-id="<%= card.column_id %>"
+  data-content-type="<%= card.content_type %>"
+  data-content-id="<%= card.content_id %>"
+  <% card.attrs_for_filter(viewer: current_user).each do |attr_name, attr_value| %>
+    data-card-<%= attr_name %>='<%= Array.wrap(attr_value).to_json %>'
+  <% end %>
+  >
+
+  <div class="archived-header d-none flex-row border-bottom p-2 text-small">
+    <div class="flex-auto d-flex flex-row min-width-0 position-relative">
+      <div class="d-flex flex-row">
+        <%= primer_octicon(:archive) %>
+      </div>
+
+      <div class="d-flex flex-row flex-auto">
+        <div class="pl-2 pr-3">
+          <% if card.column %>
+            From <span class="text-bold"><%= card.column.name %></span>
+          <% end %>
+
+          <% if card.archived_at %>
+            <%= time_ago_in_words_js(card.archived_at) %>
+          <% end %>
+        </div>
+      </div>
+
+      <% if card_movable?(card) %>
+        <div class="d-flex flex-row">
+          <%= form_tag unarchive_project_card_path(card), method: :put, class: "js-unarchive-project-card" do %>
+            <%= render Primer::ButtonComponent.new(scheme: :link, type: :submit) do %>Restore<% end %>
+            <input type="hidden" name="client_uid" class="js-client-uid-field">
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="d-flex flex-row">
+    <div class="flex-auto min-width-0 position-relative">
+      <%=
+        status_direction = local_assigns[:status_direction]
+
+        case card.partial
+        when "note"
+          references = card.references(viewer: current_user)
+          unauthorized_org_ids = cap_filter.unauthorized_resource_ids(current_user&.organizations)
+          references.filter_unauthorized_orgs(unauthorized_org_ids)
+
+          if references.single_issue_reference?
+            render partial: "projects/cards/issue_note", locals: { card: card, status_direction: status_direction }
+          elsif references.single_project_reference?
+            render partial: "projects/cards/project_note", locals: { card: card, status_direction: status_direction }
+          elsif references.single_discussion_reference?
+            render partial: "projects/cards/discussion_note", locals: { card: card, status_direction: status_direction }
+          else
+            render partial: "projects/cards/note", locals: { card: card, status_direction: status_direction }
+          end
+        when "issue"
+          render partial: "projects/cards/issue", locals: { card: card, status_direction: status_direction }
+        when "redacted"
+          render partial: "projects/cards/redacted", locals: { card: card, status_direction: status_direction }
+        end
+      %>
+
+      <% if card_movable?(card) %>
+        <span class="sr-only">Press enter to move this card</span>
+      <% end %>
+    </div>
+
+    <% if card.project.writable_by?(current_user) %>
+      <% if local_assigns[:include_add_link] %>
+        <%= render Primer::ButtonComponent.new(mr: 2, display: [nil, :none], classes: "flex-self-center js-project-active-column-dialog-button", "data-dialog-id": "move-card-to-column-dialog", "aria-label": "Add card to selected column", "aria-expanded": "false") do %>
+          <%= primer_octicon(:plus) %>
+        <% end %>
+        <% if enable_drag_by_handle? %>
+          <div class="d-none d-sm-flex color-bg-subtle border-left flex-items-center rounded-2" style="border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important">
+            <div class="px-3 py-2 color-fg-muted js-project-dragger">
+              <%= primer_octicon(:grabber) %>
+            </div>
+          </div>
+        <% end %>
+      <% elsif enable_drag_by_handle? %>
+        <div class="d-none color-bg-subtle height-full ml-2 border-left flex-items-center rounded-2 project-move-actions position-absolute right-0" style="z-index: 4; border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; box-shadow: -2px 0px 5px -1px rgba(27, 31, 35, 0.15) !important">
+          <%= render Primer::ButtonComponent.new(display: [nil, :none], ml: 3, classes: "js-project-active-column-dialog-button", "data-dialog-id": "move-card-to-column-dialog", "aria-expanded": "false", "data-change-active-column": "") do %>
+            Move to&hellip;
+          <% end %>
+          <div class="px-4 py-2 color-fg-muted height-full d-flex flex-items-center js-project-dragger">
+            <%= primer_octicon(:grabber, height: mobile? ? 32 : nil) %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+</article>

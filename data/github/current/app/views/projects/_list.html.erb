@@ -1,0 +1,304 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 4 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    projectsResourcePath
+
+    ... on Organization {
+      viewerIsAMember
+    }
+
+    paginatedProjects: projects(first: $first, after: $after, search: $query) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        resourcePath
+        updateStateResourcePath
+        settingsResourcePath
+        name
+        number
+        bodyHTML
+        updatedAt
+        state
+        viewerCanUpdate
+        viewerCanAdminister
+        editResourcePath
+        closedAt
+        publicProjectOrOwner
+        migrationStatus
+
+        progress {
+          enabled
+
+          ...Views::Projects::ProjectProgress::ProjectProgress
+        }
+
+        linkedRepositories {
+          name
+          resourcePath
+        }
+      }
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<%
+project_owner = Views::Projects::List::ProjectOwner.new(project_owner)
+state_filter = projects_search_term_values(:is)[0]
+show_memex = GitHub.projects_new_enabled? && project_owner.is_a?(PlatformTypes::Organization) && project_owner.viewer_is_a_member?
+%>
+
+<% if project_owner.paginated_projects.nodes.any? %>
+  <% project_owner.paginated_projects.nodes.each do |project| %>
+    <% project_dom_id = "project_#{project.id}" %>
+    <% next if hide_project?(state_filter, project.state) %>
+    <% if show_memex %>
+      <div class="Box-row d-flex flex-row flex-nowrap" data-filter-value="<%= project.name %>" <%= test_selector("projects-results") %>>
+        <h2 class="sr-only">Search results</h2>
+        <div class="d-flex flex-row flex-auto">
+          <%= render(Primer::Beta::Octicon.new(icon: "project", color: :muted, mr: 2, mt: 1)) %>
+          <div class="d-flex flex-row col-12 flex-auto flex-sm-wrap">
+            <div class="d-flex flex-1 flex-column">
+              <%= render(Primer::Beta::Text.new(tag: :h3, font_size: 4, mb: 1)) do %>
+                <a href="<%= project.resource_path %>" class="Link--primary mr-1" id="<%= project_dom_id %>"><%= project.name %></a>
+                <div class="d-inline no-wrap">
+                  <% unless project.public_project_or_owner? %>
+                    <%= render Primer::Beta::Label.new(scheme: :secondary, vertical_align: :middle, mr: 1, mb: 1) do %>Private<% end %>
+                  <% end %>
+                  <% if project.state == "CLOSED" %>
+                    <%= render Primer::Beta::Label.new(mr: 1, mb: 1, vertical_align: :middle, scheme: :danger, title: "Closed on #{full_month_date project.closed_at}") do %>
+                      Closed
+                    <% end %>
+                  <% end %>
+                </div>
+              <% end %>
+
+              <div class="f6 pr-sm-5 mb-2 mb-md-0 color-fg-muted">
+                #<%= project.number %> updated <%= time_ago_in_words_js project.updated_at %>
+              </div>
+
+              <% if project.progress.enabled %>
+                <div class="mt-1 pr-5 mb-2 mb-md-0">
+                  <%= render partial: "projects/project_progress", locals: { progress: project.progress } %>
+                </div>
+              <% end %>
+            </div>
+
+            <div class="d-flex flex-1 flex-column col-12 col-md-6 col-lg-6 markdown-body">
+              <div class="project-description mb-1">
+                <% if project.body_html.present? %>
+                  <%= project.body_html %>
+                <% else %>
+                  <div>No description</div>
+                <% end %>
+              </div>
+
+              <% if project.linked_repositories.any? %>
+                  <div class="f6 color-fg-muted">
+                    Tracking items from
+                    <% project.linked_repositories.each do |repo| %>
+                      <a href="<%= repo.resource_path %>" class="Link--primary text-bold"><%= repo.name %></a><% unless repo == project.linked_repositories.last %>,<% end %>
+                    <% end %>
+                  </div>
+              <% end %>
+            </div>
+          </div>
+        </div>
+        <% if project.viewer_can_update? %>
+          <details class="details-reset details-overlay dropdown flex-grow-0 flex-1 pl-1" style="width: 40px">
+            <summary class="color-fg-muted mt-3" aria-labelledby="<%= project_dom_id %>">
+              <%= primer_octicon(:"kebab-horizontal") %>
+            </summary>
+            <details-menu class="dropdown-menu dropdown-menu-sw mt-6 mr-1 top-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <% if project.state == 'OPEN' || (project.state == 'CLOSED' && (!current_user.feature_enabled?(:projects_migration_disallow_reopen_after_migrate) || project.migration_status != 'COMPLETED')) %>
+                <%= form_tag project.update_state_resource_path.to_s, method: :put do %>
+                  <input type="hidden" name="global_id" value="<%= project.id %>">
+                  <input type="hidden" name="client_uid" class="js-client-uid-field">
+                  <input type="hidden" name="redirect_back" value="true">
+                  <button type="submit" class="btn-link dropdown-item" name="state" value="<%= project.state == "OPEN" ? "closed" : "open" %>" role="menuitem">
+                    <% if project.state == "OPEN" %>
+                      <%= render(Primer::Beta::Octicon.new(icon: "archive", color: :muted, mr: 1)) %> Close project
+                    <% else %>
+                      Reopen
+                    <% end %>
+                  </button>
+                <% end %>
+              <% end %>
+              <%= form_tag project.resource_path.to_s, method: :get do %>
+                <input type="hidden" name="migrate" value="confirm">
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, "role": "menuitem", classes: "dropdown-item") do |c| %>
+                  <% c.with_leading_visual_icon(icon: "paper-airplane") %>
+                  <% if project.migration_status == 'COMPLETED' %>
+                    Re-migrate
+                  <% else %>
+                    Migrate
+                  <% end %>
+                <% end %>
+              <% end %>
+            </details-menu>
+          </details>
+        <% end %>
+      </div>
+    <% else %>
+      <div class="Box-row clearfix position-relative pr-6" data-filter-value="<%= project.name %>" <%= test_selector("projects-results") %>>
+        <h2 class="sr-only">Search results</h2>
+        <% if project.viewer_can_update? %>
+          <details class="details-reset details-overlay dropdown position-static">
+            <summary class="color-fg-muted position-absolute right-0 top-0 mt-3 px-3" aria-labelledby="<%= project_dom_id %>">
+              <%= primer_octicon(:"kebab-horizontal") %>
+            </summary>
+            <details-menu class="dropdown-menu dropdown-menu-sw mt-6 mr-1 top-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <a href="<%= project.edit_resource_path %>" class="btn-link dropdown-item" role="menuitem">
+                Edit
+              </a>
+              <% if project.state == 'OPEN' || (project.state == 'CLOSED' && (!current_user.feature_enabled?(:projects_migration_disallow_reopen_after_migrate) || project.migration_status != 'COMPLETED')) %>
+                <%= form_tag project.update_state_resource_path.to_s, method: :put do %>
+                  <input type="hidden" name="global_id" value="<%= project.id %>">
+                  <input type="hidden" name="client_uid" class="js-client-uid-field">
+                  <input type="hidden" name="redirect_back" value="true">
+                  <button type="submit" class="btn-link dropdown-item" name="state" value="<%= project.state == "OPEN" ? "closed" : "open" %>" role="menuitem">
+                    <%= project.state == "OPEN" ? "Close" : "Reopen" %>
+                  </button>
+                <% end %>
+              <% end %>
+              <%= form_tag project.resource_path.to_s, method: :get do %>
+                <input type="hidden" name="migrate" value="confirm">
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, "role": "menuitem", classes: "dropdown-item") do %>
+                  <% if project.migration_status == 'COMPLETED' %>
+                    Re-migrate
+                  <% else %>
+                    Migrate
+                  <% end %>
+                <% end %>
+              <% end %>
+              <% if !project_owner.is_a?(PlatformTypes::Repository) && project.viewer_can_administer? %>
+                <div role="none" class="dropdown-divider"></div>
+
+                <a href="<%= project.settings_resource_path %>" class="btn-link dropdown-item" role="menuitem">
+                  Settings
+                </a>
+              <% end %>
+            </details-menu>
+          </details>
+        <% end %>
+
+        <div class="col-12 col-md-6 col-lg-4 pr-2 float-left">
+          <%= render(Primer::Beta::Text.new(tag: :h3, font_size: 4, mb: 1)) do %>
+            <a href="<%= project.resource_path %>" class="Link--primary mr-1"><%= project.name %></a>
+            <div class="d-inline no-wrap">
+              <% unless project.public_project_or_owner? %>
+                <%= render Primer::Beta::Label.new(scheme: :secondary, vertical_align: :middle, mr: 1, mb: 1) do %>Private<% end %>
+              <% end %>
+              <% if project.state == "CLOSED" %>
+                <%= render Primer::Beta::Label.new(mr: 1, mb: 1, vertical_align: :middle, scheme: :danger, title: "Closed on #{full_month_date project.closed_at}") do %>
+                  Closed
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+
+          <div class="f6 pr-sm-5 mb-2 mb-md-0 color-fg-muted">
+            <%= primer_octicon(:clock) %> Updated <%= time_ago_in_words_js project.updated_at %>
+          </div>
+
+          <% if project.progress.enabled %>
+            <div class="mt-1 pr-5 mb-2 mb-md-0">
+              <%= render partial: "projects/project_progress", locals: { progress: project.progress } %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-8 float-left markdown-body">
+          <% if project.body_html.present? %>
+            <%= project.body_html %>
+          <% else %>
+            <p class="color-fg-muted">No description</p>
+          <% end %>
+          <% if project.linked_repositories.any? %>
+            <p class="f5">
+              <%= render(Primer::Beta::Octicon.new(icon: "link")) %> Linked repositories:
+              <% project.linked_repositories.each do |repo| %>
+                <a href="<%= repo.resource_path %>"><%= repo.name %></a><% unless repo == project.linked_repositories.last %>,<% end %>
+              <% end %>
+            </p>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+<% else %>
+  <% if search_includes_name? || !state_filter.present? %>
+    <% if show_memex %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_visual_icon(icon: :project) %>
+
+        <% c.with_heading(tag: :h2) do %>
+          No projects matched your search
+        <% end %>
+
+        <% c.with_description do %>
+          Create a new project or try a different search query.
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+        <% c.with_visual_icon(icon: "project") %>
+
+        <% c.with_heading(tag: :h2) do %>
+          No projects matched your search
+        <% end %>
+
+        <% c.with_description do %>
+          Use the links above to find what you’re looking for, or try a new search query.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <% if show_memex %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_visual_icon(icon: :table) %>
+
+        <% c.with_heading(tag: :h2) do %>
+          <%= "No #{state_filter} projects" %>
+        <% end %>
+
+        <% c.with_description do %>
+          <%= "No projects have been #{state_filter} yet." %>
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new do |c| %>
+        <% c.with_visual_icon(icon: :project) %>
+        <% c.with_heading(tag: :h2) do %>
+          <%= "No #{state_filter} projects" %>
+        <% end %>
+        <% c.with_description do %>
+          <p>
+            <% if state_filter == "open" %>
+              There are no open projects. You can reopen
+            <% else %>
+              No projects have been <%= state_filter %> yet. You can close
+            <% end %>
+            projects from the <a class="Link--inTextBlock" href="<%= project_owner.projects_resource_path %>?<%= {type: "classic"}.to_param %>">projects list</a> or a project’s menu.
+          </p>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% page_info = project_owner.paginated_projects.page_info %>
+<% if page_info.has_next_page? %>
+  <div class="text-center d-block p-3 ajax-pagination-form js-ajax-pagination">
+    <%= form_tag project_owner.projects_resource_path.to_s, method: :get do %>
+      <input name="cursor" type="hidden" value="<%= page_info.end_cursor %>">
+      <input name="sort" type="hidden" value="<%= params[:sort] %>">
+      <input type="hidden" name="client_uid" class="js-client-uid-field">
+      <input type="hidden" name="query" value="<%= query %>">
+      <input type="hidden" name="type" value="classic">
+      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, "data-disable-with": "Loading more...") do %>Load more...<% end %>
+    <% end %>
+  </div>
+<% end %>

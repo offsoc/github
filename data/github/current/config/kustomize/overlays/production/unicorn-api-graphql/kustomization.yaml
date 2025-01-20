@@ -1,0 +1,73 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+    - ../../../base/production/unicorn-api/
+    - poddisruptionbudgets/unicorn-api-graphql.yaml
+# If you're decreasing this value, make sure to also update the
+# corresponding `acl site_dead` configuration in the kube-dotcom-ingress
+# repo
+# (https://github.com/github/kube-dotcom-ingress/blob/main/config/helm/production/haproxytech-ingress-dotcom-unicorn-api-graphql.yaml)
+# and deploy that change first. Reach out to #service-mesh for guidance.
+replicas:
+    - name: unicorn-api
+      count: 44
+nameSuffix: -graphql
+patches:
+    - target:
+        kind: Deployment
+        name: unicorn-api
+      patch: |-
+        - op: replace
+          path: /spec/template/spec/containers/1/env/0
+          value:
+            name: KUBE_DEPLOYMENT_NAME
+            value: unicorn-api-graphql
+        - op: replace
+          path: /spec/strategy/rollingUpdate/maxUnavailable
+          value: 3
+        - op: replace
+          path: /spec/selector/matchLabels/service
+          value: unicorn-api-graphql
+        - op: replace
+          path: /spec/template/metadata/labels/service
+          value: unicorn-api-graphql
+        # If you're decreasing this value, make sure to also update the
+        # corresponding `acl site_dead` configuration in the kube-dotcom-ingress
+        # repo
+        # (https://github.com/github/kube-dotcom-ingress/blob/main/config/helm/production/haproxytech-ingress-dotcom-unicorn-api-graphql-canary.yaml)
+        # and deploy that change first. Reach out to #service-mesh for guidance.
+        - op: replace
+          path: /metadata/annotations/moda.github.net~1canary-replicas
+          value: 4
+        - op: replace
+          path: /metadata/annotations/moda.github.net~1allow-missing-ready-pods
+          value: 3
+        - op: add
+          path: /metadata/annotations/moda.github.net~1canary-maxunavailable
+          value: "1"
+    - target:
+        kind: Service
+        name: unicorn-api
+      patch: |-
+        - op: replace
+          path: /metadata/annotations/kubernetes.io~1ingress.class
+          value: "haproxytech-unicorn-api-graphql"
+        - op: replace
+          path: /metadata/labels/service
+          value: unicorn-api-graphql
+        - op: replace
+          path: /spec/selector/service
+          value: unicorn-api-graphql
+        - op: remove
+          path: /spec/ports/0/nodePort
+        - op: replace
+          path: /metadata/annotations/opaque.github.net~1checks
+          value:  |
+            - http:
+                url: "https://api.github.com/graphql"
+                method: POST
+                header:
+                    authorization: "Bearer {{ .Env.GITHUB_API_TOKEN }}"
+              tags:
+                  - "api-type:unicorn-api-graphql"
+                  - "dotcom-api:true"

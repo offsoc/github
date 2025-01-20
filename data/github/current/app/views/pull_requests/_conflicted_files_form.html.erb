@@ -1,0 +1,117 @@
+<%# required locals: pull %>
+<% dco_signoff_enabled = pull.repository.dco_signoff_enabled? %>
+<% button_text ||= dco_signoff_enabled ? "Sign off and commit merge" : "Commit merge" %>
+<% button_class ||= "btn btn-sm btn-primary flash-action" %>
+<% author_email = current_user.default_author_email(pull.repository, pull.head_sha) %>
+<% adjust_pull = false unless defined? adjust_pull %>
+<% in_dialog = false unless defined? in_dialog %>
+
+<%= form_tag "#{pull_request_path(pull)}/conflicts/resolve", class: ["js-resolve-conflicts-form", "d-flex", "flex-wrap", {"flex-row-reverse" => !in_dialog}] do %>
+  <% pull.conflicted_files.each do |filename| %>
+    <input type="hidden" name="files[<%= CGI.escape(filename) %>]" class="js-file">
+  <% end %>
+  <input type="hidden" name="pr_head_sha" value="<%= pull.head_sha %>">
+  <input type="hidden" name="pr_base_sha" value="<%= pull.mergeable_base_sha %>">
+
+  <% if adjust_pull %>
+    <%
+      data_check_url = ref_check_url(current_repository.owner, current_repository)
+      temp_branch = current_repository.heads.temp_name(topic: "patch", prefix: current_user.display_login)
+    %>
+    <input type="hidden" name="target_branch" class="js-quick-pull-target-branch" data-default-value="<%= current_repository.default_branch %>" autocomplete="off">
+
+    <% if pull.head_branch_rule_evaluator && !pull.head_branch_rule_evaluator.commit_authorized?(current_user) %>
+      <% button_text = "Create branch#{dco_signoff_enabled ? ", then sign off" : ""} and update my pull request" %>
+      <p>
+        You can't commit to <strong class="branch-name"><%= pull.head_ref_name %></strong> because it is a <a class="Link--inTextBlock" href="<%= docs_url "repositories/about-protected-branches" %>">protected branch</a>.
+      </p>
+
+      <p>
+        You can create a <strong>new branch</strong><%= dco_signoff_enabled ? ", then sign off" : "" %> and commit these updates. Your pull request will be updated automatically.
+      </p>
+
+      <input type="hidden" name="commit_choice" value="direct">
+      <div class="position-relative">
+        <%= primer_octicon(:"git-branch", color: :muted, position: :absolute, text_align: :center, classes: "quick-pull-new-branch-icon") %>
+        <input type="text"
+               class="form-control input-contrast input-monospace pl-5 mr-1 js-quick-pull-new-branch-name"
+               placeholder="New branch name…"
+               aria-describedby="js-quick-pull-normalization-info"
+               data-generated-branch="<%= temp_branch %>"
+               data-check-url="<%= data_check_url %>"
+               required
+               disabled
+               aria-label="Enter a branch name">
+
+        <%= csrf_hidden_input_for data_check_url, class: "js-data-check-url-csrf" %>
+        <p class="color-fg-muted js-quick-pull-normalization-info"></p>
+      </div>
+    <% else %>
+      <% button_text = "I understand, #{dco_signoff_enabled ? "sign off and " : ""}continue updating #{pull.head_ref_name}" %>
+      <div class="mt-0" role="radiogroup" aria-label="Commit choice">
+        <div class="form-checkbox pl-4 mt-0 mb-2">
+          <label class="text-normal">
+            <input type="radio" class="js-conflict-resolution-choice-option" name="commit_choice" value="direct" checked>
+            <%= primer_octicon(:"git-commit", color: :muted, mr: 1, text_align: :center) %>
+            <%= dco_signoff_enabled ? "Sign off and commit " : "Commit " %>updates to the <strong class="branch-name"><%= pull.head_ref_name %></strong> branch.
+          </label>
+        </div>
+        <div class="form-checkbox pl-4 mt-0">
+          <label class="text-normal">
+            <input type="radio" class="form-checkbox-details-trigger js-conflict-resolution-choice-option" name="commit_choice" value="quick-pull">
+            <%= primer_octicon(:"git-pull-request", color: :muted, mr: 1, text_align: :center) %>
+            Create a <strong>new branch</strong><%= dco_signoff_enabled ? ", then sign off" : "" %> and commit updates. Your pull request will be updated automatically.
+
+            <div class="form-checkbox-details">
+              <div class="position-relative my-1">
+                <%= primer_octicon(:"git-branch", color: :muted, position: :absolute, text_align: :center, classes: "quick-pull-new-branch-icon") %>
+                <%
+                  data_check_url = ref_check_url(current_repository.owner, current_repository)
+                  temp_branch = current_repository.heads.temp_name(topic: "patch", prefix: current_user.display_login)
+                %>
+                <input type="text" disabled required value=""
+                  class="form-control input-contrast mr-1 pl-5 input-monospace js-quick-pull-new-branch-name"
+                  placeholder="New branch name…"
+                  aria-label="Enter a branch name"
+                  aria-describedby="js-quick-pull-normalization-info"
+                  data-generated-branch="<%= temp_branch %>"
+                  data-check-url="<%= data_check_url %>">
+                <%= csrf_hidden_input_for data_check_url, class: "js-data-check-url-csrf" %>
+              </div>
+              <p class="color-fg-muted js-quick-pull-normalization-info"></p>
+            </div>
+          </label>
+        </div>
+      </div>
+
+    <% end %>
+    <div class="Truncate">
+      <button type="submit"
+              class="<%= button_class %> js-resolve-conflicts-button"
+              data-update-text="I understand, <%= dco_signoff_enabled ? "sign off and " : "" %>continue updating <%= pull.head_ref_name %>"
+              data-new-branch-text="Create branch<%= dco_signoff_enabled ? ", then sign off" : "" %> and update my pull request"
+              data-disable-with="Committing merge…"><%= button_text %></button>
+    </div>
+    <% if author_email || dco_signoff_enabled %>
+      <div class="text-small color-fg-muted pt-1 text-right">
+        <% if dco_signoff_enabled %>
+          You are <%= safe_link_to("signing off", DcoSignoffHelper::dco_signoff_help_url, target: "_blank") %> on this commit as <%= author_email || current_user.git_author_email %>
+        <% elsif author_email %>
+          This merge commit will be associated with <%= author_email %>.
+        <% end %>
+      </div>
+    <% end %>
+
+  <% else %>
+    <button type="submit" class="<%= button_class %> js-resolve-conflicts-button" data-disable-with="Committing merge…"><%= button_text %></button>
+    <% if author_email || dco_signoff_enabled %>
+      <div class="text-small color-fg-muted pt-1 text-right">
+        <% if dco_signoff_enabled %>
+          You are <%= safe_link_to("signing off", DcoSignoffHelper::dco_signoff_help_url, target: "_blank") %> on this commit as <%= author_email || current_user.git_author_email %>
+        <% elsif author_email %>
+          This merge commit will be associated with <%= author_email %>.
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>

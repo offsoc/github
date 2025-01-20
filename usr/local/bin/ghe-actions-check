@@ -1,0 +1,71 @@
+#!/bin/bash
+#/ Usage: ghe-actions-check [-ahs]
+#/
+#/ Check that all active GitHub Action services are alive and healthy.
+#/ When provided with --service parameter, checks that the input services are alive and healthy
+#/
+#/ OPTIONS:
+#/   -a  | --attempts        The number of attempts to wait until the service
+#/                           becomes healthy.  Use 0 to not wait.
+#/   -h  | --help            Show this message
+#/   -s  | --service         The name of the service (mssql, actions, mps, token, artifactcache, blob).
+#/                           If not specified, will check all services, except blob.
+#/   --force-on-replica      Normally the mssql check goes to the primary. If you set --force-on-replica,
+#/                           we'll check the local mssql instance instead of routing to the primary.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options
+services="mssql $(action-services)"
+attempts=20
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+force_on_replica=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -s|--service)
+            services="$(to-lower "$2")"
+            shift 2
+            ;;
+        -a|--attempts)
+            attempts=$2
+            shift 2
+            ;;
+        --force-on-replica)
+            force_on_replica="--force-on-replica"
+            shift 1
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+ensure-int-range "--attempts" "$attempts" 1 999
+
+node=$(jq -r .cluster_ha_primary /etc/github/configapply.json || echo "localhost")
+if [ "$node" == "null" ]; then node="localhost"; fi
+
+for service in $services; do
+    if [ "$service" = "mssql" ]; then
+        wait-for "$attempts" MSSQL check-mssql "$force_on_replica"
+    elif [ "$service" = "blob" ]; then
+        ensure-storage-valid
+    else
+        ensure-service-name "$service"
+        wait-for "$attempts" "$(capitalize "$service database")" check-mssql-actions "$service"
+        wait-for "$attempts" "$(capitalize "$service nomad job")" check-nomad-job "$node" "$service"
+        url="http://localhost:$(action-port "$service")/_apis/health"
+        wait-for "$attempts" "$(capitalize "$service AT health api")" check-url "$url"
+    fi
+done

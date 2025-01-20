@@ -1,0 +1,128 @@
+<%
+  view = Issues::IndexView.new(
+    query: query,
+    issues: issues,
+    repo: current_repository,
+    pulls_only: pulls_only,
+    current_user: current_user,
+    applied_tab_filter_name: applied_tab_filter_name
+  )
+
+  target = (pulls_only ? "Pull requests" : "Issues")
+
+  page_info(
+    title: view.dashboard_title,
+    breadcrumb: target,
+    canonical_url: request.original_url
+  )
+
+  nav = Issues::DashboardNavigationView.new(:query => query)
+%>
+
+  <%# Include empty container header so that the repository header pjax renders when following a pull request/issue link %>
+  <div id="repository-container-header" data-turbo-replace hidden></div>
+
+  <turbo-frame target="_top" data-turbo-action="advance" id="issues_dashboard" class="pt-4 position-relative <% if container_xl? %>container-xl<% else %>container-lg<% end %> p-responsive">
+    <%= render ConditionalAccess::UnauthorizedAccountsComponent.new(
+      classes: "Box mb-1",
+      container_classes: "mb-2",
+      resource_label: "issues",
+      cap_filter: cap_filter
+    )%>
+    <% if render_issue_react_dashboard_opt_in %>
+    <%= form_with url: "/issues?new_issues_experience=true" do |f| %>
+      <%= render(Primer::Beta::Label.new(scheme: :success)) { "Beta" } %>
+      <%= render Primer::Beta::Button.new(scheme: :link, type: :submit, mb: 3, mt: 2) do %>
+        <%= emoji_tag(Emoji.find_by_alias("zap"), class: "emoji emoji-icon") %>Try new issues experience
+      <% end %>
+    <% end %>
+    <% end %>
+    <div class="subnav d-flex mb-3 flex-column flex-md-row" data-pjax>
+      <nav class="subnav-links d-flex d-sm-block" aria-label="<%= target %>">
+        <% if logged_in? %>
+          <%= selected_link_to "Created",
+            issues_search_query(replace: { assignee: nil, mentions: nil, "review-requested": nil }, append: [[:author, current_user.display_login]], pulls_only: pulls_only),
+            :class => "subnav-item flex-1 text-center",
+            :"aria-label" => "#{target} created by you",
+            :highlight => :dashboard_created,
+            :selected_link => nav.selected_link,
+            :"data-turbo-frame" => "_self"
+          %>
+          <%= selected_link_to "Assigned",
+            issues_search_query(replace: { author: nil, mentions: nil, "review-requested": nil }, append: [[:assignee, current_user.display_login]], pulls_only: pulls_only),
+            :class => "subnav-item flex-1 text-center",
+            :"aria-label" => "#{target} assigned to you",
+            :highlight => :dashboard_assigned,
+            :selected_link => nav.selected_link,
+            :"data-turbo-frame" => "_self"
+          %>
+          <%= selected_link_to "Mentioned",
+            issues_search_query(replace: { assignee: nil, author: nil, "review-requested": nil }, append: [[:mentions, current_user.display_login]], pulls_only: pulls_only),
+            :class => "subnav-item flex-1 text-center",
+            :title => "#{target} mentioning you",
+            :highlight => :dashboard_mentioned,
+            :selected_link => nav.selected_link,
+            :"data-turbo-frame" => "_self"
+          %>
+          <% if pulls_only %>
+            <%= selected_link_to "Review requests",
+              issues_search_query(replace: { assignee: nil, author: nil, mentions: nil }, append: [[:"review-requested", current_user.display_login]], pulls_only: pulls_only),
+              :class => "subnav-item flex-1 text-center no-wrap hide-sm",
+              :title => "#{target} requesting your review",
+              :highlight => :dashboard_review_requested,
+              :selected_link => nav.selected_link,
+              :"data-turbo-frame" => "_self"
+            %>
+          <% end %>
+        <% end %>
+      </nav>
+      <div class="flex-auto min-width-0">
+        <%= form_tag "/#{pulls_only ? :pulls : :issues}", :method => :get, :class => "subnav-search ml-0 ml-md-3 mt-3 mt-md-0", role: "search", "aria-label": "Issues", :"data-turbo-frame" => "_self" do %>
+          <input type="text" name="q" value="<%= query.rstrip %> " id="js-issues-search" class="form-control subnav-search-input subnav-search-input-wide input-contrast width-full" placeholder="Search all issues" aria-label="Search all issues">
+          <%= primer_octicon(:search, classes: 'subnav-search-icon') %>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="d-block d-md-none no-wrap mb-3">
+      <%= render partial: "issues/filters/states", locals: { issues: issues, pulls_only: pulls_only, open_count: open_count, closed_count: closed_count } %>
+    </div>
+
+    <div class="Box Box--responsive hx_Box--firstRowRounded0" id="js-issues-toolbar" data-pjax>
+      <div class="Box-header d-flex flex-justify-between" data-turbo-frame="_self">
+        <div class="table-list-filters flex-auto d-none d-md-block no-wrap">
+          <%= render partial: "issues/filters/states", locals: { issues: issues, pulls_only: pulls_only, open_count: open_count, closed_count: closed_count } %>
+        </div>
+
+        <div class="table-list-header-toggle width-full d-flex flex-justify-between flex-sm-justify-start flex-md-justify-end">
+          <%= render partial: "issues/filters/visibility", locals: { pulls_only: pulls_only } if logged_in? && !GitHub.multi_tenant_enterprise? %>
+          <%= render partial: "issues/filters/orgs", locals: { query: query, pulls_only: pulls_only } if logged_in? %>
+          <%= render partial: "issues/filters/sorts", locals: { pulls_only: pulls_only } %>
+        </div>
+      </div>
+
+      <% if issues.empty? %>
+        <%= render partial: "issues/issues_blankslate", locals: { icon: "issue-opened", title: view.blankslate_title, copy: view.blankslate_copy } %>
+      <% else %>
+        <div class="js-navigation-container js-active-navigation-container" data-issue-and-pr-hovercards-enabled data-repository-hovercards-enabled data-hpc>
+          <% view.issues.each do |issue| %>
+            <%= render "issues/issue", view: create_view_model(
+              Issues::IssueListItem,
+              issue: issue,
+              global: true,
+              reference_location: "DASHBOARD_ISSUES_INDEX",
+              pulls_only: pulls_only,
+            ) %>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+
+    <% if !issues.empty? %>
+      <div class="paginate-container">
+        <%= will_paginate issues, params: { q: query } %>
+      </div>
+    <% end %>
+
+    <%= render(Issues::TipComponent.new(parsed_issues_query: parsed_issues_query, pulls_only: pulls_only, repo: nil)) %>
+  </turbo-frame>

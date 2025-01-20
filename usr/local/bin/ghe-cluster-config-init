@@ -1,0 +1,165 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-config-init [-h]
+#/
+#/ Initialize the GitHub Enterprise cluster using the configuration in /data/user/common/cluster.conf.
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ -z "$HA_CLUSTER" ]; then
+  ghe-license check
+
+  echo "Verifying SSL is enabled ..." >&2 
+  ghe-config --get github-ssl.enabled | grep -q 'true' || {
+    echo "SSL must be configured before running ghe-cluster-config-init." >&2
+    exit 1
+  }
+fi
+
+echo "Verifying the cluster configuration ..." >&2 
+sudo env HA_CLUSTER=$HA_CLUSTER ghe-cluster-config-check /data/user/common/cluster.conf || {
+  echo "Configuration errors must be fixed before running ghe-cluster-config-init." >&2
+  sudo env HA_CLUSTER=$HA_CLUSTER ghe-cluster-config-check /data/user/common/cluster.conf >&2
+  exit 1
+}
+
+echo "Verifying a cluster is not already configured ..." >&2 
+cluster_already_configured=false
+if [ -f "/etc/github/cluster" ] && [ -n "$(cat /etc/github/cluster)" ]; then
+  cluster_already_configured=true
+fi
+
+write_cluster_file_for_this_node() {
+  local nodes ip entry
+  nodes=$(ghe-config --get-regexp cluster.*.ipv*)
+  echo "$nodes" | while read -r node ; do
+    ip=$(echo "$node" | cut -d ' ' -f 2)
+    entry=$(echo "$node" | cut -d ' ' -f 1 | cut -d '.' -f 2)
+    if ip -o addr show | awk  '{ print $4}' | cut -d/ -f1 | grep -q "^$ip$"; then
+      ghe-config "cluster.$entry.hostname" | sudo dd status=none of=/etc/github/cluster
+    fi
+  done
+
+  if [ ! -f "/etc/github/cluster" -o -z "$(cat /etc/github/cluster)" ]; then
+    echo "Current node is not part of the cluster configuration." >&2
+    exit 1
+  fi
+}
+
+declare -a pids=()
+
+get_host_ip() {
+  local hostname=$1
+  if [ -n "$(ghe-config cluster.$hostname.ipv6)" ]; then
+    ghe-config "cluster.$hostname.ipv6"
+  elif [ -n "$(ghe-config cluster.$hostname.ipv4)" ]; then
+    ghe-config "cluster.$hostname.ipv4"
+  fi
+}
+
+prepare_host() {
+  local hostname=$1
+  echo "$hostname" | grep -q ".hostname" && return
+  echo "Preparing host '$hostname' to join the cluster ..." >&2 
+
+  local ip=$(get_host_ip "$hostname")
+
+  if [ "$hostname" != "$local_host" ]; then
+      if ! nc.openbsd -z -w 2 -n "$ip" 122; then
+        echo "Cannot connect to $hostname SSH at $ip:122." >&2
+        if [ "$(ghe-config "cluster.$hostname.offline")" = true ]; then
+          echo "Hostname '$hostname' is offline" >&2
+          return
+        else
+          echo "Exiting..." >&2
+          exit 1
+        fi
+      fi
+      cluster=$(ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$ip" -- cat /etc/github/cluster 2>/dev/null || true)
+      if [ -z "$cluster" ]; then
+        echo "Running ghe-cluster-config-init on '$hostname'" >&2
+        ghe-cluster-config-node-init "$hostname" "$ip" &
+        pids+=($!)
+      fi
+  fi
+}
+
+configure_fluent_bit() {
+  local hostname=$1
+  echo "$hostname" | grep -q ".hostname" && return
+  echo "Running ghe-fluent-bit-configure for host '$hostname' ..." >&2
+
+  local ip=$(get_host_ip "$hostname")
+
+  if [ "$hostname" != "$local_host" ]; then
+    # configure fluent-bit for replica
+    ssh \
+    -p 122 \
+    -o PasswordAuthentication=no \
+    -o ConnectTimeout=2 \
+    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=no \
+    -o LogLevel=quiet \
+    admin@$ip "/usr/local/share/enterprise/ghe-fluent-bit-configure replica $local_host"
+  else
+    # configure fluent-bit for primary
+    /usr/local/share/enterprise/ghe-fluent-bit-configure primary
+  fi
+}
+
+write_cluster_file_for_this_node
+
+# Automatically generated SSH key to perform the initial cluster
+# configuration.
+if ghe-config --blank 'secrets.admin-ssh-key'; then
+  echo "Generating SSH key to initialize cluster ..." >&2
+  filename=/home/admin/.ssh/id_ed25519
+  yes | ssh-keygen -t ed25519 -N "" -C "admin-ssh-key" -f $filename
+  ghe-config 'secrets.admin-ssh-key' "$(cat $filename)"
+  ghe-config 'secrets.admin-ssh-pubkey' "$(cat $filename.pub)"
+fi
+
+readonly local_host=$(cat /etc/github/cluster)
+readonly hosts=$(ghe-config --get-regexp cluster.*.hostname)
+
+for hostname in ${hosts}; do
+    prepare_host "${hostname}"
+done
+
+exit_code=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || {
+    ret_code=$?
+    echo "$pid exited $ret_code"
+    exit_code=$ret_code
+  }
+done
+
+# don't cleanup nomad if updating an existing cluster or if in pre-config
+if ! "$cluster_already_configured" && [ $exit_code -eq 0 ]; then
+  echo "Running nomad cleanup ..." >&2
+  ghe-cluster-each -- ghe-nomad-cleanup -y
+fi
+
+# configure fluent-bit for centralized config-apply logs + traces
+for hostname in ${hosts}; do
+  configure_fluent_bit "${hostname}"
+done
+
+if [ $exit_code -eq 0 ]; then
+  echo "Finished cluster initialization"
+else
+  echo "Error during cluster initialization" 1>&2
+fi
+
+exit "$exit_code"

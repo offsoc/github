@@ -1,0 +1,90 @@
+<%
+  page_info(
+    selected_link: :repo_wiki,
+    title: "Compare revisions · #{current_repository.name_with_display_owner} Wiki",
+    dashboard_pinnable_item_id: current_repository.global_relay_id
+  )
+-%>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+  <%= render(Primer::Experimental::PageLayout.new(container_width: :xl, row_gap: :none, id: "wiki-wrapper")) do |c| %>
+    <% c.with_header_region do %>
+      <%= render(Primer::Beta::Subhead.new(mb: 0)) do |component| %>
+        <% component.with_heading(tag: :h2) do %>
+          <%= view.page_title %>
+        <% end %>
+        <% component.with_actions do %>
+          <% if view.comparison.revertable_by?(current_user) -%>
+            <%= form_tag wiki_revert_path(view.comparison.page, "#{CGI.escape(view.comparison.old_revision)}/#{CGI.escape(view.comparison.new_revision)}"), :method => :post,
+                  name: "gollum-revert", class: "d-inline-block" do %>
+              <%= render Primer::Beta::Button.new(type: :submit, size: :small, ml: 0, test_selector: "gollum-revert-button") do %>Revert changes<% end %>
+            <% end %>
+          <% end -%>
+
+          <% if view.show_new_button? %>
+            <%= render Primer::Beta::Button.new(size: :small, tag: :a, scheme: :primary, href: new_wiki_path, ml: 1) do %>New page<% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% c.with_content_region do %>
+      <div id="files_bucket">
+        <% if !view.comparison.comparable? %>
+          <%= render Primer::Beta::Blankslate.new do |component| %>
+            <% component.with_heading(tag: :h3).with_content("There isn’t anything to compare.") %>
+            <% component.with_description do %>
+              You’ll need to select one or more revisions in the
+              <%= link_to "history", view.comparison.page ? wiki_history_path(view.comparison.page) : wiki_history_path, class: "Link--inTextBlock" %>
+              to get a valid comparison.
+            <% end %>
+          <% end %>
+        <% elsif view.comparison.missing_commits? %>
+          <%= render Primer::Beta::Blankslate.new do |c| %>
+            <% c.with_heading(tag: :h3) do %>
+              There isn’t anything to compare.
+            <% end %>
+
+            <% c.with_description do %>
+              We couldn’t figure out how to compare these references, do they point to valid commits?
+            <% end %>
+          <% end %>
+        <% elsif view.comparison.diff_available? %>
+          <div id='diff'>
+            <% if params[:toc] && !view.comparison.page %>
+              <%= render :partial => "diff/tree_toc", :locals => {
+                            :diffable => GitHub::Unsullied::Comparison.new(view.comparison.wiki, view.comparison.old_revision, view.comparison.new_revision),
+                            :tree_diff => view.comparison.tree_diff
+                          } %>
+            <% else %>
+              <%
+                file_list_view = Wiki::FileListView.new(:diffs => view.comparison.diffs, :params => params, :current_user => current_user, :commentable => false, :in_wiki_context => true)
+
+                shd = SyntaxHighlightedDiff.new(view.comparison.wiki)
+                shd.highlight!(view.comparison.diffs, attributes_commit_oid: file_list_view.attributes_commit_oid)
+              %>
+              <%= render :partial => 'diff/toc', :locals => { :file_list_view => file_list_view, :force_prose => true } %>
+              <%= render :partial => 'diff/diff', :locals => { :file_list_view => file_list_view, :force_prose => true } %>
+            <% end %>
+          </div>
+        <% else %>
+          <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert, mb: 3)) do %>
+            Sorry, this diff is taking too long to generate.
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+    <% if view.comparison.revertable_by?(current_user) %>
+      <% c.with_footer_region do %>
+        <%= form_tag wiki_revert_path(view.comparison.page, "#{CGI.escape(view.comparison.old_revision)}/#{CGI.escape(view.comparison.new_revision)}"), :method => :post,
+              :name => "gollum-revert" do %>
+          <%= render Primer::Beta::Button.new(type: :submit, size: :small, test_selector: "gollum-revert-button") do %>Revert changes<% end %>
+          <%= render Primer::Beta::Button.new(tag: :a, href: "#", size: :small, ml: 1) do %>Back to top<% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do -%><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle 'wiki' %>
+<% end -%>

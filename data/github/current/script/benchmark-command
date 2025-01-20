@@ -1,0 +1,105 @@
+#!/usr/bin/env safe-ruby
+#/ Usage: benchmark-command [--run-time=<secs>] -- <command>...
+#/ Runs <command> in a loop for <run-time> seconds and reports timing measurements.
+#/ Like time(1) but over multiple runs. When no --run-time option is given, run <command>
+#/ for 5s.
+#/
+#/ Note: To avoid intermediate shell process time being included, <command> should be
+#/ specified as multiple arguments, not a single shell script string.
+#/
+#/ Options:
+#/   -t, --run-time=<secs>       Number of seconds to run the command in a loop.
+#/       --stats=<namespace>     Graphite stat name where timing metrics should
+#/                               be reported.
+#/
+#/ Example:
+#/
+#/     $ benchmark-command -- ruby -e "1 + 1"
+#/     true                          min   mean[+/-]sd median    max    sum
+#/                          real:  0.002  0.002  0.001  0.002  0.037  4.913
+#/                      user+sys:  0.000  0.001  0.005  0.000  0.020  2.850
+#/                          user:  0.000  0.001  0.002  0.000  0.010  1.210
+#/                           sys:  0.000  0.001  0.003  0.000  0.010  1.640
+#/                                                        (1986 runs in 5s)
+require "optparse"
+
+# default options
+run_time = 5.0
+posix_spawn = false
+log_file = "/dev/null"
+
+# parse arguments
+file = __FILE__
+ARGV.unshift("--help") if ARGV.empty?
+ARGV.options do |opts|
+  opts.on("-t", "--run-time=val", Float) { |val| run_time = val.to_f }
+  opts.on("--log=<file>", String)        { |val| log_file = val }
+  opts.on("-h", "--help")                { exec "grep ^#/<'#{file}'|cut -c4-" }
+  opts.parse!
+end
+
+# measure spawn overhead by spawning true(1) and taking the difference of real
+# time and child user+sys time.
+require "benchmark"
+real, child = 0.0, 0.0
+iterations = 100
+iterations.times do
+  tms = Benchmark.measure { pid = spawn("true"); Process.wait2(pid) }
+  real += tms.real
+  child += tms.cutime + tms.cstime
+end
+overhead = (real - child) / iterations.to_f
+
+# spawn loop for run-time seconds, collect benchmark measurements
+runs = []
+failures = false
+start = Time.now
+loop do
+  res = nil
+  tms = Benchmark.measure do
+    pid = spawn(*ARGV, out: log_file, err: log_file)
+    _, res = Process.wait2(pid)
+  end
+  failures = true if !res.success?
+  runs << tms
+  break if Time.now - start > run_time
+end
+elapsed = Time.now - start
+
+printf "%-38s %6s %6s%7s %6s %6s %6s\n",
+  ARGV.join(" "), "min", "mean", "[+/-]sd", "median", "max", "sum"
+
+rtimes = runs.map  { |t| t.real }.sort
+utimes = runs.map  { |t| t.cutime }.sort
+stimes = runs.map  { |t| t.cstime }.sort
+ttimes = utimes.zip(stimes).map { |u, s| u + s }.sort
+
+reports = [
+  ["real",     rtimes],
+  ["user+sys", ttimes],
+  ["user",     utimes],
+  ["sys",      stimes],
+]
+
+reports.each do |type, times|
+  min = times[0]
+  mid = times[times.size / 2]
+  max = times[-1]
+  sum = times.inject(0.0) { |x, y| x + y }
+  avg = sum / times.size.to_f
+  var = times.inject(0) { |x, y| x + (y - avg)**2 } / (times.size - 1)
+  sdv = Math.sqrt(var)
+
+  printf "%38s %6.3f %6.3f%7.3f %6.3f %6.3f %6.3f\n",
+    "#{type}:", min, avg, sdv, mid, max, sum
+end
+
+printf "%80s\n", "(#{runs.size} runs in #{elapsed.to_i}s)"
+printf "%80s\n", ("(spawn overhead: %.6fs per spawn)" % [overhead])
+
+if failures
+  printf "%80s\n", "command exited non-zero :("
+  exit 1
+end
+
+# vim: ft=ruby

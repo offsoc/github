@@ -1,0 +1,45 @@
+#!/bin/bash
+
+if [ -f /etc/github/cluster ]; then
+  PRIMARY_DC="$(ghe-config cluster.primary-datacenter)"
+  CLUSTER_HA="$(ghe-config cluster.ha || false)"
+fi
+
+PRIMARY_DC=${PRIMARY_DC:-default}
+
+CONSUL_HTTP_TOKEN=$(ghe-config secrets.consul.acl-master-token)
+export CONSUL_HTTP_TOKEN
+
+
+if [ "$CLUSTER_HA" = "true" ]; then
+  LEADER_TIMEOUT=60
+else
+  LEADER_TIMEOUT=240
+fi
+
+elapsed=0
+success=false
+echo "Waiting for consul leader"
+
+while [ $elapsed -lt $LEADER_TIMEOUT ]; do
+  leader_status=$(consul-cli status leader  --template '{{ ne . "" }}')
+  if [ "$leader_status" = "true" ]; then
+    echo "Consul leader acquired."
+    success=true
+    break
+  fi
+  (( elapsed++ ))
+  sleep 1
+done
+
+if ! $success; then
+  echo "Consul leader not detected within $LEADER_TIMEOUT seconds"
+  exit 1
+fi
+
+echo "DC: $PRIMARY_DC"
+consul kv put ghe/cluster/primary-datacenter "$PRIMARY_DC"
+
+if [ -f /etc/github/cluster ]; then
+  sudo consul operator raft remove-peer -address=127.0.0.1:8300  &>/dev/null || true
+fi

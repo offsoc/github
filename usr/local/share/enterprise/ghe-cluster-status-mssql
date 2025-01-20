@@ -1,0 +1,399 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-mssql [-hjnv]
+#/
+#/ Check the status of the MSSQL service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+source /usr/local/share/enterprise/ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+source /usr/local/share/enterprise/ghe-actions-lib
+
+mssql_master_hostname=$(ghe-config cluster.mssql-master) || true # to prevent errexit
+
+# Check if only valid database names are in the availability group.
+check_availability_group_database_names() {
+  local db_name="$1"
+  local replica_name="$2"
+  local db_valid
+  db_name_lower=$(echo "$db_name" | tr '[:upper:]' '[:lower:]')
+
+  for service in $(action-services); do
+    # Ensure that the database has a known service's prefix (e.g. 'mps' in 'mps_configuration')
+    prefix=$(action-db-prefix "$service")
+    if [[ $db_name_lower == "$prefix"* ]]; then
+      db_valid=true
+    fi
+  done
+
+  if ! $db_valid; then
+    check_result "${replica_name}-${db_name}" "mssql-ag-database-names" "warn" "$db_name on node ${replica_name} should not be in availability group"
+  else
+    check_result "${replica_name}-${db_name}" "mssql-ag-database-names" "ok" "$db_name on node ${replica_name} is a valid database name"
+  fi
+}
+
+# Check if the sync state is SYNCHRONIZING, SYNCHRONIZED or HEALTHY.
+check_sync_state() {
+  local db_name="$1"
+  local replica_name="$2"
+  local sync_state="$3"
+  local sync_health="$4"
+
+  if [ "$sync_state" != "SYNCHRONIZING" ] && [ "$sync_state" != "SYNCHRONIZED" ] || [ "$sync_health" != "HEALTHY" ]; then
+    check_result "${replica_name}-${db_name}" "mssql-sync-state" "error" "mssql replication synchronization state for database $db_name on node ${replica_name} is $sync_state"
+  else
+    check_result "${replica_name}-${db_name}" "mssql-sync-state" "ok" "mssql replication synchronization state for database $db_name on node ${replica_name} is $sync_state"
+  fi
+}
+
+# Check if sync delay is over 120'000. Warn if over 20'000.
+check_sync_delay() {
+  local db_name="$1"
+  local replica_name="$2"
+  local delay="$3"
+
+  if [ -z "$delay" ] || [[ ! "$delay" =~ ^-?[0-9]+$ ]]; then
+    if [ "$delay" = "NULL" ]; then
+      # Special case where last_commit_time is NULL after creating a new replica db but before any changes are committed.
+      # Rely on the synchronization health and state checks.
+      delay=0
+    else
+      check_result "${replica_name}-${db_name}" "mssql-sync-delay" "error" "synchronization delay could not be determined: $delay"
+      return
+    fi
+  fi
+
+  if [ "$delay" -ge 20000 ] && [ "$delay" -lt 120000 ]; then
+    check_result "${replica_name}-${db_name}" "mssql-sync-delay" "warn" "replication delay for database $db_name is $delay ms"
+  elif [ "$delay" -ge 120000 ]; then
+    check_result "${replica_name}-${db_name}" "mssql-sync-delay" "error" "replication delay for database $db_name is $delay ms"
+  else
+    check_result "${replica_name}-${db_name}" "mssql-sync-delay" "ok" "replication delay for database $db_name is $delay ms"
+  fi
+}
+
+# Check if seeding has failed.
+check_seeding_status() {
+  local db_name="$1"
+  local replica_name="$2"
+  local last_seeding_attempt
+
+  last_seeding_attempt=$(ghe-mssql-console -p -r -n -y -q "
+    SET NOCOUNT ON;
+    SELECT TOP 1
+        seeding.current_state,
+        stats.internal_state_desc,
+        stats.transferred_size_bytes,
+        stats.database_size_bytes
+    FROM sys.dm_hadr_automatic_seeding seeding
+    LEFT JOIN sys.availability_groups ag ON ag.group_id = seeding.ag_id
+    LEFT JOIN sys.availability_databases_cluster db ON db.group_id = seeding.ag_id AND db.group_database_id = seeding.ag_db_id
+    LEFT JOIN sys.dm_hadr_physical_seeding_stats stats ON stats.remote_physical_seeding_id = seeding.operation_id
+    WHERE ag.name = 'ha' AND db.database_name = '$db_name'
+    ORDER BY seeding.start_time DESC" 2>/dev/null)
+
+  if [ -z "$last_seeding_attempt" ]; then
+    check_result "${replica_name}-${db_name}" "mssql-seeding-status" "error" "no seeding attempt found for $db_name"
+    return
+  fi
+
+  local state=$(echo "$last_seeding_attempt" | awk '{print $1}')
+  local transfer_state=$(echo "$last_seeding_attempt" | awk '{print $2}')
+  local transferred_size_bytes=$(echo "$last_seeding_attempt" | awk '{print $3}')
+  local database_size_bytes=$(echo "$last_seeding_attempt" | awk '{print $4}')
+
+  if [[ "$state" == "COMPLETED" ]]; then
+    check_result "${replica_name}-${db_name}" "mssql-seeding-status" "ok" "seeding completed successfully for $db_name"
+  elif [[ "$state" == "FAILED" ]]; then
+    check_result "${replica_name}-${db_name}" "mssql-seeding-status" "error" "seeding failed for $db_name"
+  else
+    if [[ $database_size_bytes -gt 0 ]]; then
+      local percent=$(( 100 * transferred_size_bytes / database_size_bytes ))
+      check_result "${replica_name}-${db_name}" "mssql-seeding-status" "warn" "seeding is in state '$state' ($percent complete, transfer state: '$transfer_state') for $db_name"
+      return
+    fi
+    check_result "${replica_name}-${db_name}" "mssql-seeding-status" "warn" "seeding is in state '$state' (transfer state: '$transfer_state') for $db_name"
+  fi
+}
+
+# Check if MSSQL can be queried.
+check_health() {
+  for node in $(ghe-cluster-nodes -r mssql); do
+      if ! $(ssh_node $node "ghe-mssql-console -y -q \"print CONCAT(@@SERVERNAME, ' is alive!')\"" &>/dev/null); then
+        check_result "$node" "mssql-health" "error" "mssql is not responding"
+      else
+        check_result "$node" "mssql-health" "ok" "mssql is healthy"
+      fi
+  done
+}
+
+# Check if databases are online.
+check_databases_health() {
+  local result
+  local db_health_query="
+    SET NOCOUNT ON;
+    SELECT name
+    FROM   sys.databases
+    WHERE  state_desc != 'ONLINE'"
+  if ! result=$(ghe-mssql-console -p -y -n -r -q "$db_health_query" | xargs 2> /dev/null) ; then
+    check_result "$mssql_master_hostname" "mssql-databases-health" "error" "mssql databases are not healthy"
+    return
+  fi
+
+  # There is at least one item in the returned "not ONLINE" databases
+  if [ -n "$result" ]; then
+    check_result "$mssql_master_hostname" "mssql-databases-health" "error" "mssql databases are not healthy: ${result// /, }"
+    return
+  fi
+
+  check_result "$mssql_master_hostname" "mssql-databases-health" "ok" "mssql databases are healthy"
+}
+
+# Check if replicas are in a healthy state.
+check_replicas_health() {
+  local result
+  replicas_health_query="
+    SET ANSI_WARNINGS OFF;
+    SET NOCOUNT ON;
+    SELECT role_desc,
+      operational_state_desc,
+      connected_state_desc,
+      recovery_health_desc,
+      synchronization_health_desc
+    FROM sys.dm_hadr_availability_replica_states
+    WHERE
+      operational_state_desc IN('PENDING', 'PENDING_FAILOVER', 'OFFLINE', 'FAILED', 'FAILED_NO_QUORUM')
+      OR connected_state_desc = 'DISCONNECTED'
+      OR recovery_health_desc = 'ONLINE_IN_PROGRESS'
+      OR synchronization_health_desc IN('NOT_HEALTHY', 'PARTIALLY_HEALTHY')"
+
+  if ! result=$(ghe-mssql-console -p -y -n -r -q "$replicas_health_query"); then
+    check_result "$mssql_master_hostname" "mssql-replicas-health" "error" "could not get availability replica state"
+    return
+  fi
+
+  if [ -n "$result" ]; then
+    check_result "$mssql_master_hostname" "mssql-replicas-health" "error" "mssql replicas are not healthy"
+    return
+  fi
+
+  check_result "$mssql_master_hostname" "mssql-replicas-health" "ok" "mssql replicas are healthy"
+}
+
+check_replicas_allow_correct_connections() {
+  primary_replica=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT primary_replica
+    FROM sys.dm_hadr_availability_group_states" | xargs )
+
+  primary_allow_connections_desc=$(ghe-mssql-console -y -n -p -q "
+    SET NOCOUNT ON;
+    SELECT primary_role_allow_connections_desc
+    FROM sys.availability_replicas
+    WHERE replica_server_name='$primary_replica'" | xargs)
+
+  if [[ "$primary_allow_connections_desc" == "ALL" ]]; then
+    check_result "$mssql_master_hostname" "mssql-primary-replica-allow-all-connections" "ok" "mssql primary replica '$primary_replica' allows 'ALL' connections"
+  else
+    check_result "$mssql_master_hostname" "mssql-primary-replica-allow-all-connections" "error" "expecting mssql primary replica '$primary_replica' to allow 'ALL' connections but was '$primary_allow_connections_desc'"
+  fi
+
+  all_replicas=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT replica_server_name
+    FROM sys.availability_replicas" | xargs)
+
+  for replica in $all_replicas
+  do
+    [ "$replica" = "$primary_replica" ] && continue
+    read_only=$(ghe-mssql-console -p -y -n -q "
+      SET NOCOUNT ON;
+      SELECT secondary_role_allow_connections_desc
+      FROM sys.availability_replicas
+      WHERE replica_server_name='$replica'" | xargs )
+    if [[ "$read_only" == "READ_ONLY" ]]; then
+      check_result "$mssql_master_hostname" "mssql-secondary-replica-read-only" "ok" "mssql secondary replica '$replica' allows 'READ_ONLY' connections"
+    else
+      check_result "$mssql_master_hostname" "mssql-secondary-replica-read-only" "error" "expecting mssql secondary replica '$replica' to allow 'READ_ONLY' connections but was '$read_only'"
+    fi
+  done
+}
+
+check_roles_match_cluster_configuration(){
+  primary_replica=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT primary_replica
+    FROM sys.dm_hadr_availability_group_states" | xargs )
+
+  if [ "$primary_replica" == "$mssql_master_hostname" ];then
+    check_result "$mssql_master_hostname" "mssql-matches-cluster-roles" "ok" "mssql primary replica '$primary_replica' matches mssql-master in cluster configuration"
+  else
+    check_result "$mssql_master_hostname" "mssql-matches-cluster-roles" "error" "mssql primary replica '$primary_replica' does not match mssql-master in cluster configuration"
+  fi
+
+  all_replicas=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT replica_server_name
+    FROM sys.availability_replicas" | xargs)
+
+  for replica in $all_replicas
+  do
+    if ghe-config --true "cluster.$replica.mssql-server" ; then
+      check_result "$mssql_master_hostname" "mssql-matches-cluster-roles" "ok" "mssql replica '$replica' contains mssql-server role in cluster configuration"
+    else
+      check_result "$mssql_master_hostname" "mssql-matches-cluster-roles" "error" "mssql replica '$replica' does not contain mssql-server role in cluster configuration"
+    fi
+  done
+}
+
+check_correct_availability_mode(){
+  cmd=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT COUNT(*) AS total, SUM(CASE when availability_mode_desc = 'ASYNCHRONOUS_COMMIT' THEN 1 ELSE 0 END)
+    FROM sys.availability_replicas")
+  total_replicas=$(echo $cmd | awk '{print $1}')
+  num_asychronous_commit_replicas=$(echo $cmd | awk '{print $2}')
+  if [[ "$num_asychronous_commit_replicas" == "$total_replicas" ]]; then
+    check_result "$mssql_master_hostname" "check-correct-availability-mode" "ok" "All replicas have the availability mode of 'ASYNCHRONOUS_COMMIT'"
+  else 
+    check_result "$mssql_master_hostname" "check-correct-availability-mode" "error" "Expecting all replicas to have the availability mode of 'ASYNCHRONOUS_COMMIT'"
+  fi
+}
+
+# Utility function to get sync delay
+_get_delay() {
+  local replica_id=$1
+  local group_database_id=$2
+  local delay
+
+  delay=$(ghe-mssql-console -y -n -p -q "
+    SET NOCOUNT ON;
+    DECLARE @Counter INT = 0
+    DECLARE @primary_lsn Numeric(25,0)
+    DECLARE @primary_commit_time datetime
+    DECLARE @group_database_id UNIQUEIDENTIFIER = CONVERT(UNIQUEIDENTIFIER,'$group_database_id')
+
+    SELECT @primary_lsn = last_commit_lsn,
+      @primary_commit_time = last_commit_time
+    FROM sys.dm_hadr_database_replica_states
+    WHERE group_database_id = @group_database_id
+      AND is_primary_replica = 1
+
+    WHILE (@Counter <= 5)
+    BEGIN
+
+      -- Find last_commit_time for this LSN on the replica (or a more recent one)
+      SELECT DATEDIFF(millisecond, last_commit_time, IIF(@primary_commit_time > last_commit_time, @primary_commit_time, last_commit_time))
+      FROM sys.dm_hadr_database_replica_states
+      WHERE group_database_id = @group_database_id
+        AND replica_id = '$replica_id'
+        AND (last_commit_lsn >= @primary_lsn OR @Counter = 5)
+
+      IF @@ROWCOUNT = 1
+        RETURN
+      ELSE
+        BEGIN
+          SET @Counter = @Counter + 1
+          WAITFOR DELAY '00:00:01'
+        END
+    END") || true
+
+  echo "$delay" | tr -d '[:space:]'
+}
+
+#
+# Script "ENTRYPOINT"
+#
+start_output "mssql"
+
+# This query is run later with ghe-mssql-console to get the list of databases in the availability group and their state
+shopt -s lastpipe
+shopt -so pipefail
+status=()
+ghe-mssql-console -p -y -n -q "
+  SET NOCOUNT ON;
+  SELECT
+    ar.replica_server_name,
+    dc.database_name,
+    dc.group_database_id,
+    drs.synchronization_state_desc,
+    drs.synchronization_health_desc,
+    ars.role_desc,
+    drcs.is_failover_ready,
+    drs.replica_id,
+    drs.database_id
+  FROM sys.dm_hadr_availability_replica_states AS ars
+  JOIN sys.dm_hadr_database_replica_cluster_states AS drcs
+    ON ars.replica_id = drcs.replica_id
+  JOIN sys.availability_databases_cluster AS dc
+    ON drcs.group_database_id = dc.group_database_id
+  JOIN sys.dm_hadr_database_replica_states AS drs
+    ON dc.group_id = drs.group_id AND dc.group_database_id = drs.group_database_id
+  JOIN sys.availability_groups AS ag
+    ON ars.group_id = ag.group_id
+  JOIN sys.availability_replicas AS ar
+      ON ars.replica_id = ar.replica_id
+  WHERE ag.name = N'ha'" | while read -r record; do
+  status+=("$record")
+done
+
+check_health
+check_databases_health
+
+all_secondary_replicas_count=$(ghe-mssql-console -n -y -p -q "
+    SET NOCOUNT ON;
+    SELECT COUNT(*)
+    FROM sys.availability_replicas
+    WHERE replica_server_name
+    NOT IN
+      (
+        SELECT primary_replica
+        FROM sys.dm_hadr_availability_group_states
+      )")
+
+  # warn if no replicas are present. This could be a valid configuration so is a warn instead of error
+  if [ $all_secondary_replicas_count -lt 1 ]; then
+    check_result "$mssql_master_hostname" "check replica count" "warn" "No MSSQL replicas found. Skipping replication related checks"
+    exit 0
+  fi
+
+for line in "${status[@]}"; do
+  replica_name=$(echo "$line" | awk '{print $1}')
+  db_name=$(echo "$line" | awk '{print $2}')
+  group_database_id=$(echo "$line" | awk '{print $3}')
+  sync_state=$(echo "$line" | awk '{print $4}')
+  sync_health=$(echo "$line" | awk '{print $5}')
+  replica_id=$(echo "$line" | awk '{print $8}')
+
+  check_availability_group_database_names "$db_name" "$replica_name"
+  check_sync_state "$db_name" "$replica_name" "$sync_state" "$sync_health"
+
+  delay=$(_get_delay "$replica_id" "$group_database_id")
+  check_sync_delay "$db_name" "$replica_name" "$delay"
+
+  check_seeding_status "$db_name" "$replica_name"
+done
+
+check_replicas_health
+check_roles_match_cluster_configuration
+check_replicas_allow_correct_connections
+check_correct_availability_mode
+
+end_output "mssql"
+

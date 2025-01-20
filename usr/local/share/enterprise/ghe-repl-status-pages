@@ -1,0 +1,56 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-pages [-v] [--check]
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+process_cluster_ha() {
+  ! is_cache_replica || return 0
+
+  DPAGES_STATUS=${DPAGES_STATUS:-$(ghe-dpages replication-status || true)}
+
+  count="$(total_counts_ha "$DPAGES_STATUS" "under/over-replicated pages")"
+
+  # We can't easily determine the number if above 5000, so add a qualifier to
+  # indicate there are more than 5000 objects.
+  add_qualifier=
+  if [ $count -ge 5000 ]; then
+    add_qualifier="more than "
+  fi
+
+  if [ "$1" = "-v" ]; then
+    echo "$DPAGES_STATUS"
+    return 0
+  elif [ $# -eq 0 ]; then
+    if [ $count -eq 0 ]; then
+      echo "Pages replication is in sync"
+      return 0
+    else
+      echo "Pages replication is not in sync, off by ${add_qualifier}${count} sites"
+      return 1
+    fi
+  fi
+
+  if [ "$1" = "--check" ]; then
+    if [ $count -gt 120 ]; then
+      echo "CRITICAL: pages replication is behind the primary by ${add_qualifier}${count} sites"
+      return 2
+    elif [ $count -lt 120 -a $count -gt 0 ]; then
+      echo "WARNING: pages replication is behind the primary by $count sites"
+      return 1
+    elif [ $count -eq 0 ]; then
+      echo "OK: pages replication is in sync"
+      return 0
+    else
+      echo "UNKNOWN: pages replication is not in sync"
+      return 3
+    fi
+  fi
+}
+
+if [ "$1" != "--source-only" ]; then
+  ensure_replica
+
+  process_cluster_ha "$@"
+fi

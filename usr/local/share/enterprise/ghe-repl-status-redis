@@ -1,0 +1,38 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-redis [-v] [--check]
+#/ Show replication status.
+#/ In --check mode, act like a nagios check.
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+ensure_replica
+
+if [ "$1" = "-v" ]; then
+ ghe-redis-cli --local info replication
+  exit 0
+elif [ $# -eq 0 ]; then
+ ghe-redis-cli --local info replication | grep ^master_
+  exit 0
+fi
+
+eval "$(ghe-redis-cli --local info replication | tr -d '\r' | tr ':' '=')"
+
+if [ "$role" = "slave" ]; then
+  if [ "$master_link_status" = "down" ]; then
+    echo "CRITICAL: redis link is down since ${master_link_down_since_seconds}s ago"
+    exit 2 # CRITICAL
+  elif [ "$master_sync_in_progress" = "1" ]; then
+    echo "WARNING: redis is performing initial sync"
+    exit 1 # WARNING
+  elif [ "$master_last_io_seconds_ago" -lt 12 ]; then
+    echo "OK: redis replication is in sync"
+    exit 0 # OK
+  else
+    echo "WARNING: redis delay is ${master_last_io_seconds_ago}s"
+    exit 1 # WARNING
+  fi
+else
+  echo "UNKNOWN: redis replication is not setup"
+  exit 3 # UNKNOWN
+fi

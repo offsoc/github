@@ -1,0 +1,49 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-storage [-hjnv]
+#/
+#/ Check the status of the storage service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+start_output "storage"
+
+storage_status=$(ghe-storage replication-status || true)
+online_hosts=$(mysql_query "SELECT * FROM storage_file_servers WHERE online = 1;" || true)
+
+for hostname in $(ghe-cluster-nodes -r storage); do
+  uuid=$(ghe-config "cluster.$hostname.uuid")
+  if echo "$online_hosts" | grep -q "storage-server-$uuid"; then
+    check_result "$hostname" "storage-host-online" "ok"
+  else
+    check_result "$hostname" "storage-host-online" "error" "Storage server (storage-server-$uuid) not marked online"
+  fi
+done
+
+mysql_master=$(/usr/local/share/enterprise/ghe-call-configrb mysql_master)
+if [ -n "$storage_status" ]; then
+  count=$(total_error_counts "$storage_status" "under/over-replicated alambic objects")
+  if [ "$count" -gt 0 ]; then
+    check_result "$mysql_master" "storage-replication" "warn" "$count unsynchronized objects"
+  else
+    check_result "$mysql_master" "storage-replication" "ok" "Storage replication in sync"
+  fi
+else
+  check_result "$mysql_master" "storage-replication" "error" "Storage replication has stopped"
+fi
+
+end_output "storage"

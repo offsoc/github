@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+#/ Usage: create-integration-listings [<num>] [<owner-login>]
+#/ Create a bunch of integration listings in the database.
+
+# Show usage
+if ARGV.include?("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c3-"
+  exit 1
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+require "faker"
+
+unless Rails.env.development?
+  puts "This can only be run in the development environment!"
+  exit 1
+end
+
+# Parse arguments
+count = (ARGV.shift || 10).to_i
+owner = User.find_by_login(ARGV.shift)
+def random_owner
+  User.order(Arel.sql("RAND()")).first
+end
+
+def random_feature
+  IntegrationFeature.all.sample
+end
+
+def create_oauth_application(owner = nil)
+  application = OauthApplication.new(
+    user: owner || random_owner,
+    name: Faker::Company.name,
+    url: "http://example.com",
+    callback_url: "http://example.com/oauth/callback",
+  )
+
+  puts "Creating OAuth application: #{application.name}"
+  application.save!
+  application
+end
+
+def create_integration(owner = nil)
+  integration = Integration.new(
+    owner: owner || random_owner,
+    name: Faker::Company.name,
+    url: "http://example.com",
+    default_permissions: {
+      "statuses" => :write,
+      "contents" => :read,
+      "pull_requests" => :read,
+      "issues" => :read },
+    default_events: %w(pull_request),
+    hook_attributes: { url: "http://example.com/hook" },
+  )
+
+  puts "Creating Integration: #{integration.name}"
+  integration.save!
+  integration
+end
+
+def create_integration_listing(application_or_integration)
+  integration_listing = IntegrationListing.new(
+    integration: application_or_integration,
+    body: Faker::Lorem.paragraphs(number: 6),
+    blurb: Faker::Company.catch_phrase,
+    state: :published,
+    feature_ids: random_feature.id,
+    privacy_policy_url: "http://example.com/privacy",
+  )
+
+  yield integration_listing if block_given?
+
+  integration_listing.save!
+  integration_listing
+end
+
+IntegrationListing.transaction do
+  count.times do |index|
+
+    # Generate a vareity of application types
+    case index % 3
+    when 0
+      application = create_oauth_application(owner)
+
+      puts "Creating listing for a traditional OAuth app: #{application.name}"
+      create_integration_listing(application) do |listing|
+        listing.installation_url = "http://example.com/install"
+      end
+    when 1
+      application = create_oauth_application(owner)
+
+      puts "Creating listing for a 'Learn more' app: #{application.name}"
+      create_integration_listing(application) do |listing|
+        listing.learn_more_url = "http://example.com/learn_more"
+      end
+    when 2
+      integration = create_integration(owner)
+
+      puts "Creating listing for an Integration: #{integration.name}"
+      create_integration_listing(integration) do |listing|
+        listing.installation_url = "http://example.com/install"
+      end
+    end
+  end
+end

@@ -1,0 +1,75 @@
+#!/bin/bash
+#/ github-mysql
+#/ run an arbitrary sql command against the database.
+set -euo pipefail
+
+SQL_FILE=
+SQL_CMD=
+MYSQL_PORT=3307
+RETRIES=0
+
+while [ $# -gt 0 ]; do
+      case "$1" in
+      -f)
+        # Use -f for especially large sql files (such as seed.sq1)
+        # the file *must* be visible at the given path from *within* the container
+        # on the node in which it runs (web-server). In other words, the file
+        # must be in a mount, or already in the container, and the path
+        # must be what the container sees, not the host, if they are different
+        SQL_FILE="$2"
+        shift 2
+      ;;
+      -r|--retry)
+        RETRIES='1 2 4 8 16 32'
+        shift
+      ;;
+      *)
+        SQL_CMD=
+        if [ "$1" = "-" ]; then
+          SQL_CMD=$(cat)
+        else
+          SQL_CMD="$*"
+        fi
+        break
+        ;;
+      esac
+done
+
+process_cmd() {
+  # we need to escape embedded back-ticks and double quotes to get them through
+  local processed
+  processed=$(echo "$1" | sed 's/`/\\`/g')
+  processed=$(echo "$processed" | sed 's/\"/\\\"/g')
+  echo "$processed"
+}
+
+[ -n "$SQL_CMD" ] && SQL_CMD=$(process_cmd "$SQL_CMD")
+
+# In order to replicate existing behavior, pre-containerization, if this script is run on the replica node
+# we will address the replica mysql instance via the replica port. The command will be run in the gh/gh
+# container using the github-env jobspec which is constrained to running on web-server nodes
+if [ -f /etc/github/repl-state ] && grep replica /etc/github/repl-state > /dev/null; then
+  MYSQL_PORT=3308
+fi
+
+run_sql() {
+  if [ -n "$SQL_FILE" ]; then
+    github-env eval "cat \"$SQL_FILE\" | MYSQL_PWD=\$ENTERPRISE_MYSQL_PASSWORD mysql -u \$ENTERPRISE_MYSQL_USERNAME -h \$ENTERPRISE_MYSQL_HOSTNAME -P $MYSQL_PORT \$ENTERPRISE_MYSQL_DATABASE"
+  else
+    github-env eval "echo \"$SQL_CMD\" | MYSQL_PWD=\$ENTERPRISE_MYSQL_PASSWORD mysql -u \$ENTERPRISE_MYSQL_USERNAME -h \$ENTERPRISE_MYSQL_HOSTNAME -P $MYSQL_PORT \$ENTERPRISE_MYSQL_DATABASE"
+  fi
+}
+
+for retry in $RETRIES
+do
+  if run_sql
+  then
+    status=0
+    break
+  else
+    status=$?
+    sleep "$retry"
+  fi
+done
+
+exit $status

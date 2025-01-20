@@ -1,0 +1,153 @@
+#!/bin/bash
+#/ Usage: ghe-upgrade [options] <upgrade package file>
+#/
+#/ Install or verify an upgrade package.
+#/
+#/ OPTIONS:
+#/   -h | --help                  Show this message.
+#/   -V | --verify                Verify the package, do not run the upgrade.
+#/   -x | --trace                 Print bash trace output (debugging).
+#/   -y | --yes                   Answer yes to upgrade prompt.
+#/   -s | --skip-reboot           Do not reboot.
+#/   -t | --target                Install upgrade to specified partition (optional).
+#/   -c | --check                 Check only if the upgrade can be performed
+#/   --allow-patch-rollback       Allows upgrade to an earlier patch release.
+#/   <upgrade package file>       The upgrade package file to apply.
+#/
+set -e
+
+BASE_PATH=$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+check_for_config_run() {
+  # Abort if a config run is currently on-going
+  if /usr/local/share/enterprise/ghe-config-in-progress > /dev/null; then
+    echo "Unable to perform an upgrade. A configuration run is currently in progress. Please try again after it is finished." >&2
+    exit 1
+  fi
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verify,check,trace,yes,help,skip-reboot,allow-patch-rollback,target: --options Vcxyhsrt: -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+prompt_less=
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -V|--verify)
+      verify=1
+      shift
+      ;;
+    -c|--check)
+      check_only=1
+      shift
+      ;;
+    -x|--trace)
+      bash_trace=1
+      shift
+      ;;
+    -y|--yes)
+      prompt_less="-y"
+      shift
+      ;;
+    -s|--skip-reboot)
+      skip_reboot="-s"
+      shift
+      ;;
+    --allow-patch-rollback)
+      allow_patch_rollback="-r"
+      shift
+      ;;
+    -t|--target)
+      if [[ "$2" && -e "$2" && -b "$2" ]]; then
+        TARGET_PARTITION=$2
+        shift
+      else
+        echo "ERROR: must specfiy a valid block device target with -t" >&2
+        exit 1
+      fi
+      target="-t $TARGET_PARTITION"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+[ -n "$bash_trace" ] && set -x
+
+# exit early if not running as admin
+if [ "$(whoami)" != "admin" ]; then
+  echo "Error: ghe-upgrade must be run as the admin user" >&2
+  exit 1
+fi
+
+if [ ! -e "$1" ]; then
+  echo "Error: Need to specify a valid upgrade package file!"  >&2
+  echo "Usage: ghe-upgrade <upgrade package file>"  >&2
+  exit 1
+fi
+
+pkg=$1
+
+echo "*** verifying upgrade package signature..."
+trap "rm -f /tmp/sig.$$.asc /tmp/sig.$$.output" EXIT
+# pull signature out of the end of the file
+tail -n 25 $pkg | sed -n '/-----BEGIN PGP SIGNATURE-----$/,/^-----END PGP SIGNATURE-----$/p' | tail -n+2 > /tmp/sig.$$.asc
+echo "-----BEGIN PGP SIGNATURE-----
+$(cat /tmp/sig.$$.asc)" > /tmp/sig.$$.asc
+
+# crop out the trailing signature, and verify the contents against it
+sigsize=$(stat --printf='%s' /tmp/sig.$$.asc)
+filesize=$(stat --printf='%s' $pkg)
+bytes=$((filesize - sigsize))
+
+if ! head --bytes=$bytes $pkg | pv -s $bytes | gpg --batch --logger-file /tmp/sig.$$.output --verify /tmp/sig.$$.asc -; then
+  if grep -q "no valid OpenPGP data found." /tmp/sig.$$.output; then
+    echo "Error: The file provided is not a valid GitHub Enterprise Server package."  >&2
+  else
+    grep "^gpg:" /tmp/sig.$$.output
+    echo "Error: The GitHub Enterprise Server package is corrupt. Please download the file again."  >&2
+  fi
+  exit 1
+else
+  cat /tmp/sig.$$.output
+fi
+
+if [ -n "$verify" ]; then
+  echo "Package verified successfully."
+  exit 0
+fi
+
+check_for_config_run
+export GHE_UPGRADE=1
+if [ -n "$check_only" ]; then
+  echo "*** Check only if the upgrade can be performed ..."
+  bash "$@" -c $prompt_less $skip_reboot $allow_patch_rollback $target
+  result=$?
+  exit $result
+fi
+
+echo "*** clearing scheduled update installations..."
+$BASE_PATH/ghe-upgrade-scheduler -r $pkg
+
+echo "*** applying update..."
+export GHE_UPGRADE=1
+if [ -n "$bash_trace" ]; then
+  bash -x "$@" $prompt_less $skip_reboot $allow_patch_rollback $target
+else
+  bash "$@" $prompt_less $skip_reboot $allow_patch_rollback $target
+fi

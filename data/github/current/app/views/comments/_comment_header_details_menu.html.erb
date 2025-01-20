@@ -1,0 +1,278 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 8 %>
+<%
+  minimized_comment_partial = params[:minimized] || false
+  graphql_comment_id = params[:gid]
+  is_comment = !comment.is_a?(Issue)
+  href = local_assigns[:href] || "#{comment_dom_id(comment)}"
+  permalink_id = "#{href}-permalink".delete("#")
+  can_view_in_stafftools = is_comment && viewer.site_admin? && !comment.stafftools_url.nil?
+  is_archived = current_repository.archived?
+  can_update = comment.viewer_can_update?
+  can_delete = is_comment && comment.viewer_can_delete? && form_path.present?
+  must_verify_email = logged_in? && current_user.must_verify_email?
+  can_report = comment.viewer_can_report
+  new_reporting_experience = can_report && comment.viewer_can_report_to_maintainer
+  can_minimize = is_comment && comment.viewer_can_minimize?
+  can_unminimize = is_comment && comment.viewer_can_unminimize?
+  can_block = comment.viewer_can_block_from_org?
+  can_unblock = comment.viewer_can_unblock_from_org?
+
+  can_reference_in_new_issue = \
+    can_reference_in_new_issue?(comment, minimized_view: minimized_comment_partial)
+
+  can_create_new_issue = comment.viewer_can_create_issue?
+  comment_link = "#{base_url}#{issue_path}#{href}"
+%>
+
+<% copy_button = capture do %>
+  <%= render Primer::Beta::ClipboardCopy.new("aria-label": "Copy link", classes: "dropdown-item btn-link", for: permalink_id, role: "menuitem", test_selector: "comment-menu-copy-link") do %>
+    Copy link
+  <% end %>
+<% end %>
+
+<% quote_reply_button = capture do %>
+  <button
+    type="button"
+    class="dropdown-item btn-link js-comment-quote-reply"
+    hidden
+    data-hotkey="<%= hotkeys_for(current_user, :pull_request_conversation, :reply) %>"
+    role="menuitem"
+    <%= test_selector("comment-menu-quote-reply") %>
+    >
+    Quote reply
+  </button>
+<% end %>
+
+<% edit_button = capture do %>
+  <% if is_archived %>
+  <% elsif can_update %>
+    <button
+      type="button"
+      class="dropdown-item btn-link js-comment-edit-button"
+      role="menuitem"
+      aria-label="Edit comment"
+      <%= test_selector("comment-menu-edit") %>
+      >
+      Edit
+    </button>
+  <% elsif must_verify_email %>
+    <button
+      type="button"
+      class="dropdown-item disabled btn-link"
+      title="You need to verify your email address before you can edit this comment."
+      role="menuitem"
+      disabled><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+      Edit
+    </button>
+  <% end %>
+<% end %>
+
+<% open_new_issue_button = capture do %>
+  <% if can_reference_in_new_issue %>
+    <%= render layout: "shared/details_dialog", locals: {
+        title: "Reference in new issue",
+        button_text: "Reference in new issue",
+        button_class: "dropdown-item",
+        button_role: "menuitem",
+        details_class: "",
+        dialog_class: "Box-overlay--wide overflow-visible"
+      } do %>
+      <div class="Box-body overflow-auto">
+        <%= render partial: "comments/convert_to_issue_form", locals: {
+            text: comment.body,
+            id: comment.id,
+            user_id: comment.repository.owner.display_login,
+            repository: comment.repository.name,
+            repository_name: can_create_new_issue ? comment.repository.name : 'Select another repository',
+            repository_id: can_create_new_issue ? comment.repository.id : '',
+            author: comment.safe_user.display_login,
+            original_reference: comment_link
+          } %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% minimize_toggle_button = capture do %>
+    <% if minimized_comment_partial %>
+      <% if can_unminimize %>
+        <%= form_tag unminimize_comment_path(user_id: comment.repository.owner.display_login, repository: comment.repository.name), method: :put, class: "inline-form js-comment-unminimize width-full" do %>
+          <input type="hidden" name="comment_id" value="<%= graphql_comment_id %>" >
+          <button
+            type="submit"
+            class="dropdown-item btn-link"
+            role="menuitem"
+            aria-label="Unhide comment"
+            <%= test_selector("comment-menu-unhide") %>>
+            Unhide
+          </button>
+        <% end %>
+      <% end %>
+    <% else %>
+      <% if can_minimize %>
+        <button
+          type="button"
+          class="dropdown-item btn-link js-comment-hide-button"
+          role="menuitem"
+          aria-label="Hide comment"
+          <%= test_selector("comment-menu-hide") %>
+          >
+          Hide
+        </button>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% report_button = capture do %>
+  <% if can_report %>
+    <% if new_reporting_experience %>
+      <%= render layout: "shared/details_dialog", locals: {
+          button_text: "Report content",
+          title: "Report content",
+          button_class: "dropdown-item",
+          details_class: "width-full",
+          dialog_class: "Box-overlay--wide"
+      } do %>
+        <div class="container-lg clearfix d-flex ws-normal">
+          <div class="col-lg-6 p-3">
+            <% owner = comment.repository.owner %>
+            <%= form_tag report_content_path(owner.display_login, comment.repository.name, comment_id: comment.global_relay_id), method: :post, class: "inline-form" do %>
+              <div class="d-flex flex-column flex-justify-between">
+                <p>This content violates @<%= profile_link(owner, class: "Link--primary text-bold") %>'s Code of Conduct and should be submitted to the maintainers of this repository for review.</p>
+                <p>This report, as well as your username as the reporter, will be viewable by all admins of this repository.</p>
+
+                <dl class="form-group">
+                  <dt> Choose a reason for reporting this content </dt>
+                  <dd>
+                    <select name="reason" class="form-select mr-2" aria-label="Reason" required>
+                      <option value>
+                      Choose a reason
+                      </option>
+                      <% classifier_enums = Platform::Enums::AbuseReportReason.values.keys - ["UNSPECIFIED"] %>
+                      <%= options_for_select(classifier_enums.map { |s| [s.titleize, s] }) %>
+                    </select>
+                  </dd>
+                </dl>
+
+                <p class="text-small color-fg-muted">
+                  Learn more about <%= link_to "requesting that maintainers moderate content.", "#{GitHub.help_url}/articles/reporting-abuse-or-spam", class: "Link--inTextBlock" %>
+                </p>
+
+                <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger) do %>Report to repository admins<% end %>
+              </div>
+            <% end %>
+          </div>
+          <div class="col-lg-6 p-3">
+            <div class="d-flex flex-column flex-justify-between height-full">
+              <p>Contact GitHub Support about this user’s spammy or abusive behavior.</p>
+
+              <div>
+                <p class="text-small color-fg-muted mt-3">
+                  Learn more about <%= link_to "reporting abuse to GitHub Support", "#{GitHub.help_url}/articles/reporting-abuse-or-spam", class: "Link--inTextBlock" %>
+                </p>
+
+                <%= link_to(flavored_contact_path(
+                      flavor: "report-content",
+                      report: "#{ comment.safe_user == User.ghost ? "ghost" : comment.safe_user.display_login } (user)",
+                      content_url: comment_link),
+                      class: "btn btn-block btn-danger",
+                      'data-test-selector': "comment-menu-report"
+                    ) do %>
+                  Report abuse to GitHub Support
+                <% end %>
+              </div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    <% else %>
+      <%= link_to(flavored_contact_path(
+            flavor: "report-content",
+            report: "#{ comment.safe_user == User.ghost ? "ghost" : comment.safe_user.display_login } (user)",
+            content_url: comment_link
+          ), {
+            'aria-label': "Report abusive content",
+            role: "menuitem",
+            class: "dropdown-item btn-link",
+            'data-ga-click': "Report content, reported by #{comment.viewer_relationship}",
+            'data-test-selector': "comment-menu-report"
+          }) do %>
+        Report content
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% delete_button = capture do %>
+  <% if can_delete %>
+    <%= form_tag form_path, :method => :delete, :class => "width-full inline-form js-comment-delete" do %>
+      <input type="hidden" name="input[id]" value="<%= comment.id %>">
+      <button
+        type="submit"
+        class="dropdown-item menu-item-danger btn-link"
+        aria-label="Delete comment"
+        role="menuitem"
+        data-confirm="Are you sure you want to delete this?"
+        <%= test_selector("comment-menu-delete") %>
+        >
+        Delete
+      </button>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% stafftools_button = capture do %>
+  <% if can_view_in_stafftools %>
+    <% text = GitHub.enterprise? ? "Site Admin" : "Stafftools" %>
+    <a href="<%= comment.stafftools_url %>" class="dropdown-item btn-link" role="menuitem" <%= test_selector("comment-menu-stafftools")%> >View in <%= text %></a>
+  <% end %>
+<% end %>
+
+<% block_button = capture do %>
+  <% if can_block %>
+    <details class="details-reset details-overlay details-overlay-dark" <%= test_selector("comment-menu-block-user") %>>
+      <summary class="dropdown-item" role="menuitem">Block user</summary>
+      <details-dialog
+        class="Box Box-overlay--wide d-flex flex-column anim-fade-in fast"
+        src="<%= block_from_comment_modal_path(id: graphql_comment_id) %>" preload><%# erblint:disable A11yDetailsDialogMigration %>
+        <include-fragment class="my-3" aria-label="Loading..."><%= render(Primer::Beta::Spinner.new(size: :large, mx: :auto, display: :block)) %></include-fragment>
+      </details-dialog>
+    </details>
+  <% elsif can_unblock %>
+    <%= form_tag organization_settings_blocked_user_path(
+        comment.repository.owner.display_login,
+        login: comment.safe_user.display_login,
+        content_id: comment.global_relay_id,
+      ),
+      method: "delete",
+      class: "inline-form width-full" do %>
+      <button class="dropdown-item btn-link"
+              type="submit"
+              role="menuitem"
+              data-confirm="Are you sure you want to unblock this user from the organization?"
+              <%= test_selector("comment-menu-unblock-user") %>>
+        Unblock user
+      </button>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% divider_tag = capture do %>
+  <div role="none" class="dropdown-divider"></div>
+<% end %>
+
+<%
+  button_groups = [
+    [copy_button, quote_reply_button, open_new_issue_button],
+    [edit_button, minimize_toggle_button, delete_button],
+    [report_button, block_button],
+    [stafftools_button]
+  ].map { |group| group.compact.presence }.compact
+
+  dividers = [divider_tag] * [button_groups.length - 1, 0].max
+%>
+
+<% button_groups.zip(dividers).flatten.each do |menu_item| %>
+    <%= menu_item %>
+<% end %>

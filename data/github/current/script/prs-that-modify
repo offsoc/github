@@ -1,0 +1,124 @@
+#!/bin/bash
+# Usage: prs-that-modify [-<timeframe>] [-M|--markdown] <paths>...
+#
+# List open pull requests that have been updated within <timeframe> and that
+# change at least one of the files listed in <paths>. Additionally, print the
+# summary of changed files as well.
+#
+# The format of listed pull requests is `<num-files> <pr-title> <pr-url>`.
+# The format of summary is `<count> <status> <file>`, where <status> is one of
+# `(A|D|M|R)`. See `--diff-filter` in git-diff(1) for more info.
+#
+# The <timeframe> is expected in `<num>(y|m|w|d|H)` format. The default is "6m".
+#
+# With `--markdown`, the output is formatted as a table compatible with
+# GitHub-flavored Markdown syntax.
+#
+# The OAuth token used for API requests is pulled from your `~/.config/hub`
+# file if you are a user of hub. Otherwise, you should define GITHUB_TOKEN.
+set -euo pipefail
+
+timeshift="6m"
+markdown=
+
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+  -h | --help )
+    sed -ne '/^#/!q;s/.\{1,2\}//;1d;p' < "$0"
+    exit 0
+    ;;
+  -M | --markdown )
+    markdown=1
+    shift 1
+    ;;
+  -* )
+    timeshift="${1:1}"
+    shift 1
+    ;;
+  * )
+    break
+    ;;
+  esac
+done
+
+# Replicate the functionality of BSD `date -v`
+amount="${timeshift:0:${#timeshift}-1}"
+unit="unit_${timeshift:${#amount}}"
+let unit_H=60*60
+let unit_d=$unit_H*24
+let unit_w=$unit_d*7
+let unit_m=$unit_d*30
+let unit_y=$unit_d*365
+min_updated_date=$(( $(date +'%s') - (amount * ${!unit}) ))
+
+remote=origin
+repo="$(git remote -v | grep -o 'github.com/[^/]\+/[^/ ]\+' | head -1)"
+repo="${repo#*/}"
+repo="${repo%.git}"
+main_branch="$(git symbolic-ref --short "refs/remotes/${remote}/HEAD" 2>/dev/null || echo "${remote}/master")"
+
+api="https://api.github.com"
+params="state=open&base=${main_branch#*/}&sort=updated&direction=desc&per_page=100"
+url="${api}/repos/${repo}/pulls?${params}"
+token="${GITHUB_TOKEN:-}"
+[ -n "$token" ] || token="$(awk '/oauth/ { print $(NF) }' ~/.config/hub | head -1)"
+request_headers=(
+  -H "Authorization: token ${token}"
+  -H "Accept: application/vnd.github.v3+json"
+)
+
+parse-json() {
+  ruby -rjson -rtime -e '
+    $, = "\t"; $\ = "\n"
+    JSON.parse(STDIN.read).each do |pr|
+      timestamp = Time.parse(pr["updated_at"]).to_i
+      print pr["number"], pr["title"], pr["head"]["ref"], timestamp
+    end
+  '
+}
+
+git fetch "$remote" --quiet
+
+all_files=""
+
+while [ -n "$url" ]; do
+  http="$(curl -ifsSL "${request_headers[@]}" "$url")"
+  headers="$(sed '/^$/,$d' <<<"$http")"
+  parsed_json="$(sed '1,/^$/d' <<<"$http" | parse-json)"
+  url="$(grep -o '[^ ]\+; rel="next"' <<<"$headers" | grep -o 'http[^>]\+' || true)"
+
+  IFS=$'\t'
+  while read num title head timestamp; do
+    if [ "$timestamp" -lt "$min_updated_date" ]; then url=""; break; fi
+    files="$(git diff --name-status "${main_branch}...${remote}/${head}" -- "$@")"
+    [ -n "$files" ] || continue
+    num_changed="$(wc -l <<<"$files" | awk '{print $1}')"
+    [ "${#title}" -le 40 ] || title="${title:0:37}..."
+    if [ -n "$markdown" ]; then
+      if [ -z "$all_files" ]; then
+        printf "%2s | %-40s | %s\n" "f" "title" "PR"
+        printf "%2s | %-40s | https://github.com/%s/pull/%d\n" "" "" "$repo" "$num" | tr -C $'|\n' -
+      fi
+      printf "%2d | %-40s | https://github.com/%s/pull/%d\n" "$num_changed" "$title" "$repo" "$num"
+    else
+      printf "%2d  %-40s  https://github.com/%s/pull/%d\n" "$num_changed" "$title" "$repo" "$num"
+    fi
+    all_files="${all_files}${files}"$'\n'
+  done <<<"$parsed_json"
+done
+
+if [ -n "$all_files" ]; then
+  printf "\nSummary of modifications:\n\n"
+  if [ -n "$markdown" ]; then
+    printf "count | status | file\n"
+    printf "count | status | file\n" | tr -C $'|\n' -
+  fi
+  IFS=$'\t '
+  sed '/^$/d' <<<"$all_files" | sort | uniq -c | sort -k3 | while read count status file; do
+    if [ -n "$markdown" ]; then
+      printf "%5d | %-6s | %s\n" "$count" "$status" "$file"
+    else
+      printf "%2d  %s  %s\n" "$count" "$status" "$file"
+    fi
+  done
+fi

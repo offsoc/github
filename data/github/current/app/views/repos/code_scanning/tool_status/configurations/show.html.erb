@@ -1,0 +1,152 @@
+<%= render layout: "repos/code_scanning/tool_status/configurations/layout", locals: {
+  tool: tool,
+  configurations: configurations,
+  selected_item_id: selected_configuration.slug,
+  configuration_group: configuration_group,
+} do %>
+  <%= render(CodeScanning::ToolStatus::DeleteConfigurationDialogComponent.new(
+    dialog_id: delete_configuration_dialog_id,
+    repository: current_repository,
+    tool_name: tool.name,
+    category: selected_configuration.category.category,
+    configuration_group_slug: configuration_group.slug
+  )) %>
+  <%= render(Primer::Beta::Subhead.new(mb: 2)) do |component| %>
+    <% component.with_heading(tag: :h2) do %>
+      <%= selected_configuration.label %>
+    <% end %>
+    <% component.with_actions do %>
+      <%= render(Primer::Alpha::ActionMenu.new(
+        menu_id: "tool-status-configuration-menu", anchor_align: :end,
+        test_selector: "configuration_menu"
+      )) do |c| %>
+        <% c.with_show_button(icon: :"kebab-horizontal", scheme: :default, "aria-label": "Configuration menu") %>
+        <% c.with_item(
+          tag: :a,
+          test_selector: "rules_used_csv",
+          href: repository_code_scanning_results_tool_status_rules_path(
+            user_id: current_repository.owner_display_login,
+            repository: current_repository,
+            tool_name: tool.name,
+            ids: [selected_configuration.category.analysis_id],
+          ),
+          data: {
+            turbo: false,
+          },
+        ) do |item| %>
+          <% item.with_leading_visual_icon(icon: :download) %>
+          Download list of rules used
+        <% end %>
+        <% c.with_item(
+          test_selector: "delete_config",
+          classes: [],
+          tag: :button,
+          type: "button",
+          content_arguments: {
+            data: { "show-dialog-id": delete_configuration_dialog_id }
+          },
+        ) do |item| %>
+          <% item.with_leading_visual_icon(icon: :trash, color: :danger) %>
+          <%= render(Primer::Beta::Text.new(color: :danger)) { "Delete configuration" } %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <h3 class="f4 text-normal">Status</h3>
+  <%= render(CodeScanning::ToolStatus::MessageListComponent.new(
+      messages: messages.fetch(tool.name, selected_configuration.category),
+    ))
+  %>
+
+  <h3 class="f4 text-normal mb-2">Details</h3>
+  <%= render(Primer::Beta::BorderBox.new(mb: 4)) do |component| %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">Configuration</span>
+        <span class="flex-1 text-right">
+          <%= selected_configuration.category.category.gsub("([/:])", "\1\u200B") %>
+        </span>
+      </div>
+    <% end %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">Last scan</span>
+        <span class="flex-1 text-right">
+          <%= render Primer::Beta::Octicon.new(icon: "git-commit") %><span class="pl-2"><a href="<%= commit_url(selected_configuration.category.commit_oid, current_repository) %>" class="text-mono "><%= selected_configuration.category.commit_oid[0..Commit::ABBREVIATED_OID_LENGTH] %></a></span>
+          · <%= time_ago_in_words_js selected_configuration.last_scan %>
+        </span>
+      </div>
+    <% end %>
+    <% component.with_row do %>
+      <div class="d-flex flex-items-center">
+        <span class="no-wrap text-bold">First scan</span>
+        <span class="flex-1 text-right">
+          <%= time_ago_in_words_js selected_configuration.first_scan %>
+        </span>
+      </div>
+    <% end %>
+    <% if selected_configuration.category.tool_version.present? %>
+      <% component.with_row do %>
+        <div class="d-flex flex-items-center">
+          <span class="no-wrap text-bold">Tool version</span>
+          <span class="flex-1 text-right">
+            <%= name_with_version(tool.name, selected_configuration.category.tool_version) %>
+          </span>
+        </div>
+      <% end %>
+    <% end %>
+    <% if selected_configuration.category.query_suites.present? %>
+      <% selected_configuration.category.query_suites.group_by(&:type).tap do |suites| %>
+        <% if suites[:QUERY_SUITE_BUILTIN_SUITE].present? %>
+          <% component.with_row do %>
+            <div class="d-flex" <%= test_selector("query_suite_builtin") %>>
+              <span class="no-wrap text-bold">Query <%= "suite".pluralize(suites[:QUERY_SUITE_BUILTIN_SUITE].size) %></span>
+              <ul class="flex-1 text-right list-style-none">
+                <% suites[:QUERY_SUITE_BUILTIN_SUITE].each do |suite| %>
+                  <li><%= suite.uses %><% if selected_configuration.category.default_queries_disabled %><span class="ml-1 color-fg-muted">(Default queries excluded)</span><% end %></li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        <% end %>
+        <% if suites[:QUERY_SUITE_EXTERNAL_REPOSITORY].present? %>
+          <% component.with_row do %>
+            <div class="d-flex" <%= test_selector("query_suite_external_repository") %>>
+              <span class="no-wrap text-bold">Additional query <%= "pack".pluralize(suites[:QUERY_SUITE_EXTERNAL_REPOSITORY].size) %></span>
+              <ul class="flex-1 text-right list-style-none">
+                <% suites[:QUERY_SUITE_EXTERNAL_REPOSITORY].each do |suite| %>
+                  <li><%= format_external_repository(suite.uses) %></li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        <% end %>
+        <% if suites[:QUERY_SUITE_LOCAL_QUERY].present? %>
+          <% component.with_row do %>
+            <div class="d-flex" <%= test_selector("query_suite_local_query") %>>
+              <span class="no-wrap text-bold">Additional <%= "query".pluralize(suites[:QUERY_SUITE_LOCAL_QUERY].size) %></span>
+              <ul class="flex-1 text-right list-style-none">
+                <% suites[:QUERY_SUITE_LOCAL_QUERY].each do |suite| %>
+                  <li><%= render(Primer::Beta::Link.new(href: blob_path(suite.uses.delete_prefix("./"), current_repository.default_branch, current_repository))) { suite.uses } %></li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if selected_configuration.category.extensions.present? %>
+      <% component.with_row do %>
+        <div class="d-flex">
+          <span class="no-wrap text-bold">Extensions</span>
+          <ul class="flex-1 text-right list-style-none">
+            <% selected_configuration.category.extensions.each_with_index do |extension, idx| %>
+              <li class="<%= "mt-1" if idx > 0 %>"><%= extension_with_link(tool.name, extension.name, extension.version[/\A[\d.]+/]) %></li>
+            <% end %>
+          </ul>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

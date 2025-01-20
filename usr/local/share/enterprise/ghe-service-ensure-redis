@@ -1,0 +1,39 @@
+#!/bin/bash
+#/ Usage: ghe-service-ensure-redis
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+if ! service_enabled redis; then
+  /usr/local/share/enterprise/ghe-nomad-local-alloc-stop redis
+  exit 0
+fi
+
+wait_for_redis() {
+  echo "Waiting for redis service"
+  GHE_REDIS_HOST="$(ghe-config cluster.redis-master || true)"
+  [ -z "$GHE_REDIS_HOST" ] && GHE_REDIS_HOST="localhost"
+
+  for ((n = 0; n < 45; n++)); do
+    ghe-redis-cli --remote -h "$GHE_REDIS_HOST" ping >/dev/null 2>&1 && return
+    sleep 1
+  done
+  echo "Redis service still unavailable."
+  exit 1
+}
+
+/usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/redis/redis.hcl
+/usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/redis/redis-aof-cron.hcl
+
+wait_for_redis

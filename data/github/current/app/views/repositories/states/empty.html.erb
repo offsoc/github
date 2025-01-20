@@ -1,0 +1,274 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ClipboardCopyComponentMigrationCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 7 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 5 %>
+<% page_info \
+    title: "#{current_repository.name_with_display_owner}",
+    container_xl: true,
+    show_repository_header_placeholder: true
+  %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+  <div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+    <% if !(current_user_can_push? && current_repository.parent_id?) %>
+      <% if !GitHub.single_or_multi_tenant_enterprise? && !current_user.is_enterprise_managed? %>
+        <%= render_nothing_if_database_fails do %>
+          <div class="d-md-flex flex-items-stretch gutter-md mb-4">
+            <%= render Repositories::EmptyRepo::CopilotOrCodespacePromptComponent.new(
+              user_can_push: current_user_can_push?,
+              user: current_user,
+              copilot_user: current_copilot_user,
+              repository: current_repository
+            ) %>
+            <div class="col-md-6">
+              <div class="height-full border rounded-2 p-4">
+                <% if current_repository.in_organization? %>
+                  <%= render(Primer::Beta::Octicon.new("person-add", size: :medium, color: :muted, mb: 2)) %>
+                  <h3 class="h4">
+                    Give access to the people you work with
+                  </h3>
+                  <p class="color-fg-muted">Ensure the right people and teams have access to this repository.</p>
+                  <%= render(Primer::Beta::Button.new(
+                    scheme: :default,
+                    size: :small,
+                    tag: :a,
+                    href: repository_access_management_path(current_repository.owner, current_repository),
+                    data: analytics_click_attributes(
+                      category: "repository_onboarding",
+                      action: "click_to_manage_access",
+                      label: "ref_cta:give_access_to_the_people_you_work_with_you;ref_loc:empty_repo;"
+                    )
+                  )) do %>
+                    Manage access
+                  <% end %>
+                <% elsif current_repository.members_count >= 5 %>
+                  <%= render(Primer::Beta::Octicon.new("people", size: :medium, color: :muted, mb: 2)) %>
+                  <h3 class="h4">
+                    Move to an organization
+                  </h3>
+                  <p class="color-fg-muted">Collaborate across many projects, with security and administrative features.</p>
+                  <%= render(Primer::Beta::Button.new(
+                    scheme: :default,
+                    size: :small,
+                    tag: :a,
+                    href: new_move_work_path(current_user, repository: current_repository),
+                    data: analytics_click_attributes(
+                      category: "repository_onboarding",
+                      action: "click_to_move_work",
+                      label: "ref_cta:move_to_an_organization;ref_loc:empty_repo;"
+                    )
+                  )) do %>
+                    Move repository
+                  <% end %>
+                <% else %>
+                  <%= render(Primer::Beta::Octicon.new("person-add", size: :medium, color: :muted, mb: 2)) %>
+                  <h3 class="h4">
+                    Add collaborators to this repository
+                  </h3>
+                  <p class="color-fg-muted">Search for people using their GitHub username or email address.</p>
+                  <%= render(Primer::Beta::Button.new(
+                    scheme: :default,
+                    size: :small,
+                    tag: :a,
+                    href: repository_access_management_path(current_repository.owner, current_repository),
+                    data: analytics_click_attributes(
+                      category: "repository_onboarding",
+                      action: "click_to_add_collaborators",
+                      label: "ref_cta:invite_collaborators;ref_loc:empty_repo;"
+                    )
+                  )) do %>
+                    Invite collaborators
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+          </div>
+        <% end %>
+      <% else %>
+        <% if current_repository.adminable_by?(current_user) &&
+            current_repository.in_organization? &&
+            current_repository.members_count == 0 %>
+          <div class="Box Box--spacious mb-3">
+            <div class="Box-body">
+              <h3>Give access to the people you work with</h3>
+              <p>Ensure the right people and teams have access to this repository.</p>
+              <a href="<%= repository_access_management_path(current_repository.owner, current_repository) %>" class="btn btn-sm btn-primary" <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, :add_teams_and_collaborators)) %>>
+                Add teams and collaborators
+              </a>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if current_user_can_push? %>
+      <% if current_repository.parent_id? %>
+        <% content_for :head do %>
+          <meta http-equiv="refresh" content="5">
+        <% end %>
+
+        <%= render Primer::BlankslateComponent.new(
+          title: "Forking #{current_repository.parent.name_with_display_owner}",
+          description: "It should only take a few seconds.",
+        ) do |component| %>
+          <a href="" class="btn btn-sm mt-2"><%= render(Primer::Beta::Octicon.new(icon: "sync")) %> Refresh</a>
+          <% component.with_spinner(size: :medium) %>
+        <% end %>
+      <% elsif current_repository.mirror? %>
+        <% content_for :head do %>
+          <meta http-equiv="refresh" content="5">
+        <% end %>
+
+        <%= render Primer::BlankslateComponent.new(
+          title: "Mirroring your repository",
+          description: "We’re currently mirroring this repository. It should take anywhere from a few minutes to a couple of hours depending on the size of the repository.",
+        ) do |component| %>
+          <% component.with_spinner(size: :large) %>
+        <% end %>
+      <% else %>
+        <%
+          view = Repositories::ProtocolSelectorView.new(
+            :context => :empty_repo,
+            :repository => current_repository,
+            :user => current_user
+          )
+
+          # this must be wrapped in quotation marks for *nix systems and
+          # peculiarities between various Windows shells
+          echo_phrase = "# #{current_repository.name}"
+          echo_phrase = ['"', echo_phrase, '"'].join
+          echo_phrase += " >> README.md"
+        %>
+
+          <git-clone-help class="Box Box--spacious d-block">
+
+            <div class="Box-header Box-header--blue">
+              <h3><strong>Quick setup</strong> — if you’ve done this kind of thing before</h3>
+
+              <div class="TableObject my-2">
+                <div class="TableObject-item js-remove-unless-platform" data-platforms="windows,mac">
+                  <a href="<%= app_clone_url %>" class="btn btn-sm primary" data-ga-click="Empty repo, click, Clicked Set up in Desktop" <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, :set_up_in_desktop)) %>>
+                    <%= primer_octicon(:"desktop-download") %> Set up in Desktop
+                  </a>
+                </div>
+
+                <div class="TableObject-item js-remove-unless-platform" data-platforms="windows,mac">
+                  <strong class="mx-3">or</strong>
+                </div>
+
+                <div class="TableObject-item">
+                  <div class="BtnGroup d-flex mr-2">
+                    <% view.each_protocol_view do |protocol_view| %>
+                        <%= form_tag protocol_view.sticky_url, :class => "BtnGroup-parent", "data-remote" => true do %>
+                          <button type="submit" class="BtnGroup-item btn btn-sm js-git-protocol-clone-url<% if protocol_view.is_default %> selected<% end %>"
+                                  data-action="click:git-clone-help#updateURL"
+                                  data-targets="git-clone-help.cloneURLButtons"
+                                  data-url="<%= protocol_view.url %>"
+                                  data-ga-click="Empty repo, click, Clicked <%= protocol_view.protocol  %> protocol"
+                                  <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, "copy_url_#{protocol_view.protocol}".downcase.to_sym)) %>>
+                            <%= protocol_view.protocol %>
+                          </button>
+                        <% end %>
+                      <% end %>
+                  </div>
+                </div>
+
+                <div class="TableObject-item TableObject-item--primary">
+                  <div>
+                    <span class="input-group width-full">
+                      <input id="empty-setup-clone-url" type="text" readonly spellcheck="false" class="form-control input-sm input-monospace" data-target="git-clone-help.helpField" value="<%= view.default_url %>" aria-label="Clone URL">
+                      <span class="input-group-button">
+                        <clipboard-copy
+                            for="empty-setup-clone-url"
+                            aria-label="Copy to clipboard"
+                            class="btn btn-sm zeroclipboard-button"
+                            data-ga-click="Empty repo, click, Clicked copy URL"
+                            <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, :copy_url)) %>>
+                          <%= render(Primer::Beta::Octicon.new(icon: "copy")) %>
+                        </clipboard-copy>
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <p class="mb-0">
+                Get started by
+                <%= link_to "creating a new file",
+                    blob_new_path('', tree_name), 'data-ga-click' => "Empty repo, click, Clicked create new file link",
+                    data: repo_empty_state_click_attributes(current_repository, :creating_new_file), class: "Link--inTextBlock" %>
+                or
+                <%= link_to "uploading an existing file",
+                    repo_uploads_path(current_repository.owner, current_repository), 'data-ga-click' => "Empty repo, click, Clicked upload file link",
+                    data: repo_empty_state_click_attributes(current_repository, :uploading_existing_file), class: "Link--inTextBlock" %>.
+
+                We recommend every repository include a
+                <%= link_to "README",
+                  blob_new_path('', tree_name) + '?readme=1', 'data-ga-click' => "Empty repo, click, Clicked README link",
+                  data: repo_empty_state_click_attributes(current_repository, :readme), class: "Link--inTextBlock" %>,
+                <%= link_to "LICENSE",
+                  blob_new_path('', tree_name) + '?filename=LICENSE.md', 'data-ga-click' => "Empty repo, click, Clicked LICENSE link",
+                  data: repo_empty_state_click_attributes(current_repository, :license), class: "Link--inTextBlock" %>,
+                and <%= link_to ".gitignore",
+                  blob_new_path('', tree_name) + '?filename=.gitignore', 'data-ga-click' => "Empty repo, click, Clicked .gitignore link",
+                  data: repo_empty_state_click_attributes(current_repository, :gitignore), class: "Link--inTextBlock" %>.
+              </p>
+            </div>
+
+            <div><!-- Ensure box rows behave properly -->
+              <div class="Box-row">
+                <h3>…or create a new repository on the command line</h3>
+
+                <div class="copyable-terminal">
+                  <div class="copyable-terminal-button">
+                    <clipboard-copy
+                        for="empty-setup-new-repo-echo"
+                        aria-label="Copy to clipboard"
+                        class="btn btn-sm zeroclipboard-button"
+                        data-ga-click="Empty repo, click, Clicked copy new repo commands"
+                        <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, :copy_commands_for_creating_repo)) %>>
+                      <%= render(Primer::Beta::Octicon.new(icon: "copy")) %>
+                    </clipboard-copy>
+                  </div>
+                  <pre id="empty-setup-new-repo-echo" class="copyable-terminal-content f5"><span class="user-select-contain">echo <%= echo_phrase %></span>
+<span class="user-select-contain">git init</span>
+<span class="user-select-contain">git add README.md</span>
+<span class="user-select-contain">git commit -m "first commit"</span>
+<span class="user-select-contain" <%= test_selector("default-branch-git-step") %>>git branch -M <%= shell_safe_name(":branch", current_repository.default_branch) %></span>
+<span class="user-select-contain">git remote add origin <span data-targets="git-clone-help.helpTexts"><%= view.default_url %></span></span>
+<span class="user-select-contain mb-0">git push -u origin <%= shell_safe_name(":branch", current_repository.default_branch) %></span></pre>
+                </div>
+              </div>
+
+              <div class="Box-row">
+                <h3>…or push an existing repository from the command line</h3>
+
+                <div class="copyable-terminal">
+                  <div class="copyable-terminal-button">
+                    <clipboard-copy
+                        for="empty-setup-push-repo-echo"
+                        aria-label="Copy to clipboard"
+                        class="btn btn-sm zeroclipboard-button"
+                        data-ga-click="Empty repo, click, Clicked copy existing repo commands"
+                        <%= safe_data_attributes(repo_empty_state_click_attributes(current_repository, :copy_commands_for_uploading_repo)) %>>
+                      <%= render(Primer::Beta::Octicon.new(icon: "copy")) %>
+                    </clipboard-copy>
+                  </div>
+                  <pre id="empty-setup-push-repo-echo" class="copyable-terminal-content f5"><span class="user-select-contain">git remote add origin <span data-targets="git-clone-help.helpTexts"><%= view.default_url %></span></span>
+<span class="user-select-contain">git branch -M <%= shell_safe_name(":branch", current_repository.default_branch) %></span>
+<span class="user-select-contain">git push -u origin <%= shell_safe_name(":branch", current_repository.default_branch) %></span></pre>
+                </div>
+              </div>
+            </div>
+          </git-clone-help>
+
+          <div class="protip">
+            <%= primer_octicon(:"light-bulb", color: :muted) %>
+            <strong>ProTip!</strong> Use the URL for this page when adding GitHub as a remote.
+          </div>
+      <% end %>
+    <% else %>
+      <%= render :partial => "repositories/states/nothing_partial" %>
+    <% end %>
+  </div>
+<% end %>

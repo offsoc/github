@@ -1,0 +1,174 @@
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+
+<%
+  deferred_comment_actions = local_assigns.fetch(:deferred_comment_actions, false)
+  deferred_edit_form = local_assigns.fetch(:deferred_edit_form, false)
+
+  href = "#{dom_id}-minimized"
+  permalink_id = "#{href}-permalink"
+  legacy_commit_comment = nil unless local_assigns.key?(:legacy_commit_comment)
+  pull_request_review_comment = comment.is_a?(PlatformTypes::PullRequestReviewComment)
+  can_update = !deferred_edit_form && comment.is_a?(PlatformTypes::Updatable) && comment.viewer_can_update? && form_path
+%>
+
+<% if comment.viewer_can_see? %>
+  <details class="Details-element details-reset <%= "border rounded-2 color-bg-default" unless pull_request_review_comment %>"
+       data-body-version="<%= comment.body_version %>">
+  <% if comment.is_a?(PlatformTypes::PullRequestReviewComment) %>
+    <summary class="color-fg-muted f6">
+      <div class="d-flex flex-justify-between flex-items-center">
+        <h3 class="review-comment-contents color-bg-default f5 text-normal text-italic" style="margin-left:38px">
+          <div class="discussion-item-icon discussion-item-icon-gray color-fg-muted">
+            <%= primer_octicon(:fold) %>
+          </div>
+          <div class="d-inline-block">
+            <%= render partial: "comments/minimized_comment_header", locals: {
+                  minimized_by_staff: comment.minimized_by_staff?,
+                  minimized_reason: comment.minimized_reason,
+                  spammy: comment.spammy?
+            } %>
+          </div>
+        </h3>
+        <div class="Details-content--closed btn-link color-fg-muted"><%= primer_octicon(:unfold, mr: 1) %>Show comment</div>
+        <div class="Details-content--open btn-link color-fg-muted"><%= primer_octicon(:fold, mr: 1) %>Hide comment</div>
+      </div>
+    </summary>
+  <% else %>
+    <summary class="color-bg-subtle border-bottom-0 py-0 px-2">
+      <div class="d-flex flex-justify-between flex-items-center">
+        <h3 class="timeline-comment-header-text f5 color-fg-muted text-normal text-italic">
+          <%= render partial: "comments/minimized_comment_header", locals: {
+                minimized_by_staff: comment.minimized_by_staff?,
+                minimized_reason: comment.minimized_reason,
+                spammy: comment.spammy?
+          } %>
+        </h3>
+        <div class="Details-content--closed color-fg-muted f6 no-wrap"><%= primer_octicon(:unfold, position: :relative, mr: 1) %>Show comment</div>
+        <div class="Details-content--open color-fg-muted f6 no-wrap"><%= primer_octicon(:fold, position: :relative, mr: 1) %>Hide comment</div>
+      </div>
+    </summary>
+  <% end %>
+    <div class="<%= pull_request_review_comment ? "py-2 pl-6 pr-0" : "review-comment border-top pt-3" %>">
+      <div class="previewable-edit <%= "js-comment" if comment.is_minimized? %> js-task-list-container <%= "reorderable-task-lists" if logged_in? %>">
+        <div class="edit-comment-hide">
+          <div class="timeline-comment-actions">
+          <% if deferred_comment_actions %>
+            <%= render partial: "comments/comment_header_actions_deferred",
+              locals: {
+                comment: comment,
+                form_path: form_path,
+                permalink_id: permalink_id,
+                href: href,
+                minimized_comment_partial: true
+              }
+            %>
+          <% else %>
+            <%= render partial: "comments/comment_header_actions",
+              locals: {
+                comment: comment,
+                form_path: form_path,
+                permalink_id: permalink_id,
+                minimized_comment_partial: true
+              }
+            %>
+          <% end %>
+          </div>
+          <% if comment.author %>
+            <%= linked_avatar_for(comment.author, 28, img_class: "avatar", link_class: "float-left mt-1") %>
+          <% else %>
+            <%# TODO: Remove links to the ghost user profile %>
+            <%= linked_avatar_for(User.ghost, 28, img_class: "avatar", link_class: "float-left mt-1") %>
+          <% end %>
+          <div class="review-comment-contents">
+            <h4 class="f5 text-normal d-inline color-fg-default">
+              <strong class="color-fg-muted">
+                <%= render "comments/actor", actor: comment.author %>
+              </strong>
+              <span class="color-fg-muted">
+                <% if comment.published_at %>
+                  <a href="<%= "##{dom_id}" %>" id="<%= permalink_id %>" class="Link--secondary"><%= time_ago_in_words_js comment.published_at %></a>
+                <% end %>
+              </span>
+              <% if comment.spammy? %>
+                <%= render(Primer::Beta::Label.new(scheme: :danger, ml: 2, classes: "tooltipped tooltipped-multiline tooltipped-s",
+                  aria: { label: "This user is marked as spammy. Their comments will only show in staff mode." }
+                )) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                  Spammy
+                <% end %>
+              <% end %>
+            </h4>
+            <%= render Comments::CommentAuthorAssociationComponent.new(comment: comment) %>
+            <%= render(partial: "comments/subject_author_badge", locals: { viewer_did_author: comment.viewer_did_author, subject_type: comment.subject_type }) if comment.authored_by_subject_author %>
+            <task-lists disabled sortable>
+              <div class="comment-body markdown-body p-0 pt-1 js-comment-body <%= "email-format" if comment.created_via_email? %>">
+                <% if comment.body_html.present? %>
+                  <%= comment.body_html %>
+                <% else %>
+                  <p class="color-fg-muted">
+                    <em>No description provided.</em>
+                  </p>
+                <% end %>
+              </div>
+            </task-lists>
+          </div>
+        </div>
+
+        <%= form_tag form_path, :method => :put, :class => "js-comment-update", :id => nil, "data-type" => "json" do %>
+          <% if deferred_edit_form %>
+            <%= render Comments::DeferredEditFormComponent.new(form_path: form_path, comment_context: comment_context, textarea_id: "#{dom_id}-minimize-comment-body") %>
+          <% else %>
+            <% if can_update %>
+              <%
+                saved_reply_context = if comment.is_a?(PlatformTypes::PullRequest)
+                  "pull_request"
+                elsif comment.is_a?(PlatformTypes::Issue)
+                  "issue"
+                elsif comment.is_a?(PlatformTypes::IssueComment)
+                  comment.pull_request ? "pull_request_comment" : "issue"
+                end
+              %>
+              <%= render Comments::EditForm::EditFormComponent.new(
+                comment: comment,
+                comment_context: comment_context,
+                textarea_id: "#{dom_id}-minimize-comment-body",
+                saved_reply_context: saved_reply_context,
+                current_repository: try(:current_repository)
+              ) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </details>
+<% else %>
+  <div class="<%= "border rounded-2 color-bg-default" unless pull_request_review_comment %>">
+    <% if comment.is_a?(PlatformTypes::PullRequestReviewComment) %>
+      <div class="color-fg-muted f6 d-flex flex-justify-between flex-items-center">
+       <div class="review-comment-contents color-bg-default f5 text-normal text-italic" style="margin-left:38px">
+        <div class="discussion-item-icon discussion-item-icon-gray color-fg-muted">
+          <%= primer_octicon(:fold) %>
+        </div>
+        <div class="d-inline-block">
+          <%= render partial: "comments/minimized_comment_header", locals: {
+                minimized_by_staff: comment.minimized_by_staff?,
+                minimized_reason: comment.minimized_reason,
+                spammy: comment.spammy?
+          } %>
+        </div>
+       </div>
+      </div>
+    <% else %>
+      <div class="color-bg-subtle border-bottom-0 py-0 px-2">
+        <div class="d-flex flex-justify-between flex-items-center">
+          <div class="timeline-comment-header-text f5 color-fg-muted text-normal text-italic">
+            <%= render partial: "comments/minimized_comment_header", locals: {
+                  minimized_by_staff: comment.minimized_by_staff?,
+                  minimized_reason: comment.minimized_reason,
+                  spammy: comment.spammy?
+            } %>
+          </div>
+        </div>
+      </div>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "csv"
+require "json"
+require "pathname"
+
+class CsvTestResult
+  def self.generate(log_output, io: STDOUT)
+    test_results = log_output.scan(/\n===(TEST RESULT|FAILURE)===$(.*?)^===(END RESULT|END FAILURE)===\n/m).map do |match_groups|
+      begin
+        JSON.parse(match_groups[1])
+      rescue JSON::ParserError
+        nil
+      end
+    end.compact
+
+    rows = test_results.each_with_object({}) do |test_result, hash|
+      suite = test_result.fetch("suite")
+      name = test_result.fetch("name").gsub(/_L\d+/, "")
+      key = suite + name
+
+      existing_entry = hash[key]
+      if existing_entry && existing_entry.last == "failed"
+        # Keep the most pessimistic outcome
+        next
+      else
+        outcome = find_outcome(test_result)
+        hash[key] = [suite, name, outcome]
+      end
+    end.values
+
+    CSV(io) do |csv|
+      csv << %w[suite name outcome]
+      rows.each { |row| csv << row }
+    end
+  end
+
+  def self.find_outcome(test_result)
+    if test_result["skipped"]
+      "skipped"
+    elsif test_result["failed"]
+      "failed"
+    elsif test_result["passed"]
+      "passed"
+    else
+      "unknown"
+    end
+  end
+end
+
+def bail(message = nil)
+  STDERR.puts "Usage: #{__FILE__} <path to test run output log>"
+  STDERR.puts message if message
+  exit 1
+end
+
+bail unless ARGV.first
+test_output_file = Pathname(ARGV.first)
+bail("#{test_output_file} not found") unless test_output_file.exist?
+
+CsvTestResult.generate(test_output_file.read)

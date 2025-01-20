@@ -1,0 +1,51 @@
+#!/bin/bash
+set -e
+
+echo "*** Setup GHCR"
+cd /workspaces/github
+script/setup-codespaces-ghcr
+
+echo "*** Modifying launch to not use results service"
+cd /workspaces/actions/launch
+linenumber=$(grep -n -E "func UsingResultsService\(\) bool {$" pkg/launchconfig/globalcfg.go | sed -E 's/(.*):.*/\1/')
+if [ -n "$linenumber" ]; then # Allow for this script having run before
+  sed -i "${linenumber},${linenumber}s/$/ return false } \/*/" pkg/launchconfig/globalcfg.go
+  sed -i "${linenumber},$(( linenumber + 8 ))s/^}/ } *\//" pkg/launchconfig/globalcfg.go
+fi
+
+echo "*** Setup Actions"
+echo "*** Optional: in another pane do: watch -d -n 1 kubectl get deployments"
+cd /workspaces/actions/actions-codespaces
+script/setup --scenario actions-three-nines-launch-kredz
+
+echo "*** Setup npm-registry/container-registry"
+echo "export ADDR=:8003" > /workspaces/packages/npm-registry/.env
+
+echo "*** Creating /workspaces/logs"
+mkdir -p /workspaces/logs
+
+echo "*** Killing registry-metadata container-registry"
+for service in registry-metadata container-registry; do
+  pid=$(ps aux | grep "$service" | grep -v grep | awk '{print $2}')
+  if [ -n "$pid" ]; then
+    echo "Killing $service - $pid"
+    kill $pid
+  fi
+done
+
+echo "*** Modifying RMS as per https://github.com/github/package-registry-team/issues/7439"
+cd /workspaces/packages/registry-metadata
+# Hard to make git apply work when copy-pasting a diff file from markdown, due to whitespace I think.
+# So the following sed command replaces the function IsFeatureEnabledGlobally with a return true, nil
+# Dependent on the existing closing brace being within 40 lines of the start
+linenumber=$(grep -n -E "cachingClient\) IsFeatureEnabledGlobally.*{$" rms/features/client.go | sed -E 's/(.*):.*/\1/')
+if [ -n "$linenumber" ]; then # Allow for this script having run before
+  sed -i "${linenumber},${linenumber}s/$/ return true, nil } \/*/" rms/features/client.go
+  sed -i "${linenumber},$(( linenumber + 50 ))s/^}/ } *\//" rms/features/client.go
+fi
+
+cd /workspaces/github
+
+echo "***"
+echo "To start package registry services in separate terminals, use 'Start immutable actions services' from the command palette"
+echo "***"

@@ -1,0 +1,128 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    ... on Repository {
+      id
+    }
+
+    ... on Organization {
+      id
+    }
+
+    ... on User {
+      id
+    }
+
+    project(number: $projectNumber) {
+      closed
+      closedAt
+      updatedAt
+      name
+      publicProjectOrOwner
+      viewerCanUpdate
+      metadataWebsocket
+      number
+      lockedForResyncBy
+      resourcePath
+
+      ...Views::Projects::ChangeState::Project
+      ...Views::Projects::ShowProgress::Project
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_owner = Views::Projects::Header::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<div class="d-flex flex-justify-between flex-items-center f6 js-updatable-content js-socket-channel d-none d-lg-block"
+     data-channel="<%= live_update_view_channel(project.metadata_websocket) %>"
+     data-url="<%= show_project_node_partial_path(path: "projects/header", id: project_owner.id, variables: { projectNumber: project.number }) %>">
+  <div class="d-flex flex-row flex-items-center f6">
+    <% if project.locked_for_resync_by %>
+      <%= render(Primer::Beta::Spinner.new(mr: 2, "aria-label": "Waiting for project resync to complete")) %>
+    <% end %>
+    <div class="d-table-cell position-relative">
+      <div class="d-flex flex-items-center f5 mb-1">
+        <% if !project.public_project_or_owner? %>
+          <span class="tooltipped tooltipped-e mr-2" aria-label="This project is private."><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+            <%= primer_octicon(:lock, color: :muted) %>
+          </span>
+        <% end %>
+
+        <% hovercard_attributes = hovercard_data_attributes_for_project(resource_path: project.resource_path, with_timestamp: true) %>
+
+        <div class="Details js-details-container project-name-hover">
+          <div class="Details-content--shown js-project-hovercard <%= safe_data_attributes(hovercard_attributes) %>">
+            <h2 style="cursor: pointer" class="d-inline f5 js-project-name-label">
+              <%= project.name %>
+            </h2>
+
+            <% if project.viewer_can_update? %>
+              <%= render Primer::ButtonComponent.new(scheme: :link, ml: 2, classes: "js-details-target project-name-edit-action", "aria-expanded": "true") do %>
+                Edit
+              <% end %>
+            <% end %>
+          </div>
+
+          <% if project.viewer_can_update? %>
+            <div class="Details-content--hidden">
+              <%= form_with(
+                url: project.resource_path.to_s,
+                scope: :project,
+                method: :put,
+                html: {
+                  class: "js-project-name-update",
+                  "data-fallback-error-message": "Something went wrong. Please try again."
+                },
+              ) do |f| %>
+                <div class="form-group js-project-form-group js-remove-error-state-on-click d-flex flex-column flex-md-row width-full m-0">
+                  <div class="form-group-body">
+                    <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>" class="flex-auto d-flex">
+                      <%= f.text_field(
+                        :name,
+                        class: "js-quick-submit",
+                        autofocus: true,
+                        autocomplete: "off",
+                        value: project.name,
+                        "aria-label": "Project name",
+                        "aria-describedby": "title-input-validation",
+                      ) %>
+                    </text-expander>
+                    <p id="title-input-validation" class="note error js-project-form-error"></p>
+                  </div>
+                  <div class="mt-2 mt-md-0">
+                    <%= render Primer::ButtonComponent.new(mr: 2, type: :submit, "data-disable-with": "Updating") do %>
+                      Save
+                    <% end %>
+                    <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-details-target", "aria-expanded": "true") do %>
+                      Cancel
+                    <% end %>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+
+        <div class="ml-3 d-inline-block"><%= render partial: "projects/show_progress", locals: { project: project } %></div>
+      </div>
+      <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-show-project-menu Link--secondary") do %>
+        <% if project.closed? %>
+          <%= render Primer::Beta::Label.new(mr: 2,  scheme: :danger, title: "Closed on #{full_month_date project.closed_at}") do %>
+            Closed
+          <% end %>
+        <% end %>
+        <% if project.locked_for_resync_by %>
+          <span>Re-syncing automation...</span>
+        <% else %>
+          <span>
+            Updated <%= time_ago_in_words_js project.updated_at %>
+          </span>
+        <% end %>
+      <% end %>
+      <% if project.locked_for_resync_by %>
+        <%= render partial: "projects/lock_popover", locals: { message: "Re-syncing automation", description: "re-syncing outdated automation events", user: project.locked_for_resync_by } %>
+      <% end %>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,77 @@
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%
+  plan = view.account.plan
+
+  usage = Billing::SharedStorageUsage.usage_quote(view.account)
+  org_usage = BillingSettings::OverviewView::SharedStorageUsage.new(view.account, usage: usage)
+
+  usage = Billing::SharedStorageUsage.usage_quote(view.account.business)
+  business_usage = BillingSettings::OverviewView::SharedStorageUsage.new(view.account.business, usage: usage)
+
+  has_error = org_usage.has_error? || business_usage.has_error?
+  data = {
+    org_usage: org_usage.estimated_monthly_private_gigabytes,
+    other_orgs_usage: business_usage.estimated_monthly_private_gigabytes - org_usage.estimated_monthly_private_gigabytes,
+    available_usage: business_usage.plan_included_megabytes_in_gigabytes - business_usage.estimated_monthly_private_gigabytes,
+    quota: business_usage.plan_included_megabytes_in_gigabytes,
+    business_usage: business_usage.estimated_monthly_private_gigabytes,
+    business_usage_percentage: usage.included_usage_percentage
+  } unless has_error
+%>
+
+<% if view.product_moved_to_vnext?(view.account.business, :actions) %>
+  <div <%= test_selector "actions-usage-component" %>>
+    <%= render(Primer::Box.new( color: :muted, text_align: :center)) do %>
+      <%= render(Primer::Beta::Text.new(tag: :p, my: 3)) do %>
+        <%= render(Primer::Beta::Octicon.new(icon: :stop, color: :muted, mr: 2)) %>
+        View your usage through the <%= link_to "new Billing experience", enterprise_billing_usage_path(view.account.business.slug), class: "Link--inTextBlock" %>.
+      <% end %>
+    <% end %>
+  </div>
+<% elsif has_error %>
+  <div class="Box-row py-4">
+    <div class="color-fg-muted text-center">
+      <%= primer_octicon(:stop, color: :muted, mr: 2) %>
+      Error: Unable to load the data at this time.
+      <%= link_to "Refresh", "", class: "Link--inTextBlock" %>
+      the page or try again later.
+    </div>
+  </div>
+<% else %>
+  <div>
+    <div class="Box-row py-2 d-flex flex-items-center flex-justify-between color-fg-muted">
+      <div class="pl-6 ml-1 my-1 col-6">
+        <div class="d-flex flex-items-baseline mb-1">
+          <div class="flex-auto d-inline-block text-bold">Storage</div>
+          <div class="text-small d-inline-block">
+            <strong><%= number_with_delimiter(data[:org_usage]) %></strong> GB used
+          </div>
+        </div>
+        <%
+          tooltip_text = "#{number_with_precision(data[:org_usage], precision: 2)} GB used by this org, #{number_with_precision(data[:other_orgs_usage], precision: 2)} GB used by other orgs and #{number_with_precision(data[:available_usage], precision: 2)} GB left."
+        %>
+        <div class="billing-box-progress tooltipped tooltipped-s tooltipped-no-delay" aria-label="<%= tooltip_text %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+          <%= render(Primer::Beta::ProgressBar.new(size: :small)) do |component| %>
+            <% if data[:business_usage_percentage] < 100 %>
+              <%
+                org_progress_color = data[:business_usage_percentage] <= 75 ? :accent_emphasis : :attention_emphasis
+                other_orgs_progress_color = data[:business_usage_percentage] <= 75 ? :accent : :attention
+                org_usage_percentage = (data[:org_usage] / data[:quota].to_f) * 100
+                other_orgs_usage_percentage = (data[:other_orgs_usage] / data[:quota].to_f) * 100
+              %>
+            <% else %>
+              <%
+                org_progress_color = :accent_emphasis
+                other_orgs_progress_color = :accent
+                org_usage_percentage = (data[:org_usage] / data[:business_usage].to_f) * 100
+                other_orgs_usage_percentage = (data[:other_orgs_usage] / data[:business_usage].to_f) * 100
+              %>
+            <% end %>
+            <% component.with_item(bg: org_progress_color, percentage: org_usage_percentage) %>
+            <% component.with_item(bg: other_orgs_progress_color, percentage: other_orgs_usage_percentage) %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+<% end %>

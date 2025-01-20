@@ -1,0 +1,4 @@
+export const COPILOT_BUSINESS_LICENSE_COST = 19
+export const COPILOT_ENTERPRISE_LICENSE_COST = 39
+export const PAGE_SIZE = 10
+export const REDESIGN_PAGE_SIZE = 25

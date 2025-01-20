@@ -1,0 +1,103 @@
+<% if request_timed_out %>
+  <%= render partial: "code_navigation/timed_out", locals: {
+      nav_kind: "definitions",
+      nav_url: code_nav_definition_path(current_repository.owner, current_repository, path_params),
+      backend: backend,
+      language: language,
+      code_nav_context: code_nav_context,
+    } %>
+<% elsif locations.present? %>
+  <div class="flex-auto d-flex flex-justify-between f6 px-3 py-1 text-small color-bg-subtle">
+
+    <% if locations.size == 1 %>
+      <%
+        tag = locations.first
+        line = tag.ident.start.line
+        row = line + 1
+        target_repo = repos_by_location.fetch(tag, current_repository)
+        target_oid = tag.pkg&.commit_oid || commit_oid
+        url = blob_path(tag.path, target_oid, target_repo)
+        path = "#{url}#L#{row}"
+        is_cross_repo = aleph_cross_repo_jump_to_definition_enabled? && tag.pkg&.repository_id != current_repository.id
+        display_path = is_cross_repo ? "#{target_repo.name_with_display_owner}:#{tag.path}" : tag.path
+      %>
+
+      <% if tag.path == params["blob_path"] %>
+        <% if line == params["row"].to_i %>
+          <span class="text-bold v-align-middle">
+            This is the definition
+          </span>
+        <% else %>
+          <span class="v-align-middle">
+            Defined on <%= link_to("line #{row}", path, class: "Link--primary text-bold") %>
+          </span>
+        <% end %>
+      <% else %>
+        <div>
+          Defined in <%= link_to(display_path, path, class: "no-underline color-fg-default Link--onHover text-bold") %>
+        </div>
+      <% end %>
+    <% else %>
+      <div class="color-fg-muted">
+        Present in
+        <span class="color-fg-default text-bold">
+          <%= pluralize(locations.index_by(&:path).size, "file") %>
+        </span>
+      </div>
+    <% end %>
+
+    <% if is_cross_repo %>
+      <%= render(Primer::Beta::Label.new) { "Cross-repo result" } %>
+    <% elsif aleph_show_proxy_backend_enabled? %>
+      <i><%= display_backend_name(backend) %></i>
+    <% end %>
+  </div>
+
+  <% locations_by_path.each do |path, path_locations| %>
+    <% if locations_by_path.size > 1 %>
+      <%
+        tag = path_locations.first
+        is_cross_repo = aleph_cross_repo_jump_to_definition_enabled? && tag.pkg&.repository_id != current_repository.id
+        target_repo = repos_by_location.fetch(tag, current_repository)
+        file_location = is_cross_repo ? "#{target_repo.name_with_display_owner}:#{path}" : path
+      %>
+      <div class="flex-auto d-flex flex-justify-between f6 px-3 py-1 color-bg-default border-top"
+           style="position: sticky; position: -webkit-sticky; position: -moz-sticky;
+                  top:'34px'; z-index: 1;">
+        <span class="text-bold css-truncate css-truncate-target" title="<%= file_location %>" style="max-width: 100% !important;"><%= file_location %></span><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+        <%= render(Primer::Beta::Label.new) { "Cross-repo result" } if is_cross_repo %>
+      </div>
+    <% end %>
+    <ul class="TagsearchPopover-list <%= 'border-top' unless locations_by_path.size > 1 %>">
+      <%= render partial: "code_navigation/location", collection: path_locations, locals: {
+            click_tracking_id: "navigate_to_definition",
+            ref: ref,
+            repos_by_location: repos_by_location,
+            language: language,
+            commit_oid: commit_oid,
+            backend: backend,
+            code_nav_context: code_nav_context,
+          }
+      %>
+    </ul>
+  <% end %>
+  <% if available_backends.length > 1 %>
+    <% retry_backend_value = retry_backend(backend, available_backends) %>
+    <% path_params[:backend] = display_backend_name(retry_backend_value) %>
+    <%= render partial: "code_navigation/results_backend", locals: { action: "retry_definition", retry_backend: retry_backend_value, data_kind: "definitions", display_backend: display_backend_name(backend), retry_url: code_nav_definition_path(current_repository.owner, current_repository, path_params), backend: backend, code_nav_context: code_nav_context, language: language } %>
+  <% end %>
+<% elsif available_backends.length > 1 %>
+    <% retry_backend_value = retry_backend(backend, available_backends) %>
+    <% path_params[:backend] = display_backend_name(retry_backend_value) %>
+    <%= render partial: "code_navigation/no_results", locals: { action: "retry_definition", retry_backend: retry_backend_value, data_kind: "definitions", display_backend: display_backend_name(backend), retry_url: code_nav_definition_path(current_repository.owner, current_repository, path_params), backend: backend, code_nav_context: code_nav_context, language: language } %>
+<% elsif backend == :ALEPH_PRECISE || backend == :ALEPH_PRECISE_PREVIEW || backend == :ALEPH_PRECISE_DEVELOPMENT %>
+    <% retry_backend_value = :BLACKBIRD %>
+    <% path_params[:backend] = display_backend_name(retry_backend_value) %>
+    <%= render partial: "code_navigation/no_results", locals: { action: "retry_definition", retry_backend: retry_backend_value, data_kind: "definitions", display_backend: display_backend_name(backend), retry_url: code_nav_definition_path(current_repository.owner, current_repository, path_params), backend: backend, code_nav_context: code_nav_context, language: language } %>
+<% elsif backend == :BLACKBIRD && is_retry %>
+  <% retry_backend_value = :ALEPH_PRECISE %>
+  <% path_params[:backend] = display_backend_name(retry_backend_value) %>
+  <%= render partial: "code_navigation/no_results", locals: { action: "retry_definition", retry_backend: retry_backend_value, data_kind: "definitions", display_backend: display_backend_name(backend), retry_url: code_nav_definition_path(current_repository.owner, current_repository, path_params), backend: backend, code_nav_context: code_nav_context, language: language } %>
+<% else %>
+  <span class="js-tagsearch-no-definitions"></span>
+<% end %>

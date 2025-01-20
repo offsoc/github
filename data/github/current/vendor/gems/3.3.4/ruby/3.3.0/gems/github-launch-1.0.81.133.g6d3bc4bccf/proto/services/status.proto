@@ -1,0 +1,254 @@
+syntax = "proto3";
+package git_hub.launch.services.status;
+
+option go_package = "github.com/github/launch/services/deploy/status";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service LaunchStatusService {
+    // JobStatus is used for posting job status as it comes in from AZP
+    rpc JobStatus(JobStatusRequest) returns (google.protobuf.Empty);
+
+    // RunStatus is used for posting run/workflow status as it comes in from AZP
+    rpc RunStatus(RunStatusRequest) returns (google.protobuf.Empty);
+
+    // GateStatus is used for posting gate status as it comes in from AZP
+    rpc GateStatus(GateStatusRequest) returns (google.protobuf.Empty);
+}
+
+enum Status {
+    STATUS_NONE = 0;
+    STATUS_NOT_STARTED = 1;
+    STATUS_IN_PROGRESS = 2;
+    STATUS_POSTPONED = 3;
+    STATUS_CANCELLING = 4;
+    STATUS_ALL = 5;
+    STATUS_COMPLETED = 6;
+    STATUS_PENDING = 7;
+}
+
+enum Result {
+    RESULT_NONE = 0;
+    RESULT_CANCELED = 1;
+    RESULT_FAILED = 2;
+    RESULT_PARTIALLY_SUCCEEDED = 3;
+    RESULT_SUCCEEDED = 4;
+    RESULT_SKIPPED = 5;
+}
+
+enum AnnotationLevel {
+    LEVEL_UNKNOWN = 0;
+    LEVEL_NOTICE = 1;
+    LEVEL_WARNING = 2;
+    LEVEL_FAILURE = 3;
+}
+
+message Annotation {
+    AnnotationLevel annotation_level = 1;
+    // Description of the issue (ex. the type of an exception)
+    string message = 2;
+    // Optional issue details (ex. stack trace for an exception)
+    string raw_details = 3;
+    // Path of the file to add an annotation to
+    string path = 4;
+    // Start line of the annotation
+    int64 start_line = 5;
+    // End line of the annotation
+    int64 end_line = 6;
+    // Start column of the annotation. Annotations only support start_column and end_column on the same line. Omit this parameter if start_line and end_line have different values.
+    int64 start_column = 7;
+    // End column of the annotation. Annotations only support start_column and end_column on the same line. Omit this parameter if start_line and end_line have different values.
+    int64 end_column = 8;
+    // The title that represents the annotation. The maximum size is 255 characters.
+    string title = 9;
+    // The step number in logs the annotation was generated from if applicable
+    int64 step_number = 10;
+}
+
+// Payload of an incoming LaunchStatusService.JobStatus RPC
+message JobStatusRequest {
+    // Workflow ID in launch DB
+    string workflow_id = 1;
+    // JobID created by provider
+    string job_id = 2;
+    // External ID from provider
+    string external_id = 3;
+    // Zero indexed order of this job in jobs for the workflow
+    int64 number = 4;
+    // The name for the UI
+    string display_name = 5;
+    // The key in the job map
+    repeated Artifact artifacts = 6;
+    repeated JobStep steps = 7;
+
+    oneof Progress {
+        JobInProgress in_progress = 8;
+        JobComplete complete = 9;
+    }
+
+    repeated Annotation annotations = 10;
+
+    string job_key = 11;
+    string runtime = 12;
+    string runtime_version = 13;
+    bool self_hosted = 14;
+    int64 duration_ms = 15;
+    bool delayed = 16;
+    Environment environment = 17;
+    string parent_job_id = 18;
+    Concurrency concurrency = 19;
+    repeated string labels = 20;
+    int64 runner_id = 21;
+    string runner_name = 22;
+    int64 runner_group_id = 23;
+    string runner_group_name = 24;
+    bool is_cloned_from_previous_run = 25;
+    string runner_properties = 26;
+    string runner_type = 27;
+    string billable_owner_id = 28;
+    google.protobuf.Timestamp queued_at = 29;
+    string product_sku = 30;
+    int64 customer_id = 31;
+}
+
+message JobInProgress {
+    google.protobuf.Timestamp started_at = 1;
+    Status status = 2;
+    // Metadata for streaming the logs
+    LogStream log_stream = 3;
+    Log log = 4;
+}
+
+message JobComplete {
+    google.protobuf.Timestamp started_at = 1;
+    google.protobuf.Timestamp completed_at = 2;
+    // Resulting state of the job
+    Result result = 3;
+    Log log = 4;
+    string summary_url = 5;
+}
+
+message JobStep {
+    // External ID from provider
+    string external_id = 1;
+    // Zero indexed order in the list of steps
+    int64 number = 2;
+    // The name for the UI
+    string name = 3;
+
+    oneof Progress {
+        StepInProgress in_progress = 4;
+        StepComplete complete = 5;
+        StepQueued queued = 6;
+    }
+}
+
+message StepQueued {
+}
+
+message StepInProgress {
+    Status status = 1;
+    google.protobuf.Timestamp started_at = 2;
+}
+
+message StepComplete {
+    Result result = 1;
+    google.protobuf.Timestamp started_at = 2;
+    google.protobuf.Timestamp completed_at = 3;
+    Log log = 4;
+}
+
+message Artifact {
+    string name = 1;
+    // Size of the artifact in bytes
+    int64 size = 2;
+    string url = 3;
+    google.protobuf.Timestamp created_at = 4;
+    google.protobuf.Timestamp expires_at = 5;
+}
+
+message Environment {
+    string name = 1;
+    string url = 2;
+}
+
+message Concurrency {
+    string group = 1;
+    WaitingOnResource waiting_on_resource = 2;
+}
+
+message WaitingOnResource {
+    string run_external_id = 1;
+    string job_external_id = 2;
+    string identifier = 3;
+}
+
+message Log {
+    string url = 1;
+    // Number of lines in the log
+    int64 lines = 2;
+    google.protobuf.Timestamp created_at = 3;
+}
+
+message LogStream {
+    string url = 1;
+    // Auth token for the log stream
+    string token = 2;
+    // Expiration time of the auth token
+    google.protobuf.Timestamp expires_at = 3;
+}
+
+enum RunStatus {
+    COMPLETED = 0;
+    PENDING = 1;
+}
+
+enum RunConclusion {
+    // handle backend not sending it - can be removed when it does
+    NOT_PROVIDED = 0;
+    CANCELED = 1;
+    FAILED = 2;
+    SUCCEEDED = 3;
+    SKIPPED = 4;
+}
+
+message RunComplete {
+    RunStatus status = 1;
+    google.protobuf.Timestamp started_at = 2;
+    RunConclusion conclusion = 3;
+    google.protobuf.Timestamp completed_at = 4;
+    google.protobuf.Timestamp expires_at = 5;
+    bool is_infra_failure = 6;
+}
+
+message RunNotStarted {
+    RunStatus status = 1;
+}
+
+// Payload of an incoming LaunchStatusService.RunStatus RPC
+message RunStatusRequest {
+    // Workflow ID in launch DB
+    string workflow_id = 1;
+    Log completed_log = 2;
+    repeated Artifact artifacts = 3;
+
+    oneof Progress {
+        RunComplete complete = 4;
+        RunNotStarted not_started = 7;
+    }
+
+    repeated Annotation annotations = 5;
+    Concurrency concurrency = 6;
+}
+
+// Payload of an incoming LaunchStatusService.GateStatus RPC
+message GateStatusRequest {
+    string gate_id = 1;
+    string external_id = 2;
+    string type = 3;
+    string token = 4;
+    bool is_open = 5;
+    bool is_concluded = 6;
+    google.protobuf.Timestamp deadline = 7;
+}

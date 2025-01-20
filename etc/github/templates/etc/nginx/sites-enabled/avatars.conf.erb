@@ -1,0 +1,40 @@
+server {
+
+  <% if cluster_ha_primary? -%>
+  listen 9100;
+  listen [::]:9100;
+  <% else -%>
+  listen 127.0.0.1:9100;
+  listen [::1]:9100;
+  <% end -%>
+  server_name <%= "avatars.#{@config["github-hostname"]}" %>;
+
+  access_log /var/log/nginx/avatars.log main;
+  error_log  /var/log/nginx/avatars.error.log;
+
+  client_max_body_size 1g;
+  # Don't spill requests to disk if they don't fit in proxy_buffers
+  proxy_request_buffering off;
+  proxy_max_temp_file_size 0;
+
+  # Setup path for private mode authentication.
+  #
+  # WARNING: This include needs to be above other includes and location blocks
+  # so the auth request locations aren't hijacked by another location.
+  include /etc/nginx/private_mode_server_include.conf;
+  include /etc/nginx/private_mode_location_include.conf;
+  include /etc/nginx/common/error_pages.conf;
+
+  location / {
+    rewrite ^/(.*)$ /avatars/$1 break;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Host $http_host;
+    proxy_pass http://alambic_upstream;
+  }
+
+  location @custom_404 {
+    root /data;
+    try_files /github/current/public/images/gravatars/gravatar-user-420.png =404;
+  }
+
+}

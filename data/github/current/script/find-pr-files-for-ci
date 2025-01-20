@@ -1,0 +1,109 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "octokit"
+require "optparse"
+
+def exit_with_error(msg, err = nil)
+  $stderr.puts msg
+  $stderr.puts err unless err.nil?
+  exit 1
+end
+
+def github_token
+  # Make this script work both in Janky, GitHub Actions, and Codespaces by trying a couple of variables
+  github_token = ENV.fetch("GAUNTLET_TESTS_API_TOKEN", ENV["GITHUB_TOKEN"])
+
+  if running_on_resiliency_mirror?
+    github_token = ENV["BP_GITHUB_MIRROR_TOKEN"]
+  end
+
+  if github_token.nil?
+    exit_with_error "GITHUB_TOKEN or GAUNTLET_TESTS_API_TOKEN environment variable must be set"
+  end
+
+  github_token
+end
+
+def get_primary_pr_by_sha(client, sha)
+  # prs_for_sha will contain all PRs that include the given commit SHA, whether that's directly or through a merge commit
+  # onto another PR branch. We only want to consider PRs that have the current SHA as the head commit.
+  begin
+    prs_for_sha = client.commit_pulls("github/github", sha)
+  rescue Octokit::ServerError => e
+    exit_with_error "Failed to get PRs for commit '#{sha}' due to error", e
+  end
+
+  prs_for_sha.find { |pr| pr[:head][:sha] == sha }
+end
+
+def get_pr_files(client, pr, valid_file_states, max_files: 30, num_files: 30)
+  return [] if pr.nil?
+  pr_files = []
+  begin
+    page = 1
+    while pr_files.size < max_files
+      last_files = client.pull_request_files("github/github", pr.number, { per_page: num_files, page: page })
+      pr_files += last_files.select { |f| valid_file_states.include?(f.status) }
+      page += 1
+      # if we get less files than what's requested per page, then we have exceeded the number of changed files in the PR
+      break if last_files.size < num_files
+    end
+  rescue Octokit::ServerError => e
+    exit_with_error "Failed to get files in PR #{pr.number}", e
+  end
+
+  pr_files.map(&:filename)
+end
+
+def parse_options
+  options = {
+    file_states: %w[added modified renamed copied changed]
+  }
+
+  OptionParser.new do |parser|
+    parser.banner = "Usage: script/find-pr-files-for-ci SHA_ID [OPTIONS]"
+
+    parser.on("-s", "--file-states [FILE_STATES]", String, "Only return PR file that match this comma-separated list of states. See https://docs.github.com/rest/pulls/pulls#list-pull-requests-files for a complete list of valid states.") do |file_states|
+      options[:file_states] = file_states.split(",")
+    end
+
+    parser.on("-m", "--max [MAX_FILES]", Integer, "Maximum number of files to return. Defaults to 30. Max is 3000.") do |max_files|
+      # Default to 30 because by default each api request returns 30 files per page, and by default only 1 request is made
+      # https://docs.github.com/rest/pulls/pulls?apiVersion=2022-11-28#list-pull-requests-files
+      exit_with_error "max must be 3000 or less" if max_files > 3000
+      options[:max_files] = max_files || 30
+    end
+
+    parser.on("-p", "--files-per-request [NUM_FILES]", Integer, "Number of files to fetch per request. Defaults to 30. Max is 100.") do |num_files|
+      # Default to 30 because by default each api request returns 30 files per page
+      # https://docs.github.com/rest/pulls/pulls?apiVersion=2022-11-28#list-pull-requests-files
+      exit_with_error "The number of files per request must be 100 or less" if num_files > 100
+      options[:num_files] = num_files || 30
+    end
+  end.parse!
+
+  options[:sha_id] = ARGV[0]
+  options[:num_files] ||= 30
+  options[:max_files] ||= 30
+
+  options
+end
+
+def running_on_resiliency_mirror?
+  # MIRROR_SERVER_URL is set in the github/internal-actions ci-larger-runners environment vault
+  ENV.fetch("GITHUB_SERVER_URL", "https://github.com") == ENV.fetch("MIRROR_SERVER_URL", "")
+end
+
+# run it and return the file list
+# -------------------------------
+
+options = parse_options
+
+client = Octokit::Client.new(access_token: github_token)
+pr = get_primary_pr_by_sha(client, options[:sha_id])
+
+exit 0 if pr.nil?
+
+files = get_pr_files(client, pr, options[:file_states], max_files: options[:max_files], num_files: options[:num_files])
+$stdout.puts files

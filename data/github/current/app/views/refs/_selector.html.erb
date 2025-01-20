@@ -1,0 +1,141 @@
+<%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+
+<%
+  repository = local_assigns[:repository] || current_repository
+  selected_ref ||= current_ref
+  current_committish_for_attribute = Base64.strict_encode64(selected_ref.to_s)
+  default_branch_for_attribute = Base64.strict_encode64(repository.default_branch)
+  name_with_owner_for_attribute = Base64.strict_encode64(repository.name_with_display_owner)
+  hide_tabs = local_assigns.fetch(:hide_tabs, false)
+  hide_footer = local_assigns.fetch(:hide_footer, false)
+  turbo_frame = local_assigns.fetch(:turbo_frame, false)
+  input_id = local_assigns.fetch(:input_id, "context-commitish-filter-field")
+  branch_tabpanel_id = local_assigns.fetch(:branch_tabpanel_id, "ref-list-branches")
+  tag_tabpanel_id = local_assigns.fetch(:tag_tabpanel_id, "tags-menu")
+  enclosing_details_id = local_assigns.fetch(:enclosing_details_id, "branch-select-menu")
+%>
+<div class="SelectMenu">
+  <div class="SelectMenu-modal">
+    <header class="SelectMenu-header">
+      <span class="SelectMenu-title"><%= title %></span>
+      <button class="SelectMenu-closeButton" type="button" data-toggle-for="<%= enclosing_details_id %>"><%= render Primer::Beta::Octicon.new(icon: "x", aria: {label: "Close menu", hidden: false}) %></button>
+    </header>
+
+    <input-demux data-action="tab-container-change:input-demux#storeInput tab-container-changed:input-demux#updateInput">
+      <div class="SelectMenu-filter">
+        <input data-target="input-demux.source"
+                id="<%= input_id %>"
+                class="SelectMenu-input form-control"
+                aria-owns="<%= branch_tabpanel_id %>"
+                data-controls-ref-menu-id="<%= branch_tabpanel_id %>"
+                autofocus
+                autocomplete="off"
+                aria-label="<%= placeholder %>"
+                placeholder="<%= placeholder %>"
+                type="text"
+        >
+      </div>
+
+      <tab-container class="d-flex flex-column js-branches-tags-tabs" style="min-height: 0;">
+        <div class="SelectMenu-tabs" role="tablist" data-target="input-demux.control" <% if hide_tabs %>hidden<% end %>>
+          <button class="SelectMenu-tab" type="button" role="tab" aria-selected="true">Branches</button>
+          <button class="SelectMenu-tab" type="button" role="tab">Tags</button>
+        </div>
+
+        <div role="tabpanel" id="<%= branch_tabpanel_id %>" data-filter-placeholder="<%= placeholder %>" tabindex="" class="d-flex flex-column flex-auto<%= " overflow-auto" unless hide_footer %>">
+          <ref-selector
+            type="branch"
+            data-targets="input-demux.sinks"
+            data-action="
+              input-entered:ref-selector#inputEntered
+              tab-selected:ref-selector#tabSelected
+              focus-list:ref-selector#focusFirstListMember
+            "
+            query-endpoint="<%= refs_ref_list_path(repository: repository.name, user_id: repository.owner_display_login) %>"
+            <%= "can-create" if current_user_can_push? %>
+            cache-key="<%= ref_list_cache_key(repository: repository) %>"
+            current-committish="<%= current_committish_for_attribute %>"
+            default-branch="<%= default_branch_for_attribute %>"
+            name-with-owner="<%= name_with_owner_for_attribute %>"
+            prefetch-on-mouseover
+          >
+
+            <template data-target="ref-selector.fetchFailedTemplate">
+              <div class="SelectMenu-message" data-index="{{ index }}">Could not load branches</div>
+            </template>
+
+            <% if local_assigns.key? :no_match_template %>
+              <%= render partial: no_match_template %>
+            <% elsif local_assigns.key? :no_match_template_content %>
+              <%= no_match_template_content %>
+            <% else %>
+              <%= render partial: "refs/no_match_template/default", locals: { show_sha_on_branch_create: current_branch_or_tag_name&.b.blank? } %>
+            <% end %>
+
+            <div data-target="ref-selector.listContainer" role="menu" class="SelectMenu-list <% if hide_footer %>m-0<% end %>" <% if turbo_frame %>data-turbo-frame="<%= turbo_frame %>"<% end %>>
+              <div class="SelectMenu-loading pt-3 pb-0 overflow-hidden">
+                <%= render(Primer::Beta::Spinner.new(size: :medium)) %>
+              </div>
+            </div>
+
+            <% if local_assigns.key? (:item_template) %>
+              <%= render partial: item_template %>
+            <% elsif local_assigns.key?(:item_template_content) %>
+              <%= item_template_content %>
+            <% else %>
+              <%= render partial: "refs/list_item_template/default", locals: { turbo_frame: turbo_frame } %>
+            <% end %>
+
+            <% unless hide_footer %>
+              <footer class="SelectMenu-footer"><%= link_to "View all branches", branches_path(repository) %></footer>
+            <% end %>
+          </ref-selector>
+
+        </div>
+
+        <div role="tabpanel" id="<%= tag_tabpanel_id %>" data-filter-placeholder="Find a tag" tabindex="" hidden class="d-flex flex-column flex-auto<%= " overflow-auto" unless hide_footer %>">
+          <ref-selector
+            type="tag"
+            data-action="
+              input-entered:ref-selector#inputEntered
+              tab-selected:ref-selector#tabSelected
+              focus-list:ref-selector#focusFirstListMember
+            "
+            data-targets="input-demux.sinks"
+            query-endpoint="<%= refs_ref_list_path(repository: repository.name, user_id: repository.owner_display_login) %>"
+            cache-key="<%= ref_list_cache_key(repository: repository) %>"
+            current-committish="<%= current_committish_for_attribute %>"
+            default-branch="<%= default_branch_for_attribute %>"
+            name-with-owner="<%= name_with_owner_for_attribute %>"
+          >
+
+            <template data-target="ref-selector.fetchFailedTemplate">
+              <div class="SelectMenu-message" data-index="{{ index }}">Could not load tags</div>
+            </template>
+
+            <template data-target="ref-selector.noMatchTemplate">
+              <div class="SelectMenu-message" data-index="{{ index }}">Nothing to show</div>
+            </template>
+
+            <% if local_assigns.key? (:item_template) %>
+              <%= render partial: item_template %>
+            <% elsif local_assigns.key?(:item_template_content) %>
+              <%= item_template_content %>
+            <% else %>
+              <%= render partial: "refs/list_item_template/default", locals: { turbo_frame: turbo_frame } %>
+            <% end %>
+
+            <div data-target="ref-selector.listContainer" role="menu" class="SelectMenu-list" <% if turbo_frame %>data-turbo-frame="<%= turbo_frame %>"<% end %>>
+              <div class="SelectMenu-loading pt-3 pb-0 overflow-hidden">
+                <%= render(Primer::Beta::Spinner.new(size: :medium)) %>
+              </div>
+            </div>
+            <% unless hide_footer %>
+              <footer class="SelectMenu-footer"><%= link_to "View all tags", tags_path(repository.owner, repository) %></footer>
+            <% end %>
+          </ref-selector>
+        </div>
+      </tab-container>
+    </input-demux>
+  </div>
+</div>

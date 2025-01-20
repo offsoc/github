@@ -1,0 +1,345 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+#/ Generate client calls (and tests) for GraphQL queries and mutations in a given namespace.
+#/ Usage: script/generate-client --field <FIELD> --namespace <RUBY_NAMESPACE>
+#/ Examples:
+#/     script/generate-client --field Mutation.deleteSlo --namespace Slos
+#/     script/generate-client --field Query.slos --namespace Slos
+
+require "bundler/setup"
+require "optionparser"
+require "active_support/core_ext/string"
+require "graphql"
+require "pry"
+
+options = { field: nil, namespace: nil }
+OptionParser.new do |opts|
+  opts.banner = "Usage: #{File.basename($0)} [options]"
+
+  opts.on("-fFIELD", "--field FIELD", "The thing to generate client code for. Must be `Mutation.MUTATION_NAME` or `Query.QUERY_NAME`") do |m|
+    options[:field] = m
+  end
+
+  opts.on("-nNAMESPACE", "--namespace NAMESPACE", "The Ruby namespace to generate the client code under") do |n|
+    options[:namespace] = n
+  end
+end.parse!
+
+if options[:namespace].nil?
+  abort "Please include --namespace flag"
+end
+
+if options[:field].nil?
+  abort "Please include --field flag"
+end
+
+schema = GraphQL::Schema.from_definition(File.expand_path("../test/support/api-schema.graphql", __dir__))
+field = schema.find(options[:field])
+arguments = if options[:field].start_with?("Mutation")
+  field.arguments["input"].type.of_type.arguments.map do |name, arg|
+    [name, arg.type, arg.description]
+  end
+else
+  field.arguments.map do |name, arg|
+    [name, arg.type, arg.description]
+  end
+end
+
+if arguments.nil?
+  abort "Couldn't lookup arguments for #{options[:field]} (found #{field})"
+end
+
+action_name = file_slug = webmock_slug = nil
+
+if options[:field].start_with?("Mutation.")
+  action_name  = field.name.delete_suffix(options[:namespace].singularize).underscore
+  file_slug    = options[:field].underscore.split(".").reverse.join("_")
+  webmock_slug = "#{options[:field].underscore.split(".").last.underscore}.json"
+else
+  action_name  = field.name == options[:namespace].downcase ? "list" : "find"
+  file_slug    = "#{action_name}_#{options[:field].underscore.split(".").reverse.join("_")}"
+  webmock_slug = "#{options[:field].underscore.split(".").last.underscore}.json"
+end
+
+lib_dir = File.expand_path(File.join("..", "lib", "service-catalog", "client", options[:namespace].underscore), __dir__)
+lib_path = File.join(lib_dir, "#{file_slug}.rb")
+test_dir = File.expand_path(File.join("..", "test", "service-catalog", "client", options[:namespace].underscore), __dir__)
+test_path = File.join(test_dir, "#{file_slug}_test.rb")
+webmock_path = File.expand_path(File.join("..", "test", "fixtures", "webmock", webmock_slug), __dir__)
+
+FileUtils.mkdir_p lib_dir
+FileUtils.mkdir_p test_dir
+
+graphql_type_to_s = lambda { |graphql_type|
+  if graphql_type.is_a?(GraphQL::Schema::NonNull)
+    "#{graphql_type_to_s.call(graphql_type.of_type)}!"
+  else
+    graphql_type.graphql_name
+  end
+}
+
+ruby_type = lambda { |graphql_type|
+  return ruby_type.call(graphql_type.of_type) if graphql_type.is_a?(GraphQL::Schema::NonNull)
+  return "Array" if graphql_type.is_a?(GraphQL::Schema::List)
+
+  case graphql_type.graphql_name
+  when "ID"
+    "String"
+  when "Int"
+    "Integer"
+  when "ISO8601DateTime"
+    "Time"
+  else
+    graphql_type.graphql_name
+  end
+}
+
+sample_arg = lambda { |graphql_type|
+  type_name = ruby_type.call(graphql_type)
+  case type_name
+  when "Integer"
+    1
+  when "Float"
+    1.2
+  when "Boolean"
+    true
+  when "ServiceFilterSelectionInput"
+    { query: "name: test-service" }
+  else
+    Object.const_get(type_name).new
+  end
+}
+
+indent = lambda { |text, prefix|
+  text.split("\n").map { |line| "#{prefix}#{line}" }.join("\n")
+}
+
+template_vars = {
+  namespace: options[:namespace],
+  object_name: options[:namespace].singularize,
+  description: field.description || "Execute the #{options[:field].split(".").reverse.join(" ")}.",
+  module_name: options[:field].split(".").reverse.join(" ").titleize.split(" ").join(""),
+  instrumentation_key: "service_catalog_client.#{options[:namespace].underscore}.#{field.name.underscore}",
+  arguments_definition: Hash[arguments.map { |(name, type, description)| [name, {graphql_type: graphql_type_to_s.call(type)}] }],
+  arguments_documentation: arguments.map do |(name, type, desc)|
+    "# @param #{name.underscore} [#{ruby_type.call(type)}] #{desc}"
+  end.join("\n"),
+  sample_arguments: arguments.map do |(name, type, desc)|
+    [name.underscore, sample_arg.call(type)]
+  end,
+  extra_arguments: ["**kwargs"],
+  query_name: field.name,
+  method_name: action_name,
+}
+
+if options[:field].start_with?("Mutation.")
+  template_vars[:execute_body] = <<~BODY
+    data = {"mutation" => nil, "errors" => []}
+    ActiveSupport::Notifications.instrument(INSTRUMENTATION_KEY) do
+      response = client.query_with_retries(query: query, variables: variables, context: context)
+      data["errors"] = response["errors"] if response["errors"]
+      data["mutation"] = response.dig("data", "#{template_vars[:query_name]}")
+    end
+  BODY
+  template_vars[:query] = <<~GRAPHQL
+    mutation #{template_vars[:query_name]}\#{GraphqlQuerySemantics.graphql_variable_declaration(variables, variable_types: VARIABLE_GRAPHQL_TYPES, include_parens: true)} {
+      #{template_vars[:query_name]}(input: { \#{GraphqlQuerySemantics.graphql_variable_passing(variables)} }) {
+        clientMutationId
+      }
+    }
+  GRAPHQL
+elsif action_name == "list"
+  template_vars[:module_name] = "#{action_name.titleize}#{template_vars[:module_name]}"
+  template_vars[:detail_fragment] = "#{options[:namespace]}QueryBinder::#{options[:namespace].singularize.underscore.upcase}_DETAIL_FRAGMENT"
+  template_vars[:arguments_documentation] << "\n# @param detail_fragment [String] GraphQL detail fragment for the model"
+  template_vars[:extra_arguments].unshift ["detail_fragment: #{template_vars[:detail_fragment]}"]
+  template_vars[:execute_body] = <<~BODY
+    data = {"data" => {"#{template_vars[:query_name]}" => []}, "errors" => []}
+    ActiveSupport::Notifications.instrument(INSTRUMENTATION_KEY) do
+      loop do
+        response = client.query_with_retries(query: query, variables: variables, context: context)
+        if response["errors"]
+          data["errors"].concat(response["errors"])
+          break
+        end
+        response["data"]["#{template_vars[:query_name]}"]["edges"].each do |edge|
+          data["data"]["#{template_vars[:query_name]}"] << edge["node"]
+        end
+        break if data["data"]["#{template_vars[:query_name]}"].size >= response["data"]["#{template_vars[:query_name]}"]["totalCount"]
+        variables["after"] = response["data"]["#{template_vars[:query_name]}"]["edges"].last["cursor"]
+      end
+    end
+  BODY
+  template_vars[:query] = <<~GRAPHQL
+  query #{template_vars[:method_name]}#{template_vars[:query_name].capitalize}\#{GraphqlQuerySemantics.graphql_variable_declaration(variables, variable_types: VARIABLE_GRAPHQL_TYPES, include_parens: true)} {
+    #{template_vars[:query_name]}\#{GraphqlQuerySemantics.graphql_variable_passing(variables, include_parens: true)} {
+      totalCount
+      edges {
+        cursor
+        node {
+          ...#{template_vars[:object_name]}Detail
+        }
+      }
+    }
+  }
+  \#{detail_fragment}
+  GRAPHQL
+else
+  template_vars[:module_name] = "#{action_name.titleize}#{template_vars[:module_name]}"
+  template_vars[:detail_fragment] = "#{options[:namespace]}QueryBinder::#{options[:namespace].singularize.underscore.upcase}_DETAIL_FRAGMENT"
+  template_vars[:arguments_documentation] << "\n# @param detail_fragment [String] GraphQL detail fragment for the model"
+  template_vars[:extra_arguments].unshift ["detail_fragment: #{template_vars[:detail_fragment]}"]
+  template_vars[:execute_body] = <<~BODY
+    data = {"data" => {"#{template_vars[:object_name].underscore}" => nil}, "errors" => []}
+    ActiveSupport::Notifications.instrument(INSTRUMENTATION_KEY) do
+      response = client.query_with_retries(query: query, variables: variables, context: context)
+      data["errors"].concat(response["errors"]) if response["errors"]
+      data["data"]["#{template_vars[:object_name].underscore}"] = response.dig("data", "#{template_vars[:query_name]}")
+    end
+  BODY
+  template_vars[:query] = <<~GRAPHQL
+    TODO
+    \#{detail_fragment}
+  GRAPHQL
+end
+
+puts "Writing template to #{lib_path}"
+File.open(lib_path, "w") do |lib_file|
+  lib_file.puts <<~LIB
+# frozen_string_literal: true
+
+module ServiceCatalog
+  class Client
+    module #{template_vars[:namespace]}
+      # #{template_vars[:description]}
+      module #{template_vars[:module_name]}
+        # The instrumentation key for this query used by ActiveSupport::Notifications.
+        INSTRUMENTATION_KEY = "#{template_vars[:instrumentation_key]}"
+
+        # GraphQL types for the known GraphQL arguments
+        VARIABLE_GRAPHQL_TYPES = {
+#{indent.call(template_vars[:arguments_definition].map { |k, v| "#{k.inspect} => #{v[:graphql_type].inspect}," }.join("\n"), "          ")}
+        }
+
+        # #{template_vars[:description]}
+        #
+        # @param client [ServiceCatalog::Client] The ServiceCatalog::Client
+        # @param context [Hash] Additional headers to add to the request (optional)
+#{indent.call(template_vars[:arguments_documentation], "        ")}
+        #
+        # @return [Hash]
+        def self.execute(client:, context: {}, #{template_vars[:extra_arguments].join(", ")})
+          variables = GraphqlQuerySemantics.kwargs_to_graphql_variables(kwargs)
+          query = build_query(variables)
+
+#{indent.call(template_vars[:execute_body], "          ")}
+
+          data
+        end
+
+        # Build query for this query.
+        #
+        # @param variables [Hash] Input variables in GraphQL variable format as keys.
+        #
+        # @return [String] The mutation query
+        def self.build_query(variables, #{template_vars[:extra_arguments].join(", ")})
+          <<~GRAPHQL
+#{indent.call(template_vars[:query], "            ")}
+          GRAPHQL
+        end
+      end
+    end
+
+    class #{options[:namespace]}QueryBinder < QueryBinder
+      # #{template_vars[:description]}
+      #
+#{indent.call(template_vars[:arguments_documentation], "      ")}
+      # @param context [Hash] Additional headers to add to the request (optional)
+      #
+      # @return [Response]
+      def #{template_vars[:method_name]}(**kwargs)
+        Response.new Client::#{options[:namespace]}::#{template_vars[:module_name]}.execute(client: client, **kwargs)
+      end
+    end
+  end
+end
+LIB
+end
+
+puts "Writing template to #{test_path}"
+File.open(test_path, "w") do |test_file|
+  test_file.puts <<~TEST
+# frozen_string_literal: true
+
+require "test_helper"
+
+class ServiceCatalog::Client::#{template_vars[:namespace]}::#{template_vars[:module_name]}Test < Minitest::Test
+  def kwargs
+    @kwargs ||= {
+#{template_vars[:sample_arguments].map { |(name, val)| "      #{name}: #{val.inspect}," }.join("\n")}
+    }
+  end
+
+  def setup_request(fixture_path:)
+    variables = ServiceCatalog::Client::GraphqlQuerySemantics.kwargs_to_graphql_variables(kwargs)
+    payload = {
+      "query" => ServiceCatalog::Client::#{template_vars[:namespace]}::#{template_vars[:module_name]}.build_query(variables),
+      "variables" => variables
+    }
+    stub_api_request.
+      with(body: JSON.generate(payload)).
+      to_return(status: 200, body: File.read(fixture_path), headers: {})
+  end
+
+  def test_it_works
+    setup_request(fixture_path: "test/fixtures/webmock/#{webmock_slug}")
+
+    resp = api_client.#{template_vars[:namespace].underscore}.#{template_vars[:method_name]}(**kwargs)
+    refute_predicate resp, :errored?
+    assert_empty resp.errors
+  end
+
+  def test_it_handles_graphql_errors
+    setup_request(fixture_path: "test/fixtures/webmock/errors.json")
+    assert_raises(ServiceCatalog::Client::Response::PartialSuccessError) do
+      api_client.#{template_vars[:namespace].underscore}.#{template_vars[:method_name]}(**kwargs)
+    end
+  end
+
+  def test_instrumentation
+    key = ServiceCatalog::Client::#{template_vars[:namespace]}::#{template_vars[:module_name]}::INSTRUMENTATION_KEY
+    assert_instruments(key: key) do
+      setup_request(fixture_path: "test/fixtures/webmock/#{webmock_slug}")
+      api_client.#{template_vars[:namespace].underscore}.#{template_vars[:method_name]}(**kwargs)
+    end
+  end
+
+  def test_validate_query_against_schema
+    assert_valid_graphql_query \\
+      ServiceCatalog::Client::#{template_vars[:namespace]}::#{template_vars[:module_name]}.build_query(
+        ServiceCatalog::Client::GraphqlQuerySemantics.kwargs_to_graphql_variables(kwargs)
+      )
+  end
+end
+TEST
+end
+
+puts "Writing #{webmock_path}"
+File.open(webmock_path, "w") do |webmock_file|
+  sample_data = {}
+  if options[:field].start_with?("Mutation.")
+    sample_data[field.name] = {"clientMutationId" => nil}
+  elsif action_name == "list"
+    sample_data[template_vars[:query_name]] = {
+      "totalCount" => 1,
+      "edges" => [
+        {
+          "cursor" => "abc",
+          "node" => {}
+        }
+      ]
+    }
+  end
+  webmock_file.puts JSON.pretty_generate({"data" => sample_data})
+end

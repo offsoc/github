@@ -1,0 +1,83 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require_relative "./seeds/objects"
+require_relative "./seeds/factory_bot_loader"
+
+unless Rails.env.development?
+  raise "This is a dev-only script"
+end
+
+class SetupGhostPilot
+  BASE_FEATURE_FLAG = :ghost_pilot_pr_autocomplete
+
+  def call
+    puts "Setting up Ghost Pilot. You must have script/server running; if not, kill this and try again after starting the server."
+    enable_feature
+    configure_access_to_feature
+    create_example_branch
+  end
+
+  private
+
+  def enable_feature
+    GitHub.flipper[BASE_FEATURE_FLAG].enable
+    GitHub.flipper[:copilot_beta_features_opt_in].enable
+
+    Feature.find_or_create_by(
+        public_name: "Copilot Pull Request Autocomplete",
+        slug: BASE_FEATURE_FLAG.to_s,
+        flipper_feature: FlipperFeature.find_by(name: BASE_FEATURE_FLAG.to_s),
+        feedback_link: "https://aka.ms/AAqbvho",
+        enrolled_by_default: true
+    )
+  end
+
+  def configure_access_to_feature
+    biz = Business.find_by_slug("github-inc")
+    copilot_business = Copilot::Business.new(biz)
+    copilot_business.enable_copilot_for_all_organizations!
+
+    unless Billing::SalesServePlanSubscription.find_by_customer_id(biz.customer_id)
+      FactoryBot.create(:billing_sales_serve_plan_subscription,
+        customer: biz.customer,
+        billing_start_date:  GitHub::Billing.today - 5.days,
+        zuora_rate_plan_charges: {
+          Copilot::CopilotEnterprise::GHEC_FOR_COPILOT_CHARGE_ID => { number: "C-123" }
+        }
+      )
+    end
+
+    copilot_business.allow_public_code_suggestions!
+    copilot_business.copilot_plan_enterprise!
+    copilot_business.copilot_for_dotcom_enabled!
+    copilot_business.beta_features_github_chat_enable!
+
+    copilot_organization = Copilot::Organization.new(organization)
+    copilot_organization.assign([actor], actor)
+  end
+
+  def create_example_branch
+    repo = organization.repositories.find_by_name("private-server")
+    head_ref = repo.refs.find("refs/heads/add-readme") || repo.refs.create("refs/heads/add-readme", repo.default_oid, actor)
+    if head_ref.target_oid == repo.default_oid
+      head_ref.append_commit({ message: "Add README with setup steps", committer: actor, author: actor }, actor) do |files|
+        files.add "README", "# #{repo.name.capitalize}\n\n## Setup\n1. Sit back\n2. Take a deep breath\n3. Smile!\n"
+      end
+    end
+  end
+
+  def actor
+    @actor ||= User.find_by_login("monalisa")
+  end
+
+  def organization
+    @organization ||= Organization.find_by_login("github")
+  end
+end
+
+if __FILE__ == $0
+  SetupGhostPilot.new.call
+  puts "Ghost Pilot setup done! Once signed in with monalisa, you can jump right to a new PR at http://github.localhost/github/private-server/compare/main...add-readme?quick_pull=1"
+end

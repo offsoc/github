@@ -1,0 +1,113 @@
+<% page_info(title: "Security · Code Scanning · #{organization.display_login}") %>
+
+<%= render(
+  SecurityCenter::PageComponent.new(
+    backfill_in_progress: backfill_in_progress,
+    organization: organization,
+    selected_tab: :code_scanning,
+    user: current_user
+  )
+) do |page_component| %>
+  <% page_component.with_header_section do %>
+    <%= render(SecurityCenter::SubheadComponent.new(
+      actor: current_user,
+      scope: organization,
+      heading: "Code scanning alerts"
+    )) { |c| c.with_feedback_link } %>
+  <% end %>
+
+  <% page_component.with_main_section do %>
+    <%= render Primer::Box.new(mb: show_incomplete_data_warning ? 1 : 3, display: :flex, justify_content: :space_between, style: "gap: 1em;") do %>
+      <%= render Primer::Box.new(flex: 1) do %>
+        <%= render CodeScanning::SearchBarComponent.new(
+          user: current_user,
+          organization: organization,
+          query: query,
+        ) %>
+      <% end %>
+
+      <% if SecurityCampaigns.creation_enabled?(current_organization) && query.is_valid? && SecurityProduct::Permissions::OrgAuthz.new(current_organization, actor: current_user).can_manage_security_products? %>
+        <%= render_react_partial name: "security-campaign-creation", class_name: "flex-react-partial security-campaign-creation-button", props: {
+          query: query.user_query,
+          orgCampaignsCount: org_campaigns_count,
+          maxCampaigns: SecurityCampaigns::MAX_CAMPAIGNS_COUNT,
+          campaignCreationPath: campaign_creation_path,
+          campaignManagersPath: campaign_managers_path,
+          campaignAlertsSummaryPath: campaign_alerts_summary_path,
+          currentUser: {
+            id: current_user.id,
+            login: current_user.display_login,
+            avatarUrl: current_user.primary_avatar_url(40),
+          },
+          alertsCount: alert_results.total_entries,
+          maxAlerts: SecurityCampaigns::MAX_ALERTS_COUNT,
+          showOnboardingNotice: SecurityCampaigns.show_onboarding_message?(current_user),
+          dismissOnboardingNoticePath: SecurityCampaigns::ONBOARDING_DISMISSAL_NOTICE_PATH,
+        } %>
+      <% end %>
+
+      <% if team_filter_menu_data.present? %>
+        <%= render Primer::Box.new(display: :flex, align_items: :center, style: "height: 32px;") do %>
+          <%= render SecurityCenter::Coverage::SelectMenuComponent.new(team_filter_menu_data) %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if show_incomplete_data_warning %>
+      <%= render ::SecurityCenter::LimitedRepoWarningComponent.new(display: :block, mb: 3, test_selector: "code-scanning-org-repo-limit-exceeded") %>
+    <% end %>
+
+    <%= render CodeScanning::TableComponent.new(
+      organization: organization,
+      open_count: open_count,
+      closed_count: closed_count,
+      query: query,
+      user: current_user,
+      alerts_code_scanning_index_path_method: alerts_code_scanning_index_path_method,
+      fixed_result_numbers: [],
+      alert_results: alert_results,
+      alert_number_plus_repository_id_to_issues:,
+    ) %>
+
+    <% if blankslate_text %>
+      <% icon = error_occurred ? "alert" : nil %>
+      <%= render(Primer::Beta::BorderBox.new(border_top: 0, classes: "rounded-top-0")) do |border_box_component| %>
+        <% border_box_component.with_body do %>
+          <%= render(
+            Primer::Beta::Blankslate.new(
+              spacious: true,
+              test_selector: "security-center-alert-centric-views-code-scanning-error-blankslate"
+            )
+          ) do |c| %>
+            <% if icon.present?
+                c.with_visual_icon(icon: icon) # Icon takes precedence over the image
+              else
+                c.with_visual_image(src: "modules/site/icons/security.svg", alt: "Security icon")
+              end %>
+            <% c.with_heading(tag: :h3) do %>
+              <%= blankslate_text %>
+            <% end %>
+            <% c.with_description do %>
+              <% if error_occurred %>
+                <% if GitHub.enterprise? %>
+                  <p>If the problem persists <%= contact_support_snippet(true) %>.</p>
+                <% else %>
+                  <%= render(Primer::Beta::Text.new(tag: :p)) do %>
+                    We track these errors automatically, but if the problem persists feel free to
+                    <%= render(Primer::Beta::Link.new(href: contact_path, classes: "Link--inTextBlock")) { "contact us" } %>.
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if alert_results.total_pages > 1 %>
+      <div class="paginate-container" <%= test_selector("paginate-container") %>>
+        <%= will_paginate alert_results %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>

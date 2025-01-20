@@ -1,0 +1,357 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% view = Stafftools::RepositoryViews::PagesView.new(:repository => current_repository) %>
+
+<% page_info :title => view.page_title %>
+
+<div class="Box Box--condensed mb-3" data-hpc>
+  <div class="Box-header"><h3 class="Box-title">Pages</h3></div>
+  <div class="Box-body">
+    <p>
+      <div class="clearfix summary">
+        <%= form_tag gh_restore_page_stafftools_repository_pages_path(current_repository), :method => "put" do %>
+          <%= render Primer::ButtonComponent.new(
+            type: :submit,
+            classes: "boxed-action",
+            disabled: !current_repository.page&.can_restore_soft_deleted?
+          ) do %>
+            Restore Page
+          <% end %>
+        <% end %>
+        <dl>
+          <dt>Page ID</dt>
+          <% if current_repository.page %>
+            <dd>
+              <%= current_repository.page.id %><%= render Primer::Beta::ClipboardCopy.new(value: current_repository.page.id, "aria-label": "Copy path", ml: 1) %>
+            </dd>
+          <% else %>
+            <dd>None</dd>
+          <% end %>
+        </dl>
+        <dl>
+          <dt>Site type</dt>
+          <% if current_repository.is_user_pages_repo? %>
+            <dd>User site</dd>
+          <% else %>
+            <dd>Project site</dd>
+          <% end %>
+        </dl>
+        <% if current_repository.page %>
+          <dl>
+            <dt>Site visibility</dt>
+            <% if current_repository.page.public? %>
+              <dd>Public</dd>
+            <% else %>
+              <dd>Private</dd>
+            <% end %>
+          </dl>
+        <% end %>
+        <dl>
+          <dt>Repository visibility</dt>
+          <% if current_repository  .public? %>
+            <dd>Public</dd>
+          <% else %>
+            <dd>Private</dd>
+          <% end %>
+        </dl>
+        <% if current_repository.page %>
+          <dl>
+            <dt>Soft Deleted at</dt>
+            <% if current_repository.page.soft_deleted? %>
+              <dd><%= current_repository.page.deleted_at %></dd>
+            <% else %>
+              <dd>active</dd>
+            <% end %>
+          </dl>
+        <% end %>
+        <dl>
+          <dt>Production branch</dt>
+          <dd>
+            <% if !current_repository.page&.workflow_build_enabled? %>
+              <%= current_repository.pages_branch.dup.force_encoding(Encoding::UTF_8) %>
+            <% else %>
+              <%= current_repository.default_branch.dup.force_encoding(Encoding::UTF_8) %>
+            <% end %>
+          </dd>
+        </dl>
+          <dl>
+            <dt>Alternative Domain</dt>
+            <% if current_repository&.page&.certificate && current_repository&.page&.certificate&.alt_domain.present?%>
+              <dd><%= current_repository&.page&.certificate&.alt_domain %></dd>
+            <% else %>
+              <dd>None</dd>
+            <% end %>
+          </dl>
+        <dl>
+          <dt>Build type</dt>
+          <% case view.build_type %>
+          <% when :workflow %>
+            <dd>Workflow (Actions)</dd>
+          <% when :dynamic_workflow %>
+            <dd>Dynamic workflow (Actions)</dd>
+          <% when :static_content %>
+            <dd>Static content (No build step)</dd>
+          <% when :legacy_jekyll %>
+            <dd>⚠️ Legacy Jekyll (<%= current_repository.page.dynamic_workflow_disabled_reason %>)</dd>
+          <% end %>
+        </dl>
+        <% unless current_repository.page&.workflow_build_enabled? %>
+          <dl>
+            <dt>Source folder</dt>
+            <dd>
+              <% if current_repository.page %>
+                <%= current_repository.page.source_dir %>
+              <% else %>
+              <%= render(Primer::Beta::Octicon.new(:alert, classes: "error")) do |component| %>
+                <% component.with_tooltip(label: "No source selected", direction: :s) %>
+              <% end %>
+                  /
+              <% end %>
+            </dd>
+          </dl>
+        <% end %>
+        <% if GitHub.pages_custom_cnames? && current_repository.page && current_repository.page.cname? %>
+          <include-fragment src="<%=  gh_status_stafftools_repository_pages_path(current_repository) %>">
+            <dl>
+              <dt>Health check</dt>
+              <dd data-hide-on-error>
+                <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+              </dd>
+              <dd data-show-on-error hidden>
+                <%= primer_octicon(:alert, classes: "error") %>
+                Failed to query health check
+              </dd>
+            </dl>
+          </include-fragment>
+        <% end %>
+        <% if current_repository.page && !GitHub.enterprise? %>
+            <include-fragment src="<%=  gh_https_status_stafftools_repository_pages_path(current_repository) %>">
+              <dl>
+                <dt>HTTPS Health Check</dt>
+                <dd data-hide-on-error>
+                  <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+                </dd>
+                <dd data-show-on-error hidden>
+                  <%= primer_octicon(:alert, classes: "error") %>
+                  Failed to query HTTPS health check
+                </dd>
+              </dl>
+            </include-fragment>
+        <% end %>
+
+        <% if view.show_spam? %>
+        <dl>
+          <dt>Is Owner Spammy?</dt>
+          <dd>
+            <% if current_repository.owner.spammy? %>
+              Yes
+              <%= primer_octicon(:stop, classes: "error") %>
+            <% else %>
+              No
+            <% end %>
+          </dd>
+        </dl>
+        <% end %>
+
+      </div>
+      <% if GitHub.pages_custom_cnames? && current_repository.page && current_repository.page.cname? %>
+        <hr>
+
+        <%= form_tag gh_clear_domain_stafftools_repository_pages_path(current_repository), :method => "put" do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, classes: "boxed-action", "data-confirm": "Are you sure you want to clear the custom domain?") do %>Clear custom domain<% end %>
+        <% end %>
+        <h4>Clear custom domain</h4>
+        <p>
+          Clear the <strong><%= view.domain %></strong> custom domain from this
+          repository.
+        </p>
+
+        <% if pending_protected_domains.present? %>
+          <p>
+            ⚠️ Clearing the custom domain will also downgrade the following protected <%= "domain".pluralize(pending_protected_domains.length) %>
+            to unverified, because <%= pending_protected_domains.length == 1 ? "it is" : "they are" %> in a pending state and
+            <%= pending_protected_domains.length == 1 ? "has" : "have" %> never been verified before.
+          </p>
+          <ul class="ml-3 mb-3">
+            <% pending_protected_domains.each do |name| %>
+              <li><strong><%= name %></strong></li>
+            <% end %>
+          </ul>
+          <p>
+            ⚠️ Other pages belonging to this owner may also lose their custom domains as a result of the <%= "domain".pluralize(pending_protected_domains.length) %> no longer being verified.
+          </p>
+        <% end %>
+      <% end %>
+      <% if current_repository.page&.cname? && current_repository.page&.certificate %>
+        <hr>
+        <%= form_tag gh_delete_https_certificate_stafftools_repository_pages_path(current_repository), :method => "delete" do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, classes: "boxed-action", "data-confirm": "Are you sure you want to delete the HTTPS certificate for #{ current_repository&.page&.certificate&.domain }?") do %>Delete HTTPS certificate<% end %>
+        <% end %>
+        <h4>Delete HTTPS certificate</h4>
+        <p>
+          Delete the HTTPS certificate for the <strong><%= current_repository&.page&.certificate&.domain %></strong> custom domain.
+        </p>
+        <dl>
+          <dt>Certificate includes alternate domain? </dt>
+          <dd>
+            <strong>
+            <%if view.certificate_for_alt_domain? %>
+              True
+            <% else %>
+              False
+            <% end %>
+            </strong>
+          </dd>
+        </dl>
+      <% end %>
+    </p>
+  </div>
+</div>
+
+<% view.deployments.each do |deployment| %>
+  <div class="float-right py-1 pr-3">
+    <%= form_tag stafftools_repository_pages_path, class: "d-inline-block" do %>
+      <input name="page_deployment_id" type="hidden" value="<%= deployment.id %>">
+      <button type="submit" class="btn btn-sm boxed-action" <% unless current_repository.gh_pages_rebuildable?(current_user) && !current_repository&.page&.workflow_build_enabled? %>disabled<% end %>>
+        Rebuild
+      </button>
+    <% end %>
+
+    <%= form_tag gh_clear_generated_pages_stafftools_repository_pages_path(current_repository), :method => "put", class: "d-inline-block" do %>
+      <input name="page_deployment_id" type="hidden" value="<%= deployment.id %>">
+      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, variant: :small, classes: "boxed-action") do %>Delete generated pages<% end %>
+    <% end %>
+
+    <%= form_tag stafftools_repository_pages_path(current_repository), :method => 'delete', class: "d-inline-block" do %>
+      <input name="page_deployment_id" type="hidden" value="<%= deployment.id %>">
+      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, variant: :small, classes: "boxed-action") do %>Delete page deployment<% end %>
+    <% end %>
+  </div>
+  <details class="Box Box--condensed mb-3">
+    <summary class="Box-header">
+      <% if current_repository.page&.deployments&.any? %>
+        <h3 class="Box-title d-inline-block">
+          Deployment for
+          <% if current_repository.page&.workflow_build_enabled? && !current_repository.page&.workflow_run.nil?%>
+            workflow run id <code><%= deployment&.check_run_id %></code>
+          <%elsif !deployment.ref_name.nil? %>
+            <code><%= deployment.ref_name.dup.force_encoding(Encoding::UTF_8) %></code>
+          <% end %>
+        </h3>
+      <% end %>
+    </summary>
+    <div class="Box-body clearfix summary my-0">
+      <dl>
+        <dt>Pages servers</dt>
+        <dd>
+          <% deployment.storage_servers.each do |server| %>
+            <code class="css-truncate css-truncate-target" style="max-width: 42em"><%= server %></code>
+            <%= render Primer::Beta::ClipboardCopy.new(value: server, "aria-label": "Copy server name", ml: 1) %>
+            <br>
+          <% end %>
+        </dd>
+      </dl>
+      <dl>
+        <dt>Path on server</dt>
+        <dd>
+          <% if deployment.storage_path %>
+            <code class="css-truncate css-truncate-target" style="max-width: 42em"><%= deployment.storage_path %></code>
+            <%= render Primer::Beta::ClipboardCopy.new(value: deployment.storage_path, "aria-label": "Copy path", ml: 1) %>
+          <% end %>
+        </dd>
+      </dl>
+      <dl>
+        <dt>Most recent build</dt>
+        <dd>
+          <% if deployment.most_recent_build_time %>
+          started about <%= time_ago_in_words_js deployment.most_recent_build_time %>
+          <% else %>
+          no build for this ref
+          <% end %>
+        </dd>
+      </dl>
+      <dl>
+        <dt>Published URL</dt>
+        <dd>
+          <a href="<%= deployment&.published_url %>"><%= deployment&.published_url %></a>
+        </dd>
+      </dl>
+      <% if current_repository.page&.workflow_build_enabled? && !current_repository.page&.workflow_run.nil?%>
+        <dl>
+          <dt>Workflow run details</dt>
+          <dd>
+            <%= link_to current_repository.page&.workflow_run&.id,
+              actions_workflow_execution_stafftools_repository_path(
+              current_repository.owner,
+              current_repository,
+              current_repository.page&.workflow_run&.check_suite_id
+            ) %>
+          </dd>
+        </dl>
+      <% end %>
+    </div>
+  </details>
+<% end %>
+
+<% if current_repository.has_gh_pages? || view.recent_page_builds.any? %>
+<div class="Box Box--condensed">
+  <div class="Box-header">
+    <h3 class="Box-title">
+      Recent page builds
+      <div class="float-right" style="position:relative;bottom:6px">
+        <%= form_tag gh_unlock_build_stafftools_repository_pages_path(current_repository), :method => "put", class: "d-inline-block" do %>
+          <%= render Primer::ButtonComponent.new(type: :submit, variant: :small) do %>
+            Unlock page build
+          <% end %>
+        <% end %>
+      </div>
+    </h3>
+  </div>
+  <div class="Box-body">
+    <% if view.recent_page_builds.any? %>
+      <ul>
+        <% view.recent_page_builds.each do |page_build| %>
+        <li class="Box-row">
+          <span class="user">
+            <% if user = page_build.pusher %>
+              <%= link_to avatar_for(user, 16), stafftools_user_path(user) %>
+              <%= link_to user, stafftools_user_path(user), :class => 'name' %>
+            <% end %>
+          </span>
+          started build <%= time_ago_in_words_js page_build.created_at %>
+          <% if page_build.commit && view.commit_object(page_build.commit) %>
+            for <%= link_to page_build.commit[0, 7],
+              commit_path(view.commit_object(page_build.commit), class: "Link--inTextBlock") %>
+          <% elsif page_build.commit %>
+            for <%= page_build.commit[0, 7] %> (not found)
+          <% end %>
+          <% if page_build.deployment&.ref_name && tree_name = page_build.deployment.ref_name.dup.force_encoding(Encoding::UTF_8) %>
+            (ref=<%= link_to(tree_name, tree_path("", scrubbed_utf8(tree_name)), class: "Link--inTextBlock") %>)
+          <% end %>
+
+          <div class="description">
+            <%= page_build.status %>
+            <% if page_build.duration %>
+                in <%= pluralize(page_build.duration_in_seconds.to_i, 'second') %>
+            <% end %>
+            <% if page_build.error? %>
+              <strong>
+                <% if GitHub.enterprise? %>
+                  <%= page_build.error %>
+                <% else %>
+                  <%= link_to page_build.error, view.errors_url %>
+                <% end %>
+              </strong>
+            <% end %>
+          </div>
+        </li>
+        <% end %>
+      </ul>
+    <% end %>
+  </div>
+</div>
+<% elsif current_repository.page.workflow_build_enabled? %>
+  <p>Workflow builds enabled</p>
+<% else %>
+  <p>No pages have been built!</p>
+<% end %>

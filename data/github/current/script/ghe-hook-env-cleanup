@@ -1,0 +1,78 @@
+#!/bin/bash
+#/ Deletes an pre-receive hook environment from GitHub Enterprise
+#/ This is but a shadow of the script that runs in enterprise
+#/ Usage:
+#/          ghe-hook-env-cleanup environment-id [target-sha] [options]
+#/
+#/ Options:
+#/          -h | --help           Show this message
+#/          -a                    Delete all versions of this environment regardless of the sha
+#/
+#/ Exit codes:
+#/          0                     Everything went swimmingly
+#/          3                     Invalid arguments
+
+set -e
+
+main() {
+  while [ "$1" ]; do
+    case "$1" in
+      -a)
+        delete_all=1
+        ;;
+      -h)
+        usage
+        exit
+        ;;
+      -n)
+        # does nothing but is included for compatibility
+        ;;
+      *)
+        if [ -z "$ENVIRONMENT_ID" ]; then
+          ENVIRONMENT_ID="$1"
+        elif [ -z "$TARGET_SHA" ]; then
+          TARGET_SHA="$1"
+        else
+          exit_invalid_args "Unknown argument '$1'!"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$ENVIRONMENT_ID" ] || exit_invalid_args "environment-id is required"
+  [ -n "$TARGET_SHA" ] && [ -n "$delete_all" ] && exit_invalid_args "You must set either -a or target-sha, not both"
+  [ -z "$TARGET_SHA" ] && [ -z "$delete_all" ] && exit_invalid_args "You must set either -a or target-sha"
+
+  PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+  HOOK_ENV_DIR=${HOOK_ENV_DIR:-"$PROJECT_ROOT/git-hooks/environments"}
+
+  if [[ -n "$TARGET_SHA" ]]; then
+    set -u
+    rm -rf "$HOOK_ENV_DIR/$ENVIRONMENT_ID/$TARGET_SHA"
+    rm -rf "$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID/$TARGET_SHA"
+    set +u
+  elif [[ -n "$delete_all" ]]; then
+    set -u
+    rm -rf "$HOOK_ENV_DIR/$ENVIRONMENT_ID"
+    rm -rf "$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID"
+    set +u
+  fi
+}
+
+exit_invalid_args() {
+  echo "$1" >&2
+  usage
+  exit 3
+}
+
+err_exit() {
+  [ -n "$2" ] && echo "$2" >&2
+  exit $1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+main "$@"

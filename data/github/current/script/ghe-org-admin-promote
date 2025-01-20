@@ -1,0 +1,81 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-org-admin-promote [options]
+#/
+#/ Make users into organization admins
+#/
+#/ Promote an individual user with the -u flag. If
+#/ you don't specify a user, all site admins will be
+#/ promoted. You can promote users to site admins via
+#/ the site admin dashboard or the ghe-user-promote tool.
+#/
+#/ Specify a single organization in which to promote
+#/ the user with the -o flag. If you don't specify an
+#/ organization, a site admin specified with -u will be
+#/ granted admin privileges to all organizations.
+#/
+#/ Note that the script will refuse to promote a
+#/ non-site admin to be an admin of all organizations.
+#/
+#/ OPTIONS:
+#/  -h              Show this message.
+#/  -v              Run in verbose mode.
+#/  -y              Bypass the confirmation prompt.
+#/  -a              Add all site admins as admins of every organization
+#/  -u USERNAME     Only add the specified user as an admin.
+#/  -o ORGANIZATION Only add the user(s) as admin(s) of the specified
+#/                  organization.
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+all            = false
+verbose        = false
+bypass_warning = false
+username       = nil
+organization   = nil
+
+if ARGV.empty?
+  help!
+end
+
+ARGV.options do |opts|
+  opts.on("-a", "--all")              { all = true }
+  opts.on("-u", "--username=val")     { |val| username = val }
+  opts.on("-o", "--organization=val") { |val| organization = val }
+  opts.on("-v", "--verbose")          { verbose = true }
+  opts.on("-y")                       { bypass_warning = true }
+  opts.on_tail("-h", "--help")        { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+if username.nil? && organization.nil? && !all
+  help!
+end
+
+who = username.nil? ? "all site admins" : username
+admins = username.nil? ? "admins" : "an admin"
+what = organization.nil? ? "all organizations" : organization
+
+unless bypass_warning
+  printf "Do you want to give organization admin privileges for #{what} to #{who}? (y/N) "
+  exit(0) if STDIN.gets.chomp.downcase != "y"
+end
+
+puts "Making #{who} #{admins} of #{what}"
+# This part's slow, so wait until we need it:
+require File.expand_path("../../config/environment", __FILE__)
+
+begin
+  OrgAdminPromoter.new(username: username, organization: organization, verbose: verbose).run
+rescue OrgAdminPromoter::Error => e
+  abort e.message
+end

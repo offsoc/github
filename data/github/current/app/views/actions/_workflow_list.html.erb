@@ -1,0 +1,118 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<% if user_blocked %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-user" )) do %>
+      GitHub Actions is currently disabled for your account. Please reach out to <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url(tags: "dotcom-actions") %>">GitHub Support</a> for assistance.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-user" )) do %>
+      GitHub Actions is currently disabled for your account. Please reach out to <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url(tags: "dotcom-actions") %>">GitHub Support</a> for assistance.
+    <% end %>
+  <% end %>
+<% elsif repo_blocked %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-repo" )) do %>
+      GitHub Actions is currently disabled for this repository. Please reach out to <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url(tags: "dotcom-actions") %>">GitHub Support</a> for assistance.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :danger, mt: 2, mb: 4, icon: "alert", test_selector: "actions-invocation-blocked-repo" )) do %>
+      GitHub Actions is currently disabled for this repository. Please reach out to <a class="Link--inTextBlock" href="<%= GitHub.contact_support_url(tags: "dotcom-actions") %>">GitHub Support</a> for assistance.
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if show_survey_prompt %>
+  <% user_id = GitHub.multi_tenant_enterprise? ? "ghe" : current_user.id %>
+  <%= render_react_partial name: "actions-survey", ssr: true, props: {
+    surveyLink: "https://survey3.medallia.com/?actions&id=#{user_id}",
+    surveyOpenCallbackPath: actions_survey_open_path,
+    surveyDismissCallbackPath: actions_survey_dismiss_path
+  } %>
+<% end %>
+
+<%= render "actions/tip" if params[:show_workflow_tip].present? %>
+
+<% if selected_workflow %>
+  <%= render partial: "actions/disabled_workflow_banner", locals: { workflow: selected_workflow } %>
+<% end %>
+
+<% unless page_limit_reached %>
+  <div class="d-block d-lg-none no-wrap mt-3">
+    <div class="table-list-header-toggle states flex-auto pl-0">
+      <strong><%= pluralize number_with_delimiter(workflow_runs.total_entries), params[:query] ? "workflow run result" : "workflow run" %></strong>
+    </div>
+  </div>
+<% end %>
+
+<div class="Box Box--responsive mt-3" data-issue-and-pr-hovercards-enabled data-hpc>
+  <div class="Box-header d-flex flex-justify-between flex-items-center">
+    <div class="flex-auto d-none d-lg-block no-wrap">
+      <% unless page_limit_reached %>
+        <div class="table-list-header-toggle states flex-auto" <%= test_selector "workflow-results" %>>
+          <strong><%= pluralize number_with_delimiter(workflow_runs.total_entries), params[:query] ? "workflow run result" : "workflow run" %></strong>
+        </div>
+      <% end %>
+    </div>
+    <div class="table-list-header-toggle states d-flex flex-lg-justify-end" data-pjax="#repo-content-pjax-container" data-turbo-frame="repo-content-turbo-frame">
+      <%= render partial: "actions/filters/event", locals: { workflow_run_filters: workflow_run_filters, selected_workflow: selected_workflow } %>
+      <%= render partial: "actions/filters/status", locals: { workflow_run_filters: workflow_run_filters, selected_workflow: selected_workflow } %>
+      <%= render partial: "actions/filters/branch", locals: { workflow_run_filters: workflow_run_filters, selected_workflow: selected_workflow } %>
+      <%= render partial: "actions/filters/actor", locals: { workflow_run_filters: workflow_run_filters, selected_workflow: selected_workflow } %>
+    </div>
+  </div>
+
+  <% if user_has_push_access && selected_workflow&.has_workflow_dispatch_trigger? && !selected_workflow&.required? && !selected_workflow.disabled? && !repo_blocked && !user_blocked && !current_repository.archived? %>
+    <%= render(Primer::Beta::Flash.new(full: true, test_selector: "actions-manual-run", display: :flex, justify_content: :space_between)) do %>
+      <span>This workflow has a <span class="text-mono p-1 f6">workflow_dispatch</span> event trigger.</span>
+
+      <details
+        class="js-dropdown-details details-overlay position-relative details-reset d-inline-block flash-action width-fit"
+        data-deferred-details-content-url="<%= actions_manual_run_partial_path(workflow: selected_workflow.path, show_workflow_tip: params[:show_workflow_tip].presence) %>"
+        data-details-no-preload-on-hover
+        >
+        <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "primary") do %>
+          Run workflow
+          <div class="dropdown-caret"></div>
+        <% end %>
+        <div class="Popover position-relative">
+          <div class="position-absolute Popover-message Popover-message--large Popover-message--top-right mt-2 right-0 text-left p-3 mx-auto Box color-shadow-large" style="width: 232px !important">
+            <include-fragment>
+              <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block)) %>
+            </include-fragment>
+          </div>
+        </div>
+      </details>
+    <% end %>
+  <% end %>
+
+  <% if page_limit_reached %>
+    <%= render partial: "actions/workflow_runs_page_limit", locals: {
+      workflow_run_filters: workflow_run_filters,
+      recommended_date_filter: recommended_date_filter,
+    } %>
+  <% else %>
+    <% track_render_partial("actions/workflow_runs") do %>
+      <%= render partial: "actions/workflow_runs", locals: { workflow_runs: workflow_runs, selected_workflow: selected_workflow } %>
+    <% end %>
+  <% end %>
+</div>
+
+<% unless page_limit_reached %>
+  <div class="paginate-container">
+    <div class="pagination">
+      <%= will_paginate workflow_runs, renderer: ActionsWorkflowsLinkRenderer %>
+    </div>
+  </div>
+<% end %>
+
+<% if page >= 10 && workflow_runs.any? %>
+  <%
+    recommended_date_filter = "<" + workflow_runs.last.created_at.strftime("%F")
+    link_to_filter = filtered_runs_by_file_path(filters: workflow_run_filters, replace: { created: recommended_date_filter }, filename: params[:selected_filename], lab: params[:lab] == "true")
+  %>
+  <div class="protip mt-4 mb-4">
+    <%= render(Primer::Beta::Octicon.new(icon: "light-bulb", color: :muted)) %>
+    <strong>ProTip!</strong>
+      You can narrow down the results and go further in time using <a class="Link--inTextBlock" href="<%= link_to_filter %>">created:<%= recommended_date_filter %></a> or the other filters available.
+  </div>
+<% end %>

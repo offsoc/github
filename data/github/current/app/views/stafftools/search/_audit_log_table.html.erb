@@ -1,0 +1,148 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+
+<%= render(Primer::Beta::BorderBox.new) do |box| %>
+  <% view.logs.each_with_index do |log, index| %>
+    <% box.with_row do %>
+      <% if log.repo && view.prompt_for_hubber_access?(log.actor, log.repo_id, log.action, ( log.data.key?(:private_repo) ? log.data[:private_repo] : nil )) %>
+        <%= render :partial => "stafftools/search/private_log", locals: {view: view, log: log} %>
+      <% else %>
+        <div class="stafftools-auditlog <%= "invalid" if log.invalid? %>">
+          <%= render partial: "audit_log/entry_warning_security_5219", locals: { entry: log } %>
+          <%= primer_octicon(log.icon, height: 32) %>
+          <div class="js-details-container Details audit-log-entry <%= "open" if view.logs.size == 1 %>">
+            <span class="float-right"><%= time_ago_in_words_js log.at_timestamp %></span>
+            <strong class="audit-log-title"><%= log.action %>
+              <% if log.invalid? %><%= content_tag(:span, primer_octicon(:alert), :class => "tooltipped tooltipped-s tooltipped-auditlog", :'aria-label' => view.invalid_tooltip_label(log)) %><% end %>
+              <% if view.show_filter_links? %>
+                <% search_action_url = view.filter_action_query(log.action) %>
+                <%= render(Primer::Beta::Link.new(id: "action-filter-search-#{log.action}", href: "#{search_action_url}", aria: { label: "Show only #{log.action} events" }, data: { pjax: true } )) do |component| %>
+                  <% component.with_tooltip(text: "Show only #{log.action} events") %><%= primer_octicon(:search) %>
+                <% end %>
+                <% hide_action_url = view.hide_action_query(log.action) %>
+                <%= render(Primer::Beta::Link.new(id: "action-filter-hide-#{log.action}", href: "#{hide_action_url}", aria: { label: "Hide #{log.action} events" }, data: { pjax: true } )) do |component| %>
+                  <% component.with_tooltip(text: "Hide #{log.action} events") %><%= primer_octicon(:"bell-slash") %>
+                <% end %>
+              <% end %>
+            </strong>
+            <small class='log-subtitle'>
+              <%= log.title(viewer: current_user) %>
+            </small>
+            <p>
+              Performed
+              <% if log.actor %>
+                by <%= view.log_query(log.actor) %>
+              <% end %>
+              from <%= view.actor_location log %>
+              <%= "(#{log.country})" unless log.country.blank? %>
+            </p>
+            <% if log.impersonated? %>
+            <p>
+              On behalf of <%= view.stafftools_user_link(log.hit[:user_id]) %>
+            </p>
+            <% end %>
+            <p>
+              Targeting
+              <% if log.repo %>
+                repository
+                <%= view.log_query(log.repo) %>
+              <% elsif log.org %>
+                organization
+                <%= view.log_query(log.org) %>
+              <% elsif log.business %>
+                enterprise
+                <%= view.log_query(log.business) %>
+              <% elsif log.user %>
+                user <%= view.log_query(log.user) %>
+              <% elsif log.hit[:user] %>
+                user <%= view.log_query(log.hit[:user]) %>
+              <% elsif log.actor %>
+                user <%= view.log_query(log.actor) %>
+              <% else %>
+                <em>unknown</em>
+              <% end %>
+              <span class="hidden-text-expander inline"><button type="button" aria-expanded="false" aria-label="Show more details" class="ellipsis-expander js-details-target">&hellip;</button></span>
+            </p>
+            <div class="log-more-info">
+
+              <%= render Primer::Beta::ClipboardCopy.new(float: :right, ml: 1, classes: "btn btn-sm zeroclipboard-button", value: log.pretty_metadata, title: "This version is safe for user consumption", "aria-label": "Copy metadata") do %>
+                Copy metadata
+              <% end %>
+              <% if log.hit.index.present? %>
+                <%= render Primer::Beta::ClipboardCopy.new(float: :right, ml: 1, classes: "btn btn-sm zeroclipboard-button", value: "curl -XGET '#{log.hit.index.client.url}/#{log.hit.index_name}/#{log.hit.type}/#{log.hit.id}?pretty'", "aria-label": "Copy entry cURL") do %>
+                  Copy entry cURL
+                <% end %>
+              <% end %>
+              <% if view.show_verify_device?(log) %>
+                <%= form_tag stafftools_user_authenticated_devices_verify_path(log.user, device_id: log.metadata[:device_cookie]), method: :put do %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, scheme: :danger, float: :right, ml: 1) do %>
+                    Verify device
+                  <% end %>
+                <% end %>
+              <% end %>
+              <% if view.show_unverify_device?(log) %>
+                <%= form_tag stafftools_user_authenticated_devices_unverify_path(log.user, device_id: log.metadata[:device_cookie]), method: :put do %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, scheme: :danger, float: :right, ml: 1) do %>
+                    Unverify device
+                  <% end %>
+                <% end %>
+              <% end %>
+              <% if view.show_mobile_revoke?(log) %>
+                <%= form_tag stafftools_user_mobile_registration_path(log.actor, log.data["oauth_access_id"]), method: :delete do %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, scheme: :danger, float: :right, ml: 1) do %>
+                    Delete Key
+                  <% end %>
+                <% end %>
+              <% end %>
+              <table>
+                <% log.user_metadata.each do |key, value| %>
+                  <tr class="border-bottom">
+                    <th><%= key %></th>
+                    <td>
+                      <% if value.nil? %>
+                        <em>nil</em>
+                      <% elsif key == :content_url %>
+                        <%= link_to value, value %>
+                      <% elsif key == :request_id %>
+                        <%= link_to \
+                              value,
+                              stafftools_audit_log_path(query: view.request_id_query(value)) %>
+                      <% elsif key == :repo_id %>
+                        <%= view.stafftools_repo_link(value) %>
+                      <% elsif key == :org_id || key == :user_id || key == :actor_id %>
+                        <%= view.stafftools_user_link(value) %>
+                      <% elsif key == :business %>
+                        <%= view.log_query(value) %>
+                      <% elsif key == :business_id %>
+                        <%= view.stafftools_business_link(value) %>
+                      <% elsif view.linkable_key?(key) %>
+                        <% if value.respond_to?(:each) %>
+                          <%= safe_join value.collect { |item| view.log_query(item) }, ", " %>
+                        <% elsif view.stafftools_linkable_key?(key) %>
+                          <%= view.stafftools_link(key, value, log.action, log.metadata[:comment_type]) %>
+                        <% else %>
+                          <%= view.log_query value %>
+                        <% end %>
+                      <% elsif value.is_a? Hash %>
+                        <% value.each do |k, v| %>
+                          <strong><%= k %>:</strong> <%= v %><br>
+                        <% end %>
+                      <% elsif [true, false].include?(value) %>
+                        <%= value %>
+                      <% elsif value.blank? %>
+                        <em>blank</em>
+                      <% elsif value.is_a?(String) && value =~ /\n/ %>
+                        <span class="preserve-newlines"><%= value %></span>
+                      <% else %>
+                        <%= value %>
+                      <% end %>
+                    </td>
+                  </tr>
+                <% end %>
+              </table>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

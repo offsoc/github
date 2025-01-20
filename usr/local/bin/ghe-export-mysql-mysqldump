@@ -1,0 +1,59 @@
+#!/bin/sh
+#/ Usage: ghe-export-mysql-mysqldump [-h]
+#/
+#/ Export all MySQL data, which includes users, commit comments, pull requests,
+#/ issues, etc. The data is streamed as plain text to STDOUT.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Export the MySQL data to a file:
+#/    $ ghe-export-mysql > dump-file
+#/
+#/  Transfer the MySQL data from the current appliance to another:
+#/    $ ghe-export-mysql | ssh -p 122 admin@[hostname] -- ghe-import-mysql
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+ssh=
+sudo=sudo
+
+if ghe-config --true 'mysql.external.enabled'; then
+  GHE_MYSQL_HOST="127.0.0.1"
+  MYSQL_PWD="$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)"
+  GHE_MYSQL_USER="$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)"
+  GHE_MYSQL_PORT="3307"
+  export MYSQL_PWD
+  sudo="sudo -E"
+else
+  if [ -f /etc/github/cluster ]; then
+    local_host="$(cat /etc/github/cluster)"
+    mysql_master="$(ghe-config cluster.mysql-master)"
+    if [ "$local_host" != "$mysql_master" ]; then
+      echo "-- MySQL Master: $mysql_master"
+      ssh="ssh -p 122 admin@$mysql_master -- "
+    fi
+    echo "-- Backup Via: $local_host"
+  fi
+fi
+
+$ssh $sudo mysqldump \
+  --user="${GHE_MYSQL_USER:-root}" \
+  --default-character-set=utf8 \
+  --hex-blob \
+  --single-transaction \
+  --quick \
+  --set-gtid-purged=OFF \
+  --ssl-mode=DISABLED \
+  --max_allowed_packet=1024M \
+  ${GHE_MYSQL_HOST:+--host="$GHE_MYSQL_HOST"} \
+  ${GHE_MYSQL_PORT:+--port="$GHE_MYSQL_PORT"} \
+  github_enterprise

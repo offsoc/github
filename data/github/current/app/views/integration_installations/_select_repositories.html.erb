@@ -1,0 +1,153 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# view is instance of IntegrationInstallations::SuggestionsView %>
+<% repository_target_switching_disabled = local_assigns.fetch(:repository_target_switching_disabled, false) %>
+
+<% if view.integration&.suspended? %>
+  <p class="note text-small mb-4 color-fg-muted">
+    This integration has been suspended. Repository access can be modified once the integration is reinstated.
+  </p>
+<% else %>
+  <div role="radiogroup" aria-labelledby="repository-selection">
+    <% unless view.integration.present? %>
+      <div class="form-checkbox integrations-install-target mb-4">
+        <label for="install_target_none">
+          <%=
+            radio_button_tag(
+              "install_target",
+              "none",
+              nil,
+              checked: view.install_target_radio_checked?(:none),
+              class: " js-installation-repositories-radio"
+            )
+          %>
+        Public Repositories (read-only)
+        </label>
+      </div>
+    <% end %>
+
+    <% unless repository_target_switching_disabled %>
+    <div class="form-checkbox integrations-install-target mb-4">
+      <label for="install_target_all">
+        <%=
+          radio_button_tag(
+            "install_target",
+            "all",
+            nil,
+            checked: view.install_target_radio_checked?(:all),
+            class: "js-installation-repositories-radio",
+            disabled: !view.can_target_all_repositories?,
+            "aria-describedby" => "all-repositories-desc-01 all-repositories-desc-02"
+          )
+        %>
+        All repositories
+      </label>
+      <p id="all-repositories-desc-01" class="note text-small m-0 color-fg-muted">
+        This applies to all <% if view.installable_repositories? || view.requestable_repositories? %> current <i>and</i><% end %> future repositories <%= view.current_and_future_owned_repositories_text %>.
+      </p>
+      <p id="all-repositories-desc-02" class="note text-small m-0 color-fg-muted">
+        Also includes public repositories (read-only).
+      </p>
+    </div>
+    <% end %>
+
+    <% if view.installable_repositories? || view.requestable_repositories? %>
+      <div class="form-checkbox integrations-install-target mb-4 clearfix">
+        <label for="install_target_selected">
+          <%=
+            radio_button_tag(
+              "install_target",
+              "selected",
+              nil,
+              checked: view.install_target_radio_checked?(:selected),
+              class: "js-select-repositories-radio js-installation-repositories-radio float-left",
+              readonly: repository_target_switching_disabled,
+              "aria-describedby" => "select-repositories-desc-01 select-repositories-desc-02"
+            )
+          %>
+          Only select repositories
+        </label>
+        <p id="select-repositories-desc-01" class="note text-small m-0 color-fg-muted">
+          Select at least one repository. <%= " Max #{view.max_repositories} repositories." if view.display_max_repositories_note? %>
+        </p>
+        <p id="select-repositories-desc-02" class="note text-small m-0 color-fg-muted">
+          Also includes public repositories (read-only).
+        </p>
+
+        <div class="integrations-repository-picker mt-2 position-relative js-integrations-install-repo-selection
+          <% unless view.install_target_radio_checked?(:selected) %>has-removed-contents<% end %>">
+          <details class="select-menu js-apps-install-select-repositories-container details-reset details-overlay mb-3">
+            <%= render Primer::ButtonComponent.new(tag: :summary, classes: "select-menu-button") do %>
+              <%= primer_octicon(:repo) %>
+              <span>Select repositories</span>
+            <% end %>
+            <details-menu class="select-menu-modal width-full position-absolute js-apps-install-select-repositories-menu" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="select-menu-filters">
+                <div class="select-menu-text-filter">
+                  <remote-input
+                    role="menuitem"
+                    aria-owns="repository-menu-list"
+                    src="<%= view.repository_suggestions_path %>">
+                    <input
+                      type="text"
+                      class="form-control"
+                      placeholder="Search for a repository"
+                      aria-label="Search for a repository"
+                      autocomplete="off"
+                      autofocus>
+                  </remote-input>
+                </div>
+              </div>
+              <div class="select-menu-list" id="repository-menu-list">
+                <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block, role: 'menuitem')) %>
+              </div>
+            </details-menu>
+          </details>
+
+          <div class="js-integration-total-repos text-small color-fg-muted mb-3" <% if view.initial_repository_ids.length == 0 %>hidden<% end %>>
+            <% if view.initial_repository_ids.length > 0 %>
+              Selected <%= pluralize(view.initial_repository_ids.length, "repository") %>.
+            <% end %>
+          </div>
+
+          <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+            <%= render(Primer::Alpha::Banner.new(scheme: :warning, classes: "js-max-repository-warning", my: 3, p: 2, hidden: true)) do %>
+              Finish installing to select more than <strong><%= view.max_repositories %></strong> repositories.
+            <% end %>
+          <% else %>
+            <%= render(Primer::Beta::Flash.new(scheme: :warning, classes: "js-max-repository-warning", my: 3, p: 2, hidden: true)) do %>
+              Finish installing to select more than <strong><%= view.max_repositories %></strong> repositories.
+            <% end %>
+          <% end %>
+
+          <div class="js-min-repository-error flash-error text-small" hidden>
+            Select at least one repository.
+            <%# repository admins get the option to uninstall an app from all repositories that they manage %>
+            <% if repository_target_switching_disabled %>
+              <%= render Primer::ButtonComponent.new(scheme: :danger, mt: 2, type: :submit) do %>Uninstall integration on all my repositories<% end %>
+            <% end %>
+          </div>
+          <div class="integrations-select-repos js-integrations-install-repo-picked">
+            <% if view.edit_installed_repositories? %>
+              <% view.installed_repositories.each do |repo| %>
+                <%= render :partial => "integration_installations/suggestion_selection", locals: {repository: repo, label: {}} %>
+              <% end %>
+            <% end %>
+
+            <% if view.installation_request_available? %>
+              <% view.installation_request.repositories.each do |repo| %>
+                <%= render :partial => "integration_installations/suggestion_selection", locals: {repository: repo, label: {text: view.installation_request_verb, title: view.label_title}} %>
+              <% end %>
+            <% end %>
+
+            <% unless view.integration %>
+              <% view.programmatic_access_selected_repositories.each do |repo| %>
+                <%= render :partial => "integration_installations/suggestion_selection", locals: {repository: repo, label: {}} %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+
+      </div>
+    <% end %>
+  </div>
+<% end %>

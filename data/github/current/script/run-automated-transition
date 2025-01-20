@@ -1,0 +1,60 @@
+#!/bin/bash
+# Usage: run-automated-transition <transition-file-name> <arguments>
+USAGE="Usage: run-automated-transition <transition-file-name> <arguments>"
+
+set -e
+
+retry_command() {
+  local command="$1"
+  local max_tries="$2"
+  local sleep_time="$3"
+
+  for i in $(seq 1 $max_tries); do
+    if eval "$command"; then
+      return 0
+    else
+      sleep $sleep_time
+    fi
+  done
+
+  echo "Error: Command failed after $max_tries tries"
+  return 1
+}
+
+shutdown_query_analyzer() {
+  if [ -z "$QUERY_ANALYZER_AGENT_SOCKET" ]; then
+    return 0
+  fi
+
+  local flush="$1"
+  retry_command "curl --silent --show-error --output /dev/null -H \"Connection: close\" --unix-socket ${QUERY_ANALYZER_AGENT_SOCKET} http://localhost/agent/v1/shutdown?flush=${flush}" 60 1 || true
+}
+
+if [[ $# -eq 0 ]] ; then
+    # No arguments given, nothing to do. This usually happens when
+    # the transition-job-template is deployed.
+    # Shut the query-analyzer down and exit.
+    shutdown_query_analyzer 1
+    exit 0
+fi
+
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+  echo "${USAGE}" 1>&2
+  exit 1
+fi
+
+ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../" && pwd )"
+
+filename="$1"
+shift
+
+# The transition id is the first part of the filename, e.g. 20190101000000_delete_duplicated_widgets.rb -> 20190101000000
+# This is used by the query duplicator
+export TRANSITION_ID=$(echo "$filename" | cut -d'_' -f1)
+"$ROOT_DIR"/bin/safe-ruby "lib/github/transitions/$filename" "$@"
+transition_return_code=$?
+
+# The agent is running, instruct it to flush and shutdown
+shutdown_query_analyzer $transition_return_code
+
+exit $transition_return_code

@@ -1,0 +1,185 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+class SetupStripeWebhooks
+  attr_reader :argv, :username, :connect_webhook_endpoint, :platform_webhook_endpoint
+
+  def initialize(argv)
+    @argv = argv
+  end
+
+  def run
+    return help if argv.first == "--help"
+
+    @username = argv.shift || username_from_prompt
+
+    puts "\n#{GREEN}ngrok tunnel:#{RESET} #{ngrok_tunnel_url}"
+    puts "(You will need to set this up at ngrok.io manually)"
+
+    @platform_webhook_endpoint = find_stripe_platform_webhook_endpoint
+    @connect_webhook_endpoint = find_stripe_connect_webhook_endpoint
+
+    any_missing_events = false
+
+    if platform_webhook_endpoint
+      puts "\n#{GREEN}Stripe platform webhook endpoint:#{RESET} #{platform_webhook_endpoint.url}"
+    else
+      puts "\n#{YELLOW}No Stripe platform webhook endpoint found.#{RESET} Don't worry! One will be created for you."
+    end
+
+    puts "Subscribed event types:"
+    PLATFORM_EVENTS_TO_SUBSCRIBE.each do |expected_event|
+      if platform_webhook_endpoint&.enabled_events&.include?(expected_event)
+        print "  #{GREEN}✔#{RESET} "
+      else
+        print "  #{RED}x#{RESET} "
+        any_missing_events = true
+      end
+
+      puts expected_event
+    end
+
+    if connect_webhook_endpoint
+      puts "\n#{GREEN}Stripe Connect webhook endpoint:#{RESET} #{connect_webhook_endpoint.url}"
+    else
+      puts "\n#{YELLOW}No Stripe Connect webhook endpoint found.#{RESET} Don't worry! One will be created for you."
+    end
+
+    puts "Subscribed event types:"
+    CONNECT_EVENTS_TO_SUBSCRIBE.each do |expected_event|
+      if connect_webhook_endpoint&.enabled_events&.include?(expected_event)
+        print "  #{GREEN}✔#{RESET} "
+      else
+        print "  #{RED}x#{RESET} "
+        any_missing_events = true
+      end
+
+      puts expected_event
+    end
+
+    if platform_webhook_endpoint.present? && connect_webhook_endpoint.present? && any_missing_events == false
+      puts "\nLooks like you're good to go!"
+      return
+    end
+
+    print "\nCreate/update webhook endpoints? (y/n): "
+
+    confirmation = gets.strip.downcase
+    unless %w[y yes].include?(confirmation)
+      puts "Aborting!"
+      return
+    end
+
+    platform_stripe_params = {
+      url: stripe_platform_webhook_target,
+      enabled_events: PLATFORM_EVENTS_TO_SUBSCRIBE,
+    }
+
+    if platform_webhook_endpoint.present?
+      Stripe::WebhookEndpoint.update(platform_webhook_endpoint.id, platform_stripe_params)
+    else
+      Stripe::WebhookEndpoint.create(platform_stripe_params.merge(connect: false))
+    end
+
+    connect_stripe_params = {
+      url: stripe_connect_webhook_target,
+      enabled_events: CONNECT_EVENTS_TO_SUBSCRIBE,
+    }
+
+    if connect_webhook_endpoint.present?
+      Stripe::WebhookEndpoint.update(connect_webhook_endpoint.id, connect_stripe_params)
+    else
+      Stripe::WebhookEndpoint.create(connect_stripe_params.merge(connect: true))
+    end
+  rescue Stripe::StripeError => e
+    puts "\n#{RED}ERROR:#{RESET} #{e}"
+  end
+
+  def help
+    puts <<~HELP
+    Usage: #{$PROGRAM_NAME} [USERNAME]
+
+    Sets up Stripe webhook tunneling through ngrok for a given username.
+    HELP
+  end
+
+  private
+
+  def ngrok_tunnel_subdomain
+    "ghdev-#{username}"
+  end
+
+  def ngrok_tunnel_url
+    "https://#{ngrok_tunnel_subdomain}.ngrok.io"
+  end
+
+  def stripe_platform_webhook_target
+    "#{ngrok_tunnel_url}/billing/stripe/platform"
+  end
+
+  def stripe_connect_webhook_target
+    "#{ngrok_tunnel_url}/billing/stripe/connect"
+  end
+
+  def username_from_prompt
+    default = username_from_git
+
+    print "GitHub username"
+    print " (#{default})" if default
+    print ": "
+
+    input = gets.strip
+    if input.empty?
+      default
+    else
+      input
+    end
+  end
+
+  def username_from_git
+    `git config user.email`.split("@")&.first&.strip
+  end
+
+  def find_stripe_platform_webhook_endpoint
+    find_stripe_webhook_endpoint(application_is_nil: true, target: stripe_platform_webhook_target)
+  end
+
+  def find_stripe_connect_webhook_endpoint
+    find_stripe_webhook_endpoint(application_is_nil: false, target: stripe_connect_webhook_target)
+  end
+
+  def find_stripe_webhook_endpoint(application_is_nil:, target:)
+    Stripe::WebhookEndpoint.list.auto_paging_each.detect do |webhook_endpoint|
+      webhook_endpoint.livemode == false &&
+        webhook_endpoint.url == target &&
+        webhook_endpoint.application.nil? == application_is_nil
+    end
+  end
+
+  PLATFORM_EVENTS_TO_SUBSCRIBE = [
+    "charge.dispute.closed",
+    "charge.dispute.created",
+    "charge.dispute.updated",
+    "transfer.created",
+    "transfer.failed",
+    "transfer.reversed",
+  ].freeze
+
+  CONNECT_EVENTS_TO_SUBSCRIBE = [
+    "payout.created",
+    "payout.failed",
+    "account.updated",
+  ].freeze
+
+  GREEN = "\e[0;32;49m"
+  YELLOW = "\e[0;33;49m"
+  RED = "\e[0;31;49m"
+  RESET = "\e[0m"
+end
+
+warn "Loading rails environment..."
+$stderr.sync = true
+require File.expand_path("../../config/basic", __FILE__)
+require_relative "../config/environment"
+
+SetupStripeWebhooks.new(ARGV).run if $PROGRAM_NAME == __FILE__

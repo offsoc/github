@@ -1,0 +1,229 @@
+#!/bin/bash
+# Usage: script/vendor-rails [-b <branch>] [-r <rev>] [--bisect-start] [<git-url>]
+#
+#   -b                Branch name to clone (default: "main")
+#   -r                SHA to build (default: HEAD)
+#   --bisect-start    Takes a good and bad commit SHAs, then vendors the first commit to check.
+#                     After checking the commit use --bisect-good or --bisect-bad.
+#                       --bisect-good Marks the commit as good and continues the bisect for the next commit
+#                       --bisect-bad  Marks the commit as bad and continues the bisect searching for the next commit.
+#                     The process will repeate until the first bad commit is found.
+#                     Once the process the first bad commit has been found, use --bisect-end to clean up.
+#                       --bisect-end  Cleans up the temporary rails directory used during bisect
+#
+# Build Rails gems and stick them in vendor/cache.
+#
+# This command is used in situations where you'd typically use a :git bundler
+# source which should not be used in the main github app (even for development gems).
+
+set -eu
+
+rev=""
+directory=""
+branch="main"
+url="https://github.com/rails/rails"
+depth="1"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -b)
+    branch="$2"
+    shift 2
+    ;;
+  -r)
+    rev="$2"
+    depth="1000"
+    shift 2
+    ;;
+  -d)
+    directory="$2"
+    shift 2
+    ;;
+  --bisect-start)
+    depth="1000"
+    bisecting=true
+    bisect_start=true
+    shift
+    ;;
+  --bisect-good)
+    bisecting=true
+    bisect_continue="good"
+    shift
+    ;;
+  --bisect-bad)
+    bisecting=true
+    bisect_continue="bad"
+    shift
+    ;;
+  --bisect-end)
+    bisecting=true
+    bisect_end=true
+    shift
+    ;;
+  -h|--help)
+    sed -ne '/^#/!q;s/.\{1,2\}//;1d;p' < "$0"
+    exit
+    ;;
+  *)
+    url="$1"
+    shift
+    ;;
+  esac
+done
+
+if [ -z "$url" ]; then
+  "$0" --help >&2
+  exit 1
+fi
+
+# Remove linuxbrew from the PATH since it is not consistently available and
+# can cause gems to compile with the wrong pkg-config.
+# See https://github.com/github/ruby-architecture/issues/593
+export PATH=$(echo "$PATH" | sed -r 's|:/home/linuxbrew/.linuxbrew/s?bin||g')
+
+# the RAILS_ROOT directory
+root=$(cd $(dirname "$0")/.. && pwd)
+cd "$root"
+
+# 1. Use our vendored ruby directly (this gives us ruby and bundle exec)
+# 2. Append project bin to the PATH so we can use bin/npm when there's no global npm available
+export PATH="$root/vendor/ruby/current/bin:$PATH:$root/bin"
+
+if [ ! -z "$directory" ]; then
+    echo "Using rails from $directory"
+
+    rails_clone=$directory
+else
+    rails_clone=$root/tmp/rails
+    if [ -z "${bisecting+1}" ]; then
+        echo "Cloning $url at $branch"
+        rm -Rf "$rails_clone"
+        git clone --depth "$depth" --branch "$branch" "$url" "$rails_clone"
+        trap "rm -rf $rails_clone" EXIT
+    else
+        if [ ! -d $rails_clone ]; then
+          git clone --depth "$depth" --branch "$branch" "$url" "$rails_clone"
+        fi
+    fi
+fi
+
+if [ "${bisect_start+1}" ]; then
+  cd $rails_clone
+  echo ""
+  echo "Enter good commit sha:"
+  read good_sha
+  echo ""
+  echo "Enter bad commit sha:"
+  read bad_sha
+  echo ""
+
+  git bisect start
+  git bisect good "$good_sha"
+  bisect_output=$(git bisect bad "$bad_sha")
+
+  cd $root
+
+  echo $bisect_output
+  echo ""
+  echo "Ready to proceed, press enter to continue."
+  read
+fi
+
+if [ "${bisect_continue+1}" ]; then
+  {
+    git restore --staged .
+    git restore .
+    git clean -fd
+  } &> /dev/null
+
+    cd $rails_clone
+    bisect_output=$(git bisect "$bisect_continue")
+    cd $root
+
+    echo ""
+    echo $bisect_output
+    echo ""
+
+    STR="is the first bad commit"
+    if [[ "$bisect_output" =~ .*"$STR".* ]]; then
+      exit
+    fi
+fi
+
+if [ "${bisect_end+1}" ]; then
+    rm -Rf "$rails_clone"
+    exit
+fi
+
+pushd "$rails_clone" >/dev/null
+
+if [ ! -z "$rev" ]; then
+  git reset --hard $rev
+fi
+git checkout -- .
+
+sha=$(git rev-parse --short HEAD)
+base_version=$(cat RAILS_VERSION)
+new_version="$base_version.$sha"
+minor_version=$(echo $base_version | ruby -ne 'puts $_[/^\d+\.\d+/]')
+
+# Use the SHA as part of version number
+echo "$new_version" > RAILS_VERSION
+
+echo "Building rails $new_version"
+(
+export BUNDLE_PATH="$root/tmp/rails_bundle"
+export BUNDLE_WITHOUT="job:storage:db:rubocop:doc::ujs:test"
+
+bundle install
+
+# build the .gem files
+/usr/bin/rake -f ./tasks/release.rb all:build
+
+git checkout -- .
+)
+
+popd >/dev/null
+
+echo "Importing new $new_version gemfiles"
+for gemfile in $rails_clone/pkg/{actionmailer,actionpack,actionview,activejob,activemodel,activerecord,activesupport,railties}*.$sha.gem; do
+  filename="${gemfile##*/}"
+
+  cp "$gemfile" "vendor/cache/$filename"
+done
+
+echo "Bundling"
+bin/bundle config set --local deployment 'false'
+
+old_version=$(ruby -e "puts ARGF.read[/^rails_version = \"([^\"]*)\"$/, 1]" Gemfile)
+ruby -p -i -e "\$_.sub!('$old_version', '$new_version')" Gemfile
+
+bin/bundle update actionmailer actionpack actionview activejob activemodel activerecord activesupport railties --conservative
+
+echo "Updating gemfiles"
+if [ -z "${bisecting+1}" ]; then
+  git add -v "vendor/cache"
+fi
+
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+	mkdir -p /tmp/prepare-rails-update-artifacts
+
+	echo $branch > /tmp/prepare-rails-update-artifacts/RAILS_BRANCH
+	echo $url > /tmp/prepare-rails-update-artifacts/RAILS_URL
+	echo $minor_version > /tmp/prepare-rails-update-artifacts/RAILS_MINOR_VERSION
+	echo $new_version > /tmp/prepare-rails-update-artifacts/RAILS_NEW_VERSION
+	echo $sha > /tmp/prepare-rails-update-artifacts/RAILS_NEW_SHA
+	echo $old_version > /tmp/prepare-rails-update-artifacts/RAILS_OLD_VERSION
+	echo $(echo "$old_version" | grep -o '[^.]*$') > /tmp/prepare-rails-update-artifacts/RAILS_OLD_SHA
+fi
+
+if [ -z "${bisecting+1}" ]; then
+    git add -v Gemfile Gemfile.lock
+    git add -v "vendor/licenses/bundler/"
+    git add -v "sorbet/rbi/gems/"
+
+    echo ""
+    echo "Changes have been staged for commit. Please review the changes and commit them."
+else
+    echo ""
+    echo $bisect_output
+fi

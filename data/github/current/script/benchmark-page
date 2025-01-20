@@ -1,0 +1,123 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+unless ENV["PRELOAD"] == "1" && ENV["FASTDEV"] == "1"
+  warn "benchmarking was run without PRELOAD=1 FASTDEV=1, results will be invalid"
+end
+
+unless Rails.env.development?
+  abort "benchmarking should be run in development (with PRELOAD=1 FASTDEV=1)"
+end
+
+require "optparse"
+options = {
+  path: "/about",
+  profile: false,
+  api: false,
+}
+opts = OptionParser.new do |opts|
+  opts.on("--api", "Use api host") do
+    options[:api] = true
+  end
+
+  opts.on("--path PATH", "path of page to profile (default: /about)") do |path|
+    options[:path] = path
+  end
+
+  opts.on("--time TIME", "seconds to spend benchmarking (default: 5)") do |t|
+    options[:time] = Float(t)
+  end
+
+  opts.on("--warmup TIME", "seconds to spend warming up (default: 2)") do |t|
+    options[:warmup] = Float(t)
+  end
+
+  opts.on("--memory", "Report allocations made") do |m|
+    options[:memory] = m
+  end
+
+  opts.on("--profile", "Run stackprof after benchmarking") do |p|
+    options[:profile] = p
+  end
+end
+opts.parse(ARGV)
+
+require "./config/environment"
+require "stackprof"
+require "benchmark/ips"
+require "benchmark/memory"
+
+# We will be making many requests, so turn off rate limiting
+GitHub.request_limiting_enabled = false
+
+# Build the application via config.ru
+app = Rack::Builder.load_file("./config.ru")[0]
+
+host_name = options[:api] ? GitHub.api_host_name : GitHub.host_name
+# Set up a vaguely valid env for making requests
+url = URI.join("https://#{host_name}", options[:path]).to_s
+env = Rack::MockRequest.env_for(url)
+env["HTTP_HOST"] = host_name
+env["REMOTE_ADDR"] = "127.0.0.1"
+
+make_request = -> () {
+  status, headers, body = app.call(env.dup)
+  s = []
+  body.each { |x| s << x }
+  body.close if body.respond_to?(:close)
+  unless status == 200
+    STDERR.puts "Encountered an error when trying to request the document"
+    STDERR.puts "Error code #{status}"
+    exit 1
+  end
+  [status, headers, s.join("")]
+}
+
+# print some info about the page, to help spot mistakes
+# It's easy to be misconfigured and not be testing the page you think
+first_call_response = make_request.call
+first_call_title = Nokogiri::HTML(first_call_response[2]).at_css("title")&.inner_text
+puts
+puts "Benchmarking page #{url}"
+puts "  title: #{first_call_title.inspect}"
+puts "  response code: #{first_call_response[0]}"
+puts "  ruby: #{RUBY_DESCRIPTION}"
+puts "  rails: #{Rails.version}"
+puts
+
+result = Benchmark.ips do |x|
+  x.config(options.slice(:time, :warmup))
+  x.report "GET #{options[:path]}" do
+    make_request.call
+  end
+end
+
+if options[:memory]
+  Benchmark.memory do |x|
+    x.report "GET #{options[:path]}" do
+      make_request.call
+    end
+  end
+end
+
+if options[:profile]
+  puts
+  output = "tmp/stackprof_#{options[:path].gsub("/", "_")}_#{DateTime.now.strftime("%Y-%m-%d-%H-%M-%S")}.dump"
+  puts "collecting profile to #{output}"
+
+  mode = :wall
+
+  avg = result.entries[0].seconds / result.entries[0].iterations
+  target_samples = 5000
+  sample_interval = 500
+  samples_per_iter = avg * 1_000_000.0 / sample_interval
+  iters = (target_samples / samples_per_iter).ceil
+  puts "  mode=#{mode.inspect} interval=#{sample_interval} iters=#{iters}"
+
+  StackProf.run(mode: mode, out: output, interval: sample_interval) do
+    iters.times do
+      make_request.call
+    end
+  end
+  system "stackprof #{output}", exception: true
+end

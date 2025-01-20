@@ -1,0 +1,126 @@
+<%
+  enterprise_managed_user_enabled = !!organization&.enterprise_managed_user_enabled?
+  icon = enterprise_managed_user_enabled ? "person" : "mail"
+  invite_or_add = invite_or_add_action_word(enterprise_managed: enterprise_managed_user_enabled)
+%>
+
+<div class="js-invite-member-dialog pb-3 pl-3 pr-3">
+  <%= render Primer::Beta::Blankslate.new do |c| %>
+    <% c.with_visual_icon(icon: icon) %>
+
+    <% c.with_heading(tag: :h2) do %>
+      <%= "#{invite_or_add} a member to #{organization.safe_profile_name}" %>
+    <% end %>
+
+    <% if organization&.business&.metered_plan? && !organization&.business&.metered_ghec_trial? %>
+      <% c.with_description do %>
+        <span class="color-fg-muted f5" <%= test_selector("metered-potential-costs") %>>
+          Adding new members may result in a charge of up to $21 per month, for each additional member. Add-ons such as GitHub Advanced Security will incur
+          additional charges.
+        </span>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render "orgs/invitations/rate_limited_message", :hide_close => true if rate_limited %>
+
+  <%= form_tag org_invitations_member_adder_add_path(organization), :class => "input-block" do %>
+    <%= hidden_field_tag :enable_tip, params[:enable_tip].presence %>
+    <% if on_per_seat_pricing?(organization) %>
+      <span class="d-block text-center color-fg-muted mt-1 mb-3">
+        <include-fragment src="<%= org_invitations_licensing_details_path(organization) %>" aria-label="Loading..."></include-fragment>
+      </span>
+    <% end %>
+    <div class="mt-3 d-flex flex-items-end">
+      <div class="flex-auto">
+        <%= render Primer::Beta::AutoComplete.new(
+          label_text: "Search by username, full name or email address",
+          classes: "auto-search-group",
+          src: org_invitations_invitee_suggestions_path(organization),
+          list_id: "org-invite-complete-results",
+          input_id: "org-invite-complete-input",
+          input_name: "identifier",
+          full_width: true,
+          with_icon: true
+        ) do |c| %>
+          <% c.with_input(
+            classes: "new-member-field rounded-right-0",
+            required: true
+          ) %>
+          <% c.with_results(
+            classes: "invite-member-results",
+            mb: 2) %>
+        <% end %>
+      </div>
+      <div class="input-group-button--autocomplete-embedded-icon">
+        <%= render(Primer::Beta::Button.new(type: :submit, scheme: :primary, classes: "js-auto-complete-button rounded-left-0")) { invite_or_add } %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if GitHub.billing_enabled? && organization.business.nil? %>
+    <div class="mt-3" <%= test_selector "invite-billing-manager-link" %>>
+      <%= render(Primer::Beta::Link.new(
+        href: org_new_billing_manager_path(organization)
+      )) { "#{invite_or_add} a billing manager" } %>
+    </div>
+  <% end %>
+
+  <% if display_saml_prompt?(organization, current_user) %>
+    <aside class="js-notice rounded-3 mt-3" style="padding: 1px; background: linear-gradient(135deg, rgba(191,57,137,1) 0%, rgba(9,107,222,1) 100%);" aria-label="Authenticate your members with SAML single sign-on">
+      <%= form_tag dismiss_org_notice_path(organization), method: :delete, class: "d-md-flex flex-items-center flex-justify-between color-bg-default rounded-3 js-notice-dismiss p-3" do %>
+        <input type="hidden" name="input[organizationId]" value="<%= organization.id %>">
+        <input type="hidden" name="input[notice]" value="<%= User::NoticesDependency::ORGANIZATION_NOTICES[:saml_prompt] %>">
+
+        <div class="flex-auto mr-md-3">
+          <h3 class="h5 lh-condensed mb-1">Authenticate members with <%= link_to "SAML single sign-on",
+            "#{GitHub.help_url}/github/authenticating-to-github/authenticating-with-saml-single-sign-on",
+            data: analytics_click_attributes(
+              category: "Suggestion",
+              action: "click to read docs",
+              label: "ref_page:#{request.fullpath};ref_cta:learn more about SAML;ref_loc:invite member dialog"
+            ), class: "Link--inTextBlock" %></h3>
+          <p class="f6 color-fg-muted mb-md-0">
+            Try it in a 30-day trial of GitHub Enterprise.
+          </p>
+        </div>
+        <div class="d-flex flex-items-center">
+          <%= render(Primer::Beta::Button.new(
+            scheme: :secondary,
+            size: :small,
+            tag: :a,
+            mr: 3,
+            data: {
+              **analytics_click_attributes(
+                category: "start_a_free_trial",
+                action: "click_to_set_up_enterprise_trial",
+                label: "ref_page:#{request.fullpath};ref_cta:start_a_free_trial;ref_loc:invite_member_dialog;",
+              )
+            },
+            href: enterprise_trial_signup_path(organization),
+          )) do %>
+            Start a free trial
+          <% end %>
+          <%= render(Primer::Beta::Button.new(
+            scheme: :link,
+            size: :small,
+            type: :submit,
+            aria: { label: "dismiss this message" },
+            data: {
+              **analytics_click_attributes(
+                category: "Suggestion",
+                action: "dismiss",
+                label: "ref_page:#{request.fullpath};ref_cta:dismiss;ref_loc:invite member dialog;",
+              )
+            },
+          )) do %>
+            <span class="d-none d-md-inline-block">
+              <%= render(Primer::Beta::Octicon.new(icon: "x", color: :subtle)) %>
+            </span>
+            <span class="d-md-none f6">Dismiss</span>
+          <% end %>
+        </div>
+      <% end %>
+    </aside>
+  <% end %>
+</div>

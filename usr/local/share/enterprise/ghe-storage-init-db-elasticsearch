@@ -1,0 +1,37 @@
+#!/bin/bash
+#/ Usage: ghe-storage-init-db-elasticsearch
+#/ Move /data/user/elasticsearch to secondary block device on /data/db/elasticsearch
+set -e
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+if [ -L /data/user/elasticsearch ]; then
+  echo "Error: /data/user/elasticsearch is already a symlink" >&2
+  exit 1
+fi
+
+if ! mountpoint -q /data/db; then
+  echo "Error: /data/db is not mounted. Use ghe-storage-init-db first." >&2
+  exit 1
+fi
+
+if ! test -f /data/github/current/public/system/maintenance.html; then
+  echo "Error: maintenance mode must be enabled before moving elasticsearch databases." >&2
+  exit 1
+fi
+
+if curl -s -o /dev/null http://localhost:9200; then
+  /usr/local/share/enterprise/ghe-nomad-local-alloc-stop elasticsearch
+fi
+
+cp -a /data/user/elasticsearch /data/db/
+mv /data/user/elasticsearch /data/user/elasticsearch.old
+ln -nfs /data/db/elasticsearch /data/user/elasticsearch
+
+/usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/elasticsearch/elasticsearch.hcl
+
+echo "Success: /data/user/elasticsearch moved to /data/db/elasticsearch"

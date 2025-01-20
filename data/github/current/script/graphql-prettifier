@@ -1,0 +1,153 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+# Usage: script/graphql-prettifier -q path/to/query.graphql
+require "optparse"
+require "./config/environment"
+
+class Node
+  attr_reader :name, :children
+
+  def initialize(name)
+    @name = name
+    @children = []
+  end
+
+  def add_child(gql_node)
+    new_node = create_node(gql_node)
+
+    existing_node = @children.find { |c| c.name == new_node.name }
+    return existing_node if existing_node
+
+    @children << new_node
+    new_node
+  end
+
+  def create_node(node)
+    if node.is_a?(GraphQL::Language::Nodes::Field)
+      name = ""
+      if node.alias
+        name += "#{node.alias}: "
+      end
+      name += node.name
+
+      if node.arguments.any?
+        name += "("
+        node.arguments.each_with_index do |arg, index|
+          name += "#{arg.name}: "
+          if arg.value.is_a?(Integer)
+            name += "#{arg.value}"
+          elsif arg.value == false || arg.value == true
+            name += "#{arg.value}"
+          elsif arg.value.is_a?(GraphQL::Language::Nodes::InputObject)
+            name += "{"
+            arg.value.arguments.each_with_index do |input_arg, input_index|
+              name += "#{input_arg.name}: #{input_arg.value.name}"
+              name += ", " if input_index < arg.value.arguments.length - 1
+            end
+            name += "}"
+          elsif arg.value.is_a?(String)
+            name += "\"#{arg.value}\""
+          else
+            name += "$#{arg.value.name}"
+          end
+          name += ", " if index < node.arguments.length - 1
+        end
+        name += ")"
+      end
+
+      Node.new(name)
+    elsif node.is_a?(GraphQL::Language::Nodes::InlineFragment) || node.is_a?(GraphQL::Language::Nodes::FragmentDefinition)
+      Node.new("... on #{node.type.name}")
+    else
+      puts "cannot create node"
+    end
+  end
+end
+
+class QueryPrettifier
+  def initialize(doc)
+    @fragments = {}
+
+    @definitions = doc.definitions
+    first = @definitions.first
+    root = Node.new(first.name)
+    read(root, first)
+    dump(root, 0)
+  end
+
+  def read(node, gql_node)
+    if gql_node.is_a?(GraphQL::Language::Nodes::OperationDefinition)
+      gql_node.selections.map do |selection|
+        read(node, selection)
+      end
+    elsif gql_node.is_a?(GraphQL::Language::Nodes::Field)
+      field_node = node.add_child(gql_node)
+      gql_node.selections.map do |selection|
+        read(field_node, selection)
+      end
+    elsif gql_node.is_a?(GraphQL::Language::Nodes::FragmentSpread)
+      fragment = @definitions.find { |d| d.name == gql_node.name }
+      raise "fragment #{gql_node.name} not found" unless fragment
+
+      # this is hacky and only works for a couple of nodes right now, for fields that are
+      # union types we need to make sure to add each fragment separately instead of trying
+      # to merge all of them together
+      if node.name == "node" || node.name == "options" || node.name == "field(name: \"Status\")" || node.name == "fieldValueByName(name: \"Status\")"
+        inline_node = node.add_child(fragment)
+        fragment.selections.each do |selection|
+          read(inline_node, selection)
+        end
+      else
+        fragment.selections.each do |selection|
+          read(node, selection)
+        end
+      end
+
+    elsif gql_node.is_a?(GraphQL::Language::Nodes::InlineFragment)
+      inline_node = node.add_child(gql_node)
+      gql_node.selections.each do |selection|
+        read(inline_node, selection)
+      end
+    end
+  end
+
+  def dump(node, level)
+    level.times { print "  " }
+    print node.name
+    if node.children.any?
+      puts " {"
+      node.children.each do |child|
+        dump(child, level + 1)
+      end
+      level.times { print "  " }
+      puts "}"
+    else
+      puts ""
+    end
+  end
+end
+
+query_path = nil
+OptionParser.new do |opt|
+  opt.banner =
+  opt.on("-q [INPUT]", "Path to the query file",) do |input|
+    query_path = input
+  end
+end.parse!(ARGV)
+
+if query_path.nil?
+  puts "Usage: #{File.basename($PROGRAM_NAME)} -q path/to/query.graphql"
+  exit 1
+end
+
+file_path = Rails.root.join(query_path)
+query = File.read(file_path)
+
+doc = GraphQL.parse(query)
+
+# walk the AST tree of the query and inline all fragments into the main query
+# limitations
+# - parsing of the outter query is incomplete so after running the script, I manually edited the first line to be "query IssueViewerViewQuery($repo: String!, $owner: String!, $number: Int!, $allowedOwner: String, $fetchSubIssues: Boolean = false) {"
+# - fragment spread on union types is harcoded based on the few nodes names where it happens (node, options, field(name: "Status"), fieldValueByName(name: "Status")
+# - in the query we select an issue { } but we also spread "... on PullRequest" which should be inlined - I removed that manually from the output
+QueryPrettifier.new(doc)

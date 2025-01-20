@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: timerd
+  labels:
+    service: timerd
+    role: production
+  annotations:
+    # Transposes all matching values for `image` to refer to the image
+    # corresponding to the SHA deployed at deploy time.
+    moda.github.net/image-placeholder: "github"
+    # Injects the application config Heaven has associated with this application
+    # into containers matching the following name.
+    moda.github.net/inject-moda-env-vars-into-containers: timerd
+    moda.github.net/inject-otel-env-vars-into-containers: "timerd"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      service: timerd
+      role: production
+  template:
+    metadata:
+      labels:
+        service: timerd
+        role: production
+      annotations:
+        observability.github.com/splunk_index: prod-timerd
+        fluentbit.io/parser: logfmt_sloppy
+    spec:
+      dnsPolicy: ClusterFirst
+      volumes:
+      - name: github-metadata
+        hostPath:
+          path: /etc/github/metadata.json
+      - name: syslog
+        hostPath:
+          path: /dev/log
+      restartPolicy: Always
+      containers:
+      - name: timerd
+        image: github
+        args: ["bin/timerd", "config/timers.proxima.rb"]
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - "sleep"
+              - "5"
+        ports:
+        - name: metrics
+          containerPort: 9988
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /etc/github/metadata.json
+          name: github-metadata
+          readOnly: true
+        - mountPath: /dev/log
+          name: syslog
+          readOnly: true
+        resources:
+          # How much CPU and memory we expect to use
+          requests:
+            cpu: 1
+            memory: "5Gi"
+          limits:
+            # A hard cap on the CPU used by this container.
+            cpu: 5
+            # If memory usage exceeds this value, restart the container.
+            memory: "14G"
+        env:
+        - name: RAILS_ENV
+          value: production
+        # By setting `heaven.githubapp.com/inject-moda-env-vars-into-containers` to
+        # `timerd` above, environment variables from `gh-config github` will
+        # also be available to this container. The below values are specific
+        # to Kubernetes but general to the github application
+        - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: FAILBOT_CONTEXT_KUBE_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+          valueFrom:
+            configMapKeyRef:
+              key: kubernetes_cluster_name
+              name: kube-cluster-metadata
+
+        # Explicitly marks the freno dependency as disabled while it is not deployed.
+        - name: FRENO_DISABLED
+          value: "1"
+        - name: FRENO_THROTTLE
+          value: "0"
+
+        # each kube node runs a local dd-agent - to send data to it
+        # we need to explicitly set the node hostname rather than 127.0.0.1
+        # (which points to the *pod*)
+        - name: DOGSTATSD_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: KUBE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DOGSTATSD_ADDITIONAL_TAGS
+          value: "kube_deployment:worker"
+        - name: USE_GLB_BALANCED_MAIL
+          value: '1'
+        # - name: SMTP_HOST
+        #   value: smtp.service.github.net
+        # - name: SMTP_PORT
+        #   value: '2525'
+        - name: GITHUB_CONFIG_ROLE
+          value: "worker"
+        - name: OTEL_SERVICE_NAME
+          value: "github-timerd"
+        envFrom:
+        - configMapRef:
+            name: elasticsearch
+        - configMapRef:
+            name: observability-config
+        - secretRef:
+            name: vault-secrets

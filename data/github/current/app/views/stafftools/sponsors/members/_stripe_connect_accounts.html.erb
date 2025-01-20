@@ -1,0 +1,211 @@
+<div class="Box Box--condensed">
+  <% if stripe_connect_accounts.present? %>
+    <table class="stafftools-table">
+      <thead>
+        <tr>
+          <th class="text-bold billing-table-cell text-center" colspan="8">Status</th>
+        </tr>
+        <tr>
+          <th class="text-bold billing-table-cell">ID</th>
+          <th class="text-bold billing-table-cell">Active</th>
+          <th class="text-bold billing-table-cell">Verified</th>
+          <th class="text-bold billing-table-cell">Enabled</th>
+          <th class="text-bold billing-table-cell">W-8/W-9</th>
+          <th class="text-bold billing-table-cell">Balance</th>
+          <th class="text-bold billing-table-cell">Transfers</th>
+          <th class="text-bold billing-table-cell">Options</th>
+        </tr>
+      </thead>
+      <tbody>
+        <%= render Stafftools::Sponsors::CreatePayoutRestrictionComponent.new(sponsorable: sponsorable) %>
+        <% stripe_connect_accounts.each do |stripe_account| %>
+          <%
+            transfers_path = stafftools_sponsors_member_stripe_connect_account_transfers_path(
+              sponsorable,
+              stripe_account,
+            )
+            balance_path = stafftools_sponsors_member_stripe_connect_account_balance_partial_path(
+              sponsorable,
+              stripe_account,
+            )
+            transfer_count = transfer_counts_by_stripe_connect_account_id[stripe_account.id]
+            unverified_explanation_identifier = unverified_explanations.index(stripe_account.unverified_explanation) + 1
+            disabled_reason_identifier = disabled_reasons.index(stripe_account.disabled_reason) + 1
+            create_manual_payout_component = Stafftools::Sponsors::CreateManualPayoutComponent.new(stripe_account: stripe_account)
+            toggle_payouts_component = Stafftools::Sponsors::TogglePayoutsComponent.new(stripe_account: stripe_account)
+            deactivate_stripe_component = Stafftools::Sponsors::DeactivateStripeComponent.new(stripe_account: stripe_account)
+            delete_stripe_component = Stafftools::Sponsors::DeleteStripeComponent.new(sponsorable: sponsorable, stripe_account: stripe_account)
+            sync_stripe_form_id = "sync-stripe-form-#{stripe_account.stripe_account_id}"
+          %>
+          <tr>
+            <td class="tiny no-wrap v-align-middle">
+              <a href="<%= stripe_account.stripe_dashboard_url %>" target="_blank" rel="noopener noreferrer">
+                <%= stripe_account.truncated_stripe_account_id %>
+                <%= render Primer::Beta::Octicon.new(icon: "link-external", ml: 1) %>
+              </a>
+
+              <% if stripe_account.billing_country.present? %>
+                <%=
+                  render Primer::Beta::Label.new(
+                    title: "Billing country: #{stripe_account.billing_country}",
+                    scheme: :secondary,
+                    ml: 2,
+                    test_selector: "stripe-account-#{stripe_account}-billing-country-label",
+                  ) do
+                %>
+                  <%= stripe_account.billing_country %>
+                <% end %>
+              <% end %>
+            </td>
+            <td class="<%= class_names(
+              "tiny no-wrap v-align-middle",
+              "color-fg-success text-bold" => stripe_account.active?,
+              "color-fg-muted" => !stripe_account.active?,
+            ) %>">
+              <%= stripe_account.active? ? "Yes" : "No" %>
+            </td>
+            <td class="tiny no-wrap v-align-middle">
+              <span class="<%= class_names(
+                "color-fg-muted" => !stripe_account.verified_verification_status? && !stripe_account.active?,
+                "color-fg-danger text-bold" => !stripe_account.verified_verification_status? && stripe_account.active?,
+              ) %>">
+                <span <%= test_selector("stripe-account-#{stripe_account.stripe_account_id}-status") %>>
+                  <%= stripe_account.verified_verification_status? ? "Yes" : "No" %>
+                </span>
+                <% unless stripe_account.verified_verification_status? %>
+                  <sup class="text-normal">
+                    <a class="Link--secondary" href="#unverified-explanation-<%= unverified_explanation_identifier %>">
+                      <%= unverified_explanation_identifier %>
+                    </a>
+                  </sup>
+                <% end %>
+              </span>
+              <%= form_tag(
+                stafftools_sponsors_member_stripe_connect_account_sync_path(sponsorable, stripe_account),
+                method: :post,
+                id: sync_stripe_form_id,
+              ) do %><% end %>
+            </td>
+            <td class="<%= class_names(
+              "tiny no-wrap v-align-middle",
+              "color-fg-danger text-bold" => stripe_account.disabled_reason,
+            ) %>">
+              <% if stripe_account.disabled_reason %>
+                No
+                <sup class="text-normal">
+                  <a class="Link--secondary" href="#unverified-explanation-<%= disabled_reason_identifier %>">
+                    <%= disabled_reason_identifier %>
+                  </a>
+                </sup>
+              <% else %>
+                Yes
+              <% end %>
+            </td>
+            <td class="tiny no-wrap v-align-middle" <%= test_selector("stripe-account-#{stripe_account.stripe_account_id}-w8-or-w9-status") %>>
+              <% if stripe_account&.w8_or_w9_verified? %>
+                <%= render(Primer::Beta::Label.new(scheme: :success)) { "Completed" } %>
+              <% elsif stripe_account&.w8_or_w9_requested_at? %>
+                <%= render(Primer::Beta::Label.new(
+                  scheme: :attention,
+                  title: "Requested at #{stripe_account&.w8_or_w9_requested_at.strftime("%b %-d, %Y")}"
+                ).with_content("Requested")) %>
+              <% else %>
+                <span>-</span>
+              <% end %>
+            </td>
+            <td class="tiny no-wrap v-align-middle">
+              <include-fragment src="<%= balance_path %>" class="d-flex flex-items-center">
+                <%= render Primer::Beta::Spinner.new(size: :small, mr: 1) %>
+              </include-fragment>
+            </td>
+            <td class="tiny no-wrap v-align-middle">
+              <a href="<%= transfers_path %>">
+                <%= social_count(transfer_count) %> <%= "transfer".pluralize(transfer_count) %>
+              </a>
+            </td>
+            <td class="tiny v-align-middle">
+              <%= render Primer::Alpha::ActionMenu.new(anchor_side: :outside_right) do |action_menu| %>
+                <% action_menu.with_show_button(
+                  icon: :"kebab-horizontal",
+                  "aria-label": "Stripe Account Options",
+                  scheme: :invisible,
+                ) %>
+                <% action_menu.with_item(
+                  label: "Sync verification status",
+                  tag: :button,
+                  content_arguments: { form: sync_stripe_form_id, type: :submit },
+                ) %>
+                <% if toggle_payouts_component.render? %>
+                  <% action_menu.with_item(
+                    label: toggle_payouts_component.menu_item_label,
+                    tag: :button,
+                    content_arguments: { "data-show-dialog-id": toggle_payouts_component.modal_id },
+                  ) %>
+                <% end %>
+                <% if create_manual_payout_component.render? %>
+                  <% action_menu.with_item(
+                    label: create_manual_payout_component.menu_item_label,
+                    tag: :button,
+                    content_arguments: { "data-show-dialog-id": create_manual_payout_component.modal_id },
+                  ) %>
+                <% end %>
+                <% if deactivate_stripe_component.render? %>
+                  <% action_menu.with_item(
+                    label: deactivate_stripe_component.menu_item_label,
+                    tag: :button,
+                    scheme: :danger,
+                    content_arguments: { "data-show-dialog-id": deactivate_stripe_component.modal_id },
+                  ) %>
+                <% end %>
+                <% if delete_stripe_component.render? %>
+                  <% action_menu.with_item(
+                    label: delete_stripe_component.menu_item_label,
+                    tag: :button,
+                    scheme: :danger,
+                    content_arguments: { "data-show-dialog-id": delete_stripe_component.modal_id },
+                  ) %>
+                <% end %>
+              <% end %>
+              <%= render toggle_payouts_component %><%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+              <%= render create_manual_payout_component %><%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+              <%= render deactivate_stripe_component %><%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+              <%= render delete_stripe_component %><%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <div class="Box-row" <%= test_selector("no-stripe-accounts") %>>
+      This Sponsors listing has no Stripe accounts.
+    </div>
+  <% end %>
+</div>
+
+<% if unverified_explanations.any? %>
+  <div class="my-2">
+    <h3 class="f5">Reasons an account is not verified</h3>
+    <ul class="list-style-none">
+      <% unverified_explanations.each_with_index do |explanation, index| %>
+        <li class="note">
+          <a name="unverified-explanation-<%= index + 1 %>"></a>
+          <%= index + 1 %>: <%= explanation %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<% if disabled_reasons.any? %>
+  <div class="my-2">
+    <h3 class="f5">Reasons an account is disabled</h3>
+    <ul class="list-style-none">
+      <% disabled_reasons.each_with_index do |reason, index| %>
+        <li class="note">
+          <a name="disabled-reason-<%= index + 1 %>"></a>
+          <%= index + 1 %>: <%= reason %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

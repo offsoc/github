@@ -1,0 +1,67 @@
+<%# view is an instance of Diff::CodeLinesPartialView %>
+<%
+  last_right = nil
+  last_left  = nil
+  hunk_id = nil
+%>
+
+<%# We use loop and Enumerator#next so we can peek at the next line within the loop %>
+<% line_enumerator = view.diff_entry.split_lines %>
+<% loop do %>
+  <% left_line, right_line = line_enumerator.next %>
+  <% if left_line.type == :hunk %>
+  <% hunk_id = Digest::SHA256.hexdigest(left_line.text) %>
+    <%= render partial: "diff/split_directional_hunk_header", locals: {
+      view: create_view_model(
+        Diff::DirectionalHunkHeaderView,
+        line: left_line,
+        last_right: last_right,
+        last_left: last_left,
+        parent_view: view,
+        pull_request_context: view&.pull_request&.id,
+      )
+    } %>
+  <% else %>
+    <% left_threads  = view.threads.position(left_line.position) %>
+    <% right_threads = view.threads.position(right_line.position) %>
+
+    <%= render "diff/split_diff_line",
+          view: view,
+          left_line: left_line,
+          right_line: right_line,
+          left_threads: left_threads,
+          right_threads: right_threads,
+          hunk_id: hunk_id %>
+
+    <% annotations = view.annotations.end_line(right_line.right) %>
+    <% if annotations.any? %>
+      <%= render partial: "diff/split_inline_annotations", locals: {
+            annotations: annotations,
+            pull_request: view.pull_request,
+            end_line_text: right_line.text
+          }
+      %>
+    <% end %>
+
+    <% if left_threads.any? || right_threads.any? %>
+      <%= render :partial => "diff/split_inline_comments", :locals => {
+            :left_threads      => left_threads,
+            :left_type        => left_line.type,
+            :right_threads     => right_threads,
+            :right_type       => right_line.type
+          } %>
+    <% end %>
+  <% end %>
+  <% last_right = right_line.right if right_line.right %>
+  <% last_left  = left_line.left if left_line.left %>
+<% end %>
+<%= render partial: "diff/split_directional_hunk_header", locals: {
+  view: create_view_model(
+    Diff::DirectionalHunkHeaderView,
+    line: :last,
+    last_right: last_right,
+    last_left: last_left,
+    parent_view: view,
+    pull_request_context: view&.pull_request&.id,
+  )
+} %>

@@ -1,0 +1,92 @@
+#!/bin/bash
+# Common clustering-related functions for GitHub Enterprise
+
+set -e
+
+export GHE_LIBDIR="${GHE_LIBDIR:-"/usr/local/share/enterprise/lib"}"
+source "$GHE_LIBDIR/ghe-commons"
+
+# Returns 0 if this is part of a cluster
+is_in_cluster() {
+  cluster_host="$(cluster_local_node_name)" || return 1
+  [ ! -z "$cluster_host" ]
+}
+
+is_cluster_delegate() {
+  /usr/local/share/enterprise/ghe-call-configrb ghes_cluster_delegate?
+}
+
+# Return 0 if this is part of a cluster DR pair
+is_in_cluster_dr() {
+  # checks
+  # 1. is this a cluster
+  # 2. the cluster.ha value is NOT present (cluster.ha is only set in single-node HA setup, not in cluster HA)
+  # 3. is the mysql-master-replica value set - indicating that the MYSQL Master is replicating to a secondary instance
+  # If all conditions are met, returns true (0) that this is a cluster DR pair
+  /usr/local/share/enterprise/ghe-call-configrb cluster_dr_enabled?
+}
+
+# Gets the name of this cluster node from /etc/github/cluster
+# Returns 1 if /etc/github/cluster doesn't exist
+cluster_local_node_name() {
+  local cluster_file=${CLUSTER_FILE:-"/etc/github/cluster"}
+  cat "$cluster_file" 2>/dev/null || return 1
+}
+
+# Determines whether a cluster node is assigned a role
+# Params:
+#   role          - The role we are checking for [e.g. git-server]
+#   node_name     - The name of the cluster node to check
+# Returns: 0 if it has the role, 1 if it doesn't
+cluster_node_has_role() {
+  local role="$1"
+  local node_name="$2"
+  [ "$(ghe-config cluster.$node_name.$role)" == true ] || return 1
+}
+
+# Run an ssh command on a cluster node
+# Params:
+#   node_name       - The target cluster node
+#   command         - The command to run
+# outputs the results of the command
+# Usage: ssh_node node_name command
+# Example: ssh_node cluster-data-0 "cat /etc/github/cluster"
+ssh_node() {
+  local ip=$1
+  shift
+  ssh -p 122 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null \
+             -oStrictHostKeyChecking=no -oLogLevel=quiet "git@$ip" "$@"
+}
+
+is_node_online() {
+  local hostname="$1"
+  local status
+
+  status=$(nomad node status | awk -v hostname="$hostname" '$3 == hostname {print $NF}')
+  if [[ "$status" != "ready" ]]; then
+    echo "$hostname is not online"
+    return 1
+  fi
+  return 0
+}
+
+# Usage: uuid_from_hostname <hostname>
+#
+# This method prints the uuid for the provided hostname to stdout.
+# Returns non-zero codes if the uuid cannot be retrieved
+uuid_from_hostname() {
+  local hostname
+  hostname="$1"
+  [ -n $hostname ] || {
+    >&2 echo "hostname is require"
+    return 1
+  }
+
+  local uuid
+  uuid="$(ghe-config "cluster.$hostname.uuid")" || {
+    >&2 echo "Could not retrieve uuid from hostname"
+    return 1
+  }
+  echo "$uuid"
+  return 0
+}

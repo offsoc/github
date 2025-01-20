@@ -1,0 +1,63 @@
+#!/usr/bin/env bin/safe-ruby
+# typed: strict
+# frozen_string_literal: true
+
+require "optparse"
+require "gh/dev/sorbet/file_sigils"
+
+# This script takes a list of paths relative to the github/github root and prints them with their typed strictness
+# according to Sorbet, with a tab delimiter. This also supports having the paths be provided via STDIN so piping
+# the output of other commands is possible. For example, to see all files belonging to the repo_info service with
+# a typed strictness of false:
+#
+# bin/serviceowners-ls-files -q repo_info | bin/sorbet-typed-level --level=false
+
+args = []
+while ARGV.first&.start_with?("-")
+  args << ARGV.shift
+end
+
+paths = ARGV
+paths += STDIN.readlines unless STDIN.tty?
+paths = Set.new(paths.map(&:strip))
+raise "No paths given" if paths.empty?
+
+level = T.let(nil, T.nilable(GH::Dev::Sorbet::Sigil))
+skip_unmigrateable = T.let(true, T::Boolean)
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: bin/sorbet-typed-level [options] <path1> <path2> ..."
+
+  opts.on(
+    "-l=LEVEL", "--level=LEVEL",
+    "limit output to files of the given strictness level"
+  ) do |value|
+    level = GH::Dev::Sorbet::Sigil.deserialize(value&.downcase)
+  end
+
+  # Normally we would have a "skip unmigrateable" option here, but to avoid updating
+  # fanout directions on dozens of fanout issues let's go with the opposite for a default.
+  # We can always change this later.
+  opts.on(
+    "-u", "--include-unmigrateable",
+    "include files that are not targeted for migration to true or strict mode"
+  ) do
+    skip_unmigrateable = false
+  end
+end
+parser.parse!(args)
+
+path_sigils = if skip_unmigrateable
+  GH::Dev::Sorbet::FileSigils.new.migrateable_path_sigils
+else
+  GH::Dev::Sorbet::FileSigils.new.path_sigils
+end
+
+paths.each do |path|
+  sigil = path_sigils[path]
+  if sigil && (level.nil? || sigil == level)
+    puts "#{path}\t#{sigil.serialize}"
+  elsif level.nil?
+    puts "#{path}\t<untyped>"
+  end
+end

@@ -1,0 +1,318 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: create-user-timeline-events [<username>] [<event_type>=<count>]
+#/ Create each type of events that show up in /dashboard
+#/
+#/ Options:
+#/ <username>     The username you want the activities created for. Defaults to
+#/                system username
+#/ <event_type>   available event types: follow, watch, public, create, push, issue_label,
+#/                                       pr_label, issue_comment, pr_comment, fork, gollum,
+#/                                       release, delete
+#/ <count>        integer, create <count> event types. Required when <event_type> is passed in
+
+# Show usage
+
+EVENT_TYPE_ARGUMENT_FORMAT = /^([a-z_]+)=(\d+)$/i.freeze
+
+if ARGV.include?("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c3-"
+  exit 1
+end
+
+require_relative "../config/environment"
+Rails.application.config.active_job.queue_adapter = :inline
+require "faker"
+
+unless Rails.env.development?
+  abort "This can only be run in development"
+end
+
+def viewer_username
+  return @viewer_username if defined?(@viewer_username)
+
+  if ARGV.first.nil? || ARGV.first =~ EVENT_TYPE_ARGUMENT_FORMAT
+    @viewer_username = `whoami`.strip
+  else
+    @viewer_username = ARGV.first
+  end
+end
+
+# Fixtures
+def viewer
+  @viewer ||= User.find_by_login(viewer_username)
+end
+
+def users
+  @users ||= User.all
+end
+
+def random_user
+  users.sample
+end
+
+def create_repo(owner: random_user, open_source: true)
+  count = owner.repositories.count
+  random_boolean = [true, false].sample
+  desc = random_boolean ? "#{Faker::Movies::StarWars.quote}" : ""
+
+  repo = Repository.handle_creation(
+    owner,
+    owner,
+    {
+      name: "#{Faker::Hipster.word}-#{count}",
+      description: desc,
+      public: open_source,
+    },
+    synchronous: true
+  ).repository
+
+  repo
+end
+
+def create_create_branch_event
+  viewer.watch_repo org_repo
+
+  commit = org_repo.commits.create({ message: "First commit", committer: @friend }) do |files|
+    files.add "New File 2", "Hi"
+  end
+  name = SecureRandom.hex
+  org_repo.refs.create("refs/head/branch-#{name}", commit, @friend)
+  puts "Created create event for a new branch..."
+end
+
+def org
+  Organization.find_by!(login: "github")
+end
+
+def org_repo
+  @org_repo ||= org.repositories.first!
+end
+
+# Methods to trigger events
+
+def create_push_event
+  viewer.watch_repo org_repo
+
+  name = SecureRandom.hex
+  commit = org_repo.commits.create({ message: "#{name} commit", committer: @friend }) do |files|
+    files.add "New File 2", "#{Faker::Movies::StarWars.wookiee_sentence}"
+  end
+
+  ref = org_repo.refs.create("refs/heads/bugfix-#{name}", commit, @friend)
+
+  ref.update(commit, @friend)
+  puts "Created push event..."
+end
+
+def create_commit(repo:)
+  name = SecureRandom.hex
+  commit = repo.commits.create({ message: "First commit", committer: @owner }) do |files|
+    files.add "README", "#{repo.name.capitalize} Repository"
+  end
+  repo.refs.create("refs/heads/bugfix-#{name}", commit, @owner)
+  commit
+end
+
+def create_commit_comment_event
+  commit = create_commit(repo: org_repo)
+  CommitComment.create!(
+    user: @friend,
+    repository: commit.repository,
+    commit_id: commit.sha,
+    path: commit.diff.deltas.first.new_file.path,
+    position: 1,
+    body: "#{Faker::GameOfThrones.character}",
+  )
+  puts "Created commit comment event..."
+end
+
+# actor: User
+# repo:  Repository
+def create_issue(actor:, repo:)
+  Issue.create! repository: repo, user: actor, title: "Help!", body: " #{Faker::Lorem.sentence}"
+end
+
+def create_pull_request
+  base_commit = create_commit(repo: @my_repo)
+  repo = base_commit.repository
+  base_ref = repo.refs.first
+
+  # Make a new commit
+  commit = repo.commits.create({ message: "A contribution", committer: @friend }, base_commit.oid) do |files|
+    files.add "New File", "This is a new file"
+  end
+
+  # Create the head ref
+  name = SecureRandom.hex
+  head_ref = repo.refs.create("refs/heads/branch-#{name}", commit.oid, @friend)
+
+  # Create the pull
+  PullRequest.create_for!(repo, {
+    user:   @friend,
+    title:  "New Pull Request",
+    body:   "This adds a new file to the repo.",
+    head:   head_ref.name,
+    base:   base_ref.name,
+  })
+end
+
+# TODO: This shows up in org timeline. Fix for event to show up!
+def create_review_comment_event
+  pr = create_pull_request
+  review = pr.reviews.build(user: @friend,
+                            body: "#{Faker::Movies::StarWars.quote}",
+                            head_sha: pr.head_sha)
+  review.comment!
+  puts "Created review comment event..."
+end
+
+def create_release_event
+  create_commit(repo: @my_repo)
+  name = SecureRandom.hex
+
+  Release.create!(
+    name: "Version 1",
+    tag_name: "v1.#{name}",
+    author: @friend,
+    repository: @my_repo,
+  )
+  puts "Created release event..."
+end
+
+def create_follow_event
+  @friend.follow random_user
+  puts "Created follow event..."
+end
+
+def create_watch_event
+  repo = create_repo
+  @friend.star repo
+  puts "Created watch event..."
+end
+
+# TODO: fix @friend's payment method to be able to create multiple private repos
+def create_public_event
+  private_repo = create_repo(owner: @friend, open_source: false)
+  private_repo.toggle_visibility(actor: private_repo.owner)
+  puts "Created public event..."
+end
+
+def create_fork_event
+  repo = create_repo
+  repo.fork(forker: @friend)
+rescue GitRPC::CommandFailed
+  puts "Created fork event..."
+end
+
+def create_create_repo_event
+  create_repo(owner: @friend)
+  puts "Created create event..."
+end
+
+def create_issue_comment_event
+  comment = "#{Faker::Movies::StarWars.quote}"
+  issue = org_repo.issues.first
+  issue.comment_and_open(@friend, comment)
+  puts "Created issue comment event..."
+end
+
+def create_pr_comment_event
+  comment = "#{Faker::Movies::StarWars.quote}"
+  pr = org_repo.pull_requests.first
+  pr.issue.comment_and_open(@friend, comment)
+  puts "Created pr comment event..."
+end
+
+def create_issue_label_event
+  issue = create_issue(repo: @my_repo, actor: @friend)
+  help_wanted = [issue.repository.help_wanted_label]
+  issue.add_labels(help_wanted)
+  puts "Created issue label event..."
+end
+
+def create_pr_label_event
+  pr = create_pull_request
+  help_wanted = pr.repository.labels.select { |label| label.name == "help wanted" }
+  pr.issue.add_labels(help_wanted)
+  puts "Created pr label event..."
+end
+
+# TODO: This shows up in org timeline.
+# Need to fix error locally `GitHub::DGit::UnroutedError: no available servers`.
+# This works if you manually create a wiki on a repo
+def create_gollum_event
+  RepositoryWiki.create!(repository_id: @my_repo.id)
+  wiki = @my_repo.unsullied_wiki
+  wiki.pages.create("name",
+                    :markdown,
+                    "body",
+                    "commit message",
+                    @friend)
+end
+
+# TODO: attach payment method to @friend so @friend can create multiple private repos
+# and we can run multiple create_public_event to render as grouped.
+def payment_method
+  {
+    credit_card: {
+      number:           "41111111111",
+      expiration_month: "March",
+      expiration_year:  (Time.now.year + 5).to_s,
+      cvv:              "123",
+    },
+    billing_address:   {
+      country_code_alpha3: "USA",
+      region:              "California",
+      postal_code:         "94107",
+    },
+  }
+end
+
+def setup
+  viewer || abort("Unable to find user '#{viewer_username}'")
+  @owner = random_user
+  @friend = random_user
+  @friend.plan = "pro"
+  @my_repo = create_repo(owner: viewer)
+  @my_repo.add_member(@friend)
+end
+
+def create_single_events
+  create_user_timeline_events
+  create_org_timeline_events
+end
+
+def create_org_timeline_events
+  create_create_branch_event
+  create_issue_comment_event
+  create_pr_comment_event
+  create_commit_comment_event
+  create_fork_event
+end
+
+def create_user_timeline_events
+  create_push_event
+  create_follow_event
+  create_create_repo_event
+  create_watch_event
+  create_issue_label_event
+  create_pr_label_event
+  create_release_event
+end
+
+setup
+
+event_type_arguments = ARGV.map do |arg|
+  arg.match(EVENT_TYPE_ARGUMENT_FORMAT)&.captures
+end.compact
+
+if event_type_arguments.empty?
+  create_single_events
+else
+  event_type_arguments.each do |arg|
+    type, count = arg
+    puts "creating #{count} #{type} events"
+    count.to_i.times { send "create_#{type}_event" }
+  end
+end

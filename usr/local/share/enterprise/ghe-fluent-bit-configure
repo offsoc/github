@@ -1,0 +1,135 @@
+#!/usr/bin/env ruby
+# Usage:
+# - ghe-fluent-bit-configure primary
+# - ghe-fluent-bit-configure replica primary_host
+require 'erb'
+
+def usage
+  "Usage: ghe-fluent-bit-configure\n" +
+  "       ghe-fluent-bit-configure primary\n"
+  "       ghe-fluent-bit-configure replica primary_host\n"
+end
+
+restart_fluentbit = false
+
+# render fluent-bit.conf properly if we disable centralized logging
+centralize_logs = true
+if system("ghe-config --true config-apply.centralized-logs.disabled")
+  centralize_logs = false
+  puts "Centralized logging is disabled, to re-enable please run:"
+  puts "  ghe-config --unset config-apply.centralized-logs.disabled"
+end
+
+SUPPORTED_LOG_LEVELS = ["error", "warning", "info", "debug", "trace"]
+fluentbit_log_level = "info"
+if system("ghe-config --exists config-apply.centralized-logs.log-level")
+  fluentbit_log_level = `ghe-config --get config-apply.centralized-logs.log-level`.chomp
+  if !SUPPORTED_LOG_LEVELS.include?(fluentbit_log_level)
+    puts "Invalid centralized logging log-level '#{fluentbit_log_level}' for 'config-apply.centralized-logs.log-level'! Supported levels are #{SUPPORTED_LOG_LEVELS.join(", ")}"
+    fluentbit_log_level = "info"
+    puts "Reverting to default centralized logging log-level '#{fluentbit_log_level}'!"
+  end
+end
+
+# check for valid stdout flag
+fluentbit_stdout = false
+if system("ghe-config --true config-apply.centralized-logs.stdout")
+  fluentbit_stdout = true
+end
+
+# determine node_type and primary_host or use ones passed in from args
+if ARGV.empty?
+  puts "Determining node_type and primary_host for ghe-fluent-bit-configure!"
+  node_type = "primary"
+  fluentbit_primary_host = nil
+  if File.exist?("/etc/github/cluster")
+    MYSQL_MASTER = `ghe-config --get cluster.mysql-master`.chomp
+    if MYSQL_MASTER != `hostname`.chomp
+      node_type = "replica"
+      fluentbit_primary_host = MYSQL_MASTER
+    else
+      fluentbit_primary_host = `hostname`.chomp
+    end
+  end
+  puts "node_type: #{node_type}"
+  puts "fluentbit_primary_host: #{fluentbit_primary_host}"
+else
+  node_type = ARGV[0]
+  fluentbit_primary_host = ARGV[1] || nil
+end
+
+case node_type
+when "primary"
+  # nothing to do at the moment for primary nodes
+when "replica"
+  abort usage if fluentbit_primary_host.nil?
+  CONFIG_APPLY_TEMPLATE_ERB = "/etc/github/templates/etc/fluent-bit/conf.d/config-apply-replica.conf.erb"
+  CONFIG_APPLY_TEMPLATE = "/etc/fluent-bit/conf.d/config-apply-replica.conf"
+
+  # Render fluent-bit config-apply config for replicas
+  time = Time.now.to_i
+  tmp_config_apply_template = "/tmp/config-apply-#{time}.conf"
+  
+  # compare old and new config-apply-replica.conf
+  old_config_apply_template = if File.exist?(CONFIG_APPLY_TEMPLATE)
+                                File.read(CONFIG_APPLY_TEMPLATE)
+                              else
+                                ""
+                              end
+  render = ERB.new(File.read(CONFIG_APPLY_TEMPLATE_ERB))
+  new_config_apply_template = render.result(binding)
+  if old_config_apply_template != new_config_apply_template
+    puts "Writing temp config-apply-replica config to #{tmp_config_apply_template}"
+    if File.write(tmp_config_apply_template, new_config_apply_template)
+      `sudo mv #{tmp_config_apply_template} #{CONFIG_APPLY_TEMPLATE}`
+      restart_fluentbit = true
+    else
+      abort "Failed to write #{tmp_config_apply_template}!"
+    end
+  else
+    puts "No changes to config-apply-replica.conf detected!"
+  end
+else
+  abort usage
+end
+
+# Render fluent-bit.conf for node
+FLUENT_BIT_TEMPLATE = "/etc/fluent-bit/fluent-bit.conf"
+FLUENT_BIT_TEMPLATE_ERB = "/etc/github/templates/etc/fluent-bit/fluent-bit.conf.erb"
+time = Time.now.to_i
+tmp_fluent_bit_template = "/tmp/fluent-bit-#{time}.conf"
+
+# compare old and new fluent-bit.conf
+old_fluent_bit_template = if File.exist?(FLUENT_BIT_TEMPLATE)
+                            File.read(FLUENT_BIT_TEMPLATE)
+                          else
+                            ""
+                          end
+render = ERB.new(File.read(FLUENT_BIT_TEMPLATE_ERB))
+new_fluent_bit_template = render.result(binding)
+if old_fluent_bit_template != new_fluent_bit_template
+  puts "Writing temp fluent-bit.conf to #{tmp_fluent_bit_template}"
+  if File.write(tmp_fluent_bit_template, new_fluent_bit_template)
+    `sudo mv #{tmp_fluent_bit_template} #{FLUENT_BIT_TEMPLATE}`
+    restart_fluentbit = true
+  else
+    abort "Failed to write #{tmp_fluent_bit_template}!"
+  end
+else
+  puts "No changes to fluent-bit.conf detected!"
+end
+
+# Ensure we have permissions to read from ghe-config log
+config_log = "/data/user/common/ghe-config.log"
+if !File.exist?(config_log); then
+  system("touch #{config_log}")
+end
+system("sudo chmod 664 #{config_log}")
+
+# Restart fluent-bit to pickup any updated configs
+if restart_fluentbit
+  puts "Restarting fluent-bit to pickup updated configs!"
+  system("sudo systemctl restart fluent-bit")
+end
+
+puts "Successfully configured fluent-bit!"

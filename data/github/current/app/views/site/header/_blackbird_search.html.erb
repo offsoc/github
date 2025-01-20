@@ -1,0 +1,296 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+
+<% locals = ensure_local_vars(local_assigns, {
+  required: [:view],
+  optional: [:hotkey, :is_small_search_input, :logged_in, :retain_scroll_position, :current_repository],
+  defaults: {
+    hotkey: "s,/",
+    is_small_search_input: false,
+    logged_in: true
+  },
+  view: "site/header/blackbird_search"
+})
+
+  current_repository ||= locals[:current_repository] || view.current_repository
+
+%>
+
+<%
+  urls = GitHub::Application.routes.url_helpers
+  is_search_page = current_page?(urls.search_path) ||
+    (current_repository.present? && current_page?(urls.repo_search_path(current_repository.owner, current_repository)))
+
+  # TODO(colinwm): handle other scenarios, like viewing a user's profile page
+  scope = ""
+  current_repo_nwo = ""
+  current_repo_org  = ""
+  current_repo_owner = ""
+  if current_repository.present? && view.include_repository_scope?
+    scope = "repo:#{current_repository.name_with_display_owner}"
+    current_repo_nwo = current_repository.name_with_display_owner
+    if current_repository.organization_id?
+      current_repo_org = current_repository.owner.display_login
+    else
+      current_repo_owner = current_repository.owner.display_login
+    end
+  elsif current_organization.present?
+    scope = "org:#{current_organization.display_login}"
+    current_repo_org = current_organization.display_login
+  elsif this_user.present? && !this_user.spammy?
+    scope = "owner:#{this_user.display_login}"
+  end
+%>
+
+<%= content_tag(
+  "qbsearch-input",
+  class: "search-input",
+  "data-scope": scope,
+  "data-custom-scopes-path": urls.search_custom_scopes_path,
+  "data-delete-custom-scopes-csrf": authenticity_token_for(search_custom_scopes_path, method: :delete),
+  "data-max-custom-scopes": SearchCustomScope::MAX_CUSTOM_SCOPES,
+  "data-header-redesign-enabled": header_redesign_enabled?,
+  "data-initial-value": (view.query && is_search_page) ? view.query : '',
+  "data-blackbird-suggestions-path": urls.blackbird_suggestions_path,
+  "data-jump-to-suggestions-path": graphql_path("GetSuggestedNavigationDestinations"),
+  "data-current-repository": current_repo_nwo,
+  "data-current-org": current_repo_org,
+  "data-current-owner": current_repo_owner,
+  "data-logged-in": locals[:logged_in],
+  "data-copilot-chat-enabled": header_redesign_enabled? && view.copilot_chat_enabled?,
+  "data-nl-search-csrf": (csrf_hidden_input_for(nl_github_search_path, method: :post) if view.copilot_natural_language_github_search_enabled? && !GitHub.enterprise?),
+  "data-nl-search-enabled": view.copilot_natural_language_github_search_enabled?,
+  "data-retain-scroll-position": locals[:retain_scroll_position],
+) do %>
+  <div
+    class="<%= class_names(
+      "search-input-container search-with-dialog position-relative d-flex flex-row flex-items-center",
+      "height-auto color-bg-transparent border-0 color-fg-subtle mx-0" => header_redesign_enabled?,
+      "mr-4 rounded" => !header_redesign_enabled?,
+    ) %>"
+    data-action="click:qbsearch-input#searchInputContainerClicked"
+  >
+    <% if header_redesign_enabled? %>
+      <%= render Site::Header::SearchBarComponent.new do |c| %>
+        <% c.with_narrow_control do %>
+          <button type="button" data-action="click:qbsearch-input#handleExpand" class="AppHeader-button AppHeader-search-whenNarrow" aria-label="Search or jump to…" aria-expanded="false" aria-haspopup="dialog">
+            <%= render(Primer::Beta::Octicon.new(:"search")) %>
+          </button>
+        <% end %>
+
+        <% c.with_control do %>
+          <button
+            type="button"
+            data-target="qbsearch-input.inputButton"
+            data-action="click:qbsearch-input#handleExpand"
+            class="AppHeader-searchButton form-control input-contrast text-left color-fg-subtle no-wrap"
+            data-hotkey="<%= locals[:hotkey] %>"<%# erblint:disable DataHotkey %>
+            <%= safe_analytics_click_attrs_marketing(action: "searchbar", tag: "input", context: "global", location: "navbar") %>
+            aria-describedby="search-error-message-flash"
+          >
+            <% if is_search_page && view.query.present? %>
+              <span class="sr-only">Search GitHub: </span>
+            <% end %>
+            <div class="overflow-hidden">
+              <span id="qb-input-query" data-target="qbsearch-input.inputButtonText">
+                <% if is_search_page && view.query.present? %>
+                  <span class="sr-only">Search GitHub: </span>
+                  <%= view.query %>
+                <% else %>
+                  Type <kbd class="AppHeader-search-kbd">/</kbd> to search
+                <% end %>
+              </span>
+            </div>
+          </button>
+        <% end %>
+      <% end %>
+    <% else %>
+      <button
+        type="button"
+        class="header-search-button <%= view.query ? '' : 'placeholder' %> <%= " regular-search-input" if !locals[:is_small_search_input] && force_compact_header? %><%= " sm-search-input" if locals[:is_small_search_input] && force_compact_header? %> input-button form-control d-flex flex-1 flex-self-stretch flex-items-center no-wrap width-full py-0 pl-2 pr-0 text-left border-0 box-shadow-none"
+        data-target="qbsearch-input.inputButton"
+        aria-label="Search or jump to…"
+        aria-haspopup="dialog"
+        placeholder="Search or jump to..."
+        <%= "data-hotkey=#{locals[:hotkey]}" if locals[:hotkey].present? %>
+        autocapitalize="off"
+        <%= safe_analytics_click_attrs_marketing(action: "searchbar", tag: "input", context: "global", location: "navbar") %>
+        data-action="click:qbsearch-input#handleExpand"
+      >
+        <div class="mr-2 color-fg-muted">
+          <%= primer_octicon(:search) %>
+        </div>
+        <span class="flex-1" data-target="qbsearch-input.inputButtonText"><%=view.query || "Search or jump to..."%></span>
+        <% if locals[:hotkey].present? %>
+          <div class="d-flex" data-target="qbsearch-input.hotkeyIndicator">
+            <%= svg("header/search-key-slash.svg", aria_hidden: true, class: "mr-1") %>
+          </div>
+        <% end %>
+      </button>
+    <% end %>
+
+    <input type="hidden" name="type" class="js-site-search-type-field">
+
+    <%= render(Primer::Experimental::Dialog.new(
+      dialog_id: "search-suggestions-dialog",
+      close_button_id: "close-blackbird-search",
+      show_header: false,
+      show_header_divider: false,
+      show_footer_divider: false,
+      header_variant: :large,
+      width: header_redesign_enabled? ? :medium : :large,
+      title: "Search code, repositories, users, issues, pull requests...",
+      position: :none,
+      motion: :none,
+      body_padding_variant: :none,
+      data: {
+        action: "close:qbsearch-input#handleClose cancel:qbsearch-input#handleClose",
+        target: "qbsearch-input.searchSuggestionsDialog"
+      }
+      )) do |c| %>
+      <% c.with_body do %>
+        <div class="search-suggestions <%= locals[:logged_in] ? "position-absolute" : "position-fixed" %> width-full color-shadow-large border color-fg-default color-bg-default overflow-hidden d-flex flex-column query-builder-container"
+          style="border-radius: 12px;"
+          data-target="qbsearch-input.queryBuilderContainer"
+          hidden
+        >
+          <%= render Primer::Experimental::QueryBuilder.new(
+            id: "query-builder-test",
+            label_text: "Search",
+            visually_hide_label: true,
+            classes: ["search-query-builder"],
+            form_action_url: '',
+            use_overlay: false,
+            data: {
+              target: "qbsearch-input.queryBuilder",
+            }
+          ) do |component|
+            component.with_leading_visual_icon(icon: :search)
+          end %>
+          <div class="d-flex flex-row color-fg-muted px-3 text-small color-bg-default search-feedback-prompt">
+            <%= render Primer::Beta::Link.new(href: "https://docs.github.com/search-github/github-code-search/understanding-github-code-search-syntax", color: :accent, font_weight: :normal, ml: 2, target: "_blank") do %>
+              Search syntax tips
+            <% end %>
+            <div class="d-flex flex-1"></div>
+            <% if locals[:logged_in] %>
+              <%= render Primer::Beta::Button.new(scheme: :link, color: :accent, font_weight: :normal, ml: 2, data: { action: "click:qbsearch-input#showFeedbackDialog" }) do %>
+                Give feedback
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <%end%>
+    <%end%>
+  </div>
+  <div data-action="click:qbsearch-input#retract" class="dark-backdrop position-fixed" hidden data-target="qbsearch-input.darkBackdrop"></div>
+  <div class="color-fg-default">
+    <%= render(Primer::Alpha::Dialog.new(
+      id: "feedback-dialog",
+      title: "Provide feedback",
+      data: {
+        target: "qbsearch-input.feedbackDialog",
+        action: "close:qbsearch-input#handleDialogClose cancel:qbsearch-input#handleDialogClose"
+      }
+    )) do |c| %>
+      <% c.with_body do %>
+        <%= form_tag urls.search_feedback_path, method: :post, id: "code-search-feedback-form" do %>
+          <p>We read every piece of feedback, and take your input very seriously.</p>
+          <textarea name="feedback" class="form-control width-full mb-2" style="height: 120px" id="feedback"></textarea>
+          <input name="include_email" id="include_email" aria-label="Include my email address so I can be contacted" class="form-control mr-2" type="checkbox">
+          <label for="include_email" style="font-weight: normal">Include my email address so I can be contacted</label>
+        <% end %>
+      <% end %>
+      <% c.with_footer do %>
+        <%= render(Primer::ButtonComponent.new(data: { "close-dialog-id": "feedback-dialog" })) { "Cancel" } %>
+        <%= render(Primer::ButtonComponent.new(
+          type: :submit,
+          scheme: :primary,
+          form: "code-search-feedback-form",
+          data: { "action": "click:qbsearch-input#submitFeedback" })
+          ) { "Submit feedback" } %>
+      <% end %>
+    <% end %>
+
+    <custom-scopes data-target="qbsearch-input.customScopesManager">
+    <%= render(Primer::Alpha::Dialog.new(
+      id: "custom-scopes-dialog",
+      title: "Saved searches",
+      subtitle: "Use saved searches to filter your results more quickly",
+      data: {
+        target: "custom-scopes.customScopesModalDialog",
+        action: "close:qbsearch-input#handleDialogClose cancel:qbsearch-input#handleDialogClose"
+      }
+    )) do |c| %>
+      <% c.with_header(show_divider: true) {} %>
+      <% c.with_body do %>
+        <div data-target="custom-scopes.customScopesModalDialogFlash"></div>
+
+        <div hidden class="create-custom-scope-form" data-target="custom-scopes.createCustomScopeForm">
+        <%= form_tag search_custom_scopes_path, method: :post, id: "custom-scopes-dialog-form" do  %>
+          <div data-target="custom-scopes.customScopesModalDialogFlash"></div>
+
+          <input type="hidden" id="custom_scope_id" name="custom_scope_id" data-target="custom-scopes.customScopesIdField">
+
+          <div class="form-group">
+            <label for="custom_scope_name">Name</label>
+            <auto-check src="<%= search_custom_scopes_check_name_path %>" required>
+              <input
+                type="text"
+                name="custom_scope_name"
+                id="custom_scope_name"
+                data-target="custom-scopes.customScopesNameField"
+                class="form-control"
+                autocomplete="off"
+                placeholder="github-ruby"
+                required
+                maxlength="<%= SearchCustomScope::MAX_NAME_LENGTH %>">
+              <%= csrf_hidden_input_for search_custom_scopes_check_name_path  %>
+            </auto-check>
+          </div>
+
+          <div class="form-group">
+            <label for="custom_scope_query">Query</label>
+            <input
+              type="text"
+              name="custom_scope_query"
+              id="custom_scope_query"
+              data-target="custom-scopes.customScopesQueryField"
+              class="form-control"
+              autocomplete="off"
+              placeholder="(repo:mona/a OR repo:mona/b) AND lang:python"
+              required
+              maxlength="<%= SearchCustomScope::MAX_QUERY_LENGTH %>">
+          </div>
+
+          <p class="text-small color-fg-muted">
+            To see all available qualifiers, see our <a class="Link--inTextBlock" href="https://docs.github.com/search-github/github-code-search/understanding-github-code-search-syntax">documentation</a>.
+          </p>
+        <% end %>
+        </div>
+
+        <div data-target="custom-scopes.manageCustomScopesForm">
+          <div data-target="custom-scopes.list"></div>
+        </div>
+
+      <% end %>
+      <% c.with_footer(show_divider: true) do %>
+        <%= render(Primer::ButtonComponent.new(
+          data: { "action": "click:custom-scopes#customScopesCancel" })
+                ) { "Cancel" } %>
+        <%= render(Primer::ButtonComponent.new(
+          type: :submit,
+          scheme: :primary,
+          form: "custom-scopes-dialog-form",
+          data: { "action": "click:custom-scopes#customScopesSubmit", "target": "custom-scopes.customScopesSubmitButton" })
+          ) { "Create saved search" } %>
+      <% end %>
+    <% end %>
+    </custom-scopes>
+  </div>
+<% end %>
+<% if user_or_global_feature_enabled? :skip_anon_jump_to_suggestions_enabled %>
+  <% if logged_in? %>
+    <%= csrf_hidden_input_for graphql_path("GetSuggestedNavigationDestinations"), class: "js-data-jump-to-suggestions-path-csrf" %>
+  <% end %>
+<% else %>
+  <%= csrf_hidden_input_for graphql_path("GetSuggestedNavigationDestinations"), class: "js-data-jump-to-suggestions-path-csrf" %>
+<% end %>

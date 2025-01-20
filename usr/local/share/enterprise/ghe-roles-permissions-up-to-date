@@ -1,0 +1,52 @@
+#!/bin/bash
+set -e
+set -x
+
+github-env bin/system-role-permissions | wc -l | while read -r line
+do
+  read -r role_permission_count <<< "$line"
+  count=$(github-mysql "SELECT count(*) FROM role_permissions" | tail -n1)
+
+  if [ "$count" != "$role_permission_count" ]; then
+    echo "roles and permissions are stale: expected $role_permission_count role_permissions, found $count"
+    exit 1
+  fi
+done
+
+github-env bin/system-role-base | wc -l | while read -r line
+do
+  read -r role_count <<< "$line"
+  count=$(github-mysql "SELECT count(*) FROM roles" | tail -n1)
+
+  if [ "$count" != "$role_count" ]; then
+    echo "roles and permissions are stale: expected $role_count roles, found $count"
+    exit 1
+  fi
+done
+
+github-env bin/system-role-permissions | while read -r line
+do
+  read -r role fgp <<< "$line"
+  count=$(github-mysql "SELECT count(*) FROM role_permissions perm JOIN roles role ON perm.role_id = role.id WHERE role.name = \"$role\" AND perm.action = \"$fgp\"" | tail -n1)
+
+  if [ "$count" != "1" ]; then
+    echo "roles and permissions are stale: did not find $role with $fgp"
+    exit 1
+  fi
+done
+
+github-env bin/system-role-base | while read -r line
+do
+  read -r role base <<< "$line"
+  if [ -z "$base" ]; then
+    count=$(github-mysql "SELECT count(*) FROM roles WHERE name = \"$role\" AND base_role_id IS NULL" | tail -n1)
+  else
+    base_id=$(github-mysql "SELECT id FROM roles WHERE name = \"$base\" LIMIT 1" | tail -n1)
+    count=$(github-mysql "SELECT count(*) FROM roles WHERE name = \"$role\" AND base_role_id = $base_id" | tail -n1)
+  fi
+
+  if [ "$count" != "1" ]; then
+    echo "roles and permissions are stale: did not find $role with base role $base"
+    exit 1
+  fi
+done

@@ -1,0 +1,74 @@
+#!/bin/bash
+# Usage: ./script/deploy-tarball-diff <github build hostname>
+# Obtain a diff between the deploy tarball built from current sha and the one
+# built from origin/master.
+#
+# More detailed usage:
+#
+# * Connect to the production VPN
+# * Open a PR with changes to tarball build process
+# * Push your changes and observe a tarball be built & uploaded
+# * Run this command locally to obtain information about the changes
+# * Optional: share this information as a part of obtaining review on your PR
+#
+# TODO:
+#
+# * Integrate this functionality into github-build-deploy-artifacts job
+# * Use Octofactory
+set -e
+set -o pipefail
+
+if [ -z "$1" ]; then
+  echo "Usage: ./script/deploy-tarball-diff <github build hostname>" 2>&1
+  exit 1
+fi
+
+BUILDS="$1:8080/github"
+
+: ${TMP:="./.deploy-tarball-diff"}
+: ${DEFAULT_BRANCH:="master"}
+: ${DEFAULT_BRANCH_SHA:="$(git show-ref -s origin/$DEFAULT_BRANCH)"}
+: ${BUILD_SHA:="$(git rev-parse HEAD)"}
+: ${ASSETS:="stretch-x86_64.tar.gz jessie-x86_64.tar.gz assets.tar.gz"}
+
+mkdir -p $TMP
+cd $TMP
+
+echo
+echo "https://github.com/github/github/compare/$DEFAULT_BRANCH_SHA..$BUILD_SHA"
+echo
+
+for sha in $DEFAULT_BRANCH_SHA $BUILD_SHA; do
+  for asset in $ASSETS; do
+    if test -f "$sha-$asset"; then
+      echo "Found $TMP/$sha-$asset ..."
+    else
+      echo "Downloading $BUILDS/$sha-$asset ..."
+      wget --quiet "$BUILDS/$sha-$asset"
+    fi
+  done
+done
+
+for f in $(find . -type f | grep gz); do
+  manifest="$(basename -s .tar.gz "$f").txt"
+  tar tzvf "$f" | \
+    awk '{print $1 " " $5 " " $9}' | \
+    sort -k 3 > "$manifest"
+done
+
+for f in $(find . -type f -name "*$DEFAULT_BRANCH_SHA*.txt"); do
+  if echo "$f" | grep -q "assets.txt"; then
+    echo
+    echo "SPECIAL NOTE: Diffs of certain file types are expected:"
+    echo
+    echo "(n/a)"
+    echo
+    echo "https://github.com/github/github/pull/120861#pullrequestreview-282206363"
+  fi
+  echo
+  diff -u "$f" "${f//$DEFAULT_BRANCH_SHA/$BUILD_SHA}" || true
+  echo
+done
+
+echo "Cached tarballs and manifests left in $TMP for further comparison:"
+ls -alth

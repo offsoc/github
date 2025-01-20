@@ -1,0 +1,126 @@
+#!/bin/bash
+docker_mount_argument () {
+  source_path=$1
+  target_path=$2
+
+  if [[ ! $source_path == /* ]]; then
+    source_path="$(pwd)/$source_path"
+  fi
+
+  echo "--mount=type=bind,source=$source_path,target=$target_path"
+}
+
+unique_tmp_subdirectory () {
+  echo "/tmp/$(echo $RANDOM | md5sum | head -c 20)"
+}
+
+repo_shaped_arg () {
+  arg=$1
+
+  [[
+    $arg == http://* ||
+    $arg == https://* ||
+    $arg == file://* ||
+    -d $arg
+  ]]
+}
+
+regex_match () {
+  echo "${BASH_REMATCH[0]}"
+}
+
+nth_from_last_arg () {
+  index_from_end=$1
+
+  if [[ ${#raw_args[@]} -ge $index_from_end ]] ; then
+    echo "${raw_args[-$index_from_end]}"
+  else
+    echo ""
+  fi
+}
+
+add_current_directory_to_args () {
+  raw_args+=("$(pwd)")
+}
+
+add_current_directory_if_necessary () {
+  if [[ $script_name == git-import-tfs-raw ]] ; then
+    probably_repo=$(nth_from_last_arg 3)
+    possibly_flag=$(nth_from_last_arg 4)
+  else
+    probably_repo=$(nth_from_last_arg 2)
+    possibly_flag=$(nth_from_last_arg 3)
+  fi
+
+  # We need to infer whether the user provided an explicit destination, or
+  # whether we need to add a volume for the current directory (then pass that
+  # explicitly to the script in the container). The best way to do this is just
+  # to look at where the repo arg would be if a destination was provided, then
+  # extrapolate from there.
+  if ! repo_shaped_arg "$probably_repo" || [[ $possibly_flag == --proxy ]] ; then
+    add_current_directory_to_args
+  fi
+}
+
+raw_args=( "$@" )
+mount_args=()
+script_args=()
+script_name=$(basename "$0")
+
+if [ "$script_name" = "git-import-detect" ]; then
+  script_args=( "${raw_args[*]}" )
+else
+  flag_regex="--.+="
+
+  # If a file path isn't explicitly provided, default to the current directory
+  if [[ $script_name == git-import-*-raw ]] ; then
+    add_current_directory_if_necessary
+  fi
+
+  for raw_arg in ${raw_args[*]}; do
+    prefix=""
+    suffix=""
+    arg=$raw_arg
+
+    # If the argument is formatted like --flag=value, save "--flag=" to prefix and
+    # "value" to arg.
+    if [[ $arg =~ $flag_regex ]]; then
+      prefix="$(regex_match)"
+      arg=${arg#$prefix}
+    fi
+
+    if [[ $arg = file://* ]]; then
+      prefix+="file://"
+      arg=${arg#"file://"}
+    fi
+
+    # If the argument is a directory, generate a unique directory name in tmp,
+    # bind that directory to the specified host directory, and rewrite the arg.
+    if [[ -d $arg ]]; then
+      docker_directory=$(unique_tmp_subdirectory)
+      mount_args+=("$(docker_mount_argument "$arg" "$docker_directory")")
+      arg=$docker_directory
+    # If the argument should go into an extant directory, rewrite the arg to add
+    # a bind for the extant directory, then add the path within.
+    elif [[ $arg != -* && ($(dirname "$arg") != . || -f $arg) && -d $(dirname "$arg") ]]; then
+      suffix="/$(basename "$arg")"
+      arg="$(dirname "$arg")"
+
+      docker_directory=$(unique_tmp_subdirectory)
+      mount_args+=("$(docker_mount_argument "$arg" "$docker_directory")")
+      arg=$docker_directory
+    fi
+
+    script_args+=("$prefix$arg$suffix")
+  done
+fi
+
+git_import_sha="$(cat /data/docker-image-tags/git_import_image_tag)"
+git_import_image_tag="git-import:$git_import_sha"
+
+docker run --rm \
+  --user $UID \
+  --network host \
+  ${mount_args[*]} \
+  "$git_import_image_tag" \
+  bin/$script_name ${script_args[*]}

@@ -1,0 +1,36 @@
+import {useRegisterErrors, type ErrorFilterFunction} from '../../../hooks/use-register-errors'
+import type {RegisteredRuleErrorComponent, ValidationError} from '../../../types/rules-types'
+import {RulesetFormErrorFlash} from '../../RulesetFormErrorFlash'
+
+const fileExtensionRestrictionsFilter: Record<string, ErrorFilterFunction> = {
+  unexpectedType: {
+    args: 'error',
+    func: (error: ValidationError) => {
+      for (const subError of error.sub_errors as ValidationError[]) {
+        if (
+          error.field === 'restricted_file_extensions' &&
+          subError.error_code === 'unexpected_type' &&
+          subError.message === 'Expected array, got NilClass'
+        ) {
+          return true
+        }
+      }
+      return false
+    },
+  },
+}
+export const FileExtensionRestrictionsError = ({errors, errorId, errorRef, fields}: RegisteredRuleErrorComponent) => {
+  const parsedErrors = useRegisterErrors({errors, fields, filters: fileExtensionRestrictionsFilter})
+  let message: string | undefined = undefined
+  if (parsedErrors.unexpectedType && parsedErrors.unexpectedType.length > 0) {
+    message =
+      'Restricted file extensions cannot be empty. Please add at least one restricted file extension or disable the rule.'
+  } else if (parsedErrors.unregistered && parsedErrors.unregistered.length > 0) {
+    message = parsedErrors.unregistered[0]?.message || 'An error occurred'
+  }
+  return message ? (
+    <RulesetFormErrorFlash errorId={errorId} errorRef={errorRef}>
+      {message}
+    </RulesetFormErrorFlash>
+  ) : null
+}

@@ -1,0 +1,118 @@
+<%# `view` is an Businesses::IdentityManagement::SingleSignOnView %>
+<% page_info :title => "Sign in to #{view.business.name}" %>
+
+<div class="business-sso text-center">
+  <div class="text-left">
+    <%= render "shared/flash" %>
+  </div>
+  <div class="business-sso-panel">
+    <div class="position-relative mt-2 mb-3">
+      <%= avatar_for view.business, 60, :class => "avatar mb-3" %>
+
+      <h1 class="sso-title m-0">
+        Single sign-on to
+        <strong><%= view.business.name %></strong>
+      </h1>
+    </div>
+
+    <% if view.credential_authorization_requested? %>
+      <% if view.valid_credential_authorization_request? %>
+
+        <p class="color-fg-muted mt-2 mb-4">
+          Single sign-on to authorize the <%= view.credential_type %>,
+          <%= link_to view.credential_description, view.credential_link, class: "Link--inTextBlock" %>.
+        </p>
+
+      <% else %>
+
+        <p class="color-fg-muted mt-2 mb-4">
+          You’re trying to authorize your credentials but your request is
+          <strong><%= view.invalid_credential_authorization_request_reason %></strong>.
+          Try again.
+        </p>
+
+      <% end %>
+    <% else %>
+
+      <p class="color-fg-muted mt-2 mb-4">
+        Authenticate your account by logging into
+        <%= view.business.name %>’s
+        single sign-on provider.
+      </p>
+
+    <% end %>
+
+    <%= form_tag view.initiate_sso_url, "data-turbo": "false" do %>
+      <%= hash_to_hidden_fields(form_data: view.form_data) if view.form_data %>
+      <%= hidden_field_tag "add_account", params[:add_account] %>
+
+      <% button_scheme = view.accounts_eligible_to_switch? ? :default : :primary %>
+      <%= render Primer::Beta::Button.new(type: :submit, scheme: button_scheme, block: true, test_selector: "sso-continue-button") do %>Continue<% end %>
+    <% end %>
+
+    <% if view.accounts_eligible_to_switch? && !view.credential_authorization_requested? %>
+      <div class="auth-divider text-center my-3 f4">Or</div>
+
+      <%
+        accounts = view.accounts_eligible_to_switch
+        first_account, other_accounts = accounts.first, accounts[1..]
+      %>
+
+      <%= form_tag switch_account_path, "data-turbo": "false" do %>
+        <%= hidden_field_tag "user_session_id", first_account.user_session.id %>
+        <%= hidden_field_tag "return_to", view.return_to %>
+
+        <%= render Primer::Beta::Button.new(type: :submit, scheme: :primary, block: true, test_selector: "sso-primary-switch-user-button") do %>
+          <%= render(GitHub::AvatarComponent.new(actor: first_account.user, size: 16)) %>
+          Continue as <%= first_account.user.display_login %>
+        <% end %>
+      <% end %>
+
+      <% if other_accounts.any? %>
+        <%= render partial: "sessions/account_switcher_menu", locals: {
+            stashed_accounts: other_accounts,
+            return_to: view.return_to
+        }%>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if view.credential_authorization_requested? %>
+    <% if view.valid_credential_authorization_request? %>
+      <div class="mt-4 text-left color-fg-muted clearfix mb-3">
+        <%= primer_octicon(:lock, float: :left, mr: 3, mt: 1) %>
+        <div class="overflow-hidden">
+          By authorizing, owners of <%= view.credential_authorization_organization.name %>
+          will be able to see this <%= view.credential_type %>’s <strong>access scopes</strong>
+          and when it was <strong>last used</strong>.
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if view.show_first_emu_owner_login_prompt? %>
+    <%
+      login_params = { admin: true }
+    %>
+    <div class="business-sso-panel mt-3">
+      Signing in as the enterprise admin?
+      <%= render(Primer::Beta::Link.new(
+        href: login_path(**login_params),
+        classes: "Link--inTextBlock",
+      )) do -%>
+        Sign in
+      <%- end %>
+    </div>
+  <% end %>
+
+  <% if view.show_recovery_prompt? %>
+    <p class="sso-recovery-callout mt-4">
+      Unable to single sign-on?
+      <% if view.business.saml_sso_enabled? %>
+        <%= link_to "Use a recovery code", saml_recover_enterprise_path(view.business), class: "Link--inTextBlock" %>
+      <% else %>
+        <%= link_to "Use a recovery code", oidc_recover_enterprise_path(view.business), class: "Link--inTextBlock" %>
+      <% end %>
+    </p>
+  <% end %>
+</div>

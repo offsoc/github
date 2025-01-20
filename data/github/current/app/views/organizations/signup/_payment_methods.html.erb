@@ -1,0 +1,150 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 7 %>
+<%
+  # This partial renders the fields for our payment forms. It requires:
+  #
+  # owner - The User/Organization whose account we're updating.
+  # form  - A Rails FormBuilder to use as context for this form.
+
+  view = BillingSettings::PaymentMethodFieldsView.new(owner, form)
+  condensed_view ||= false
+  orgs_data_collection_enabled ||= false
+  account_screening_profile ||= nil
+  terms_of_service ||= "standard"
+
+  SecureHeaders.append_content_security_policy_directives(
+    request,
+    img_src: [GitHub.paypal_checkout_url],
+    connect_src: [GitHub.braintreegateway_url, GitHub.braintree_analytics_url],
+    frame_src: [GitHub.zuora_payment_page_server]
+  )
+%>
+
+<div
+  class="payment-methods js-payment-methods <%= "has-paypal-account" if owner.has_paypal_account? %> <%= "condensed-payment-methods" if condensed_view %>"
+>
+  <div class="js-selected-payment-method selected-payment-method pay-by-credit-card <%= "active" unless owner.has_paypal_account? %>">
+    <div class="d-flex flex-md-items-center flex-md-row flex-column flex-justify-between border-md-bottom pb-3 pb-md-0">
+      <div class="border-bottom border-md-bottom-0 pb-2">
+        <% unless orgs_data_collection_enabled %>
+           <%= signup_h2 "Payment Details", class: "flex-auto" %>
+        <% end %>
+      </div>
+      <span
+        class="btn-link js-payment-method-href pt-2 pt-md-0"
+        for="pay-by-credit-card-<%= owner.display_login %>"
+        data-selected-tab="pay-with-paypal"
+        data-ga-click="<%= ga_label_with_analytics_tracking_id("Signup funnel team payment,click,text:Pay with PayPal;") %>"
+        <%= test_selector("signup-billing-pay-with-paypal") %>
+      >
+        Pay with PayPal
+      </span>
+    </div>
+
+    <% unless orgs_data_collection_enabled %>
+      <%= render partial: "payment_method/name_fields" %>
+
+      <!-- billing email -->
+      <% email_error = organization.try(:errors) && organization.errors[:billing_email] %>
+      <% billing_hint = [] %>
+      <% if GitHub.billing_enabled? %>
+        <% billing_hint += ["We’ll send receipts to this inbox."] %>
+      <% end %>
+
+      <%= render Billing::Settings::BillingEmailComponent.new(
+        target: organization,
+        form: f,
+        label: "#{org_contact_email_label} email",
+        hint: safe_join(billing_hint),
+        error: email_error.any? && "#{org_contact_email_label} email " + email_error.first,
+        disabled: org_transform?,
+        data: {
+          ga_click: ga_label_with_analytics_tracking_id("Signup funnel team payment,form input,text:Billing email;")
+        },
+        html_class: "form-control py-1 width-full",
+        test_selector_text: "signup-billing-email"
+      ) %>
+    <% end %>
+
+    <div class="js-zuora-spinner d-flex flex-items-center my-4">
+      <%= image_tag "spinners/octocat-spinner-32.gif", class: "mr-2", size: "16x16", alt: "", valign: "top" %>
+      Loading payment information…
+    </div>
+
+    <%= render Billing::Settings::ZuoraHppContainerComponent.new(
+      user_id: current_user.id,
+      signature_path: signup_signature_path,
+      signature_view_context: Billing::Zuora::HostedPaymentsPage::ORGANIZATION_SIGNUP_SIGNATURE_VIEW_CONTEXT,
+      container_class: "js-zuora-payment-page",
+      ignore_default_classes: true,
+      hydro_payload: {
+        account_id: owner.id,
+      },
+      organization_id: (owner.display_login if owner.organization? && owner.persisted?),
+      target: "organization",
+      terms_of_service: terms_of_service,
+    ) %>
+    <%= render Billing::Settings::ZuoraBillingInfoComponent.new(
+      send_ga_event: true,
+      ga_category: "Signup funnel team payment",
+      ga_action: "click",
+      ga_label: ga_label_with_analytics_tracking_id("text:Submit payment;"),
+      target: owner,
+      account_screening_profile: account_screening_profile,
+      mt: 3,
+      border: true,
+      border_radius: 2,
+      px: 3,
+      py: 2,
+      mb: 3,
+      display: :none,
+    ) do %>
+      <p class="d-flex flex-justify-between mb-0">
+        <span class="">
+          <%= primer_octicon(:"credit-card", color: :muted) %>
+          <strong class="js-new-card-type"></strong> ending
+          <span class="js-new-card-number"></span>
+        </span>
+        <%= render Primer::ButtonComponent.new(scheme: :link, font_size: 6, classes: "js-edit-card-details") do %>Edit<% end %>
+      </p>
+    <% end %>
+  </div>
+
+  <div class="js-selected-payment-method selected-payment-method pay-with-paypal <%= "active" if owner.has_paypal_account? %>">
+    <div class="d-flex flex-md-items-center flex-md-row flex-column flex-justify-between border-md-bottom pb-3 pb-md-0">
+      <div class="border-bottom border-md-bottom-0 pb-2">
+        <% unless orgs_data_collection_enabled %>
+           <%= signup_h2 "Payment Details", class: "flex-auto" %>
+        <% end %>
+      </div>
+
+      <span
+        class="btn-link js-payment-method-href pt-2 pt-md-0"
+        for="pay-by-credit-card-<%= owner.display_login %>"
+        data-selected-tab="pay-by-credit-card"
+        data-ga-click="<%= ga_label_with_analytics_tracking_id("Signup funnel team payment,click,text:Pay with Credit Card;") %>"
+        <%= test_selector("signup-billing-pay-with-credit-card") %>
+      >
+        Pay with credit or debit card
+      </span>
+    </div>
+
+    <% unless orgs_data_collection_enabled %>
+      <%= render Billing::Settings::BillingEmailComponent.new(
+        target: organization,
+        form: f,
+        label: "#{org_contact_email_label} email",
+        hint: safe_join(billing_hint),
+        error: email_error.any? && "#{org_contact_email_label} email " + email_error.first,
+        disabled: org_transform?,
+        data: {
+          ga_click: ga_label_with_analytics_tracking_id("Signup funnel team payment,form input,text:Billing email;")
+        },
+        html_class: "form-control py-1 width-full",
+        test_selector_text: "signup-billing-email"
+      ) %>
+    <% end %>
+
+    <%= render :partial => "payment_method/paypal_fields", :locals => { :view => view, :condensed_view => condensed_view } %>
+  </div>
+</div>

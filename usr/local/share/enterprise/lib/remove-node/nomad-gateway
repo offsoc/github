@@ -1,0 +1,172 @@
+#!/bin/bash
+# This file contains utilties for removing nomad services from a node. It wraps some of the nomad commands
+# so that they are easier to work with in our bash scripts.
+
+
+#/ function: get_nomad_id
+#/ Desciption:
+#/    Print the nomad node id to stdout.
+#/
+#/ Usage:
+#/    get_nomad_id <hostname>
+get_nomad_id() {
+  local hostname="$1"
+  local output
+  output="$(nomad node status)"
+  ## Expected output:
+  # ID        DC       Name                 Class   Drain  Eligibility  Status
+  # ae565e2a  default  build-cluster-data3  <none>  false  eligible     ready
+  # 48c30977  default  build-cluster-util   <none>  false  eligible     ready
+  # 658cba39  default  build-cluster-app    <none>  false  eligible     ready
+  # f853d1ee  default  build-cluster-data   <none>  false  eligible     ready
+  # 36d2ddee  default  build-cluster-data2  <none>  false  eligible     ready
+  # 8597df99  default  build-cluster-bare   <none>  false  eligible     ready
+
+  local matching_row
+  matching_row="$(echo "$output" | grep "$hostname")"
+
+  if [ -z "$matching_row" ]; then
+    >&2 echo "error: failed to locate nomad host"
+    return 1
+  fi
+
+  local nomad_id
+  nomad_id="$(echo "$matching_row" | awk '{print $1}')"
+  if [ -z "$nomad_id" ]; then
+    >&2 echo "error: failed to locate nomad id"
+    return 1
+  fi
+  echo "$nomad_id"
+  return 0
+}
+
+
+#/ function: mark_nomad_node_ineligible
+#/ Desciption:
+#/    Marks the node as ineligible.
+#/
+#/ Usage:
+#/    mark_nomad_node_ineligible <hostname>
+mark_nomad_node_ineligible() {
+  local hostname="$1"
+
+  local nomad_id
+  nomad_id="$(get_nomad_id "$hostname")"
+  local output
+  output="$(nomad node eligibility -disable "$nomad_id")"
+  ## expected output:
+  # Node "ae565e2a-2f2f-7aa6-f47b-0ccc852dc69a" scheduling eligibility set: ineligible for scheduling
+
+  if ! [[ "$output" == *"ineligible for scheduling"* ]]; then
+    >&2 echo "error: failed to mark node as ineligible in nomad"
+    return 1
+  fi
+  return 0
+}
+
+#/ function: drain_nomad_node
+#/ Desciption:
+#/    Marks the node as ineligible, and initiates a nomad node drain.
+#/    Blocks until the drain is complete. If --force flag is set, the
+#/    drain operation occurs immediately.
+#/
+#/ Usage:
+#/    drain_nomad_node <hostname> [--force]
+drain_nomad_node() {
+  local hostname="$1"
+  local force=""
+
+  # checking if force flag is passed
+  if [[ "$2" == "--force" ]]; then
+    force="force"
+  fi
+
+  local nomad_id
+  nomad_id="$(get_nomad_id "$hostname")"
+
+  ## Call the nomad node drain
+  local output
+  if [ -n "$force" ]; then
+    output="$(nomad node drain -enable -yes -force "$nomad_id")"
+  else
+    output="$(nomad node drain -enable -yes "$nomad_id")"
+  fi
+
+  ## ^^ This will automatically block by default. It outputs dozens of log entries. The default timeout for draining is 1-hour.
+  ## expected output:
+  # 2023-09-09T20:15:03Z: Ctrl-C to stop monitoring: will not cancel the node drain
+  # 2023-09-09T20:15:03Z: Node "ae565e2a-2f2f-7aa6-f47b-0ccc852dc69a" drain strategy set
+  # 2023-09-09T20:15:03Z: Drain complete for node ae565e2a-2f2f-7aa6-f47b-0ccc852dc69a
+  # 2023-09-09T20:15:03Z: Alloc "546fda8a-48e6-52e8-9b2f-76ad282c38ce" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "2151541d-143b-18b9-5a0a-c72d3499b0f7" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "4eaab33c-121b-0ca5-ba2b-deaebe7a5d6d" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "3298beab-d95e-eb84-9c06-0dc751e1af15" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "1d022455-b4ea-1d29-0ea2-0a8946138b34" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "9df88980-ddb2-51bd-8130-2fbd9a4e4b0b" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "7ed93930-6287-035c-4bad-0b92dad0c191" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "7fa5dc4c-001b-7ac4-67bc-5395aeeffd63" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "c73ff3cf-e8dc-b844-7a2f-1c313e0c1be2" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "13c5cef0-6e06-1667-c9ee-df732a08b601" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "ada464af-cd79-64b6-e969-943e2ab973c9" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "112a9968-116e-93be-ad61-7b140eaad4f4" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "289bbabb-a77d-0b0b-1c7a-cccf2ed24bb6" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "9c3afd62-5eb8-0ebe-7be0-f247b23b6d69" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "d05cce89-0300-06ad-31ed-216880e17bfd" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "257dbf06-884c-168f-c992-63d15c18c567" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "a8d27a70-b917-082d-b2bc-35321ddf6357" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "eb81ca52-6eb5-a457-d5f0-b9bf71b1c611" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "9ac95740-483a-3be1-2999-f5c0b6f5646c" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "1c6a48ee-b86f-0048-80c7-3021e9d4386f" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "d09005f0-378f-07ba-f038-1cba41db7b14" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "0ec7d519-cfb3-6fe0-53f8-8627fb76e3b5" marked for migration
+  # 2023-09-09T20:15:03Z: Alloc "3298beab-d95e-eb84-9c06-0dc751e1af15" draining
+  # 2023-09-09T20:15:03Z: Alloc "7ed93930-6287-035c-4bad-0b92dad0c191" draining
+  # 2023-09-09T20:15:04Z: Alloc "112a9968-116e-93be-ad61-7b140eaad4f4" draining
+  # 2023-09-09T20:15:04Z: Alloc "d05cce89-0300-06ad-31ed-216880e17bfd" draining
+  # 2023-09-09T20:15:04Z: Alloc "9c3afd62-5eb8-0ebe-7be0-f247b23b6d69" draining
+  # 2023-09-09T20:15:04Z: Alloc "289bbabb-a77d-0b0b-1c7a-cccf2ed24bb6" draining
+  # 2023-09-09T20:15:04Z: Alloc "ada464af-cd79-64b6-e969-943e2ab973c9" draining
+  # 2023-09-09T20:15:04Z: Alloc "0ec7d519-cfb3-6fe0-53f8-8627fb76e3b5" draining
+  # 2023-09-09T20:15:04Z: Alloc "546fda8a-48e6-52e8-9b2f-76ad282c38ce" draining
+  # 2023-09-09T20:15:04Z: Alloc "9df88980-ddb2-51bd-8130-2fbd9a4e4b0b" draining
+  # 2023-09-09T20:15:04Z: Alloc "257dbf06-884c-168f-c992-63d15c18c567" draining
+  # 2023-09-09T20:15:04Z: Alloc "d09005f0-378f-07ba-f038-1cba41db7b14" draining
+  # 2023-09-09T20:15:04Z: Alloc "c73ff3cf-e8dc-b844-7a2f-1c313e0c1be2" draining
+  # 2023-09-09T20:15:04Z: Alloc "13c5cef0-6e06-1667-c9ee-df732a08b601" draining
+  # 2023-09-09T20:15:04Z: Alloc "a8d27a70-b917-082d-b2bc-35321ddf6357" draining
+  # 2023-09-09T20:15:04Z: Alloc "2151541d-143b-18b9-5a0a-c72d3499b0f7" draining
+  # 2023-09-09T20:15:04Z: Alloc "4eaab33c-121b-0ca5-ba2b-deaebe7a5d6d" draining
+  # 2023-09-09T20:15:04Z: Alloc "1d022455-b4ea-1d29-0ea2-0a8946138b34" draining
+  # 2023-09-09T20:15:04Z: Alloc "eb81ca52-6eb5-a457-d5f0-b9bf71b1c611" draining
+  # 2023-09-09T20:15:04Z: Alloc "1c6a48ee-b86f-0048-80c7-3021e9d4386f" draining
+  # 2023-09-09T20:15:04Z: Alloc "7fa5dc4c-001b-7ac4-67bc-5395aeeffd63" draining
+  # 2023-09-09T20:15:04Z: Alloc "9ac95740-483a-3be1-2999-f5c0b6f5646c" draining
+  # 2023-09-09T20:15:16Z: Alloc "2151541d-143b-18b9-5a0a-c72d3499b0f7" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "4eaab33c-121b-0ca5-ba2b-deaebe7a5d6d" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "3298beab-d95e-eb84-9c06-0dc751e1af15" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "1d022455-b4ea-1d29-0ea2-0a8946138b34" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "7ed93930-6287-035c-4bad-0b92dad0c191" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "7fa5dc4c-001b-7ac4-67bc-5395aeeffd63" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "c73ff3cf-e8dc-b844-7a2f-1c313e0c1be2" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "13c5cef0-6e06-1667-c9ee-df732a08b601" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "ada464af-cd79-64b6-e969-943e2ab973c9" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "112a9968-116e-93be-ad61-7b140eaad4f4" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "289bbabb-a77d-0b0b-1c7a-cccf2ed24bb6" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "9c3afd62-5eb8-0ebe-7be0-f247b23b6d69" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "a8d27a70-b917-082d-b2bc-35321ddf6357" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "eb81ca52-6eb5-a457-d5f0-b9bf71b1c611" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "9ac95740-483a-3be1-2999-f5c0b6f5646c" status running -> complete
+  # 2023-09-09T20:15:16Z: Alloc "1c6a48ee-b86f-0048-80c7-3021e9d4386f" status running -> complete
+  # 2023-09-09T20:15:45Z: Alloc "0ec7d519-cfb3-6fe0-53f8-8627fb76e3b5" status running -> complete
+  # 2023-09-09T20:15:45Z: Alloc "546fda8a-48e6-52e8-9b2f-76ad282c38ce" status running -> complete
+  # 2023-09-09T20:15:45Z: Alloc "9df88980-ddb2-51bd-8130-2fbd9a4e4b0b" status running -> complete
+  # 2023-09-09T20:15:45Z: Alloc "257dbf06-884c-168f-c992-63d15c18c567" status running -> complete
+  # 2023-09-09T20:17:51Z: Alloc "d09005f0-378f-07ba-f038-1cba41db7b14" status running -> complete
+  # 2023-09-09T20:20:18Z: Alloc "d05cce89-0300-06ad-31ed-216880e17bfd" status running -> complete
+  # 2023-09-09T20:20:18Z: All allocations on node "ae565e2a-2f2f-7aa6-f47b-0ccc852dc69a" have stopped
+
+  ### ^^^ this run took 5 minutes even though there was zero cluster traffic (private bp-dev box)
+
+  ## TODO: take a look at ghe-nomad-cleanup and see if there's anything I can/should reuse from there.
+  return 0
+}

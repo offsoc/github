@@ -1,0 +1,250 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%= render(Primer::Beta::BorderBox.new(padding: :condensed, mt: 4)) do |component| %>
+  <% component.with_header do |h| %>
+    <% h.with_title(tag: :h2) do %>
+      Copilot Trial
+    <% end %>
+  <% end %>
+  <% if business_trial.present? %>
+    <% component.with_row do %>
+      <%= render Stafftools::Copilot::DetailComponent.new(
+        "Trial Plan",
+        business_trial.copilot_plan.humanize,
+        "Which plan (Business or Enterprise) is this trial for?",
+      ) %>
+    <% end %>
+    <% component.with_row do %>
+      <%= render Stafftools::Copilot::DetailComponent.new(
+        "Trial State",
+        business_trial.state.humanize,
+        "What is the state of this trial?",
+        label_scheme: %i(expired canceled).include?(business_trial.state) ? :danger : :success,
+      ) %>
+      <% if can_force_upgrade? %>
+        <%= render partial: "stafftools/copilot_settings/force_trial_upgrade", locals: { organization: organization } %>
+      <% end %>
+    <% end %>
+
+    <% if business_trial.active? %>
+      <% component.with_row do %>
+        <%= render Stafftools::Copilot::DetailComponent.new(
+          "Seats Used",
+          "#{used_seat_count} of #{organization.member_ids.count}",
+        ) %>
+      <% end %>
+      <% component.with_row do %>
+        <%= render Stafftools::Copilot::DetailComponent.new(
+          "Days Remaining In Trial",
+          business_trial.days_left
+        ) %>
+      <% end %>
+    <% end %>
+
+    <% if business_trial.ended? %>
+      <% component.with_row do %>
+        <%= render Stafftools::Copilot::DetailComponent.new(
+          "Trial Ended At",
+          business_trial.ends_at.to_date,
+          "When the trial actually ended",
+        ) %>
+      <% end %>
+    <% else %>
+      <% if business_trial.active? %>
+        <% component.with_row do %>
+          <%= render Stafftools::Copilot::DetailComponent.new(
+            "Trial Ends At",
+            "#{business_trial.ends_at.utc}",
+            "When the trial ends in UTC",
+          ) %>
+        <% end %>
+        <% component.with_row do %>
+          <%= render Stafftools::Copilot::DetailComponent.new(
+            "Trial Ends At (Your Time)",
+            "#{business_trial.ends_at}",
+            "When the trial ends in your time zone (#{Time.zone})",
+          ) %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if business_trial.upgradable? %>
+      <% component.with_row do %>
+        <% if organization.can_upgrade_trial? %>
+           <%= render(Primer::Alpha::Dialog.new(
+            title: "Upgrade Trial to Full Copilot",
+            id: "upgrade-dialog",
+          )) do |d| %>
+            <% d.with_show_button(block: :true, scheme: :primary) { "Upgrade Trial to Full Copilot" } %>
+            <% d.with_body do %>
+              <p <%= test_selector "copilot-trial-upgradeable" %>>You sure you wanna upgrade this organization? We will start billing them.</p>
+            <% end %>
+            <% d.with_footer do %>
+              <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "upgrade-dialog" })) { "Close" } %>
+              <%= form_tag stafftools_user_copilot_business_trials_path(organization.display_login), method: :patch do %>
+                <%= render(Primer::Beta::Button.new(scheme: :default, type: :submit)) { "UPGRADE TRIAL" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render(Primer::Beta::Flash.new(scheme: :warning, test_selector: "copilot-trial-not-upgradeable")) do %>
+            Organization cannot be upgraded because it is not invoiced and has no payment methods.
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if business_trial.extendable? %>
+      <% component.with_row(align_items: :center) do %>
+        <%= form_tag stafftools_user_copilot_business_trials_path(organization.display_login), method: :patch do %>
+          <%= render(Primer::Alpha::Dialog.new(
+            title: "Extend Trial",
+            id: "trial-dialog",
+          )) do |d| %>
+            <% d.with_show_button(block: :true) { "Extend Trial" } %>
+            <% d.with_body do %>
+              <p <%= test_selector "copilot-trial-extendable" %>>
+                Clicking "Extend Trial" will extend the current trial for the organization and send an email to the organization admin.
+              </p>
+              <p>
+                <label for="duration">Additional days:</label>
+                <%= text_field_tag "duration", trial_duration,
+                  id: "duration",
+                  type: "number",
+                  class: "form-control",
+                  max: organization_trial_active? ? trial_duration : nil,
+                  "aria-label" => "Duration"
+                %>
+              </p>
+              <%= render(Primer::Beta::Flash.new) do %>
+                This org currently has <%= member_count %> member(s).
+                <% if organization_trial_active? %>
+                  <p <%= test_selector "copilot-trial-form-org-trial" %>>
+                  This org is part of an Enterprise trial with <%= trial_duration %> days remaining.
+                  </p>
+                <% end %>
+              <% end %>
+            <% end %>
+            <% d.with_footer do %>
+              <%= render(Primer::Beta::Button.new(scheme: :primary, type: :submit)) { "Extend Trial" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if business_trial.cancelable? %>
+      <% component.with_row do %>
+        <%= render(Primer::Alpha::Dialog.new(
+          title: "Cancel Trial",
+          id: "cancel-dialog",
+        )) do |d| %>
+          <% d.with_show_button(block: :true, scheme: :danger) { "Cancel Trial" } %>
+          <% d.with_body do %>
+            <p <%= test_selector "copilot-trial-cancelable" %>>You sure you wanna do this?</p>
+          <% end %>
+          <% d.with_footer do %>
+            <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "cancel-dialog" })) { "Close" } %>
+            <%= form_tag stafftools_user_copilot_business_trials_path(organization.display_login), method: :delete do %>
+              <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit)) { "CANCEL TRIAL" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if can_be_converted_to_copilot_enterprise_trial? %>
+      <% component.with_row(align_items: :center) do %>
+        <%= form_tag stafftools_user_copilot_business_trials_path(organization.display_login), method: :patch do %>
+          <%= hidden_field_tag :copilot_plan, "enterprise", id: "copilot_plan" %>
+          <%= render(Primer::Alpha::Dialog.new(
+            title: "Convert to Copilot Enterprise Trial",
+            id: "convert-dialog",
+          )) do |d| %>
+            <% d.with_show_button(block: :true) { "Convert to Copilot Enterprise Trial" } %>
+            <% d.with_body do %>
+              <p <%= test_selector "copilot-trial-convertible" %>>
+                Clicking "Convert Trial" will start a Copilot Enterprise trial.
+              </p>
+              <p>
+                <label for="duration">Number of days in trial:</label>
+                <%= text_field_tag "duration", trial_duration,
+                  id: "duration",
+                  type: "number",
+                  class: "form-control",
+                  max: organization_trial_active? ? trial_duration : nil,
+                  "aria-label" => "Duration"
+                %>
+              </p>
+              <%= render(Primer::Beta::Flash.new) do %>
+                This org currently has <%= member_count %> member(s).
+                <% if organization_trial_active? %>
+                  <p <%= test_selector "copilot-trial-form-org-trial" %>>
+                  This org is part of an Enterprise trial with <%= trial_duration %> days remaining.
+                  </p>
+                <% end %>
+              <% end %>
+            <% end %>
+            <% d.with_footer do %>
+              <%= render(Primer::Beta::Button.new(scheme: :primary, type: :submit)) { "Convert Trial" } %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <% component.with_row(align_items: :center, test_selector: "copilot-trial-form") do %>
+      <% if has_copilot_seats %>
+        <%= render(Primer::Beta::Flash.new(icon: :alert, scheme: :warning, test_selector: "trial-has-seats")) do %>
+          This organization already has CFB seats assigned
+        <% end %>
+      <% end %>
+      <%= form_tag stafftools_user_copilot_business_trials_path(organization.display_login), method: :post do %>
+        <%= render(Primer::Alpha::Dialog.new(
+          title: "Create New Trial",
+          id: "trial-dialog",
+        )) do |d| %>
+          <% d.with_show_button { "Create New Trial" } %>
+          <% d.with_body do %>
+            <p>
+              Clicking "Create Trial" will create a new trial for the organization and send an email to the organization admin.
+            </p>
+            <p <%= test_selector "copilot-trial-plan-selection" %>>
+              <label for="copilot_plan">Select a plan:</label>
+              <%= select_tag "copilot_plan",
+                options_for_select([
+                  ["Copilot Business", "business"],
+                  ["Copilot Enterprise", "enterprise"]
+                ]),
+                id: "copilot_plan",
+                class: "form-control",
+                required: true
+              %>
+            </p>
+            <p>
+              <label for="duration">Number of days in trial:</label>
+              <%= text_field_tag "duration", trial_duration,
+                id: "duration",
+                type: "number",
+                class: "form-control",
+                max: organization_trial_active? ? trial_duration : nil,
+                "aria-label" => "Duration"
+              %>
+            </p>
+            <%= render(Primer::Beta::Flash.new) do %>
+              This org currently has <%= member_count %> member(s).
+              <% if organization_trial_active? %>
+                <p <%= test_selector "copilot-trial-form-org-trial" %>>
+                This org is part of an Enterprise trial with <%= trial_duration %> days remaining.
+                </p>
+              <% end %>
+            <% end %>
+          <% end %>
+          <% d.with_footer do %>
+            <%= render(Primer::Beta::Button.new(scheme: :primary, type: :submit)) { "Create Trial" } %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+<br>

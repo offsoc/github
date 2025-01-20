@@ -1,0 +1,53 @@
+#!/bin/bash
+#/ Usage: ghe-nes-cluster-admin-action-enabled [-h] [node]
+#/
+#/ Checks to see if admin action is enabled for the provided node.
+#/ Returns 0 if admin action is not enabled, 1 if it is.
+#/
+#/ The check is only made if NES is enabled and running (returns 2 if
+#/ NES is #/ enabled but not running).
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   node            The node to check for admin action enabled.
+#/
+
+usage () {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+  esac
+done
+
+node=$1
+
+if [ -z "$node" ]; then
+  echo "Error: Need to specify a valid node hostname!" >&2
+  echo "Usage: ghe-nes-cluster-admin-action-enabled <node>" >&2
+  exit 1
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ "$(ghe-config "app.nes.enabled")" = true ]; then
+  nes_service_running=$(nomad job status -short nes 2>&1 | grep -i running)
+
+  if [ -z "$nes_service_running" ]; then
+    echo "ERROR: NES is not currently running in the cluster." >&2
+    exit 2
+  fi
+
+  admin_action_enabled=$(/usr/bin/nes get-node-adminaction $node --json | jq '.AdminActionState == "approved"')
+
+  if $admin_action_enabled; then
+    exit 1 # admin action is enabled
+  fi
+  exit 0 # admin action is not enabled
+fi

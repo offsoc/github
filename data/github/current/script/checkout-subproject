@@ -1,0 +1,52 @@
+#!/bin/bash
+set -e
+
+cd "$(dirname "$0")/.."
+
+SUBPROJECT=$1
+if [ -z "$SUBPROJECT" ]; then
+  printf >&2 '\e[31m%s\e[0m\n' "ERROR: Usage script/checkout-subproject SUBPROJECT_NAME."
+  exit 1
+fi
+SUBPROJECT_VENDOR="vendor/$SUBPROJECT"
+SUBPROJECT_REPO="github/$SUBPROJECT"
+
+SUBPROJECT_VERSION="$(cat config/$SUBPROJECT-version)"
+SUBPROJECT_SHA1="${SUBPROJECT_VERSION%%:*}"
+SUBPROJECT_GIT_URL="$(./script/gh-clone-url $SUBPROJECT_REPO)"
+
+export GITHUB_BUILD_SUBPROJECT="1"
+
+res=$?
+if [ $res -ne 0 ]; then
+  printf >&2 '\e[31m%s\e[0m\n' "ERROR: No $SUBPROJECT project is configured."
+  exit 1
+fi
+
+if ! [ -d "$SUBPROJECT_VENDOR" ]; then
+  mkdir -p "$SUBPROJECT_VENDOR"
+fi
+cd "$SUBPROJECT_VENDOR"
+
+if [ "$(git rev-parse HEAD)" = "$SUBPROJECT_SHA1" ]; then
+  echo "$SUBPROJECT checkout $(echo $SUBPROJECT_SHA1 | cut -c1-10) is up-to-date."
+  # ensure checkout is clean and then bail out early
+  if git diff-index --quiet HEAD --; then
+    exit 0
+  fi
+fi
+
+hash -r
+if ! [ -d ".git" ]; then
+  git init
+fi
+if ! git config --local remote.origin.url >/dev/null; then
+  git remote add origin "$SUBPROJECT_GIT_URL"
+fi
+git fetch origin --prune
+git reset --hard "$SUBPROJECT_SHA1"
+# Here we’ve determined either that HEAD didn’t match SUBPROJECT_SHA1
+# or that it matched but there were changes in the index that could
+# have been caused by a previous build from a dirty tree
+git clean -fdx
+git submodule foreach git clean -fdx

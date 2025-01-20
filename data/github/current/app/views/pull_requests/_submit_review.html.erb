@@ -1,0 +1,97 @@
+<%= form_tag update_review_path(pull.repository.owner, pull.repository, pull.number), :method => "put", :id => "pull_requests_submit_review" do %>
+  <%
+    pending_comments = review_comments_count(review)
+  %>
+  <%= render(Primer::Alpha::Overlay::Body.new(pt: 3)) do %>
+    <%= hidden_field_tag "head_sha", pull.head_sha %>
+    <%= render(Comments::PreviewableCommentFormComponent.new(
+      body: review && review.body,
+      field_name: "pull_request_review[body]",
+      session_resumable: true,
+      textarea_id: "pull_request_review_body",
+      required: false,
+      size_to_fit: false,
+      allows_suggested_changes: false,
+      subject: review || pull,
+      current_repository: current_repository,
+      slash_commands_enabled: false,
+      use_fixed_width_font: current_user.use_fixed_width_font?
+    )) %>
+    <% if pull.open? %>
+      <fieldset class="mt-3">
+      <legend class="sr-only">Type of review</legend>
+        <div class="d-flex flex-column gap-2">
+          <%= render(Primer::Alpha::RadioButton.new(
+            value: "comment",
+            name: "pull_request_review[event]",
+            label: "Comment",
+            caption: "Submit general feedback without explicit approval.",
+            checked: true)) %>
+
+          <%
+            approval_caption = if pull.user == current_user
+              "Pull request authors can’t approve their own pull request"
+            elsif pull.user_has_violated_push_rule?(current_user)
+              "Users that pushed changes to this pull request after it was opened can't approve"
+            elsif !pull.allows_non_comment_reviews_from?(reviewer: current_user)
+              "Only users with explicit access to this repository may approve pull requests"
+            elsif pull.repository.writable_by?(current_user)
+              "Submit feedback and approve merging these changes."
+            else
+              "Submit feedback approving these changes."
+            end
+          %>
+          <%= render(Primer::Alpha::RadioButton.new(
+            value: "approve",
+            name: "pull_request_review[event]",
+            label: "Approve",
+            caption: approval_caption,
+            disabled: !pull.allows_non_comment_reviews_from?(reviewer: current_user))) %>
+
+          <%
+            reject_caption = if pull.user == current_user
+              "Pull request authors can’t request changes on their own pull request"
+            elsif !pull.allows_non_comment_reviews_from?(reviewer: current_user)
+              "Only users with explicit access to this repository may request changes to pull requests"
+            elsif pull.repository.writable_by?(current_user)
+              "Submit feedback that must be addressed before merging."
+            else
+              "Submit feedback suggesting changes."
+            end
+          %>
+          <%= render(Primer::Alpha::RadioButton.new(
+            value: "reject",
+            name: "pull_request_review[event]",
+            label: "Request changes",
+            caption: reject_caption,
+            disabled: !pull.allows_non_comment_reviews_from?(reviewer: current_user))) %>
+        </div>
+      </fieldset>
+    <% else %>
+      <input type="hidden" name="pull_request_review[event]" value="comment">
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Alpha::Overlay::Footer.new(show_divider: true, direction: :row_reverse, justify_content: :flex_start)) do %>
+    <%= render Primer::Beta::Button.new(
+        type: :submit,
+        size: :small,
+        scheme: :primary,
+        float: :left,
+        "data-disable-with": "") do %>
+      Submit review
+    <% end %>
+    <% if review %>
+      <%= render(Primer::Beta::Button.new(type: :submit, size: :small,  float: :left, mr: 1, name: "cancel", value: "1", classes: "review-cancel-button", "data-confirm": "Are you sure you want to cancel? You will lose all your pending comments.", "data-disable-with": "")) do %>
+        Abandon review
+      <% end %>
+    <% end %>
+    <span class="review-title-with-count color-fg-muted float-left mt-1 ml-1">
+      <span class="js-pending-review-comment-count"><%= pending_comments %></span>
+      pending
+      <span class="js-pending-comment-count-type" data-singular-string="comment" data-plural-string="comments">
+        <%= "comment".pluralize(pending_comments) %>
+      </span>
+    </span>
+  <% end %>
+<% end %>

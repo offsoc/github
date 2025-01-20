@@ -1,0 +1,61 @@
+#!/bin/bash
+#/ Usage: ghe-actions-update [-s]
+#/
+#/ Run Host and Database upgrade for GitHub Action (enabled) services
+#/
+#/ OPTIONS:
+#/   -h | --help        Show this message
+#/   -s | --service     The name of the service (actions, mps, token, artifactcache).
+#/                      If not specified, will update all services.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options
+services="$(action-services)"
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -s|--service)
+            services="$(to-lower "$2")"
+            shift 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+# Repair sql connection string if needed (see https://github.com/github/actions-platform-ghes/issues/237)
+if ! ghe-config --exists app.actions.connection-string-repaired-v2; then
+    /usr/local/share/enterprise/ghe-actions-repair-sql-connection-strings
+    ghe-config app.actions.connection-string-repaired-v2 true
+fi
+
+# Repair sql logins if needed prior to upgrade (see https://github.com/github/c2c-actions-platform/issues/2852)
+repair-actions-sql-logins
+
+# Perform service updates
+for service in $services; do
+    ensure-service-name "$service"
+    echo "Attempting Update for $(capitalize "$service")"
+    ghe-actions-console -s $service -c Update-Service
+    if ! ghe-config --exists app.actions.$service.encryptionkeyrotated; then
+      echo "Rotating top-level encryption key for $(capitalize "$service")"
+      ghe-actions-console -s $service -c "Queue-ServiceJob -JobId 4DB1F4CF-19FD-40E0-A253-91288813DE8B"
+      ghe-config app.actions.$service.encryptionkeyrotated true
+    fi
+done
+
+# Configure air gap runners
+update-runners-on-appliance

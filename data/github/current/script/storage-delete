@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/boot", __FILE__)
+require "github/storage"
+require "github/config/mysql"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} <oid>"
+  exit 1
+end
+
+require "action_view"
+# don't print deprecation warning
+I18n.enforce_available_locales = false
+
+def main
+  oid = ARGV.first
+
+  unless oid
+    usage
+  end
+
+  hosts = GitHub::Storage::Allocator.hosts_for_oid(oid)
+
+  if hosts.size == 0
+    puts "Did not find #{oid[0..5]}... on any hosts"
+    exit
+  end
+
+  blob_ids = GitHub::Storage::Allocator.blob_id_for_oid(oid)
+
+  hosts.each do |host|
+    ok, body = GitHub::Storage::Client.delete(host, [oid])
+    if !ok
+      puts "Error deleting object #{body["message"]}"
+      exit 1
+    end
+
+    GitHub::Storage::Creator.delete_replicas(host, blob_ids)
+  end
+end
+
+GitHub.load_activerecord
+main

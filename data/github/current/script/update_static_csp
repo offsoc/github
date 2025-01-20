@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+# This script updates the CSP policy defined in static error pages.
+
+require_relative "../config/environment"
+require_relative "../app/controllers/application_controller"
+
+CSP_LINE = /(?<ws>\s*)<meta http-equiv="Content-Security-Policy".*/
+
+_, static_csp_policy = SecureHeaders::CSP.make_header(
+  SecureHeaders::Configuration.dup.override(:static_file_policy).csp,
+)
+
+puts "New static file policy is:\n\t#{static_csp_policy}"
+
+files_to_update = [
+  "public/**/*.html",
+  "script/maintenance",
+]
+
+Dir[*files_to_update].each do |path|
+  puts "Updating #{path}"
+  updated = File.read(path).split("\n").map do |line|
+    if match = line.match(CSP_LINE)
+      [
+        match[:ws],
+        %q(<meta http-equiv="Content-Security-Policy" content="),
+        static_csp_policy,
+        %q(">),
+      ].join
+    else
+      line
+    end
+  end.join("\n") + "\n"
+  File.write(path, updated)
+end

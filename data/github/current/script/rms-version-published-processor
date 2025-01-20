@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+processor = GitHub::StreamProcessors::RegistryMetadata::VersionPublishedProcessor.new
+consumer = GitHub.hydro_consumer(processor.options)
+
+RMSVersionPublishedProcessorError = Class.new(StandardError)
+
+begin
+  GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+rescue => e
+  if GitHub.flipper[:packages_otel_migration].enabled?
+    GitHub.logger.error(e)
+  else
+    GitHub::Logger.log_exception({ fn: self.class.name, error: "failed to run stream processor" }, e)
+  end
+  Failbot.report(RMSVersionPublishedProcessorError.new)
+  raise
+end

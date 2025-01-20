@@ -1,0 +1,126 @@
+#!/bin/bash
+#/ Clones a repo for use by pre-receive hooks.
+#/ When run in a cluster, it also pushes the repo to other git nodes
+#/
+#/ Usage:
+#/          ghe-hook-repo-update repo-id git-url [options]
+#/ Options:
+#/          -h | --help           Show this message
+#/          -n                    Do not push to other cluster nodes
+#/
+#/ Exit codes:
+#/          0                     Everything went swimmingly
+#/          3                     Invalid arguments
+#/          4                     Error cloning the repo
+#/          5                     Error pulling the repo
+#/          6                     Error pushing to other nodes
+set -e
+
+[ "$(whoami)" = "git" ] || {
+  exec sudo -u git "$0" "$@"
+  echo Run this script as the git user. >&2
+  exit 1
+}
+
+export GHE_LIBDIR="${GHE_LIBDIR:-"/usr/local/share/enterprise/lib"}"
+[ -z "$SKIP_GHE_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-commons"
+[ -z "$SKIP_GHE_CLUSTER_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-cluster-commons"
+
+main() {
+  while [ "$1" ]; do
+    case "$1" in
+      -n)
+        no_push_to_nodes=1
+        ;;
+      -h)
+        usage
+        exit
+        ;;
+      *)
+        if [ -z "$REPO_ID" ]; then
+          REPO_ID="$1"
+        elif [ -z "$GIT_URL" ]; then
+          GIT_URL="$1"
+        else
+          exit_invalid_args "Unknown argument '$1'!"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$REPO_ID" ] || exit_invalid_args "repo-id is required"
+  [ -n "$GIT_URL" ] || exit_invalid_args "git-url is required"
+
+  # Create required directories
+  HOOK_REPO_DIR=${HOOK_REPO_DIR:-"/data/user/git-hooks/repos"}
+  mkdir -p "$HOOK_REPO_DIR"
+
+  if local_update_eligible; then
+    # git pull or clone
+    if [ -d "$HOOK_REPO_DIR/$REPO_ID/.git" ]; then
+      (
+        cd "$HOOK_REPO_DIR/$REPO_ID"
+        git remote set-url origin "$GIT_URL"
+        git fetch origin --quiet --prune || err_exit 5
+        git remote set-head -a origin || err_exit 5
+        git reset --quiet --hard origin/HEAD || err_exit 5
+      )
+    else
+      git clone "$GIT_URL" "$HOOK_REPO_DIR/$REPO_ID" || err_exit 4
+    fi
+    trigger_ha_replica "repos/$REPO_ID/"
+  fi
+
+  if [[ -z "$no_push_to_nodes" ]]; then
+    do_node_push $REPO_ID "$GIT_URL" || err_exit 6
+  fi
+}
+
+trigger_ha_replica() {
+  is_in_cluster && return || true
+  asset_path="$1"
+  . /usr/local/share/enterprise/ghe-repl-lib
+  if [ "$REPL_STATE" = "primary" ]; then
+    /usr/local/share/enterprise/ghe-repl-sync-git-hooks "$asset_path"
+  fi
+}
+
+# This will return 0 if either
+# - This is a non-clustered instance
+# - This is a git server
+local_update_eligible() {
+# return 0 if this isn't a cluster
+  is_in_cluster || return 0
+# now that we know it's a cluster, just return whether it has the git-server role
+  cluster_node_has_role git-server "$(cluster_local_node_name)"
+}
+
+do_node_push() {
+  git_url="$2"
+  repo_id="$1"
+
+  is_in_cluster || return 0
+  nodes=$(ghe-cluster-nodes -x -r git --no-cache)
+
+  for node in $nodes; do
+    ssh_node $node "/usr/local/share/enterprise/ghe-hook-repo-update -n \"$repo_id\" \"$git_url\"" > /dev/null
+  done
+}
+
+exit_invalid_args() {
+  echo "$1" >&2
+  usage
+  exit 3
+}
+
+err_exit() {
+  [ -n "$2" ] && echo "$2" >&2
+  exit $1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+main "$@"

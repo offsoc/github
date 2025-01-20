@@ -1,0 +1,170 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    project(number: $projectNumber) {
+      id
+      name
+      body
+
+      cloneResourcePath
+      targetOwnerResultsResourcePath
+
+      workflows {
+        totalCount
+      }
+      columns(first: $maxColumns) {
+        edges {
+          node {
+            purpose
+          }
+        }
+      }
+    }
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_owner = Views::Projects::Modals::Clone::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<template id="clone-project">
+  <div class="d-flex flex-column flex-auto overflow-hidden js-project-clone-dialog">
+    <div class="Box-header">
+      <h3 class="Box-title">Copy project board</h3>
+    </div>
+
+    <div class="Box-body border-0 rounded-0 m-0 pb-0 overflow-auto">
+      <p>
+        Your copy of this project includes <%= clone_settings_summary(project.workflows.total_count) %>. Cards will not be copied.
+      </p>
+
+      <%= form_tag project.clone_resource_path.to_s, method: :post, class: "js-project-clone-form" do %>
+        <input type="radio" name="project[global_target_owner_id]" hidden required>
+
+        <dl class="form-group">
+          <dt><strong>Owner</strong></dt>
+          <dd>
+            <details class="details-reset details-overlay select-menu">
+              <%= render Primer::ButtonComponent.new(tag: :summary, classes: "select-menu-button") do %>
+                <span data-menu-button>
+                  <span class="select-menu-button-gravatar">
+                    <%= primer_octicon(:person, height: 20) %>
+                  </span>
+                  Choose an owner
+                </span>
+              <% end %>
+              <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                <div class="select-menu-header" tabindex="-1">
+                  <div class="select-menu-button-gravatar"></div>
+                  <span class="select-menu-title">Options</span>
+                </div>
+                <remote-input src="<%= project.target_owner_results_resource_path %>" aria-owns="clone-project-picker-results" class="select-menu-filters border-bottom p-2 position-relative">
+                  <input type="text" id="target-owner-field"
+                    class="form-control"
+                    placeholder="Search organizations and repositories"
+                    aria-label="Type to filter"
+                    autofocus
+                    autocomplete="off">
+                  <%= render(Primer::Beta::Spinner.new(size: :small, position: :absolute, classes: "spinner chooser-spinner", "aria-label": "Loading")) %>
+                </remote-input>
+                <div class="select-menu-list">
+                  <div id="clone-project-picker-results"></div>
+                </div>
+              </details-menu>
+            </details>
+          </dd>
+        </dl>
+
+        <dl class="form-group">
+          <dt><label for="clone-project-name">Project board name</label></dt>
+          <dd>
+            <input id="clone-project-name"
+              class="form-control js-quick-submit"
+              name="project[name]"
+              value="<%= cloneable_name(project.name) %>"
+              minlength="1"
+              maxlength="140"
+              required>
+          </dd>
+        </dl>
+
+        <dl class="form-group">
+          <dt><label for="clone-project-body">Description</label></dt>
+          <dd>
+            <textarea id="clone-project-body" class="form-control js-quick-submit" name="project[body]" style="min-height: 100px; height: 100px;"><%= project.body %></textarea>
+          </dd>
+        </dl>
+
+        <% if project.workflows.total_count > 0 %>
+          <% purposes = project.columns.edges.map { |edge| edge.node.purpose } %>
+
+          <span class="text-bold">Automation settings</span>
+          <div class="form-checkbox mt-1">
+            <label>
+              <input type="hidden" name="project[include_workflows]" value="0">
+              <input type="checkbox" name="project[include_workflows]" value="1" checked>
+              <span class="text-normal">Copy automation settings.</span>
+            </label>
+            <p class="note">Includes automation settings for <span class="text-bold"><%= automation_summary(purposes) %></span>.</p>
+          </div>
+        <% end %>
+
+        <div class="js-project-clone-visibility d-none">
+          <span class="text-bold">Visibility</span>
+
+          <div class="form-checkbox mt-1 mb-0">
+            <label>
+              <input type="radio" class="form-checkbox-details-trigger js-project-clone-private" name="project[public]" checked value="false">
+              Private
+            </label>
+            <span class="note">You choose who can see and contribute to this project.</span>
+          </div>
+          <div class="form-checkbox mt-1">
+            <label>
+              <input type="radio" class="form-checkbox-details-trigger" name="project[public]" value="true">
+                <%= GitHub.public_repositories_available? ? "Public" : "Internal" %>
+            </label>
+            <span class="note"><%= if GitHub.enterprise?
+                "Anyone with access to your GitHub Enterprise Server instance can see this project. You choose who can make changes."
+              else
+                "Anyone on the internet can see this project. You choose who can make changes."
+              end %></span>
+          </div>
+        </div>
+
+        <input type="hidden" name="project[global_source_id]" value="<%= project.id %>">
+        <input type="hidden" name="client_uid" class="js-client-uid-field">
+        <input type="hidden" name="redirect_back" value="true">
+
+        <div class="form-actions mt-4 pb-3">
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, float: :left, "data-disable-with": "Copying project…", "data-disable-invalid": "") do %>Copy project<% end %>
+          <%= render Primer::ButtonComponent.new(float: :left, ml: 2, "data-close-dialog": "") do %>Cancel<% end %>
+        </div>
+
+        <div class="js-project-loader d-flex mt-4 pb-3 d-none">
+          <%= render(Primer::Beta::Spinner.new(classes: "js-project-loader")) %>
+          <p class="ml-2 note mt-0">
+            <span class="text-bold d-block">Copying project…</span>
+            You will be redirected when copying is finished.
+          </p>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</template>
+
+<template id="project-clone-error">
+  <div class="Box-header">
+    <h3 class="Box-title">Error</h3>
+  </div>
+  <div class="Box-body border-0 rounded-0 m-0 overflow-auto">
+    We ran into an error while trying to copy this project. Please try again.
+  </div>
+</template>
+
+<template id="project-clone-partial-error">
+  <div class="Box-header">
+    <h3 class="Box-title">Error</h3>
+  </div>
+  <div class="Box-body border-0 rounded-0 m-0 overflow-auto">
+    Something went wrong copying this project. Visit the <a class="js-cloned-board-link Link--inTextBlock">new board</a> for details.<%# erblint:disable GitHub::Accessibility::LinkHasHref %>
+  </div>
+</template>

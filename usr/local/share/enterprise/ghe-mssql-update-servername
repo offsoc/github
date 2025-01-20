@@ -1,0 +1,39 @@
+#!/bin/bash
+#/ Usage:
+#/    ghe-mssql-update-servername [-h]
+#/
+#/ Updates the MSSQL servername to match the hostname of this machine.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+}
+
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+  usage
+fi
+
+servername=$(get-servername)
+
+if [ "$servername" == "$(hostname)" ]; then
+  echo "MSSQL servername matches the hostname, no change necessary"
+else
+  echo "Updating MSSQL servername to match the hostname ($servername vs. $(hostname))..."
+  ghe-mssql-console -y -q "
+    sp_dropserver '$servername';
+    GO
+    sp_addserver '$(hostname)', 'local';
+    GO
+  "
+
+  echo "Restarting MSSQL container..."
+  restart-mssql-local
+  wait-mssql-local-with-restart-alloc
+fi

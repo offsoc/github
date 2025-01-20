@@ -1,0 +1,81 @@
+#!/bin/bash
+#/ Usage: ghe-alambic-extend [-h]
+#/
+#/ Expand the /data/alambic-data filesystem to take advantage of newly allocated space.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. /etc/github/enterprise-release
+
+if [ "$RELEASE_PLATFORM" = 'docker' ]; then
+  echo "Error: ghe-alambic-extend cannot be used inside containers." >&2
+  exit 1
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+if [ -L /dev/ghe-loop0 ]; then
+  VGNAME=$(lsblk -ln -o name /dev/ghe-loop0 | grep ghe_alambic_data_ | cut -d' ' -f1 | cut -d- -f1)
+else
+  VGNAME=$(lvs --noheadings -o vg_name 2>/dev/null | grep ghe_alambic_data_ | awk '{ print $1 }')
+fi
+
+if [ -z "$VGNAME" ]; then
+  echo "Error: No ghe_alambic_data volume was found." >&2
+  exit 1
+fi
+
+# Perform a read-only file system check on the data volume
+if ! fsck -Vn /dev/mapper/${VGNAME}-ghe_alambic_data_data; then
+  echo "Error: The ghe_alambic_data volume contains data inconsistencies."\
+       "Please contact GitHub Enterprise Support for assistance." >&2
+  exit 1
+fi
+
+PVS=$(pvs --noheadings -o vg_name,pv_name,pv_size,dev_size | grep $VGNAME)
+pv_name=$(echo "$PVS" | awk '{ print $2 }')
+pv_size=$(echo "$PVS" | awk '{ print $3 }')
+dev_size=$(echo "$PVS" | awk '{ print $4 }')
+
+if [ -n "$PVS" ]; then
+  if [ "$pv_size" != "$dev_size" ]; then
+    echo "Growing physical volume from $pv_size to $dev_size..."
+    pvresize $pv_name
+  fi
+
+  lv_device=$(lvdisplay -c "$VGNAME"|awk -F ":" '{ print $1 }'|tr -d ' ')
+  lv_size=$(lvs "$VGNAME" --noheadings -o lv_size | awk '{ print $1 }')
+  if [ "$dev_size" != "$lv_size" ]; then
+    echo "Growing logical volume from $lv_size to $dev_size..."
+    lvextend -l +100%FREE "$lv_device"
+    vgchange -ay $VGNAME || true
+    vgscan --mknodes
+    count=0
+    while ! mountpoint -q /data/alambic-data && [ $count -lt 60 ]; do
+      sleep 1
+      count=$[count+1]
+    done
+    if ! mountpoint -q /data/alambic-data; then
+      echo "Error: problem mounting /data/alambic-data"
+      exit 1
+    else
+      echo "Growing filesystem..."
+      resize2fs "$lv_device"
+    fi
+  fi
+fi
+
+echo "Success: $VGNAME is $dev_size"

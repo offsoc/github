@@ -1,0 +1,176 @@
+<%
+  trade_controls_restriction_type = "#{account.trade_controls_restriction.type.titleize} Trade Restricted"
+  restriction_type = if account.trade_controls_restriction.type.titleize == "Unrestricted" && account.spammy?
+    "Spammy Restricted"
+  else
+    trade_controls_restriction_type
+  end
+%>
+
+<div class="site-admin-box">
+  <h4>
+    <%= primer_octicon(:"credit-card") %>
+    <% link_text = current_user.feature_enabled?(:licensing_org_page) ? "Billing & Licensing" : "Billing" %>
+    <%= link_to link_text, billing_stafftools_user_path(account) %>
+  </h4>
+  <ul class="site-admin-detail-list">
+    <li>
+      <%= primer_octicon(:gear) %>
+      <%= account.plan.display_name.titleize %> plan <%= account_plan_extra_info(account) %>
+    </li>
+    <% if account.yearly_plan? %>
+      <li>
+        <%= primer_octicon(:calendar) %>
+        Paying yearly
+      </li>
+    <% end %>
+    <% if account.disabled? %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        This account’s billing is locked
+      </li>
+    <% end %>
+    <% if account.has_any_trade_restrictions? || account.spammy? %>
+      <% if account.trade_restriction_finalized? %>
+        <li>
+          <%= primer_octicon(:alert, classes: "alert") %>
+          <%= restriction_type %>: Downgrade ran on <%= account.trade_restriction_finalized_date %>
+        </li>
+      <% elsif account.scheduled_ofac_downgrade %>
+        <li>
+          <%= primer_octicon(:alert, classes: "alert") %>
+          <%= restriction_type %>: Downgrade scheduled for <%= account.scheduled_ofac_downgrade.downgrade_on %>
+        </li>
+      <% else %>
+        <li>
+          <%= primer_octicon(:alert, classes: "alert") %>
+          <%= restriction_type %>
+        </li>
+      <% end %>
+    <% end %>
+    <li>
+      <% if account.has_credit_card? %>
+        <%= primer_octicon(:"credit-card") %>
+        Card on file
+      <% elsif account.has_paypal_account? %>
+        <%= primer_octicon(:"credit-card") %>
+        PayPal account linked
+      <% elsif account.invoiced? %>
+        <%= primer_octicon(:file) %>
+        Invoiced account
+      <% else %>
+        <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+        No payment method on file
+      <% end %>
+    </li>
+    <% if account.payment_method && account.payment_method.blocklisted? %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        This account's payment method is blocklisted
+      </li>
+    <% end %>
+    <% if account.sponsors_invoiced? %>
+      <li <%= test_selector("invoiced-sponsors-purpose-account") %>>
+        <%= primer_octicon(:file) %>
+        Invoiced account for sponsorships
+      </li>
+    <% end %>
+    <% if (coupon = account.coupon) %>
+      <li>
+        <%= primer_octicon(:gift) %>
+        Active coupon
+        <% unless coupon.plan_specific? %>
+          <br>
+          <small>
+            <%= coupon.human_discount %> off for <%= coupon.human_duration %>
+            <br>
+            <%= coupon.code %>,
+            <time datetime="<%= account.coupon_redemption.expires_at %>">
+            expires
+            <% if account.coupon_redemption.expires_at.future? %>
+              <%= time_ago_in_words_js account.coupon_redemption.expires_at %>
+            <% else %>
+              immediately
+            <% end %>
+            </time>
+          </small>
+        <% end %>
+      </li>
+    <% end %>
+    <% if account.advanced_security_purchased? %>
+      <li <%= test_selector("advanced-security-enabled") %>>
+        <%= render(Primer::Beta::Octicon.new(icon: "lock")) %>
+        Advanced Security enabled
+      </li>
+    <% end %>
+    <% if last_transaction %>
+      <% if last_transaction.charged_back? %>
+        <li>
+          <%= primer_octicon(:stop, classes: "alert") %>
+          Disputed charge on
+          <%= link_to \
+                last_transaction.created_at.to_date,
+                stafftools_user_billing_history_path(account) %>
+        </li>
+      <% elsif last_transaction.was_refunded? %>
+        <li>
+          <%= primer_octicon(:reply, classes: "highlight") %>
+          Refunded charge on
+          <%= link_to \
+                last_transaction.created_at.to_date,
+                stafftools_user_billing_history_path(account) %>
+        </li>
+      <% elsif last_transaction.voided? %>
+        <li>
+          <%= primer_octicon(:history, classes: "highlight") %>
+          Voided charge on
+          <%= link_to \
+                last_transaction.created_at.to_date,
+                stafftools_user_billing_history_path(account) %>
+        </li>
+      <% elsif last_transaction.success? %>
+        <li <%= test_selector "last-transaction-amount-and-date" %>>
+          <%= primer_octicon(:zap) %>
+          Paid $<%= last_transaction.amount %> on
+          <%= link_to \
+                last_transaction.created_at.to_date,
+                stafftools_user_billing_history_path(account) %>
+        </li>
+      <% else %>
+        <li>
+          <%= primer_octicon(:alert, classes: "alert") %>
+          Card declined on
+          <%= link_to \
+                last_transaction.created_at.to_date,
+                stafftools_user_billing_history_path(account) %>
+        </li>
+      <% end %>
+    <% end %>
+
+    <% if show_sponsors_section_on_stafftools_user_page?(account) %>
+      <li>
+        <%= primer_octicon(:heart) %>
+        <% if sponsors_listing = account.sponsors_listing %>
+          <a href="<%= stafftools_sponsors_member_path(account.login) %>">GitHub Sponsors profile</a>
+          <% unless sponsors_listing.approved? %>
+            <span class="color-fg-muted">(not public)</span>
+          <% end %>
+          <% if stripe_account = sponsors_listing.active_stripe_connect_account %>
+            <div class="py-1">
+              Current balance:
+              <include-fragment
+                class="d-inline-block"
+                src="<%= stafftools_sponsors_member_stripe_connect_account_balance_partial_path(account, stripe_account) %>"
+              >
+                <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+              </include-fragment>
+            </div>
+            <a href="<%= stripe_account.stripe_dashboard_url %>">View in Stripe dashboard</a>
+          <% end %>
+        <% else %>
+          <a href="<%= new_stafftools_user_potential_sponsorship_path(account) %>">Log a potential sponsorship</a>
+        <% end %>
+      </li>
+    <% end %>
+  </ul>
+</div>

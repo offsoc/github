@@ -1,0 +1,47 @@
+#!/bin/bash
+#/ Usage: ghe-storage-init-db-mysql
+#/ Move /data/user/mysql to secondary block device on /data/db/mysql
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mysql-lib
+. /usr/local/share/enterprise/ghe-mysql-lib
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+if [ -L /data/user/mysql ]; then
+  echo "Error: /data/user/mysql is already a symlink" >&2
+  exit 1
+fi
+
+if ! mountpoint -q /data/db; then
+  echo "Error: /data/db is not mounted. Use ghe-storage-init-db first." >&2
+  exit 1
+fi
+
+if ! test -f /data/github/current/public/system/maintenance.html; then
+  echo "Error: maintenance mode must be enabled before moving mysql databases." >&2
+  exit 1
+fi
+
+if check_mysql; then
+  stop_mysql
+fi
+
+cp -a /data/user/mysql /data/db/
+mv /data/user/mysql /data/user/mysql.old
+ln -nfs /data/db/mysql /data/user/mysql
+
+start_mysql
+
+if ! /usr/local/share/enterprise/ghe-service-wait-mysql 60; then
+  echo "Failed to start MySQL service!"
+  exit 2
+fi
+
+echo "MySQL service started"
+
+echo "Success: /data/user/mysql moved to /data/db/mysql"

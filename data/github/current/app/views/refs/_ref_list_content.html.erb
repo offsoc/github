@@ -1,0 +1,96 @@
+<%# rubocop:disable GitHub/DeprecatedViewHelpers %>
+<%
+show_sha_on_branch_create = true if current_branch_or_tag_name.blank?
+
+# The branch loops below are quite hot loops, so the call to the octicon
+# helper is hoisted out of the loop for perf reasons.
+octicon_check_html = primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check")
+
+%>
+
+<header class="SelectMenu-header">
+  <span class="SelectMenu-title">Switch branches/tags</span>
+  <button class="SelectMenu-closeButton" type="button" data-toggle-for="branch-select-menu"><%= primer_octicon(:x, "aria-label": "Close menu") %></button>
+</header>
+
+<tab-container class="d-flex flex-column js-branches-tags-tabs" style="min-height: 0;">
+  <div class="SelectMenu-filter">
+    <filter-input aria-owns="ref-list-branches" data-controls-ref-menu-id="ref-list-branches">
+      <% placeholder = current_user_can_push? ? 'Find or create a branch…' : 'Filter branches/tags' %>
+      <input
+        type="text"
+        id="context-commitish-filter-field"
+        class="SelectMenu-input form-control"
+        autofocus
+        autocomplete="off"
+        aria-label="<%= placeholder %>"
+        placeholder="<%= placeholder %>">
+    </filter-input>
+
+    <remote-input
+      src="<%= refs_tags_path(tag_name: params[:name], source_controller: source_controller, source_action: source_action) %>"
+      aria-owns="tags-menu"
+      data-controls-ref-menu-id="tags-menu"
+      hidden>
+      <input type="text" class="SelectMenu-input form-control" aria-label="Find a tag" placeholder="Find a tag" autofocus>
+    </remote-input>
+  </div>
+
+  <div class="SelectMenu-tabs" role="tablist">
+    <button class="SelectMenu-tab" type="button" data-filter-placeholder="<%= placeholder %>" role="tab" aria-selected="true">Branches</button>
+    <button class="SelectMenu-tab" type="button" data-filter-placeholder="Find a tag" role="tab">Tags</button>
+  </div>
+
+  <div role="tabpanel" id="ref-list-branches" class="d-flex flex-column flex-auto overflow-auto">
+    <div class="SelectMenu-list" data-filter-list>
+      <% branches = current_repository.heads.refs_with_default_first %>
+      <% default_branch = current_repository.heads.default %>
+
+      <% branches.each do |branch| %>
+        <%
+          branch_escaped = escape_url_branch(branch.name).gsub('%2B', '+')
+        %>
+        <a class="SelectMenu-item"
+           href="<%= "#{url_prefix}#{branch_escaped}#{url_suffix}" %>"
+           role="menuitemradio"
+           aria-checked="<%= current_branch_or_tag_name == branch.name %>"
+           rel="nofollow">
+          <%= octicon_check_html %>
+          <% if branch.name == default_branch %>
+            <span class="flex-1 wb-break-word" data-menu-button-text data-filter-item-text><%= branch.name_for_display %></span>
+            <%= render Primer::Beta::Label.new(scheme: :secondary, classes: "flex-self-start") do %>default<% end %>
+          <% else %>
+            <span class="wb-break-word" data-menu-button-text data-filter-item-text><%= branch.name_for_display %></span>
+          <% end %>
+        </a>
+      <% end %>
+
+      <% if current_user_can_push? && (commit = current_commit) %>
+        <%= form_tag create_branch_path, "data-filter-new-item": true, hidden: true, method: :post do %>
+          <input type="hidden" name="name" id="name" data-filter-new-item-value>
+          <input type="hidden" name="branch" id="branch" value="<%= show_sha_on_branch_create ? commit.oid : tree_name_for_display %>">
+          <input type="hidden" name="path_binary" id="path_binary" value="<%= Base64.strict_encode64(path_string) if params[:path] %>">
+
+          <button class="SelectMenu-item wb-break-word" type="submit" role="menuitem">
+            <%= primer_octicon(:"git-branch", classes: "SelectMenu-icon flex-self-baseline") %>
+            <div>
+              <span class="text-bold">Create branch: <span data-filter-new-item-text></span></span>
+              <span class="color-fg-muted">from ‘<%= show_sha_on_branch_create ? commit.oid[0, 7] : tree_name_for_display %>’</span>
+            </div>
+          </button>
+        <% end %>
+
+      <% else %>
+        <div class="SelectMenu-message" data-filter-empty-state hidden>Nothing to show</div>
+      <% end %>
+    </div>
+    <footer class="SelectMenu-footer"><%= link_to "View all branches", branches_path(current_repository), "data-ga-click": "Repository, Branch selector, view all branches" %></footer>
+  </div>
+
+  <div role="tabpanel" id="tags-menu" class="d-flex flex-column flex-auto overflow-auto" hidden>
+    <div class="SelectMenu-list">
+      <div class="SelectMenu-message">Search for a tag</div>
+    </div>
+    <footer class="SelectMenu-footer"><%= link_to "View all tags", tags_path(current_repository.owner, current_repository), "data-ga-click": "Repository, Branch selector, view all tags" %></footer>
+  </div>
+</tab-container>

@@ -1,0 +1,303 @@
+#!/bin/bash
+#
+# Common functions used to setup MSSQL Replication in Full Cluster and HA.
+#
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. ghe-actions-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+
+fail() {
+  >&2 echo "$@"
+  exit 1
+}
+
+# This is like ensure_replica defined in ghe-repl-lib, but
+# ensure_replica is only valid for HA setups, and
+# ensure_mssql_instance_is_replica is only valid for MSSQL but works in either HA or full cluster.
+ensure_mssql_instance_is_replica() {
+  case "$(mssql_instance_replica_participation)" in
+    "replica")
+      # This is mssql replica =
+    ;;
+    "primary")
+      fail "Error: This command cannot be run on the mssql primary."
+    ;;
+    "none")
+      fail "Error: This command can only be run on an mssql replica. mssql should not be running here"
+    ;;
+    *)
+      fail "Error: Unable to determine if node is a replica."
+
+    ;;
+  esac
+}
+
+# This will categorize this nodes roles in mssql replication as defined in ghe-config
+# It works for both HA and full cluster
+mssql_instance_replica_participation() {
+  hostname=$(cat /etc/github/cluster)
+  mssql_master_node="$(ghe-config cluster.mssql-master)"
+  if [ "$mssql_master_node" = "$hostname" ]; then
+    echo "primary"
+  elif [ -z "$(ghe-config cluster.$hostname.mssql-server)" ]; then
+    echo "none"
+  else
+    echo "replica"
+  fi
+}
+
+# Setup the mssql-master node for replication. This is called from the primary directly AND via replicas SSHing into the primary, but there is a flock around it.
+setup-mssql-replication-primary() {
+  local cert_expiry
+  cert_expiry=$(date --utc --date "+2 years" +"%F %T")
+
+  wait-mssql-local-with-restart-alloc
+  ghe-mssql-update-servername
+
+  # Prompt to rotate the replication certificate on the primary if it has expired
+  cert_expired_query="SET NOCOUNT ON;
+        SELECT 1 FROM sys.certificates
+        WHERE name = 'dbm_certificate'
+            AND expiry_date < GETUTCDATE()"
+  cert_expired=$(ghe-mssql-console -y -n -r -q "$cert_expired_query")
+  if [[ ${#cert_expired} -gt 0 ]]; then
+      echo "Error: Unable to start MSSQL replication. The replication certificate on the primary is expired."
+      echo "Please run /usr/local/share/enterprise/ghe-mssql-repl-rotate-cert on the primary and then try again."
+      exit 1
+  fi
+
+  script-mssql "
+    IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    BEGIN
+      PRINT 'Creating encryption key...'
+      CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$key_encryption_password'
+    END
+    GO
+    IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = 'dbm_certificate')
+    BEGIN
+      PRINT 'Creating certificate...'
+      CREATE CERTIFICATE dbm_certificate WITH SUBJECT = 'dbm', EXPIRY_DATE = '$cert_expiry'
+      PRINT 'Done Creating certificate...'
+    END
+    GO
+    IF NOT EXISTS (SELECT * FROM sys.tcp_endpoints WHERE name = 'agep')
+    BEGIN
+      PRINT 'Creating endpoint...'
+      CREATE ENDPOINT agep
+      STATE = STARTED
+      AS TCP (
+        LISTENER_PORT = 5022,
+        LISTENER_IP = ALL)
+      FOR DATABASE_MIRRORING (
+        AUTHENTICATION = CERTIFICATE dbm_certificate,
+        ROLE = ALL,
+        ENCRYPTION = REQUIRED ALGORITHM AES)
+    END
+    GO
+    IF NOT EXISTS (SELECT * FROM sys.availability_groups WHERE name = 'ha')
+    BEGIN
+      PRINT 'Creating availability group...'
+      CREATE AVAILABILITY GROUP [ha]
+      WITH (CLUSTER_TYPE=NONE)
+      FOR
+      REPLICA ON
+        N'$(hostname)' WITH (
+          ENDPOINT_URL=N'TCP://$(hostname):5022',
+          AVAILABILITY_MODE = ASYNCHRONOUS_COMMIT,
+          FAILOVER_MODE = MANUAL
+        )
+    END
+    GO
+    PRINT 'Granting Create Database...'
+    ALTER AVAILABILITY GROUP [ha]
+      GRANT CREATE ANY DATABASE
+    GO
+  "
+
+  all_dbs=$(ghe-mssql-console -y -n -q "SET NOCOUNT ON; SELECT name FROM sys.databases")
+
+  dbs=()
+  for db in $all_dbs; do
+    if [[ ! "$db" =~ ^(master|tempdb|model|msdb)$ ]] && [[ "$db" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      dbs+=("$db")
+    fi
+  done
+
+  for db in "${dbs[@]}"; do
+    # If the backup file exists, delete it before creating a new one with `BACKUP DATABASE`.
+    sudo -u mssql rm -f "/data/user/mssql/backups/$db.bak"
+
+    script-mssql "
+      IF NOT EXISTS (
+        SELECT * FROM sys.availability_groups ag
+        INNER JOIN sys.availability_databases_cluster adc
+        ON ag.group_id = adc.group_id
+        WHERE ag.name = 'ha'
+        AND adc.database_name = '$db')
+      BEGIN
+        PRINT 'Adding $db to availability group...'
+        ALTER DATABASE [$db] SET RECOVERY FULL
+        BACKUP DATABASE [$db] TO DISK = '../backups/$db.bak'
+        ALTER AVAILABILITY GROUP [ha]
+          ADD DATABASE [$db]
+      END
+      GO
+    "
+  done
+
+  if ! sudo -u mssql test -f /data/user/mssql/data/endpoint.cer; then
+    script-mssql "
+      PRINT 'Exporting certificate to file...'
+      BACKUP CERTIFICATE dbm_certificate
+      TO FILE = '/var/opt/mssql/data/endpoint.cer'
+      WITH PRIVATE KEY (
+        FILE = '/var/opt/mssql/data/endpoint.pvk',
+        ENCRYPTION BY PASSWORD = '$key_encryption_password')
+      GO
+    "
+  fi
+}
+
+# Setup the mssql instance on the replica node to act as a replica mssql instance.
+setup-mssql-replication-replica() {
+  mssql_primary_instance_node_ip="$(mssql_primary_ip)"
+  # When we make calls to the primary, use sed to make it clear in the logs
+  # Use pipefail to make sure the actual command's exit code will be caught
+  set -o pipefail
+  ssh_cmd $mssql_primary_instance_node_ip -- /usr/local/share/enterprise/ghe-mssql-repl-start | sed -e 's/^/primary> /'
+  set +o pipefail
+
+  _setup-replica
+  _copy-availability-logins
+}
+
+# Helper function to extract common mssql replication scripts for usage in HA and full cluster.
+_setup-replica() {
+  mssql_primary_instance_node_ip="$(mssql_primary_ip)"
+
+  if is_cluster; then
+    flip_mssql_replica_eligibility "disable"
+  fi
+
+  # Stop any existing mssql containers best effort
+  stop-mssql-local || true
+  clear-mssql-data-local
+
+  if is_cluster; then
+    flip_mssql_replica_eligibility "enable"
+  fi
+
+  start-mssql-global
+
+  wait-mssql-local-with-restart-alloc
+  ghe-mssql-update-servername
+
+  if ! sudo test -f /data/user/mssql/data/endpoint.cer ||
+     ! sudo test -f /data/user/mssql/data/endpoint.pvk; then
+    echo "Copying certificates from primary..."
+
+    if ! ssh_cmd $mssql_primary_instance_node_ip -- sudo test -f /data/user/mssql/data/endpoint.cer || \
+       ! ssh_cmd $mssql_primary_instance_node_ip -- sudo test -f /data/user/mssql/data/endpoint.pvk; then
+      fail "MSSQL HA endpoint certificate not found on primary"
+    fi
+
+    ssh_cmd $mssql_primary_instance_node_ip -- sudo cat /data/user/mssql/data/endpoint.cer | sudo -u mssql sponge /data/user/mssql/data/endpoint.cer
+    ssh_cmd $mssql_primary_instance_node_ip -- sudo cat /data/user/mssql/data/endpoint.pvk | sudo -u mssql sponge /data/user/mssql/data/endpoint.pvk
+  fi
+
+  script-mssql "
+    IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    BEGIN
+      PRINT 'Creating encryption key...'
+      CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$key_encryption_password';
+    END
+    GO
+    IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = 'dbm_certificate')
+    BEGIN
+      PRINT 'Importing certificate from file...'
+      CREATE CERTIFICATE dbm_certificate
+      FROM FILE = '/var/opt/mssql/data/endpoint.cer'
+      WITH PRIVATE KEY (
+        FILE = '/var/opt/mssql/data/endpoint.pvk',
+        DECRYPTION BY PASSWORD = '$key_encryption_password');
+    END
+    GO
+    IF NOT EXISTS (SELECT * FROM sys.tcp_endpoints WHERE name = 'agep')
+    BEGIN
+      PRINT 'Creating endpoint...'
+      CREATE ENDPOINT agep
+      STATE = STARTED
+      AS TCP (
+        LISTENER_PORT = 5022,
+        LISTENER_IP = ALL)
+      FOR DATABASE_MIRRORING (
+        AUTHENTICATION = CERTIFICATE dbm_certificate,
+        ROLE = ALL,
+        ENCRYPTION = REQUIRED ALGORITHM AES);
+    END
+    GO
+  "
+
+  set -o pipefail
+  ssh_cmd $mssql_primary_instance_node_ip -- "ghe-mssql-console -y -q \"
+    IF NOT EXISTS (
+      SELECT * FROM sys.availability_groups ag
+      INNER JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
+      WHERE ag.name = 'ha'
+      AND ar.replica_server_name = '$(hostname)')
+    BEGIN
+      PRINT 'Adding replica to availability group...'
+      ALTER AVAILABILITY GROUP [ha]
+      ADD REPLICA ON
+        N'$(hostname)' WITH (
+          ENDPOINT_URL=N'TCP://$(hostname):5022',
+          AVAILABILITY_MODE = ASYNCHRONOUS_COMMIT,
+          FAILOVER_MODE = MANUAL,
+          SEEDING_MODE = AUTOMATIC,
+          SECONDARY_ROLE (ALLOW_CONNECTIONS = READ_ONLY)
+        )
+    END
+    GO
+  \"" | sed -e 's/^/primary> /'
+  set +o pipefail
+
+  script-mssql "
+    IF NOT EXISTS (
+      SELECT * FROM sys.availability_groups ag
+      INNER JOIN sys.dm_hadr_availability_replica_cluster_states arcs
+      ON ag.group_id = arcs.group_id
+      WHERE ag.name = 'ha'
+      AND arcs.replica_server_name = '$(hostname)'
+      AND arcs.join_state > 0)
+    BEGIN
+      PRINT 'Joining replica to availability group...'
+      ALTER AVAILABILITY GROUP [ha]
+        JOIN WITH (CLUSTER_TYPE=NONE)
+    END
+    GO
+    ALTER AVAILABILITY GROUP [ha]
+      GRANT CREATE ANY DATABASE
+    GO
+  "
+}
+
+# Grab availability group credentials for the current nodes mssql instance from the primary instance.
+# Usage: _copy-availability-logins <mssql-primary-instance-node-ip>
+_copy-availability-logins() {
+  mssql_primary_instance_node_ip="$(mssql_primary_ip)"
+
+  set -o pipefail
+  for service in $(action-services); do
+    ssh_cmd $mssql_primary_instance_node_ip -- "ghe-actions-console -s $service -c \"
+      Copy-AvailabilityGroupSqlLogins -PrimaryServerName 'localhost,1443' -SecondaryServerName $(hostname)
+    \"" | sed -e 's/^/primary> /'
+  done
+  set +o pipefail
+}

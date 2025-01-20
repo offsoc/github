@@ -1,0 +1,170 @@
+<% if @usage_moved_to_vnext %>
+  <div <%= test_selector "actions-usage-component" %>>
+    <%= render(Primer::Box.new( color: :muted, text_align: :center)) do %>
+      <%= render(Primer::Beta::Text.new(tag: :p, my: 3)) do %>
+        <%= render(Primer::Beta::Octicon.new(icon: :stop, color: :muted, mr: 2)) %>
+        View your usage through the <%= link_to "new Billing experience", @vnext_usage_link, class: "Link--inTextBlock" %>.
+      <% end %>
+    <% end %>
+  </div>
+<% elsif error_getting_usage? %>
+  <div <%= test_selector "actions-usage-component" %>>
+    <%= render(Primer::Box.new( color: :muted, text_align: :center)) do %>
+      <%= render(Primer::Beta::Text.new(tag: :p, my: 3)) do %>
+        <%= render(Primer::Beta::Octicon.new(icon: :stop, color: :muted, mr: 2)) %>
+        Error: Unable to load the data at this time. <%= link_to "Refresh", "", class: "Link--inTextBlock" %> the page or try again later.
+      <% end %>
+    <% end %>
+  </div>
+<% else %>
+  <div <%= test_selector "actions-usage-component" %>>
+    <details class="Box-row billing-box-accordion details-reset p-0 d-flex flex-items-center color-fg-muted">
+      <summary class="Details-element">
+        <div class="py-2 pr-3 d-flex user-select-none flex-items-center">
+          <div class="billing-box-accordion-state col-1 text-center color-fg-muted text-small">
+            <%= render(Primer::Beta::Octicon.new(icon: "chevron-right")) %>
+          </div>
+          <div class="flex-auto">
+            <div class="d-flex flex-auto flex-justify-between flex-items-center">
+              <div class="my-1 col-md-6 col-8 pr-3">
+                <div class="d-flex flex-md-row flex-column flex-items-baseline">
+                  <%= render(Primer::Beta::Text.new(tag: :p, font_weight: :bold, flex: :auto, display: :inline_block, mb: 1 )) do %>
+                    Usage minutes
+                  <% end %>
+                  <%= render(Primer::Beta::Text.new(tag: :p, font_size: :small, display: :inline_block, mb: 1 )) do %>
+                    <% if enterprise_org? %>
+                      <strong>
+                        <%= number_with_precision(standard_sku_minutes_consumed_for_account, precision: 2, delimiter: ",") %>
+                      </strong> min used
+                    <% elsif !exhausted_entitlements? %>
+                      <strong><%= number_with_precision(entitlements&.consumed_quantity || 0, precision: 2, delimiter: ",") %></strong>
+                      of <%= number_with_precision(entitlements&.allocated_quantity || 0 , precision: 2, delimiter: ",") %> min included
+                    <% else %>
+                      <strong><%= number_with_precision(entitlements&.consumed_quantity || 0, precision: 2, delimiter: ",") %></strong> included min used
+                    <% end %>
+                  <% end %>
+                </div>
+                <div class="billing-box-progress">
+                  <%= render(Primer::Beta::ProgressBar.new(size: :small)) do |component| %>
+                    <% component.with_item(bg: progress_bar_color, percentage: entitlements_used_percentage) %>
+                  <% end %>
+                </div>
+              </div>
+              <% unless enterprise_org? %>
+                <div class="text-right color-fg-default"><%= total_charges.format(:no_cents_if_whole => false) %></div>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      </summary>
+      <div class="d-flex pb-4">
+        <div class="flex-shrink-0 col-1"></div>
+        <div class="flex-auto mb-n2 pr-3 text-small">
+          <%= render(Primer::Beta::Text.new(tag: :p, font_size: :small, color: :muted)) do %>
+            Included minutes quota only applies to Ubuntu 2-core, Windows 2-core and macOS 3-core runners.
+            Windows 2-core and macOS 3-core runners consume included minutes at higher rates.
+            <%= entitlements_breakdown_text %>
+            <%= render(Primer::Beta::Link.new(href: documentation_url, classes: "Link--inTextBlock")) { "Learn more." } %>
+          <% end %>
+          <table class="width-full text-left">
+            <thead>
+              <tr class="color-fg-muted lh-condensed">
+                <th class="col-5"></th>
+                <th class="text-bold col-2 pt-1 pb-2"> Included</th>
+                <th class="text-bold col-2 pt-1 pb-2">Paid</th>
+                <% unless enterprise_org? %>
+                  <th class="text-bold col-2 pt-1 pb-2">Price / minute</th>
+                  <th class="text-bold col-2 pt-1 pb-2" align="right">Total</th>
+                <% end %>
+              </tr>
+            </thead>
+            <tbody class="lh-condensed">
+              <% standard_runtime_usages.each do |sku| %>
+                <tr>
+                  <td class="py-2"><%= get_display_name(sku.name) %></td>
+                  <% if get_rate_plan_multiplier(sku.name) > 1 %>
+                    <td class="py-2"><%= entitlements_consumed_with_multiplier(sku) %></td>
+                    <% unless enterprise_org? %>
+                      <td><%= overages_consumed_with_multiplier(sku) %></td>
+                      <td <%= test_selector "standard-sku-unit-price" %>>
+                        <%= "$#{sku_unit_price_with_multiplier(sku)}" %>
+                      </td>
+                    <% end %>
+                  <% else %>
+                    <td class="py-2">
+                      <%= number_with_precision(entitlements_consumed_quantity(sku), precision: 2, delimiter: ",") %>
+                    </td>
+                    <% unless enterprise_org? %>
+                      <td><%= number_with_precision(sku.overage_consumed_quantity, precision: 2, delimiter: ",") %></td>
+                      <td <%= test_selector "standard-sku-unit-price" %>>
+                        <%= "$#{number_with_precision(sku.unit_price, precision: 3, strip_insignificant_zeros: true)}" %>
+                      </td>
+                    <% end %>
+                  <% end %>
+                  <% unless enterprise_org? %>
+                    <td <%= test_selector "standard-sku-total-cost" %> align="right">
+                      <%= Billing::Money.new(sku.estimated_cost).format %>
+                    </td>
+                  <% end %>
+                </tr>
+              <% end %>
+              <% if enterprise_org? %>
+                <tr>
+                  <td></td>
+                  <td></td>
+                  <td class="py-2 text-bold" <%= test_selector "standard-sku-total-minutes" %>>
+                    <%= number_with_precision(standard_sku_total_overage_minutes_for_account, precision: 2, delimiter: ",") %>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+            <%# only display the custom / large runners if there is usage for them %>
+            <% if custom_runtime_usages.count { |runtime| runtime.overage_consumed_quantity > 0 } > 0 %>
+              <tbody class="lh-condensed" <%= test_selector "custom-skus-usage-data" %>>
+                <% custom_runtime_usages.select { |runtime| runtime.overage_consumed_quantity > 0 }.each do |sku| %>
+                  <tr>
+                    <td class="py-2"><%= get_display_name(sku.name) %></td>
+                    <td class="py-2"></td>
+                    <% if get_rate_plan_multiplier(sku.name) > 1 %>
+                      <td class="py-2">
+                        <%= overages_consumed_with_multiplier(sku) %>
+                      </td>
+                      <% unless enterprise_org? %>
+                        <td <%= test_selector "custom-sku-unit-price" %>>
+                          <%= "$#{sku_unit_price_with_multiplier(sku)}" %>
+                        </td>
+                      <% end %>
+                    <% else %>
+                      <td class="py-2">
+                        <%= number_with_precision(overage_consumed_quantity(sku), precision: 2, delimiter: ",") %>
+                      </td>
+                      <% unless enterprise_org? %>
+                        <td <%= test_selector "custom-sku-unit-price" %>>
+                          <%= "$#{number_with_precision(sku.unit_price, precision: 3, strip_insignificant_zeros: true)}" %>
+                        </td>
+                      <% end %>
+                    <% end %>
+                    <% unless enterprise_org? %>
+                      <td <%= test_selector "custom-sku-total-cost" %> align="right">
+                        <%= Billing::Money.new(sku.estimated_cost).format %>
+                      </td>
+                    <% end %>
+                  </tr>
+                <% end %>
+              </tbody>
+            <% end %>
+          </table>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <% unless enterprise_org? %>
+    <%= render "billing_settings/spending_limit_footer",
+      spending_limit_enabled: spending_limit_enabled,
+      spending_limit_path: spending_limit_path,
+      amount: total_charges,
+      budget: budget
+    %>
+  <% end %>
+<% end %>

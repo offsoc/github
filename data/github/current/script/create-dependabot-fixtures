@@ -1,0 +1,67 @@
+#!/usr/bin/env safe-ruby
+# typed: true
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require_relative "create_dependabot_example_vulnerable_repo"
+
+unless Rails.env.development?
+  abort "This can only be run in development"
+end
+
+class DependabotFixtures
+  CALLING_CARD = <<~'CALLING_CARD'
+    You are all set with some test data for the Dependabot service ♥️
+
+    %{repo_list}
+
+    Slack : #dependabot-updates
+    Issues: https://github.com/github/dependabot-updates
+  CALLING_CARD
+
+  def initialize
+    @mona = User.find_by!(login: "monalisa")
+    @gh = Organization.find_by!(login: "github")
+    @repository_manager = CreateExampleVulnerableRepository.new
+    @repos = []
+  end
+
+  def call
+    # Create Dependabot app and install triggers
+    CreateIntegrationTrigger.new.call
+
+    # Create example vulnerability data
+    CreateExampleVulnerabilities.new.call
+
+    @repos << repository_for(name: "octoapp", owner: @mona, private: false)
+    @repos << repository_for(name: "sekret-octoapp", owner: @mona, private: true)
+    @repos << repository_for(name: "octoapp-pro", owner: @gh, private: false)
+    @repos << repository_for(name: "sekret-octoapp-pro", owner: @gh, private: true)
+  end
+
+  def calling_card
+    CALLING_CARD % { repo_list: repo_list }
+  end
+
+  private
+
+  def repo_list
+    @repos.map do |repo|
+      "- http://#{GitHub.host_name}/#{repo.nwo}"
+    end.join("\n")
+  end
+
+  def repository_for(name:, owner:, private: false)
+    Repository.nwo("#{owner.login}/#{name}") ||
+      @repository_manager.create_repository(name: name, owner: owner, private: private)
+  end
+end
+
+if __FILE__ == $0
+  bootstrap = DependabotFixtures.new
+
+  bootstrap.call
+
+  puts "\n"
+  puts bootstrap.calling_card
+end

@@ -1,0 +1,204 @@
+#!/bin/bash
+
+# usage: build-subproject [-v|--verbose] SUBPROJECT [ DIR ]
+#
+# 1. Clone (if necessary) a repo `github/$SUBPROJECT` to `DIR` (which
+#    defaults to `vendor/$SUBPROJECT`).
+#
+# 2. Check out the version specified in file
+#    `config/$SUBPROJECT-version`. That file should contain a single
+#    SHA-1, optionally followed by a colon and a "build version"
+#    number. (The build version can be incremented to force a
+#    dependency to be rebuilt even if the desired SHA-1 hasn't
+#    changed, for example if the build process of the importing
+#    project changes.)
+#
+# 3. If the version matches the contents of file
+#    `vendor/$SUBPROJECT/.built`, then assume that the correct version
+#    of the subproject has already been built, so exit with a success
+#    return code.
+#
+# 4. Otherwise, build the subproject by running, from the subproject's
+#    directory, `script/bootstrap` followed by `script/build` (if
+#    those scripts exist).
+#
+# 5. If the build succeeded, write the version number that was built
+#    to `vendor/$SUBPROJECT/.built`.
+
+set -e
+cd "$(dirname "$0")/.."
+ROOT="$PWD"
+
+verbose=false
+clone_only=false
+while test $# -ne 0; do
+    case "$1" in
+    -v|--verbose)
+        verbose=true
+        shift
+        ;;
+    --clone-only)
+        clone_only=true
+        shift
+        ;;
+    -*)
+        echo "$0: unrecognized option: $1" >&2
+        exit 1
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
+
+SUBPROJECT=$1
+if [ -z "$SUBPROJECT" ]; then
+  printf >&2 '\e[31m%s\e[0m\n' "ERROR: Usage script/build-subproject SUBPROJECT_NAME."
+  exit 1
+fi
+SUBPROJECT_VENDOR="${2:-${ROOT}/vendor/$SUBPROJECT}"
+SUBPROJECT_REPO="github/$SUBPROJECT"
+
+if ! SUBPROJECT_VERSION="$(cat config/$SUBPROJECT-version | grep -v ^#)"; then
+  printf >&2 '\e[31m%s\e[0m\n' "ERROR: No $SUBPROJECT project is configured."
+  exit 1
+fi
+
+SUBPROJECT_SHA1="${SUBPROJECT_VERSION%%:*}"
+SUBPROJECT_GIT_URL="$(./script/gh-clone-url $SUBPROJECT_REPO)"
+
+# Signal to subproject that they are being built as part of the devcontainer
+export GITHUB_BUILD_SUBPROJECT="1"
+
+mkdir -p "$SUBPROJECT_VENDOR"
+cd "$SUBPROJECT_VENDOR"
+
+check_build_up_to_date() {
+  if [ "$(cat "${SUBPROJECT_VENDOR}/.built" 2>/dev/null)" = "$SUBPROJECT_VERSION" ] &&
+   [ -z "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    echo "$SUBPROJECT build $(echo $SUBPROJECT_VERSION | cut -c1-10,40-) is up-to-date."
+    return 0
+  fi
+  return 1
+}
+
+# Detect the system we're building for.
+if [ "$ROOT" = "/workspaces/github-devcontainer/github" ]; then
+  export DEVCONTAINER=1
+fi
+
+set_path_for_git() {
+  if [ "$(which git)" = "${ROOT}/bin/git" ]; then
+    SYS_GIT_DIR="/tmp/system-git"
+    mkdir -p "$SYS_GIT_DIR"
+    for g in $(which -a git | grep -v "^${ROOT}"); do
+      # This is a Hack.
+      # We create a symlink between the system git and /tmp/system-git/git
+      # so that we can prioritize the system git (/usr/bin/git) in the PATH without
+      # prioritizing everything in /usr/bin. If we add /usr/bin to the start of the PATH
+      # variable (i.e. if we prioritize everything in /usr/bin), then the subprojects will
+      # use the wrong ruby version to build. If we don't use the system git to build subprojects,
+      # then the github-codespaces-setup job will fail whenever there is a git version bump.
+      echo "Creating symlink between $g and $SYS_GIT_DIR/git"
+      ln -s "$g" "$SYS_GIT_DIR/git" || true
+      echo "Running \'which git\' before PATH update: $(which git)"
+      echo "build-subproject: Updating PATH so that build uses $g and not $(which git)"
+      export PATH="$SYS_GIT_DIR:$PATH"
+      echo "Running \'which git\' after PATH update: $(which git)"
+      break
+    done
+  fi
+}
+
+build_subproject() {
+  # The path is overridden in set_path_for_git in order to use the system git
+  # otherwise, github-codespaces-setup fails when there's a git version bump
+  # because script/build-subproject tries to use bin/git to build the missing subproject
+  # instead of the system git.
+  ORIG_PATH="$PATH"
+  set_path_for_git
+
+  rm -f .built
+  hash -r
+  if ! [ -d ".git" ]; then
+    git init
+    GIT_CHANGED="1"
+  fi
+
+  if [ -n "$GIT_CHANGED" ] || ! git config --local remote.origin.url >/dev/null; then
+    git remote add origin "$SUBPROJECT_GIT_URL"
+    GIT_CHANGED="1"
+  fi
+  if [ -n "$GIT_CHANGED" ] || ! git rev-parse --verify --quiet "$SUBPROJECT_SHA1^{commit}" >/dev/null; then
+    git fetch origin --prune
+    GIT_CHANGED="1"
+  fi
+  if [ -n "$GIT_CHANGED" ] || [ "$(git rev-parse --verify --quiet HEAD)" != "$SUBPROJECT_SHA1" ] ||
+                              ! git diff --quiet HEAD; then
+    git reset --hard "$SUBPROJECT_SHA1"
+  fi
+
+  git clean -qfdx
+  git submodule foreach git clean -qfdx
+
+  if $clone_only; then
+    export PATH="$ORIG_PATH"
+    exit 0
+  fi
+
+  mkdir -p tmp
+
+  if [ -x script/bootstrap ]; then
+    if script/bootstrap &> tmp/bootstrap.log; then
+      if $verbose; then
+        echo "$SUBPROJECT bootstrapped successfully:"
+        cat tmp/bootstrap.log
+      else
+        echo "$SUBPROJECT bootstrapped successfully."
+      fi
+    else
+      echo "$SUBPROJECT failed to bootstrap:"
+      cat tmp/bootstrap.log
+      export PATH="$ORIG_PATH"
+      exit 1
+    fi
+  fi
+
+  if [ -x script/build ]; then
+    if script/build &> tmp/build.log; then
+      if $verbose; then
+        echo "$SUBPROJECT built successfully.:"
+        cat tmp/build.log
+      else
+        echo "$SUBPROJECT built successfully."
+      fi
+    else
+      echo "$SUBPROJECT failed to build:"
+      cat tmp/build.log
+      export PATH="$ORIG_PATH"
+      exit 1
+    fi
+  fi
+
+  export PATH="$ORIG_PATH"
+  echo "$SUBPROJECT_VERSION" > .built
+}
+
+if check_build_up_to_date; then
+  exit 0
+fi
+
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+   [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+   "$ROOT/script/subproject-prebuild" download "$SUBPROJECT" "$SUBPROJECT_VENDOR" &&
+   check_build_up_to_date; then
+  exit 0
+fi
+
+build_subproject
+
+# Write to GitHub Packages subproject prebuild cache
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+  # Never fail the build on a failed upload.
+  "${ROOT}/script/subproject-prebuild" upload "$SUBPROJECT" "$SUBPROJECT_VENDOR" || true
+fi

@@ -1,0 +1,267 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% view = Stafftools::TeamView.new(:team => this_team, :page => params[:page]) %>
+
+<% page_info \
+     :title => "#{this_user.login} - #{this_team.name} team",
+     :selected_link => :org_teams %>
+
+<% external_group = this_team&.external_group_team&.external_group if this_team&.externally_managed? %>
+
+<div class="site-admin-unboxed">
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      <%= link_to "Teams", stafftools_user_teams_path(this_user) %>
+      /
+      <%= this_team.name %>
+    </h2>
+  </div>
+
+  <div class="site-admin-table">
+    <table>
+      <tr>
+        <th>
+          Privacy
+        </th>
+        <td>
+          <%= this_team.privacy %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Notifications
+        </th>
+        <td <%= test_selector("team_notifications_display_message") %>>
+          <%= view.notification_status %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Legacy permission
+        </th>
+        <td>
+          <%= this_team.permission %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Members
+        </th>
+        <td>
+          <%= link_to gh_members_stafftools_team_path(this_team) do %>
+            <%= pluralize num_members, "member" %>
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Join requests
+        </th>
+        <td>
+          <%= link_to gh_requests_stafftools_team_path(this_team) do %>
+            <%= pluralize num_requests, "join request" %>
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Repositories
+        </th>
+        <td>
+          <%= link_to gh_repositories_stafftools_team_path(this_team) do %>
+            <%= pluralize num_repos, "repository" %>
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Ancestry
+        </th>
+        <td>
+          /
+          <% ancestors.each do |ancestor| %>
+            <%= link_to ancestor.name, gh_stafftools_team_path(ancestor) %>
+            /
+          <% end %>
+          <%= this_team.name %>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          Child Teams
+        </th>
+        <td>
+          <%= link_to gh_child_teams_stafftools_team_path(this_team) do %>
+            <%= pluralize child_teams_count, "child team", "child teams" %>
+          <% end %>
+        </td>
+      </tr>
+      <% if external_group %>
+        <tr>
+          <th>
+            External group name
+          </th>
+          <td>
+            <div <%= test_selector("view-external-group-info-link") %>>
+              <%= link_to \
+                external_group.display_name,
+                external_group_members_stafftools_enterprise_path(
+                  id: external_group.id,
+                  slug: external_group.provider.business.slug) %>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <th>
+            Sync status
+          </th>
+          <td>
+            <div <%= test_selector("external-group-sync-status") %>>
+              <% if memberships_match %>
+                <%= render(Primer::Beta::Octicon.new(icon: "check", color: :success, test_selector: "external-group-synced")) %>
+                Synced
+              <% elsif this_team.external_group_team.out_of_sync_insufficient_licenses? %>
+                <%= render(Primer::Beta::Octicon.new(icon: "x", color: :danger, test_selector: "external-group-no-licenses")) %>
+                Not synced - out of licenses
+              <% else %>
+                <%= render(Primer::Beta::Octicon.new(icon: "x", color: :danger, test_selector: "external-group-not-synced")) %>
+                Not synced
+              <% end %>
+            </div>
+          </td>
+        </tr>
+      <% end %>
+      <tr>
+        <th>Security manager?</th>
+        <td><%= SecurityProduct::SecurityManagerRole.granted_or_inherited?(this_team) ? "yes": "no" %></td>
+      </tr>
+    </table>
+    <%= link_to \
+          "View database record",
+          gh_database_stafftools_team_path(this_team),
+          class: "more" %>
+    <% if this_team.externally_managed? %>
+      <% if this_user.enterprise_managed_user_enabled? %>
+        <div class="border-0 border-top" style="padding: 10px">
+          <%= form_tag gh_stafftools_reconcile_team_path(this_team), method: :put do %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              size: :small,
+              float: :right,
+              test_selector: "reconcile-memberships-button",
+            ) do %>
+              Reconcile
+            <% end %>
+          <% end %>
+
+          <div class="text-bold">Reconcile memberships</div>
+          <p <%= test_selector "reconcile-memberships-description" %>>
+            The Reconcile button synchronizes the SCIM-provisioned external group memberships stored in the enterprise account with the mapped team memberships. This button does not make any calls to the Identity Provider. This sync is also triggered automatically in the background at least once every 24 hours if there are membership mismatches.
+          </p>
+        </div>
+      <% else %>
+        <div class="more flex-items-center">
+          <%= form_tag gh_stafftools_sync_team_path(this_team), method: :put do %>
+            <%= render(Primer::ButtonComponent.new(variant: :small, type: :submit)) { "Sync" } %>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% unless GitHub.enterprise? || external_group %>
+    <div class="site-admin-subhead ruleless">
+      <h2 class="site-admin-subhead-heading">
+        Team Synchronization
+      </h2>
+    </div>
+    <include-fragment src="<%= group_sync_status_stafftools_user_team_path %>">
+      <span data-hide-on-error>
+        <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+        Loading...
+      </span>
+    </include-fragment>
+  <% end %>
+
+  <% if external_group && !memberships_match %>
+    <div class="site-admin-subhead ruleless">
+      <h2 class="site-admin-subhead-heading">
+        External group team mismatches
+      </h2>
+    </div>
+
+    <table class="site-admin-table" <%= test_selector "group_member_ids_not_in_team_table" %>>
+      <thead>
+        <th>Group members not in team</th>
+      </thead>
+      <% if group_members_not_in_team.any? %>
+        <% group_members_not_in_team.each do |user| %>
+          <tr>
+            <td <%= test_selector "group_member_not_in_team" %>>
+              <%= avatar_for user, 20, class: :avatar %>
+              <%= link_to user, stafftools_user_path(user) %>
+            </td>
+          </tr>
+        <% end %>
+      <% else %>
+        <tr>
+          <td>No group members missing from the team</td>
+        </tr>
+      <% end %>
+    </table>
+
+    <div class="paginate-container" <%= test_selector "group_member_ids_not_in_team_pagination" %>>
+      <%= will_paginate group_member_ids_not_in_team, :param_name => :group_members_page, "aria-label": "Group members not in team" %>
+    </div>
+
+    <table class="site-admin-table" <%= test_selector "team_member_ids_not_in_group_table" %>>
+      <thead>
+        <th>Team members not in group</th>
+      </thead>
+      <% if team_members_not_in_group.any? %>
+        <% team_members_not_in_group.each do |user| %>
+          <tr>
+            <td <%= test_selector "team_member_not_in_group" %>>
+              <%= avatar_for user, 20, class: :avatar %>
+              <%= link_to user, stafftools_user_path(user) %>
+            </td>
+          </tr>
+        <% end %>
+      <% else %>
+        <tr>
+          <td>No team members missing from the external group</td>
+        </tr>
+      <% end %>
+    </table>
+
+    <div class="paginate-container" <%= test_selector "team_member_ids_not_in_group_pagination" %>>
+      <%= will_paginate team_member_ids_not_in_group, :param_name => :team_members_page, "aria-label": "Team members not in group" %>
+    </div>
+  <% end %>
+
+  <div class="site-admin-subhead ruleless">
+    <h2 class="site-admin-subhead-heading">
+      Audit log
+    </h2>
+  </div>
+
+  <% if stafftools_action_authorized?(controller: Stafftools::SearchController, action: :audit_log) %>
+    <%= render \
+        partial: "stafftools/audit_log",
+        locals: {
+          query: @query,
+          logs: @logs,
+          more_results: @more_results,
+        } %>
+  <% else %>
+    <p><%= stafftools_not_authorized_html %></p>
+  <% end %>
+
+  <%= render(Stafftools::Teams::MigrationOverrideComponent.new(team: this_team)) %>
+
+  <%= render "stafftools/users/ldap_sync", view: create_view_model(
+    Stafftools::User::TeamSyncView,
+    user: this_user,
+    subject: this_team
+  ) %>
+</div>

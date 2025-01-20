@@ -1,0 +1,67 @@
+#!/bin/bash
+#/ Usage: ghe-import-ssh-host-keys [-h]
+#/
+#/ Import a backup taken with ghe-export-ssh-host-keys.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the SSH host keys from a dump file:
+#/    $ ghe-import-ssh-host-keys < dump-file
+#/
+#/  Transfer the SSH host keys from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-ssh-host-keys | ghe-import-ssh-host-keys
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ] || [ -t 0 ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+function message {
+  echo " --> ${1}"
+}
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+message "Importing SSH host keys..."
+
+# extract to /data/user/common and copy to /etc/ssh
+tar --acls -xpf - -C /data/user/common
+chown babeld:babeld /data/user/common/ssh_host_*
+setfacl -b /data/user/common/ssh_host*
+
+
+data_sha=$(cat /data/user/common/ssh_host_* | sha256sum | awk '{print $1}')
+rootfs_sha=$(cat /etc/ssh/ssh_host_* | sha256sum | awk '{print $1}')
+
+cp -p /data/user/common/ssh_host_* /etc/ssh/
+chown root:root /etc/ssh/ssh_host_*
+chmod 600 /etc/ssh/ssh_host_*_key
+chmod 644 /etc/ssh/ssh_host_*.pub
+
+if [ -z "$rootfs_sha" ] || [ "$rootfs_sha" != "$data_sha" ]; then
+  # Needs to be restarted after rolling the keys
+  service ssh restart
+  # Check if we have a remote for HA configured to roll
+  if [ -f /etc/github/repl-state -a -f /home/git/.ssh/known_hosts ]; then
+    sudo rm -f /home/git/.ssh/known_hosts
+    if [ -f /etc/github/cluster ]; then
+      for node in $(ghe-cluster-nodes -x); do
+        ip=$(ghe-config cluster.$node.ipv4 || true)
+        if [ -z "$ip" ]; then
+          ip=$(ghe-config cluster.$node.ipv6 || true)
+        fi
+        sudo -u git ssh -p 122 -o LogLevel=error -o PasswordAuthentication=no -o StrictHostKeyChecking=no git@$ip /bin/true
+      done
+    fi
+  fi
+fi

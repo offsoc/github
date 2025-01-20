@@ -1,0 +1,137 @@
+#!/bin/bash
+#/ Usage: build-babeld
+#/        build-babeld <branch>
+#/ Build an app local version of babeld from https://github.com/github/babeld.
+#/
+#/ In the first form, build and install the version specified in config/babeld-version.
+#/ This is run automatically by script/bootstrap for all development environments.
+#/
+#/ When <branch> is given, fetch the latest from the repository, build babeld at
+#/ the specified branch or tag and then update the config/babeld-version file with
+#/ the appropriate commit sha1. Add and commit the changed config/babeld-version file to
+#/ update everyone else's environment the next time they sync with your branch.
+set -e
+unset CDPATH
+
+# show usage
+if [ "$1" = "--help" ]; then
+    grep ^#/ <"$0" |cut -c4-
+    exit
+fi
+
+# change into root project dir
+cd "$(dirname "$0")/.."
+
+# revision where we should build
+pinned=$(cat config/babeld-version | grep -v ^#)
+revision="${1:-$pinned}"
+short_revision="$(echo $revision | cut -c1-10)"
+
+# babeld repository URL to clone from. this assumes that SSH is setup properly for
+# the current user.
+giturl="$(./script/gh-clone-url github/babeld)"
+
+# build path locations
+builddir="vendor/babeld"
+installdir="vendor/babeld"
+logfile="log/babeld-build.log"
+
+# fetch the remote repository into the builddir
+fetch() {
+    progress=
+    [ -t 1 ] && progress="--progress"
+    git --git-dir="$builddir/.git" \
+        fetch -u -q $progress --prune --force "$giturl" "+refs/heads/*:refs/heads/*"
+}
+
+check_babeld() {
+    if [ "$revision" = "$(cat "$installdir/version" 2>/dev/null)" -a -x "$installdir/babeld" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# bail if the already built revision is up-to-date
+if check_babeld; then
+    echo "babeld build $short_revision is up-to-date."
+    exit 0
+fi
+
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_READ" ] &&
+   [ -z "$GITHUB_PACKAGES_DISABLE_SUBPROJECT_CACHE_READ" ] &&
+   ./script/subproject-prebuild -d $installdir -v $revision download babeld &&
+   check_babeld; then
+    echo "babeld build $short_revision is up-to-date."
+    exit 0
+fi
+
+# clone or fetch the git repo if needed
+if [ ! -d "$builddir/.git" ]; then
+    echo "Fetching $giturl for the first time. This may take a while." 2>&1
+    git init -q "$builddir"
+    fetch
+elif [ "$pinned" != "$revision" ]; then
+    echo "Fetching $giturl for update ..." 2>&1
+    fetch
+elif ! git --git-dir="$builddir/.git" cat-file -e "$revision" 2>/dev/null; then
+    echo "Fetching $giturl for update ..." 2>&1
+    fetch
+fi
+
+# resolve requested revision to commit oid.
+commit=$(git --git-dir="$builddir/.git" rev-parse --verify -q "$revision" || true)
+if ! git --git-dir="$builddir/.git" cat-file -e "$commit" 2>/dev/null ; then
+    echo "ERROR: Revision not found: $revision" 2>&1
+    exit 1
+fi
+
+# prep install dir
+mkdir -p "$installdir"
+prefix=$(cd "$installdir" && pwd)
+
+# change in and build some stuff
+echo "babeld build at $(echo $commit | cut -c1-10) commencing (see $logfile) ..."
+set +e
+(
+    set -ex
+    cd "$builddir"
+    [ ! -e ssh_host_key.dev ] && ssh-keygen -N "" -m PEM -t rsa -f ssh_host_key.dev
+    [ ! -e dss_host_key.dev ] && ssh-keygen -N "" -m PEM -t ssh-dss -f dss_host_key.dev
+    time git --git-dir=".git" --work-tree="." reset --hard "$commit"
+    time make clean
+    time PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig/" make NO_GETTEXT=1 prefix="$prefix" -j4 all
+    if [ -f ./test/preload.dylib ]; then
+      cp ./test/preload.dylib ./test/babeld-preload.dylib
+    elif [ -f ./test/preload.so ]; then
+      cp ./test/preload.so ./test/babeld-preload.so
+    fi
+) 1> "$logfile" 2>&1
+res=$?
+set -e
+
+# check for failure
+if [ $res -ne 0 ]; then
+    echo "!! babeld build failed oh no. The last lines of output follow:" 2>&1
+    tail -n 100 "$logfile"
+    echo "** See $logfile for more ..." 2>&1
+    exit $res
+fi
+
+# write the current build version file
+echo "$commit" > "$installdir/version"
+
+# if a <branch> was given, and it resolves
+cat <<-EOF > config/babeld-version
+# babeld version built into development environments.
+# See 'script/build-babeld --help' for info on changing this file.
+$commit
+EOF
+
+if [ -n "$GITHUB_PACKAGES_SUBPROJECT_CACHE_WRITE" ]; then
+    # Never fail the build on a failed upload.
+    script/subproject-prebuild -d $installdir -v $revision upload babeld || true
+fi
+
+echo "$($installdir/babeld --version), installed at $installdir."
+true

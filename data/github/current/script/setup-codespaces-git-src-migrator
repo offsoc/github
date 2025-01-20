@@ -1,0 +1,97 @@
+#!/bin/bash
+set -e
+
+# This script sets up the github/git-src-migrator repository for a github/github codespace.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print help message
+help() {
+   echo "Sets up the github/git-src-migrator repository for a github/github codespace."
+   echo
+   echo "Usage: setup-codespaces-git-src-migrator [-b branch] [-d|h] "
+   echo "Options:"
+   echo "-b     Specify the git-src-migrator branch to clone. Defaults to main if not provided."
+   echo "-d     Before starting, delete the existing git-src-migrator directory in the codespace."
+   echo "-h     Print this help message."
+   echo
+}
+
+if [ -z "$GH_GH_PAT" ]; then
+  echo "You need to set a PAT in GH_GH_PAT! Check out https://thehub.github.com/engineering/development-and-ops/codespaces/dotcom-dependants-development/#setup-a-token-once-done-once-skip-this-for-future-services for more instructions."
+  exit;
+fi
+
+# Set the branch as main. If a branch is provided as an argument, it will be set to that when we parse the provided options.
+BRANCH=main
+
+# Get the options
+while getopts ":b:hd" opt; do
+   case $opt in
+      h) # display help message
+         help
+         exit;;
+      b) # If a branch was provided, re-set the variable
+         BRANCH=$OPTARG;;
+      d) # Delete the repository if it exists
+         DELETE_REPO=true;;
+     :)
+      echo "Error: Option -$OPTARG requires an argument."
+      exit 1;;
+     \?) # Invalid option
+         echo "Error: Invalid option -$OPTARG"
+         exit 1;;
+   esac
+done
+
+if [ "$DELETE_REPO" = true ]; then
+  echo -e "\n${GREEN}➡️ Deleting the existing git-src-migrator repo...\n${NC}"
+  sudo rm -rf /workspaces/git-src-migrator
+fi
+
+# Do a clone of git-src-migrator to the same dir as the github/github repo.
+# If a branch was supplied, use that branch for the clone.
+echo -e "\n${GREEN}➡️ Cloning git-src-migrator repo at branch $BRANCH...\n${NC}"
+git clone https://$GH_GH_PAT@github.com/github/git-src-migrator /workspaces/git-src-migrator --branch $BRANCH
+
+# Install dependencies in the git-src-migrator repo
+echo -e "\n${GREEN}➡️ Installing git-src-migrator package dependencies...\n${NC}"
+(
+   cd /workspaces/git-src-migrator
+
+   # Change git user.email if it's a github noreply address
+   email_match='@users.noreply.github.com'
+   user_email=$(git config user.email)
+   if [[ $user_email =~ $email_match ]]; then
+      # Get username from email address
+      if [[ $user_email =~ [0-9]*\+(.*)@ ]]; then
+         # Email format: <DIGITS>+username@users.noreply.github.com
+         eval $(git config user.email "${BASH_REMATCH[1]}@github.com")
+      else
+         # Email format: username@users.noreply.github.com
+         eval $(git config user.email $user_email)
+      fi
+   fi
+
+   # Update Ruby based on git-src-migrator .ruby-version
+   version=$(<.ruby-version)
+   version_number=${version#"ruby-"}
+   current_version_number=$(rbenv -v | awk '{print $1}')
+   if [[ $version_number != $current_version_number ]]; then
+      echo -e "\n${GREEN}➡️ Installing Ruby version $version_number...\n${NC}"
+      rbenv install $version_number
+   fi
+
+   script/bootstrap
+)
+
+echo -e ""
+echo -e "${GREEN}🎉🎉 FINISHED! The github/git-src-migrator repo has been set up! 🎉🎉"
+echo -e "To start the GitHub Source Migrator containers, run the following commands:${NC}"
+echo -e ""
+echo -e "${ORANGE}code /workspaces/git-src-migrator"
+echo -e "${ORANGE}script/server"

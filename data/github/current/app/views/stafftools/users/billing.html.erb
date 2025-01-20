@@ -1,0 +1,874 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+
+<% page_info title: "#{user.login} - Billing" %>
+
+<% if in_business %>
+  <div class="Box Box--danger mb-3">
+    <div class="Box-body text-bold" <%= test_selector "parent-enterprise-notice" %>>
+      To manage this organization's billing, see the parent enterprise
+      <%= link_to user.business.name, stafftools_enterprise_path(user.business), class: "Link--inTextBlock" %>.
+      <div class="f6 pt-2">
+      Organization members can view a list of enterprise owners from the organization people page.
+      Organization owners can email an enterprise owner from the organization billing page.
+      The email recipient is: <%= user.business.owners.first&.email || "NA" %>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<% if user.apple_iap_subscription? %>
+  <div class="Box Box--danger mb-3">
+    <div class="Box-body text-bold">
+      This account's subscription is managed by Apple through their In App Purchase program.
+    </div>
+  </div>
+<% end %>
+
+<div class="boxed-group">
+  <h3>Billing</h3>
+  <div class="boxed-group-inner clearfix">
+    <%= render Stafftools::Billing::UserBillingInfoComponent.new(
+      user: user,
+      show_billing_audit_log_link: stafftools_action_authorized?(
+        controller: Stafftools::SearchController,
+        action: :audit_log
+      ),
+      available_plan_options: available_plan_options_for_select(user),
+    ) %>
+
+    <hr class="bleed-flush">
+
+    <% if user.billing_attempts > 0 %>
+      <h4>Reset billing attempts</h4>
+      <%= form_tag reset_billing_attempts_stafftools_user_path do %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          scheme: :danger,
+          classes: "boxed-action",
+        ).with_content("Reset Billing Attempts") %>
+      <% end %>
+      <p>
+        We have attempted to bill this account at least once. To remove their failed charge notifications, reset their
+        billing attempts. (Note: This does not unlock the account)
+      </p>
+      <hr class="bleed-flush">
+    <% end %>
+
+    <% if user.invoiced? %>
+      <div>
+        <%= render(Stafftools::Billing::MeteredServiceLockFormComponent.new(
+          is_locked: user.metered_services_locked?,
+          account_type: user.class.name,
+          account_id: user.id
+        )) %>
+        <% if user.metered_services_locked? %>
+          <h4>Metered Service Lock</h4>
+          <p>
+            This will enable metered services for this account.
+            This action is reversible but should only be used as a last resort for missing payments on metered services
+          </p>
+        <% else %>
+          <h4>Metered Service Lock</h4>
+          <p>
+            This will disable metered services for this account.
+            This action is reversible but should only be used as a last resort for missing payments on metered services
+          </p>
+        <% end %>
+      </div>
+      <hr class="bleed-flush">
+    <% end %>
+
+    <% if user.has_commercial_interaction_restriction? %>
+      <h4>Billing lock</h4>
+      <p <%= test_selector("billing-lock-disabled-text") %>>
+        Billing locking and unlocking is not available for commercially restricted accounts.
+      </p>
+    <% elsif user.disabled? %>
+      <%= render(Primer::Experimental::Dialog.new(
+        dialog_id: "unlock-billing-dialog",
+        header_variant: :large,
+        width: :large,
+        title: "Confirm account change",
+        form_url: unlock_billing_stafftools_user_path,
+        form_method: :post
+      )) do |c| %>
+        <% c.with_show_button(
+          color: :danger,
+          test_selector: "unlock-billing-dialog-button",
+          classes: "boxed-action"
+        ) do |s| %>
+          Unlock billing
+        <% end %>
+        <% c.with_body do %>
+          <p>This account is currently <strong>locked</strong>.</p>
+          <% if in_business %>
+            <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+              This organization's billing is managed by an enterprise account. Please be certain before unlocking this account.
+            <% end %>
+          <% end %>
+          <p>Are you sure you want to unlock this account?</p>
+          <% if user.will_relock? %>
+            <p>The account will lock again on <strong><%= user.relock_on.iso8601 %></strong>.</p>
+          <% end %>
+        <% end %>
+        <% c.with_button(
+          data: { "close-dialog-id": "unlock-billing-dialog" }
+        ) { "Cancel" } %>
+        <% c.with_button(
+          type: :submit,
+          scheme: :danger,
+          data: { "disable-with": "" }
+        ) { "Unlock account" } %>
+      <% end %>
+
+      <h4>Billing lock</h4>
+      <p>
+        This account has been <strong>locked</strong> because
+        <% if !user.plan_supports?(:repos, visibility: :private) %>
+          <%= user.login %>'s plan does not support private repositories.
+          <% unless any_private_repos %>
+            The user doesn't own any private repositories now, so you can
+            safely unlock the account.
+          <% end %>
+        <% elsif user.has_credit_card? %>
+          the card on file declined for two weeks or because their card was declined during an authorization check.
+          This account will not be charged again until it has returned to
+          good standing.
+        <% elsif !user.has_credit_card? %>
+          the coupon expired or staff locked it.
+        <% elsif user.over_plan_limit? %>
+          the user is over their limit of private repos.
+        <% else %>
+          something weird happened. Please seek out a billing expert.
+        <% end %>
+      </p>
+    <% else %>
+      <%= render(Primer::Experimental::Dialog.new(
+        dialog_id: "lock-billing-dialog",
+        header_variant: :large,
+        width: :large,
+        title: "Confirm account change",
+        form_url: lock_billing_stafftools_user_path,
+        form_method: :post
+      )) do |c| %>
+        <% c.with_show_button(
+          color: :danger,
+          test_selector: "lock-billing-dialog-button",
+          classes: "boxed-action"
+        ) do |s| %>
+          Lock billing
+        <% end %>
+        <% c.with_body do %>
+          <p>This account is currently <strong>unlocked</strong>.</p>
+          <% if in_business %>
+            <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+              This organization's billing is managed by an enterprise account. Please be certain before locking this account.
+            <% end %>
+          <% end %>
+          <p>Are you sure you want to lock this account?</p>
+          <div class="form-actions">
+            <div class="form-group form-checkbox mt-1">
+              <input type="checkbox" name="send_email" id="send_email">
+              <label for="send_email">Send billing lock email</label>
+              <p class="note">
+                <%= primer_octicon(:question) %>
+                Notifies the <%= user.is_a?(Organization) ? "org owners" : "user" %>
+                of a problem billing this account, and requests they update their
+                payment method with a link to their billing settings page. Includes
+                a list of paid subscription items that will be cancelled.
+              </p>
+            </div>
+          </div>
+        <% end %>
+        <% c.with_button(
+          data: { "close-dialog-id": "lock-billing-dialog" }
+        ) { "Cancel" } %>
+        <% c.with_button(
+          type: :submit,
+          scheme: :danger,
+          data: { "disable-with": "" }
+        ) { "Lock account" } %>
+      <% end %>
+
+      <h4>Billing lock</h4>
+      <p>
+        Billing lock may prevent access to private repositories owned by this
+        account and their forks, as well as certain features in private repositories.
+        It also prevents future charges against the
+        account's payment method until it is updated by the user.
+      </p>
+    <% end %>
+    <hr class="bleed-flush">
+
+    <% if (user.plan_subscription || user.sponsors_plan_subscription) && (!user.invoiced? || user.sponsors_invoiced?) %>
+      <%= form_tag sync_external_subscription_stafftools_user_path do %>
+        <%= render Primer::Beta::Button.new(
+          type: :submit,
+          scheme: :danger,
+          classes: "boxed-action",
+        ).with_content("Sync subscription") %>
+      <% end %>
+
+      <h4>Synchronize <%= user.external_subscription_type&.titleize %> subscriptions</h4>
+      <p>
+        Adds/Removes subscriptions in <%= (user.external_subscription_type || "zuora").titleize %> based on GitHub's view of which subscriptions should be active.
+        This can be run to ensure that the subscriptions in <%= (user.external_subscription_type || "zuora").titleize %> reflect GitHub's desired state.
+      </p>
+    <% else %>
+      <%= form_tag sync_external_subscription_stafftools_user_path do %>
+        <% if user.has_commercial_interaction_restriction? %>
+          <% actor = user.user? ? "user" : "organization" %>
+          <% warning_msg = "Are you sure you want to sync subscription? This " + actor + " is blocked from performing commercial interactions." %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            scheme: :danger,
+            classes: "boxed-action",
+            "data-confirm": warning_msg,
+            disabled: true,
+          ).with_content("Sync subscription") %>
+        <% else %>
+          <%= render Primer::Beta::Button.new(
+            type: :submit,
+            scheme: :danger,
+            classes: "boxed-action",
+            disabled: true,
+          ).with_content("Sync subscription") %>
+        <% end%>
+      <% end %>
+
+      <h4>Synchronize subscription</h4>
+      <p>
+        <% if user.invoiced? %>
+          This account is invoiced.
+        <% else %>
+          This account does not have a plan subscription.
+        <% end %>
+      </p>
+
+      <% if user.has_commercial_interaction_restriction? %>
+        <%= primer_octicon(:shield, classes: "highlight") %>
+        SDN screening status: <%= user.trade_screening_status %> - Blocked from commercial interactions
+      <% end %>
+
+    <% end %>
+
+    <hr class="bleed-flush">
+    <%= form_tag sync_account_information_stafftools_user_path do %>
+      <%= render Primer::Beta::Button.new(
+        scheme: :danger,
+        type: :submit,
+        classes: "boxed-action",
+        disabled: !user.any_external_subscriptions?,
+      ).with_content("Sync account") %>
+    <% end %>
+
+    <h4>Synchronize <%= (user.external_subscription_type || "zuora").titleize %> account information</h4>
+    <p <%= test_selector("synchronize-account-information") %>>
+      <% if user.any_external_subscriptions? %>
+        Updates account information (bill cycle day and balance) from
+        <%= (user.external_subscription_type || "zuora").titleize %>.
+        This can be used to ensure that GitHub's data about the user's account is up-to-date.
+      <% else %>
+        This account does not have an external subscription.
+      <% end %>
+    </p>
+
+    <%= render Stafftools::Billing::UserBillableRollbackFormComponent.new(
+      plan_subscription: user.plan_subscription,
+      user: user,
+    ) %>
+    <%= render Stafftools::Billing::UserBillableRollbackFormComponent.new(
+      plan_subscription: user.sponsors_plan_subscription,
+      user: user,
+    ) %>
+
+    <% if in_enterprise_trial %>
+      <hr class="bleed-flush">
+
+      <h4>Extend Enterprise Cloud Trial</h4>
+      <p>
+        This account's Enterprise Cloud trial started on <%= enterprise_cloud_trial.started_on.strftime("%b %-d %Y") %> and expires on <%= enterprise_cloud_trial.expires_on.strftime("%b %-d %Y") %>.
+        <%= enterprise_cloud_trial.description %>
+      </p>
+
+      <%= form_tag stafftools_user_trial_extensions_path(user), method: :post do %>
+        <label for="extension_length">
+          Extend trial by
+          <input type="number" name="extension_length" class="form-control short" placeholder="14">
+          day(s)
+        </label>
+
+        <%= render Primer::Beta::Button.new(
+          disabled: !enterprise_cloud_trial.can_extend_trial?,
+          type: :submit,
+          scheme: :danger,
+          classes: "boxed-action",
+          data: { confirm: "Are you sure you want to extend this trial?" },
+        ).with_content("Update Trial") %>
+      <% end %>
+    <% end %>
+  </div>
+</div>
+
+<%= render Billing::Stafftools::PendingCycleChangesComponent.new(account: user) %>
+
+<div class="boxed-group">
+  <h3>Subscription</h3>
+  <div class="boxed-group-inner clearfix">
+    <div class="summary">
+      <% if user.organization? %>
+        <dl>
+          <dt>Plan</dt>
+          <dd>
+            <%= user.plan.display_name(user.type).titleize %>
+            <% if in_enterprise_trial %>
+              (trial expiring <%= enterprise_cloud_trial.expires_on.strftime("%b %-d %Y") %>)
+            <% end %>
+            <% unless user.delegate_billing_to_business? %>
+              <% if user.plan.per_seat? || (user.plan.free? && user.organization?) %>
+                &ndash;
+                <%= render layout: "shared/details_dialog", locals: {
+                  button_text: "Change plan",
+                  button_class: "btn-link",
+                  title: "Confirm plan change",
+                } do %>
+                  <div class="Box-body overflow-auto f5">
+                    <% if user.show_custom_role_downgrade_warning? %>
+                      <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :alert)) do %>
+                        Downgrading the plan from Enterprise to any other plan level will result in deletion of all
+                        custom roles created for this organization.
+                      <% end %>
+                    <% end %>
+                    <p>
+                      This will switch <strong><%= user.login %></strong>'s plan level.
+                    </p>
+                    <poll-synchronous-payment>
+                      <%= form_tag change_plan_stafftools_user_path(user),
+                        method: :put,
+                        "data-target" => "poll-synchronous-payment.form",
+                        "data-action" => "submit:poll-synchronous-payment#collectPayment" do %>
+                      <label for="plan">Plan</label>
+                      <%= select_tag :plan, options_for_select(available_plan_options_for_select(user), user.best_plan.to_s) %>
+                      <%= render Primer::Beta::Button.new(
+                        type: :submit,
+                        block: true,
+                        mt: 3,
+                        data: { target: "poll-synchronous-payment.buttonElement" },
+                      ) do %>
+                        <span data-target="poll-synchronous-payment.buttonCTA">Change plan</span>
+                        <span data-target="poll-synchronous-payment.loadingStatus" class="AnimatedEllipsis"></span>
+                      <% end %>
+                      <span data-target="poll-synchronous-payment.completionMessage"></span>
+                      <% end %>
+                    </poll-synchronous-payment>
+                  </div>
+                <% end %>
+              <% else %>
+                (per repository plan)
+                &ndash;
+                <%= link_to stafftools_user_per_seat_pricing_model_path(user), class: "Link--inTextBlock" do %>
+                  Switch to per seat (minimum <%= pluralize user.default_seats, "seat" %>)
+                <% end %>
+              <% end %>
+            <% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <% unless in_business %>
+        <% if GitHub.flipper[:dont_calculate_seats].enabled?(user) %>
+          <%# TODO: Find a reliable way of calculating seats for orgs with too many repos. %>
+          <%# More context in https://github.com/github/gitcoin/issues/10531 %>
+          <dl>
+            <dt>Seats</dt>
+            <dd>
+              This organization has too many repositories to calculate the number of seats on this page.
+            </dd>
+          </dl>
+        <% else %>
+          <dl>
+            <dt>
+              <% if user.plan.per_seat? %>
+                Seats
+              <% else %>
+                Private repositories
+              <% end %>
+            </dt>
+            <dd>
+              <% if user.plan.per_seat? %>
+                <strong><%= user.filled_seats %></strong> of <strong><%= user.seats %></strong> seats filled
+              <% else %>
+                <% if user.plan_supports_unlimited_private_repos? %>
+                  Unlimited
+                <% else %>
+                  Using <%= owned_private_repo_count %> of
+                  the <%= user.plan_limit(:repos, visibility: :private) %> allotted private repositories.
+                <% end %>
+              <% end %>
+              &ndash;
+              <%= render "stafftools/users/change_plan_or_seats", user: user, seat_change: seat_change %>
+            </dd>
+          </dl>
+          <% if user.plan.per_seat? %>
+            <dl>
+              <dt>Seat filling members</dt>
+              <dd>
+                <ul>
+                  <li><%= pluralize(user.members_count, "member") %></li>
+                  <li><%= formatted_account_outside_collaborators_count(user) %></li>
+                  <li><%= pluralize(user.pending_non_manager_invitations.size, "pending organization invitation") %></li>
+                  <li><%= formatted_account_private_repository_invitations_counts(user) %></li>
+                </ul>
+              </dd>
+            </dl>
+            <dl>
+              <dt></dt>
+              <dd>
+                <i><%= GitHub.outside_collaborators_flavor.capitalize %> that also have an invite to be a member are
+                  counted once as pending invitations.</i>
+              </dd>
+            </dl>
+            <dl>
+              <dt>Other users</dt>
+              <dd>
+                <%= pluralize(user.billing_managers.size, "billing manager") %>
+                (<%= pluralize(
+                  user.pending_invitations.with_business_role(:billing_manager).size,
+                  "pending invitation",
+                ) %>),
+                <%= pluralize(
+                  user.outside_collaborators(on_repositories_with_visibility: [:public]).size,
+                  GitHub.outside_collaborators_flavor.singularize,
+                ) %> with public only access
+              </dd>
+            </dl>
+          <% end %>
+        <% end %>
+        <hr class="bleed-flush">
+      <% end %>
+      <% if user.organization? %>
+        <dl>
+          <dt>Seat limit for upgrades</dt>
+          <dd>
+            <span <%= test_selector("seat-limit-for-upgrades-value") %>>
+              <%= user.custom_seat_limit_for_upgrades || "Default (#{user.default_seat_limit_for_upgrades})" %>
+            </span>
+            <% unless user.delegate_billing_to_business? %>
+              &ndash;
+              <%= render layout: "shared/details_dialog", locals: {
+                button_text: "Change",
+                button_class: "btn-link",
+                title: "Configure seat limit for upgrades",
+              } do %>
+                <div class="Box-body overflow-auto f5">
+                  <p>
+                    This will set a custom limit on the number of seats that can be added during a self-serve plan
+                    upgrade for <strong><%= user.login %></strong>.
+                  </p>
+                  <%= form_tag change_seat_limit_for_upgrades_stafftools_user_path(user), method: :put do %>
+                    <div class="form-group">
+                      <div class="form-group-header">
+                        <label for="seat-limit">Seat Limit (Default: <%= user.default_seat_limit_for_upgrades %>)</label>
+                      </div>
+                      <div class="form-group-body">
+                        <input id="seat-limit" name="limit" type="number" step="1" min="1" value="<%= user.custom_seat_limit_for_upgrades || user.default_seat_limit_for_upgrades %>">
+                      </div>
+                    </div>
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      block: true,
+                      mt: 3,
+                    ).with_content("Update") %>
+                  <% end %>
+                </div>
+              <% end %>
+            <% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <% if user.organization? %>
+        <dl <%= test_selector("advanced-security-row") %>>
+          <dt>Advanced Security</dt>
+          <dd>
+            <span <%= test_selector("advanced-security-state") %>>
+              <% if user.advanced_security_purchased? %>
+                <% if user.delegate_billing_to_business? %>
+                  <% if user.advanced_security_license.unlimited_seats? %>
+                    Unlimited seats - from parent enterprise account
+                  <% else %>
+                    <ul>
+                      <li <%= test_selector("advanced-security-state-organization") %>>
+                        <%= user.advanced_security_seats_used %> of
+                        <%= pluralize(user.advanced_security_license.seats, "seat") %> at organization level
+                      </li>
+                      <li <%= test_selector("advanced-security-state-enterprise") %>>
+                        <%= user.advanced_security_license.consumed_seats %> of
+                        <%= pluralize(user.advanced_security_license.seats, "seat") %> at parent enterprise level
+                      </li>
+                    </ul>
+                  <% end %>
+                <% else %>
+                  <%= user.advanced_security_license.consumed_seats %> of
+                  <% if user.advanced_security_license.unlimited_seats? %>
+                    unlimited
+                  <% else %>
+                    <%= pluralize(user.advanced_security_license.seats, "seat") %>
+                  <% end %>
+                <% end %>
+              <% else %>
+                Not enabled
+              <% end %>
+            </span>
+
+            <% if !user.delegate_billing_to_business? %>
+              &ndash;
+              <%= render layout: "shared/details_dialog", locals: {
+                button_text: "Change",
+                button_class: "btn-link",
+                title: "Configure Advanced Security",
+              } do %>
+                <div class="Box-body overflow-auto f5" <%= test_selector("advanced-security-change-dialog") %>>
+                  <p>
+                    This will change <strong><%= user.login %></strong>'s ability to use Advanced Security.
+                  </p>
+                  <% if GitHub.flipper[:ghas_self_serve_orgs].enabled?(user) %>
+                  <p>
+                    If there is an existing Advanced Security subscription and the option below is set to "Not enabled",
+                    the subscription will be <strong>cancelled immediately</strong> and <%= user.login %> will be <strong>refunded</strong>.
+                  </p>
+                  <p>
+                    Cancellation can also be performed in the <%= link_to "Subscription items tab", stafftools_user_subscription_items_path(this_user), class: "Link--inTextBlock" %>
+                  </p>
+                  <% end %>
+                  <%= form_tag change_advanced_security_stafftools_user_path(user), method: :put do %>
+                    <div class="form-group">
+                      <div class="form-group-header">
+                        <label for="js-ghas-state-select">State</label>
+                      </div>
+                      <div class="form-group-body">
+                        <%= select_tag(
+                          :state,
+                          options_for_select(ghas_state_select_options(user), ghas_state_selected_option(user)),
+                          id: "js-ghas-state-select",
+                          name: "state"
+                        )%>
+                      </div>
+                    </div>
+                    <div class="form-group" id="js-ghas-seats-form-group" <% if user.advanced_security_license.seats == 0 %>style="display: none"<% end %>>
+                      <div class="form-group-header">
+                        <label for="js-ghas-seats-input">Seats</label>
+                      </div>
+                      <div class="form-group-body">
+                        <input id="js-ghas-seats-input" name="seats" type="number" step="1" <% if user.advanced_security_license.seats != 0 %>min="1"<% end %> value="<%= user.advanced_security_license.seats %>">
+                      </div>
+                    </div>
+                    <%= render Primer::Beta::Button.new(
+                      type: :submit,
+                      block: true,
+                      mt: 3,
+                    ).with_content("Update") %>
+                  <% end %>
+                </div>
+              <% end %>
+              | <%= link_to "CSV", download_active_committers_stafftools_user_advanced_security_path(this_user) %>
+            <% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <% asset_status = user.asset_status || user.build_asset_status %>
+      <dl>
+        <dt>Data</dt>
+        <dd>
+          <%= pluralize(asset_status.asset_packs, "data pack") %>
+          &ndash;
+          Using
+          <%= asset_status.bandwidth_usage %> of <%= asset_status.bandwidth_quota %> GB/<%= user.plan_duration %> bandwidth,
+          <%= asset_status.storage_usage %> of <%= asset_status.storage_quota %> GB storage
+          <% if subscription_data_packs_can_be_changed?(user) %>
+            &ndash;
+            <%= link_to "Change", stafftools_user_edit_large_file_storage_path(this_user), class: "Link--inTextBlock" %><br>
+          <% end %>
+        </dd>
+      </dl>
+      <% unless in_business %>
+        <dl>
+          <dt>Active coupon</dt>
+          <dd>
+            <% if user.coupon %>
+              <code><%= link_to user.coupon, biztools_coupon_path(user.coupon) %></code>
+              <%= user.coupon.plan_display_name %>
+              <%= user.coupon.human_discount %> for <%= user.coupon.human_duration %>,
+              <time title="<%= user.coupon_redemption.expires_at %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                expires
+                <% if user.coupon_redemption.expires_at.future? %>
+                  <%= time_ago_in_words_js user.coupon_redemption.expires_at %>
+                <% else %>
+                  immediately
+                <% end %>
+              </time>
+              &ndash;
+              <%= form_tag biztools_user_coupon_path(user), method: "delete", class: "inline-form" do %>
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  scheme: :link,
+                  color: :danger,
+                  data: { confirm: "Are you sure?" },
+                ).with_content("Revoke") %>
+              <% end %>
+              | <%= link_to "View history", biztools_user_redemptions_path(user), class: "Link--inTextBlock" %>
+            <% else %>
+              No active coupon
+              &ndash;
+              <%= link_to "Apply coupon or view history", biztools_user_redemptions_path(user), class: "Link--inTextBlock" %>
+            <% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <% if user.paid_plan? %>
+        <% if user.has_credit? %>
+          <dl>
+            <dt>Credit</dt>
+            <dd><%= casual_currency user.credit %></dd>
+          </dl>
+        <% elsif user.balance.positive? %>
+          <dl>
+            <dt>Past Due</dt>
+            <dd><%= casual_currency user.balance %></dd>
+          </dl>
+        <% end %>
+        <% unless user.invoiced? %>
+          <dl>
+            <dt>Payment amount</dt>
+            <dd>
+              <% if user.has_credit? %>
+                <span class="discounted-original-price"><%= casual_currency user.payment_amount %></span>
+                <%= casual_currency user.next_charge_amount %>
+              <% else %>
+                <%= casual_currency user.payment_amount %>
+              <% end %>
+            </dd>
+          </dl>
+        <% end %>
+      <% end %>
+      <% if !user.invoiced? && user.external_subscription? %>
+        <dl>
+          <dt>Status</dt>
+          <dd>
+            <include-fragment src="<%= synchronization_stafftools_user_plan_subscription_path(user) %>">
+              <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+            </include-fragment>
+          </dd>
+        </dl>
+      <% end %>
+
+      <% if user.gift? %>
+        <dl>
+          <dt>Gift status</dt>
+          <dd><%= user.gift_type_description %></dd>
+        </dl>
+      <% end %>
+
+      <% if ::Billing::PrepaidMeteredUsageRefill.enabled_for?(user) %>
+        <hr class="bleed-flush">
+        <dl>
+          <dt>Metered Usage</dt>
+          <dd>
+            <a class="Link--inTextBlock" href="<%= stafftools_user_prepaid_metered_usage_refills_path(user) %>">View Prepaid Metered Usage Refills</a>
+          </dd>
+        </dl>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% if user.can_be_manually_charged? %>
+  <div class="boxed-group">
+    <h3>Payment Information</h3>
+    <div class="boxed-group-inner clearfix">
+      <include-fragment src="<%= payment_information_stafftools_user_plan_subscription_path(user) %>">
+      <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+      </include-fragment>
+    </div>
+  </div>
+<% end %>
+
+<% if user.is_a?(Organization) %>
+  <%= render Billing::Stafftools::SalesTaxExemptionComponent.new(account: user) %>
+<% end %>
+
+<%= render Billing::Stafftools::InvoiceReceptionPreferenceComponent.new(account: user) %>
+
+<% if user.plan_metered_billing_eligible? %>
+  <%= render "stafftools/actions_packages/breakdown",
+    shared_storage_usage: shared_storage_usage,
+    purchased_prepaid_metered_usage_refills: purchased_prepaid_metered_usage_refills,
+    remaining_prepaid_metered_usage_refills: remaining_prepaid_metered_usage_refills,
+    show_spending: !in_business,
+    business: false %>
+<% end %>
+
+<%= render Billing::Settings::Codespaces::UsageComponent.new(
+  account: user,
+  is_stafftools: true
+) %>
+
+<%= render Stafftools::Billing::CopilotUsageComponent.new(
+  copilot_monthly_usage: copilot_monthly_usage,
+  user: user,
+) %>
+
+<%= render(Stafftools::Billing::SponsorsTrustLevelsComponent.new(user: user)) %>
+<%= render(Stafftools::Billing::SponsorsCustomerComponent.new(sponsor: user)) %>
+<%= render(Stafftools::Billing::SponsorsOrgInvoicedAgreementSignaturesComponent.new(sponsor: user)) %>
+<%= render(Stafftools::Billing::SponsorshipsComponent.new(sponsor: user, active_tab: sponsorships_tab)) %>
+<%= render(Stafftools::Billing::InvoicedSponsorshipsComponent.new(sponsor: user)) %>
+
+<div class="boxed-group">
+  <h3>Marketplace</h3>
+  <div class="boxed-group-inner seamless clearfix">
+    <table class="boxed-group-table">
+      <thead>
+        <tr>
+          <th>Listing</th>
+          <th>Plan</th>
+          <th>Quantity</th>
+          <th>Price per quantity</th>
+          <th>Billed through enterprise</th>
+          <th>Remove Integration</th>
+          <th>Notes</th>
+          <th>Upgrade Free Trial</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% marketplace_items.each do |item| %>
+          <tr <%= test_selector("marketplace-item-#{item.global_relay_id}") %>>
+            <td><%= item.subscribable.listing.name %></td>
+            <td><%= item.subscribable.name %></td>
+            <td><%= item.quantity %></td>
+            <td><%= item.price.format %></td>
+            <td><%= (!item.organization_id.nil?).to_s %></td>
+            <td>
+              <%= form_tag stafftools_user_subscription_item_path(user, item.id), class: "inline-form", method: :delete do %>
+                <% cancel_msg = "Are you sure you want to cancel this integration?" %>
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  scheme: :danger,
+                  classes: "boxed-action",
+                  "data-confirm": cancel_msg,
+                ).with_content("Cancel") %>
+              <% end %>
+            </td>
+            <% if item.on_free_trial?  %>
+              <td> Trial ends <br><%= item.free_trial_ends_on.strftime("%b %-d %Y") %></td>
+              <td>
+                <% url = user.organization? && user.business.present? ? run_pending_changes_stafftools_enterprise_path(user.business) : run_pending_changes_stafftools_user_path(user) %>
+                <%= form_tag url, method: :post do %>
+                  <%= hidden_field_tag "pending_change_id", item.pending_change_id %>
+                  <%= render Primer::Beta::Button.new(
+                    type: :submit,
+                    scheme: :danger,
+                    classes: "boxed-action",
+                    "data-confirm": "Are you sure you want to upgrade this free trial to a paid plan?",
+                  ).with_content("Run Free Trial Upgrade") %>
+                <% end %>
+              </td>
+            <% else %>
+              <td>-</td>
+              <td>Paid Subscription</td>
+            <% end %>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="paginate-container mb-3">
+  <%= will_paginate marketplace_items %>
+</div>
+
+<div class="boxed-group">
+  <h3>History</h3>
+  <div class="boxed-group-inner seamless clearfix">
+    <table class="boxed-group-table">
+      <thead>
+        <tr>
+          <th class="billing-table-cell text-bold">Plan change</th>
+          <th>Details</th>
+          <th class="text-right">Time</th>
+        </tr>
+      </thead>
+      <% if plan_changes.any? %>
+        <% plan_changes.each do |change| %>
+          <tr>
+            <% if /switched-to-(.+)/ =~ change.action  %>
+              <td class="billing-table-cell text-bold" title="<%= change.action %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                Period change
+              </td>
+              <td><%= $1 == "monthly" ? "yearly" : "monthly" %> &rarr; <%= $1 %></td>
+            <% elsif /_seats/ =~ change.action %>
+              <td class="billing-table-cell text-bold" title="<%= change.action %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                <%= change.humanized_action %>
+              </td>
+              <td>
+                <%= change.old_seats %> &rarr;
+                <%= change.current_seats %>
+              </td>
+            <% elsif /_asset_packs/ =~ change.action %>
+              <td class="billing-table-cell text-bold" title="<%= change.action %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                <%= change.humanized_action %>
+              </td>
+              <td>
+                <%= change.old_data_packs %> &rarr;
+                <%= change.asset_packs_total %>
+              </td>
+            <% elsif change.current_subscribable %>
+              <td class="billing-table-cell text-bold" title="<%= change.action %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                <%= change.humanized_action %>
+              </td>
+              <td>
+                <% unless change.current_subscribable_quantity.zero? %>
+                  <% if change.old_subscribable_quantity? && change.old_subscribable_quantity != change.current_subscribable_quantity %>
+                    <%= change.old_subscribable_quantity %> &rarr;
+                  <% end %>
+                  <%= change.current_subscribable_quantity %>X
+                <% end %>
+
+                <% unless change.current_subscribable.is_a?(Billing::ProductUUID) %>
+                  <%= change.current_subscribable.listing&.name || "LISTING REMOVED" %>
+                  &ndash;
+                <% end %>
+
+                <% if change.old_subscribable && change.old_subscribable != change.current_subscribable %>
+                  <%= change.old_subscribable.name %> &rarr;
+                <% end %>
+                <%= change.current_subscribable.name %>
+              </td>
+            <% else %>
+              <td class="billing-table-cell text-bold"><%= change.humanized_action %></td>
+              <td>
+                <% if change.old_plan %>
+                  <% if change.old_plan.free_with_addons? %>
+                    Free with add ons
+                  <% else %>
+                    <%= change.old_plan.display_name.humanize %>
+                  <% end %>
+                  &rarr;
+                <% end %>
+                <%= change.human_current_plan %>
+              </td>
+            <% end %>
+
+            <td class="color-fg-muted text-right billing-table-cell"><%= time_ago_in_words_js change.timestamp %></td>
+          </tr>
+        <% end %>
+      <% else %>
+        <tr>
+          <td class="billing-table-cell text-bold">Signed-up</td>
+          <td><%= user.plan.to_s.camelize %></td>
+          <td class="color-fg-muted text-right billing-table-cell"><%= time_ago_in_words_js user.created_at %></td>
+        </tr>
+      <% end %>
+    </table>
+  </div>
+</div>

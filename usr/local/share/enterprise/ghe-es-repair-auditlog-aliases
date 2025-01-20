@@ -1,0 +1,130 @@
+#!/bin/bash
+# This script queries elastisearch for the audit log indexes,
+# finds existing aliases for those indexes, and creates any
+# missing aliases.
+
+#/ Usage: ghe-es-repair-auditlog-aliases [-h] [host]
+#/
+#/ OPTIONS:
+#/     -h | --help              Display this help
+#/
+#/ Default host is localhost:9201
+
+set -e
+
+display_help() {
+  grep '^#/' <"$0" |cut -c 4-
+}
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  display_help
+  exit 2
+fi
+
+# Default host to localhost:9201 if not provided
+host=${1:-"localhost:9201"}
+
+indexes_fetch() {
+  curl -s "${host}/_cat/indices" || {
+    echo "ERROR: could not fetch indices."
+    echo "Try running: 'curl -s ${host}/_cat/indices' manually."
+    echo "Exiting."
+    exit 1
+  }
+}
+
+aliases_fetch() {
+  curl -s "${host}/_cat/aliases" || {
+    echo "ERROR: could not fetch aliases."
+    echo "Try running: 'curl -s ${host}/_cat/aliases' manually."
+    echo "Exiting."
+    exit 1
+  }
+}
+
+# select_audit_log_indexes filters output from /_cat/indices and echo's
+# only the audit_log indexes.
+indexes_select_audit_log() {
+  while read -r line; do
+    echo "$line" | grep audit_log | awk '{print $3}'
+  done
+}
+
+# select_audit_log_aliases filters output from /_cat/aliases and echo's
+# only the audit_log indexes.
+aliases_select_audit_log() {
+  while read -r line; do
+    echo "$line" | grep audit_log | awk '{printf("%s %s\n", $1, $2)}'
+  done
+}
+
+# usage: create_aliases aliases
+# create_aliases performs an http request against elasticsearch
+# to create the alias. It processes lines in the form of:
+# "alias index"
+aliases_create() {
+  while read -r alias index; do
+    echo "creating alias: $alias for index: $index"
+    curl -s -X PUT "${host}/${index}/_alias/${alias}" > /dev/null || {
+      echo "ERROR: could not create alias."
+      echo "Try running: 'curl -s -X PUT \"${host}/${index}/_alias/${alias}\"' manually."
+      echo "Exiting."
+      exit 1
+    }
+  done <<< "$1"
+}
+
+# aliases_build_expected prints every alias we expect should exist.
+# Every audit log should have two aliases assigned:
+# - "audit_log"
+# - "audit_log-YYYY-MM"
+aliases_build_expected() {
+  audit_log_indexes=$1
+
+  while read -r index; do
+    echo "audit_log $index"
+    # audit log indexes have a format of: audit_log-X-YYYY-MM-X
+    # we want to extract the YYYY-MM portion and use it for the alias.
+    (
+      IFS="-"
+      read -ra segments <<< "$index"
+      echo "audit_log-${segments[2]}-${segments[3]} $index"
+    )
+  done <<< "$audit_log_indexes"
+}
+
+# Usage: diff_sets set1 set2
+# Displays items in set1 that are not present in set2.
+# The expected input delimiters are newlines: \n
+diff_sets() {
+  set1=$1
+  set2=$2
+  comm -23 <(echo "$set1" | sort -u) <(echo "$set2" | sort -u)
+}
+
+main() {
+  echo "Fetching audit log indexes..."
+  audit_log_indexes=$(indexes_fetch | indexes_select_audit_log)
+  if [[ -z $audit_log_indexes ]]; then
+    echo "ERROR: No audit log indexes found on host: ${host}"
+    echo "Exiting."
+    exit 1
+  fi
+
+  echo "Calculating expected aliases..."
+  expected_aliases=$(aliases_build_expected "$audit_log_indexes")
+  actual_aliases=$(aliases_fetch | aliases_select_audit_log)
+  missing_aliases=$(diff_sets "$expected_aliases" "$actual_aliases")
+
+  if [[ -z $missing_aliases ]]; then
+    echo "No missing aliases detected."
+  else
+    echo "Missing aliases detected."
+    echo "Creating missing aliases..."
+    aliases_create "$missing_aliases"
+  fi
+
+  echo "Done."
+}
+
+main

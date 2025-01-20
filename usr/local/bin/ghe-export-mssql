@@ -1,0 +1,274 @@
+#!/bin/bash
+#/ Usage: ghe-export-mssql [-h]
+#/
+#/ This command can only be run on the primary mssql node.
+#/
+#/ Export all MS SQL data.  The backup files are stored in
+#/ /data/user/mssql/backups.  Any existing backup files in this folder will
+#/ be removed before exporting the new backups.
+#/
+#/ This script can produce the following files:
+#/   1. A full backup (.bak)
+#/   2. A differential backup (.diff) based on the last full backup
+#/   3. A transaction log backup (.log)
+#/
+#/ If generating a full or differential backup, a transaction log backup will
+#/ also be produced.  This script can also generate just the transaction log
+#/ backup (using the -t flag).  Transaction log backups include a timestamp in
+#/ the filename.  This timestamp is used to restore the transaction logs in
+#/ the correct chronological sequence.
+#/
+#/ The full backup, the differential backup (if one was created), and all
+#/ transaction log backups since the last full or differential backup are
+#/ required to restore the database.
+#/
+#/ OPTIONS:
+#/   -c | --compress         Compress the backup files.
+#/   -d | --differential     Produce a differential backup instead of a full
+#/                           backup. A full backup must have been generated
+#/                           previously.
+#/   -t | --transaction-log  Produce a transaction log backup only.
+#/   -a | --append           Do not remove previous backup files, append.
+#/   -n | --name             The name of the database to backup.  If no name is
+#/                           given, all recognized databases will be exported.
+#/   -s | --stats <n>        Display backup progress every <n> percent.
+#/   -h | --help             Show this message.
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options.
+compress=
+differential=
+transaction_log=
+append=
+name=
+stats=
+
+# Display usage information and quit.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+fail() {
+    (>&2 echo "${1}")
+    exit 1
+}
+
+# Process command line arguments.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -c|--compress)
+            compress=1
+            shift
+            ;;
+        -d|--differential)
+            differential=1
+            shift
+            ;;
+        -t|--transaction-log)
+            transaction_log=1
+            shift
+            ;;
+        -a|--append)
+            append=1
+            shift
+            ;;
+        -n|--name)
+            name="$2"
+            shift
+            shift
+            ;;
+        -s|--stats)
+            stats="$2"
+            shift
+            shift
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+ensure_mssql_primary
+
+if [ -n "$differential" ] && [ -n "$transaction_log" ]; then
+    fail "Only one of the following flags can be used: -d, -t"
+fi
+
+if [ -n "$stats" ]; then
+    if [[ ! "$stats" =~ ^[0-9]+$ ]] || [[ "$stats" -lt 1 ]] || [[ "$stats" -gt 100 ]]; then
+        fail "-s argument is out of range (min: 1, max: 100, actual: $stats)"
+    fi
+fi
+
+# Perform the export.
+rel_path="../backups" # Relative path to backup folder (within MS SQL container)
+path="/data/user/mssql/backups" # Absolute path to backup folder (on GHES appliance)
+
+if [ -z "$append" ]; then
+    echo "Removing old backup files"
+    sudo rm -rf "$path"
+fi
+
+# Get the databases to export, excluding any system databases.
+dbs=()
+
+if [ -n "$name" ]; then
+    dbs+=("$name")
+else
+    all_dbs=$(ghe-mssql-console -y -n -q "SET NOCOUNT ON; SELECT name FROM sys.databases")
+
+    db_prefixes=$(reverse "$(actions-db-prefixes)")
+    db_keys=()
+    for prefix in $db_prefixes; do
+        db_keys+=( "^${prefix}_Configuration$" )
+        db_keys+=( "^${prefix}_[a-fA-F0-9-]{36}$" )
+    done
+
+    dbs=()
+    for db_key in "${db_keys[@]}"; do
+        remaining_dbs=()
+        for db in $all_dbs; do
+            if [[ "$db" =~ $db_key ]]; then
+                dbs+=("$db")
+            else
+                remaining_dbs+=("$db")
+            fi
+        done
+        all_dbs="${remaining_dbs[*]}"
+    done
+fi
+
+if [ ${#dbs[@]} -eq 0 ]; then
+    echo "No databases to backup"
+    exit 0
+else
+    echo "Backing up the following databases:"
+
+    for db in "${dbs[@]}"; do
+        echo "    $db"
+    done
+fi
+
+# Before taking backups let the Transaction Management Job running in each of the Actions services know
+services="$(action-services)"
+for service in $services; do
+    ghe-actions-console -s "$service" -c "Set-LastBackupUtils"
+done
+
+failed_backups=()
+
+# Ensure the exported database is in Full Recovery mode and create a full or
+# differential backup.
+for db in "${dbs[@]}"; do
+    if [ -n "$transaction_log" ]; then
+        continue
+    fi
+
+    if [ -n "$append" ]; then
+        echo "Removing old transaction log backups"
+        sudo find "$path" -name "$db@*.log" | xargs sudo rm
+
+        if [ -z "$differential" ]; then
+            echo "Removing old differential backup"
+            sudo find "$path" -name "$db@*.diff" | xargs sudo rm
+        fi
+    fi
+
+    with_options="WITH INIT"
+    ext="bak"
+
+    if [ -n "$compress" ]; then
+        with_options+=", COMPRESSION"
+    fi
+
+    if [ -n "$differential" ]; then
+        with_options+=", DIFFERENTIAL"
+        ext="diff"
+    fi
+
+    if [ -n "$stats" ]; then
+        with_options+=", STATS = $stats"
+    fi
+
+    echo "Creating backup of $db"
+    script="
+DECLARE @timestamp NVARCHAR(15)
+SELECT @timestamp = FORMAT(GETUTCDATE(), 'yyyyMMddTHHmmss')
+
+DECLARE @filename NVARCHAR(512) = '$rel_path/$db@' + @timestamp + '.$ext'
+
+IF EXISTS(SELECT * FROM sys.databases WHERE name='$db' AND recovery_model_desc != 'FULL')
+BEGIN
+    PRINT 'Changing recovery mode of $db to FULL'
+    DECLARE @sql NVARCHAR(1024) = 'ALTER DATABASE [$db] SET RECOVERY FULL'
+    EXEC sp_executesql @sql
+END
+
+BACKUP DATABASE [$db] TO DISK = @filename $with_options
+"
+
+    ghe-mssql-console -y -q "$script" || failed_backups+=("$db $ext")
+done
+
+# Create a marked transaction on all databases to synchronize the backup.
+for db in "${dbs[@]}"; do
+    echo "Marking transaction in $db"
+
+    script="
+USE [$db]
+
+IF EXISTS(SELECT 1 FROM sys.procedures WHERE object_id = OBJECT_ID(N'dbo.prc_SetTransactionMark'))
+BEGIN
+    EXEC prc_SetTransactionMark GheBackupMark
+END
+ELSE
+BEGIN
+    PRINT 'prc_SetTransactionMark not found, skipping marked transaction'
+END
+"
+
+    ghe-mssql-console -y -q "$script"
+done
+
+# Create transaction log backups for all databases.
+for db in "${dbs[@]}"; do
+    echo "Exporting transaction log for $db"
+    with_options="WITH INIT"
+
+    if [ -n "$compress" ]; then
+        with_options+=", COMPRESSION"
+    fi
+
+    if [ -n "$stats" ]; then
+        with_options+=", STATS = $stats"
+    fi
+
+    script="
+DECLARE @timestamp NVARCHAR(15)
+SELECT @timestamp = FORMAT(GETUTCDATE(), 'yyyyMMddTHHmmss')
+
+DECLARE @filename NVARCHAR(512) = '$rel_path/$db@' + @timestamp + '.log'
+
+BACKUP LOG [$db] TO DISK = @filename $with_options
+"
+
+    ghe-mssql-console -y -q "$script" || failed_backups+=("$db log")
+done
+
+if [ ${#failed_backups[@]} -gt 0 ]; then
+    for db in "${failed_backups[@]}"; do
+        >&2 echo "Failed to create mssql backup for $db"
+    done
+    fail "At least one mssql backup failed"
+fi

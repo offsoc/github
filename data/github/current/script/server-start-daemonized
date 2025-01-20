@@ -1,0 +1,138 @@
+#!/bin/bash
+
+if [ -n "$SERVER_START_DEBUG" ]; then debug="1"; fi
+if [ -n "$SERVER_START_RDBG" ]; then rdbg="1"; fi
+if [ -n "$SERVER_START_DAP" ]; then dap="1"; fi
+if [ -n "$SERVER_START_LOG" ]; then log="1"; fi
+
+function shutdown-overmind {
+  echo "Shutting down...";
+
+  # Double check overmind is still running
+  # otherwise we'll get a "no such process" error
+  # and cleanup will fail
+  if $(./script/overmind-running); then
+    overmind quit
+    overmind echo
+  fi
+
+  cleanup-overmind
+}
+
+function cleanup-overmind {
+  pidfiles=(
+    tmp/pids/app.pid
+    tmp/pids/echo.pid
+  )
+
+  for pid in "${pidfiles[@]}"; do
+    if [ -f "$pid" ]; then
+      kill $(cat "$pid") &>/dev/null;
+      rm -f $pid
+    fi
+  done
+
+  if [ -n "$SERVER_START_LOG" ]; then
+    # Kill any log processing processes
+    sed '' tmp/pids/log-*.pid | xargs kill &>/dev/null
+    rm -f tmp/pids/log-*.pid
+  fi
+}
+
+function log-overmind-echo {
+  overmind echo > tmp/app.log 2>&1 &
+  echo $! > tmp/pids/echo.pid
+}
+
+function wait-for-overmind {
+    # give overmind a moment so echo works
+  while [ ! -S /tmp/overmind.sock ]; do
+    sleep 0.1;
+  done
+}
+
+export OVERMIND_DAEMONIZE=1
+
+# Check if overmind is running
+./script/overmind-running
+overmind_running=$?
+# Reconnect to running overmind process
+
+trap shutdown-overmind SIGINT
+
+if [ -n "$debug" ]; then
+  if [[ $overmind_running -eq 0 ]]; then
+    echo "Overmind is already running, cannot resume in debug mode"
+    echo "Please stop overmind with 'overmind quit' and try again."
+  fi
+  # start overmind daemonized without the web process
+  overmind start --ignored-processes web
+  echo $! > tmp/pids/app.pid
+
+  echo "Pid: $(cat tmp/pids/app.pid)"
+
+  wait-for-overmind
+  log-overmind-echo
+
+  function process_overmind_exit {
+    # Will still print out errors, but not info, as we may have been deliberately killed
+    cat tmp/app.log | gh medic diagnose
+
+    # overmind has exited, so we should exit too
+    kill -s USR1 $$ 2> /dev/null
+  }
+
+  # tail waits for the process to exit
+  (tail --pid=$(cat tmp/pids/app.pid) -f /dev/null; process_overmind_exit ) &
+
+  echo "starting overmind non-web processes, this will take a few seconds..."
+  sleep 8 # let overmind start up (and fail, if it's going to) before starting web process
+
+  # start unicorn with a single worker so the log tailer doesn't split processes
+  # without this ajax requests split stdin input when typing into debuggers
+  if [ -n "$dap" ]; then
+    DEBUG_DAP=1 GH_UNICORN_WORKER_COUNT=1 script/unicorn-server
+  else
+    GH_UNICORN_WORKER_COUNT=1 script/unicorn-server
+  fi
+elif [ -n "$rdbg" ]; then
+  if [[ $overmind_running -ne 0 ]]; then
+    overmind start --ignored-processes web
+  fi
+
+  wait-for-overmind
+  overmind echo
+elif [ -n "$log" ]; then
+  if [[ $overmind_running -ne 0 ]]; then
+    echo "Running in logged mode"
+    truncate -s 0 "tmp/app.log"
+
+    for p in $(cat Procfile | cut -d ":" -f1 | grep -v '#'); do
+      log="tmp/$p.log"
+      echo "Truncating logfile ${log}"
+      truncate -s 0 $log
+
+      $(tail -f "tmp/app.log" | grep $p | cut -d "|" -f "2-" > $log) &
+      echo $! > tmp/pids/log-$p.pid
+    done
+
+    overmind start
+  fi
+
+  wait-for-overmind
+
+  # Redirect echo to logs, and start a seperate echo process
+  log-echo
+  overmind echo
+else
+  if [[ $overmind_running -ne 0 ]]; then
+    if [ -f ".overmind-tmux.conf" ]; then
+      overmind start -F .overmind-tmux.conf
+    else
+      overmind start
+    fi
+  fi
+
+  wait-for-overmind
+  overmind echo
+fi

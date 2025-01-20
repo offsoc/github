@@ -1,0 +1,424 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 18 %>
+<% content_for :head do %>
+  <%= stylesheet_bundle 'signup_copilot' %>
+<% end %>
+
+<%
+  page_info title: view.action_text
+
+  ga_company_name = ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Name of business"))
+
+  organization_name_help_text_options = {
+    error: view.login_errors? && "Name is unavailable",
+    value: view.login_value,
+    class: "js-new-organization-name width-full py-1",
+    required: true,
+    data: { ga_click: ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Organization account name")) }
+  }
+
+  organization_name_help_text_options[:hint] = safe_join([
+    content_tag(:span, "This will be the name of your account on GitHub.", class: "d-block"),
+    "Your URL will be: #{GitHub.url}/",
+    content_tag(:strong, view.organization_name_hint, class: "js-field-hint-name")
+  ]) if GitHub.billing_enabled?
+
+  ref_page = CGI.unescape(params[:ref_page]) if params[:ref_page]
+  ref_cta = CGI.unescape(params[:ref_cta] ) if params[:ref_cta]
+  ref_loc = CGI.unescape(params[:ref_loc]) if params[:ref_loc]
+  show_captcha = !current_user.hammy? && view.show_captcha?(session)
+  form_class = show_captcha ? "js-octocaptcha-parent" : ""
+
+  trial_acquisition_channel = CGI.unescape(params[:trial_acquisition_channel]) if params[:trial_acquisition_channel]
+%>
+
+<% if view.organization.errors.any? -%>
+  <%= render(Primer::Beta::Flash.new(scheme: :danger, full: true, test_selector: "org-new-error")) do %>
+    There were problems creating your organization.
+  <% end %>
+<% end %>
+
+<%= render layout: "signup/container",
+  locals: {
+    title: view.action_text,
+    subtitle: "Tell us about your organization",
+    description: view.description_text
+  } do %>
+
+  <div <%= test_selector("org-new-form")%> data-hpc>
+    <%= form_for view.organization, url: view.form_path({ ref_page: ref_page, ref_cta: ref_cta, ref_loc: ref_loc }), method: view.form_method, data: { turbo: true }, html: { id: "org-new-form", class: form_class } do |f| %>
+      <!-- Referral tracking  -->
+      <% if ref_page %><input type="hidden" name="ref_page" value="<%= ref_page %>"><% end %>
+      <% if ref_cta %><input type="hidden" name="ref_cta" value="<%= ref_cta %>"><% end %>
+      <% if ref_loc %><input type="hidden" name="ref_loc" value="<%= ref_loc %>"><% end %>
+
+      <!-- Coupon  -->
+      <% if params[:coupon] %>
+        <input type="hidden" name="coupon" value="<%= params[:coupon] %>">
+      <% end %>
+
+      <!-- Plan -->
+      <input type="hidden" name="organization[plan]" value="<%= view.plan.name %>" <%= test_selector("org-new-plan-input") %>>
+      <% if params[:plan_duration] %>
+        <input type="hidden" name="plan_duration" value="<%= params[:plan_duration] %>" <%= test_selector("org-new-plan-duration-input") %>>
+      <% end %>
+
+      <input id="org-exists-input" type="hidden" name="org_exists" value="false">
+
+      <% if view.show_eligible_existing_org_selector? %>
+        <div class="width-full" <%= test_selector("org-new-org-selector") %>>
+          <dl class="form-group required">
+            <dt class="input-label">
+            <label required>Select organization</label>
+            </dt>
+            <dd>
+            <details class="dropdown details-overlay details-reset d-inline width-full js-org-selector" <%= test_selector("org-new-context-dropdown")%>>
+              <%= render(Primer::ButtonComponent.new(id: "details-summary", tag: :summary, aria: { haspopup: true }, w: :full, display: :flex)) do %>
+                <div class="width-full d-flex flex-justify-between flex-items-center">
+                  Select an organization for the trial
+                  <div class="dropdown-caret"></div>
+                </div>
+              <% end %>
+              <details-menu
+                role="menu"
+                class="SelectMenu <% if view.include_filter? %>SelectMenu--hasFilter<% end %>"
+                aria-labelledby="trial-signup-form-context-switch-title-<%= current_user.display_login %>"
+              ><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                <div class="SelectMenu-modal">
+                  <header class="SelectMenu-header d-none">
+                    <span class="SelectMenu-title" id="trial-signup-form-context-switch-title-<%= current_user.display_login %>">Switch to another account</span>
+                  </header>
+                  <fuzzy-list class="d-flex flex-column flex-1" style="min-height: 0"  min-score="-1">
+                    <% if view.include_filter? %>
+                      <div class="SelectMenu-filter" <%= test_selector("org-new-context-filter")%>>
+                        <input
+                          type="text"
+                          id="context-context-filter-field-<%= current_user.display_login %>"
+                          class="SelectMenu-input form-control"
+                          placeholder="Filter accounts"
+                          aria-label="Choose an account"
+                          autofocus
+                        >
+                      </div>
+                    <% end %>
+
+                    <ul class="SelectMenu-list SelectMenu-list--borderless">
+                      <% view.eligible_orgs_for_ghec_trial(current_user).each do |context, context_permission| %>
+                        <%
+                          display_name = target_context_display_name(context)
+                          context_type = tracking_target_type(context)
+                        %>
+                        <li <%= test_selector("org-new-context-dropdown-context")%>>
+                          <button
+                            class="SelectMenu-item d-flex flex-items-center"
+                            role="menuitem"
+                            type="button"
+                            data-context-org="<%= context.display_login %>"
+                            <%= test_selector("org-new-context-dropdown-item-#{context_type}")%>
+                          >
+                            <div><%= render(GitHub::AvatarComponent.new(actor: context, mr: 2)) %></div>
+                            <span class="css-truncate css-truncate-overflow">
+                              <%= display_name %>
+                            </span>
+                          </button>
+                        </li>
+                      <% end %>
+                      <li <%= test_selector("org-new-context-create-org") %>>
+                        <button class="SelectMenu-item d-flex flex-items-center mt-1 border-top"
+                        role="menuitem"
+                        type="button"
+                        >
+                        <div>
+                          <%= render(Primer::Beta::Octicon.new(icon: :organization, mr: 2)) %>
+                        </div>
+                            <span class="css-truncate css-truncate-overflow">
+                          Create a new organization
+                            </span>
+                        </button>
+                      </li>
+                    </ul>
+                  </fuzzy-list>
+                </div>
+              </details-menu>
+            </details>
+            </dd>
+            </dl>
+        </div>
+      <% end %>
+
+      <% if view.is_enterprise_cloud_trial? && trial_acquisition_channel.present? %>
+        <input type="hidden" name="trial_acquisition_channel" value="<%= trial_acquisition_channel %>">
+      <% end %>
+
+      <% if view.is_enterprise_cloud_trial? %>
+        <!-- Trial selection  -->
+        <input type="hidden" name="enterprise[plan]" value="cloud-trial" <%= test_selector("org-new-cloud-trial") %>>
+
+        <!-- Company Name  -->
+        <% unless params[:organization_name] %>
+          <div class="width-full" <%= test_selector("org-new-company-name") %>>
+            <%= f.text_group("Company name", :company_name, {
+              class: "js-company-name-input width-full py-1",
+              required: true,
+              data: { ga_click: ga_company_name }
+            }) %>
+          </div>
+        <% end %>
+      <% end %>
+
+      <% if show_captcha %>
+        <noscript>
+          <p class="flash flash-error">GitHub requires JavaScript enabled during org creation, for our captcha. Please enable JavaScript during org creation.</p>
+        </noscript>
+      <% end %>
+
+      <!-- Organization Name -->
+      <% if params[:organization_name] %>
+        <input type="hidden" name="organization[profile_name]" value="<%= params[:organization_name] %>" <%= test_selector("org-new-organization-name") %> class="js-new-organization-name">
+        <input type="hidden" name="organization[login]" value="<%= view.login_value %>" <%= test_selector("org-new-login-input") %>>
+      <% else %>
+        <div
+          class="width-full"
+          id="org-name-input"
+          <%= test_selector("org-new-organization-name") %>
+          <%= view.show_eligible_existing_org_selector? ? "hidden" : nil %>
+        >
+          <auto-check
+            src="<%= organization_check_name_path %>"
+            required
+          >
+            <%= f.text_group("Organization name", :profile_name, organization_name_help_text_options) %>
+            <%= csrf_hidden_input_for organization_check_name_path %>
+          </auto-check>
+        </div>
+      <% end %>
+
+      <!-- Enterprise Trial: Contact Info -->
+      <% if view.is_enterprise_cloud_trial? %>
+        <div class="mt-6">
+          <div class="f3 text-bold mb-3">Contact information</div>
+          <%# -- Full Name -- %>
+          <dl class="form-group 2 required" <%= test_selector("org-new-full-name") %>>
+            <dt><label class="text-bold" for="full-name-trial" >Full name</label></dt>
+            <dd>
+              <input
+                class="width-full form-control py-1"
+                name="company_info[full_name]"
+                id="full-name-trial"
+                required
+                data-ga-click="<%= ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Full name")) %>"
+              >
+            </dd>
+          </dl>
+
+          <!-- Enterprise Trial: GA attributes for marketing attribution -->
+          <input type="hidden" name="user[ga_client_id]" class="js-enterprise-trial-ga-id" value="" data-field="clientId">
+          <input type="hidden" name="user[ga_tracking_id]" class="js-enterprise-trial-ga-id" value="" data-field="trackingId">
+          <input type="hidden" name="user[ga_user_id]" class="js-enterprise-trial-ga-id" value="" data-field="userId">
+
+          <% if view.collect_billing_email? %>
+            <!-- Work/Contact/Billing Email  -->
+            <div class="my-2" <%= test_selector("org-new-billing-email") %>>
+              <auto-check
+                src="<%= organization_check_billing_email_path %>"
+                required
+              >
+                <%= f.text_group(view.billing_email_label, :billing_email, {
+                  required: true,
+                  error: view.email_errors.any? && "#{view.billing_email_label} email " + view.email_errors.first,
+                  class: "width-full py-1",
+                  data: {
+                    ga_click: ga_label_with_analytics_tracking_id(view.ga_format_input_tracking(view.billing_email_label))
+                  }
+                }) %>
+                <%= csrf_hidden_input_for organization_check_billing_email_path %>
+              </auto-check>
+            </div>
+          <% end %>
+        </div>
+      <% else %>
+        <% if view.collect_billing_email? %>
+          <!-- Work/Contact/Billing Email  -->
+          <div class="width-full" <%= test_selector("org-new-billing-email") %>>
+            <auto-check
+              src="<%= organization_check_billing_email_path %>"
+              required
+            >
+              <%= f.text_group(view.billing_email_label, :billing_email, {
+                required: true,
+                error: view.email_errors.any? && "#{view.billing_email_label} email " + view.email_errors.first,
+                class: "width-full py-1",
+                data: {
+                  ga_click: ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("#{view.billing_email_label}"))
+                }
+              }) %>
+              <%= csrf_hidden_input_for organization_check_billing_email_path %>
+            </auto-check>
+          </div>
+        <% end %>
+      <% end %>
+
+      <!-- Enterprise Trial: Tell us about your company? -->
+      <% if view.is_enterprise_cloud_trial? %>
+        <div class="my-6 width-full">
+          <div class="f3 text-bold mb-3">Company details</div>
+
+          <!-- Company Name  -->
+          <% if params[:organization_name] %>
+            <div class="width-full" <%= test_selector("org-new-company-name") %>>
+              <%= f.text_group("Company name", :company_name, {
+                class: "js-company-name-input width-full py-1",
+                required: true,
+                data: {
+                  ga_click: ga_company_name
+                }
+              }) %>
+            </div>
+          <% end %>
+
+          <!-- Industry -->
+          <dl class="form-group my-2 required" <%= test_selector("org-new-industry") %>>
+            <dt><label class="text-bold" for="industry-select">Industry</label></dt>
+            <dd>
+              <%= select_tag("company_info[industry]",
+                options_for_select(Businesses::TrialAccountsHelper::INDUSTRY_OPTIONS),
+                { class: "width-full js-enterprise-trial-industry form-control py-1",
+                  id: "industry-select",
+                  required: true,
+                  data: {
+                    ga_click: ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Industry"))
+                  }
+                }
+              )%>
+            </dd>
+          </dl>
+
+          <!-- Other Industry -->
+          <dl
+            class="form-group my-2 js-enterprise-trial-other-industry-field"
+            data-trigger-option-value="Other"
+            hidden
+            <%= test_selector("org-new-other-industry") %>
+          >
+            <dt><label class="text-bold" for="other-industry-trial" >Specify your industry</label></dt>
+            <dd>
+              <input
+                class="width-full form-control py-1"
+                name="company_info[other_industry]"
+                id="other-industry-trial"
+                data-ga-click="<%= ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Custom industry")) %>"
+              >
+            </dd>
+          </dl>
+
+          <!-- Number of employees -->
+          <dl class="form-group my-2 mb-4 required" <%= test_selector("org-new-employees-size") %>>
+            <dt><label class="text-bold" for="employees-size-select">Number of employees</label></dt>
+            <dd>
+              <%= select_tag("company_info[employees_size]",
+                options_for_select(Businesses::TrialAccountsHelper::EMPLOYEE_SIZE),
+                { class: "width-full form-control py-1",
+                  id: "employees-size-select",
+                  required: true,
+                  data: {
+                    ga_click: ga_label_with_analytics_tracking_id(view.ga_format_input_tracking("Number of employees"))
+                  }
+                }
+              )%>
+            </dd>
+          </dl>
+        </div>
+      <% end %>
+
+      <!-- Select Terms of Service type -->
+      <% if GitHub.terms_of_service_enabled? && !view.is_enterprise_cloud_trial? %>
+        <%= render partial: "organizations/signup/terms_of_service_selection", locals: { f: f, data_ga_click: ga_company_name } %>
+      <% end %>
+
+      <% if show_captcha %>
+        <%= render partial: "shared/octocaptcha", locals: { origin_page: "github_org_create", octocaptcha_timeout: view.captcha_timeout } %>
+      <% end %>
+
+      <% custom_classes = show_captcha ? "js-octocaptcha-form-submit" : "" %>
+
+      <%
+        if view.is_enterprise_cloud_trial?
+          submit_click_data = analytics_click_attributes(
+            category: "Enterprise Set Up Next",
+            action: "click to next",
+            label: "ref_page:#{request.fullpath};ref_cta:#{view.button_text};ref_loc:team_payment",
+          )
+        else
+          submit_click_data = analytics_click_attributes(
+            category: "Payment details",
+            action: "click to payment details",
+            label: "ref_page:#{request.fullpath};ref_cta:#{view.button_text};ref_loc:new_organization",
+          )
+        end
+      %>
+
+      <%# Copilot add-on check %>
+      <% if GitHub.copilot_enabled? && view.plan.free? %>
+        <div class="mb-3">
+          <%= render(Primer::Beta::Text.new(font_weight: :bold)) { "Add-ons" } %>
+        </div>
+        <div class="mb-4">
+          <%= render(Primer::Box.new(classes: "copilot_add_on_box", border: true, p: 3, border_radius: 2)) do %>
+            <%= render(Hydro::TrackViewComponent.new(name: "new_org_copilot_add_on_checkbox_viewed")) %>
+            <div class="form-checkbox mt-0 mb-0" <%= test_selector("copilot-checkbox-container") %>>
+              <%= check_box_tag "copilot_add_on", "yes", session[:return_to] == "copilot_business_signup", id: "copilot_add_on" %>
+              <%= label_tag "copilot_add_on" do %>
+                <%= render(Primer::Beta::Octicon.new(:copilot, size: :small)) %>
+                <span class="ml-1" <%= test_selector("copilot-add-on-label") %>>Get GitHub <%= Copilot.business_product_name %> in this organization</span>
+              <% end %>
+              <p class="note" <%= test_selector("copilot-add-on-caption") %>>
+                Boost developer productivity for $19/user/month. Pay only for assigned seats after setup. <%= link_to "See #{Copilot.business_product_name} docs.", "#{GitHub.help_url}/enterprise-cloud@latest/copilot/overview-of-github-copilot/about-github-copilot-business", class: "Link--inTextBlock", data: analytics_click_attributes(
+                  category: "new_org_copilot_add_on",
+                  action: "redirect_to_copilot_docs",
+                  label: "ref_cta:learn_more;ref_loc:copilot_add_on_checkbox"
+                ) %>
+              </p>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if GitHub.terms_of_service_enabled? && view.is_enterprise_cloud_trial? %>
+        <div class="mt-2 mb-4">
+          <input type="hidden" name="terms_of_service_type" value="<%= Billing::EnterpriseCloudTrial::TOS_TYPE %>">
+          <div <%= test_selector("org-evaluation-tos") %>>
+            <label class="text-normal">
+              <%= check_box_tag "agreed_to_terms", "yes", false, { :"data-test-selector" => "org-evaluation-tos-checkbox", required: true } %>
+              I hereby accept the
+              <a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer Agreement</a>
+              on behalf of my organization and confirm that I have the authority to do so. For more information about GitHub's privacy practices, see the
+              <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy Statement</a>.
+            </label>
+          </div>
+        </div>
+      <% elsif GitHub.terms_of_service_enabled? && !view.is_enterprise_cloud_trial? %>
+        <div class="mt-2 mb-4">
+          <div class="width-full" <%= test_selector("org-new-tos") %>>
+            <label class="text-normal">
+              <%= check_box_tag "agreed_to_terms", "yes", false, { :"data-test-selector" => "org-evaluation-tos-checkbox", required: true } %>
+              I hereby accept the
+              <a href="<%= site_terms_path %>" target="_blank" rel="noopener noreferrer" class="Link--inTextBlock js-tos-link" aria-hidden="false">Terms of Service</a><span class="js-corp-tos-link d-none" aria-hidden="true"><a class="Link--inTextBlock" href="<%= customer_term_index_path %>" target="_blank" rel="noopener noreferrer">GitHub Customer Agreement</a>  on behalf of my organization and confirm that I have the authority to do so</span>.
+              For more information about GitHub's privacy practices, see the
+              <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">GitHub Privacy Statement</a>.
+            </label>
+          </div>
+        </div>
+      <% end %>
+
+      <!-- Submit -->
+      <%= render partial: "signup/button", locals: {
+        text: view.button_text,
+        type: "submit",
+        custom_classes: custom_classes,
+        disabled_with: "Setting up organization",
+        data: submit_click_data,
+        test_selector: "new-org-submit"
+      } %>
+    <% end %>
+  </div>
+<% end %>

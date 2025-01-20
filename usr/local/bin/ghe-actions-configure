@@ -1,0 +1,68 @@
+#!/bin/bash
+#/ Usage: ghe-actions-configure [-h]
+#/
+#/ Configures GitHub Actions on this GitHub Enterprise appliance.
+#/ Needs to be executed after GitHub Enterprise configuration has been changed
+#/ This script is normally called by ghe-config-apply
+#/
+#/ OPTIONS:.
+#/   -h | --help     Show this message.
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# usage
+#   Display usage information for this script.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+# Process command line arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+echo "Checking Actions, all services must be running to proceed..."
+ghe-actions-check
+
+# Get the current issuer URL
+prev_issuer=$(ghe-actions-console -s token -c "Get-LocationAccessMapping 
+              | Where-Object -Property Moniker -EQ IssuerAccessMapping | % AccessPoint" | grep 'http' || true)
+
+# Configure each of Actions services
+configure_service="
+    Configure-ServiceDomain
+    Flush-LocationDataCache
+    Register-WithMps
+"
+
+for service in $(action-services); do
+    echo "Configuring $(capitalize "$service") service..."
+    ghe-actions-console -s "$service" -c "$configure_service" >> /dev/null
+done
+
+# Restart Actions jobs if Issuer Access Mapping hostname changed
+new_issuer=$(ghe-actions-console -s token -c "Get-LocationAccessMapping 
+              | Where-Object -Property Moniker -EQ IssuerAccessMapping | % AccessPoint" | grep 'http' || true)
+if [[ -z "$new_issuer" || "$prev_issuer" != "$new_issuer" ]]; then
+    echo "IssuerAccessMapping has been changed, restarting Actions services..."
+    ghe-actions-stop
+    ghe-actions-start --phase app
+fi
+
+# Configure air gap runners
+update-runners-on-appliance
+
+echo "Actions was successfully configured!"

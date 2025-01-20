@@ -1,0 +1,267 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<% view = Businesses::Settings::SecurityView.new \
+  business: this_business, current_user: current_user, params: params %>
+
+<% page_info title: "Authentication security",
+             selected_link: :business_security_settings,
+             stafftools: stafftools_enterprise_path(this_business) %>
+
+<% two_factor_auth_available = !view.business_emu_configured? %>
+<% members_without_2fa_allowed = view.business.members_without_2fa_allowed? %>
+<% override_referrer_available = GitHub.enterprise? %>
+
+<%= render layout: "businesses/layout",
+  locals: {
+    business: this_business,
+    title: "Authentication security",
+    container_attributes: "itemscope itemtype='http://schema.org/Business'"
+  } do %>
+
+  <%= render(IpAllowlistEntries::Ipv6NoticeComponent.new(
+    owner: this_business,
+    dismissal_path: enterprise_notice_path(
+      this_business,
+      notice: IpAllowlistEntries::Ipv6NoticeComponent::NOTICE_NAME
+    ),
+    dismissal_method: "delete",
+  )) %>
+
+  <div data-hpc>
+    <% if business_saml_sso_enabled? && GitHub.flipper[:emu_prompt_enabled].enabled?(current_user) && this_business.trial? %>
+      <%= render "businesses/settings/security/saml_try_emu", view: view %>
+    <% end %>
+
+    <% if two_factor_auth_available %>
+      <%= render(Primer::Beta::Subhead.new(hide_border: true)) do |component| %>
+        <% component.with_heading(tag: :h3) do %>Two-factor authentication<% end %>
+      <% end %>
+      <p>
+        Enabling two-factor authentication adds another level of security for your enterprise and organizations.
+        <%= link_to \
+          "Learn more about enforcing policies for security settings",
+          "#{GitHub.help_url}/github/setting-up-and-managing-your-enterprise/enforcing-security-settings-in-your-enterprise-account#requiring-two-factor-authentication-for-organizations-in-your-enterprise-account",
+          class: "Link--inTextBlock" %>.
+      </p>
+
+      <%= form_tag enterprise_two_factor_requirement_path(this_business), method: :patch do |f| %>
+        <div class="form-checkbox">
+          <%= render "businesses/settings/two_factor_required_checkbox",
+                business: this_business,
+                view: view %>
+
+          <p class="note">
+            Enterprise administrators, organization members, and <%= outside_collaborators_verbiage(this_business) %> who do not have
+            two-factor authentication enabled on their personal account
+            <% if members_without_2fa_allowed %>
+              will be asked to enable it when accessing the enterprise or any of its organizations.
+              <br>
+              Requiring two-factor authentication will not remove them from the enterprise account.
+            <% else %>
+              will be removed from the enterprise account and will receive an
+              email notifying them about the change.
+            <% end %>
+          </p>
+
+          <% if GitHub.auth.two_factor_org_requirement_allowed? %>
+            <%= render Primer::Alpha::Dialog.new(
+                title: "Two-factor authentication",
+                size: :large,
+                id: "view-your-organizations-current-configurations-two-factor",
+                test_selector: "2fa-orgs-configurations",
+
+              ) do |dialog| %>
+                <% dialog.with_header(show_divider: true) %>
+                <% dialog.with_show_button(scheme: :link, my: 2, classes: 'Link--inTextBlock') do  %>
+                  View organizations' two-factor authentication policy
+                <% end %>
+                <% dialog.with_body do %>
+                <include-fragment loading="lazy" src="<%= view.two_factor_required_setting_organizations_business_path %>">
+                  <div class="d-flex flex-items-center  flex-justify-center">
+                    <div class="text-center" data-hide-on-error>
+                      <h2 class='f5'>Loading...</h2>
+                      <%= render(Primer::Beta::Spinner.new(size: :small, mt: 1)) %>
+                    </div>
+                    <div class="text-center" data-show-on-error hidden>
+                      <h2 class='f5'>Sorry, something went wrong.</h2>
+                    </div>
+                  </div>
+                </include-fragment>
+                <% end %>
+              <% end %>
+          <% end %>
+        </div>
+
+        <div class="clearfix">
+          <% if !view.disable_submit_button? && view.two_factor_requirement_disabled_and_needs_confirmation? %>
+            <%= render "businesses/settings/two_factor_required_confirmation", business: this_business %>
+          <% else %>
+            <%= render Primer::ButtonComponent.new(
+                type: :submit,
+                disabled: view.disable_submit_button?,
+                float: :left,
+                ml: 3,
+                mr: 4,
+              ) do %>Save<% end %>
+          <% end %>
+
+          <% if view.two_factor_requirement_form_disabled? %>
+            <span class="note d-inline-block pt-1 mt-1 clearfix">
+              <%= primer_octicon(:question) %>
+              <%= view.disabled_form_reason %>
+            </span>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <% if business_oidc_sso_enabled? %>
+      <%= render "businesses/settings/security/oidc_config", view: view, two_factor_auth_available: two_factor_auth_available %>
+    <% end %>
+
+    <% if (business_saml_sso_enabled? && !trial_expired_or_cancelled?) || current_business.enterprise_managed_user_enabled? %>
+      <%= render "businesses/settings/security/saml_config", view: view, two_factor_auth_available: two_factor_auth_available %>
+    <% end %>
+
+    <% if view.show_sso_settings? %>
+      <%= render "businesses/settings/security/single_sign_on_settings", view: view %>
+    <% end %>
+
+    <% if view.show_open_scim_configuration? %>
+      <%= render "businesses/settings/security/open_scim_configuration", view: view %>
+    <% end %>
+
+    <% if view.show_scim_configuration? %>
+      <%= render "businesses/settings/security/scim_configuration", view: view %>
+    <% end %>
+
+    <% unless trial_expired_or_cancelled? %>
+      <% if view.show_team_sync_settings? %>
+        <%= render "businesses/security_settings/team_sync/settings", view: view %>
+      <% end %>
+    <% end %>
+
+    <% if view.show_ssh_cas? %>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h3) do %>SSH certificate authorities<% end %>
+        <% unless trial_expired_or_cancelled? %>
+          <% component.with_actions do %>
+            <%= render Primer::ButtonComponent.new(
+                href: ssh_certificate_authorities_new_enterprise_path,
+                tag: :a,
+                variant: :small
+              ) do %>New certificate authority<% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if this_business.ssh_certificate_authorities.any? %>
+        <p>
+          This is a list of SSH certificate authorities associated with this enterprise.
+        </p>
+        <ul class="Box border-bottom-0 mb-3">
+          <%= render partial: "ssh_certificate_authorities/listing", collection: this_business.ssh_certificate_authorities, as: :ca, locals: {this_owner: this_business} %>
+        </ul>
+
+        <%= form_tag enterprise_ssh_certificate_authority_owner_settings_path(this_business), method: :patch do |f| %>
+          <div class="form-checkbox">
+            <input id="enable_ssh_cert_requirement_checkbox" type="checkbox" name="enable_ssh_cert_requirement" <%= "checked" if this_business.ssh_certificate_requirement_enabled? %> >
+
+            <label for="enable_ssh_cert_requirement_checkbox">Require SSH Certificates</label>
+
+            <p class="note color-fg-muted">
+              <% if GitHub.single_business_environment? %>
+                Require members and collaborators to use SSH certificates when accessing
+                this enterprise's repositories via Git. Members and collaborators will only be able
+                to use passwords or personal access tokens for Git access if SSH access has been disabled
+                for the repository. For more information, see
+                <%= link_to \
+                  "Disabling Git SSH access on GitHub Enterprise Server.",
+                  "#{GitHub.enterprise_admin_help_url}/user-management/managing-repositories-in-your-enterprise/disabling-git-ssh-access-on-your-enterprise#disabling-git-ssh-access-to-a-specific-repository",
+                  class: "Link--inTextBlock" %>
+                Access by authorized third-party integrations will not be affected.
+              <% else %>
+                Require members and collaborators to use SSH certificates when accessing
+                this enterprise's repositories via Git. This will disable Git access using personal access tokens.
+                Access by authorized third-party integrations will not be affected.
+              <% end %>
+            </p>
+            <% if this_business.can_enable_ssh_certificate_user_owned_repo_access? %>
+              <p class="note color-fg-muted">
+                This requirement does not apply to user owned repositories even if the option below is enabled.
+              </p>
+            <% end %>
+          </div>
+          <% if this_business.can_enable_ssh_certificate_user_owned_repo_access? %>
+            <div class="form-checkbox">
+              <input id="enable_user_owned_repo_access_checkbox" type="checkbox" name="enable_user_owned_repo_access" <%= "checked" if this_business.ssh_certificate_user_owned_repo_access_enabled? %> >
+
+              <label for="enable_user_owned_repo_access_checkbox">Allow SSH certificates to access user owned repositories</label>
+
+              <p class="note color-fg-muted">
+                Since your enterprise manages its users directly, you can issue certificates that can access repositories that your users created in their account.
+                <%= link_to \
+                "Learn more about SSH certificates accessing user owned repositories",
+                "#{GitHub.help_url}/admin/policies/enforcing-policies-for-your-enterprise/enforcing-policies-for-security-settings-in-your-enterprise",
+                class: "Link--inTextBlock" %>.
+              </p>
+            </div>
+          <% end %>
+          <%= render Primer::Beta::Button.new(type: :submit) do %>Save<% end %>
+        <% end %>
+      <% else %>
+        <p>There are no SSH certificate authorities associated with this enterprise.</p>
+      <% end %>
+    <% end %>
+
+    <% unless trial_expired_or_cancelled? %>
+      <% if view.show_ip_allowlist? %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h3, display: :flex, align_items: :center) do %>IP allow list<% end %>
+        <% end %>
+        <p>
+          An IP allow list lets your enterprise limit access based on the IP address a person is accessing from.
+          <%= link_to \
+            "Learn more about enforcing policies for security settings",
+            "#{GitHub.help_url}/github/setting-up-and-managing-your-enterprise/enforcing-security-settings-in-your-enterprise-account#managing-allowed-ip-addresses-for-organizations-in-your-enterprise-account",
+            class: "Link--inTextBlock" %>.
+        </p>
+
+        <% if this_business.eligible_for_ip_allowlist_configuration? %>
+          <%= render partial: "businesses/settings/ip_allowlist_configuration", locals: { view: view, business: this_business } %>
+        <% else %>
+          <%= render partial: "businesses/settings/github_ip_allowlist_configuration", locals: { business: this_business } %>
+        <% end %>
+      <% end %>
+
+      <% if override_referrer_available %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h3) do %>User Agent Referrer Policy<% end %>
+        <% end %>
+        <p>
+          Enabling same origin referrer policy will prevent the user agent from adding hostname information to request headers to external sites.
+        </p>
+
+        <%= form_tag enterprise_referrer_override_path(this_business), method: :patch do |f| %>
+          <div class="form-checkbox">
+            <label>
+              <input type="hidden" name="referrer_override" value="disabled">
+              <input type="checkbox" name="referrer_override" value="enabled"
+                    <%= 'checked' if view.referrer_override_enabled? %>>
+              Enable same origin referrer policy for all organizations.
+            </label>
+          </div>
+
+          <div class="clearfix">
+            <%= render Primer::ButtonComponent.new(type: :submit) do %>
+              Save
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if view.saml_oidc_migration_enabled? %>
+      <%= render "businesses/settings/security/saml_oidc_migration", view: view %>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,61 @@
+#!/usr/bin/env ruby
+#/ Usage: script/validate-audit-schema action
+#/
+#/ Validate local audit log entries against their schema.
+#/
+#/ Example:
+#/
+#/     script/validate-audit-schema org.rename
+#/     script/validate-audit-schema team.create
+#/     script/validate-audit-schema user.login
+$stderr.sync = true
+
+def help
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+# show usage
+if ARGV.empty? || ARGV.include?("--help")
+  help
+end
+
+# start in RAILS_ROOT
+require File.expand_path("../../config/environment", __FILE__)
+
+action = ARGV[0]
+
+unless action =~ /\A[a-z_]+\.[a-z_]+\z/
+  help
+  exit 1
+end
+
+query = Search::Queries::StafftoolsQuery.new \
+  phrase: "action:#{action}",
+  per_page: 250
+results = query.execute
+entries = results.results
+
+valid_entries = 0
+invalid_entries = 0
+all_errors = []
+
+entries.each do |entry|
+  valid, errors = Audit.schema.validate(action, entry)
+
+  if valid
+    valid_entries += 1
+  else
+    invalid_entries += 1
+    all_errors << [errors, entry]
+  end
+end
+
+puts "Summary: #{valid_entries} valid, #{invalid_entries} invalid."
+if all_errors.any?
+  all_errors.each do |errors, entry|
+    puts "*" * 50
+    p errors
+    pp entry
+  end
+  exit 1
+end

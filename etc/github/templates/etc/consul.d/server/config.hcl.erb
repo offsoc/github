@@ -1,0 +1,68 @@
+disable_keyring_file = true
+disable_update_check = true
+log_level = "<%= consul_debug_level %>"
+enable_syslog = true
+data_dir = "/data/user/consul"
+domain = "ghe.local."
+datacenter = "<%= consul_datacenter %>"
+advertise_addr = "<%= consul_advertise_addr %>"
+encrypt = "<%= secret_value("consul", "gossip") %>"
+<% if single_node? %>
+server_rejoin_age_max = "1440h"
+<% end %>
+
+<% if cluster_ha_enabled? -%>
+advertise_addr_wan = "<%= node_ip %>"
+translate_wan_addrs = true
+<% end -%>
+
+<% if consul_server? -%>
+server = true
+bootstrap_expect = <%= (local_consul_servers_ips.size / 2) + 1 %>
+<% if !consul_primary_datacenter? && cluster_multi_dc? -%>
+retry_join_wan = [
+  <%= primary_dc_consul_servers_ips.map{ |s| %Q'"#{s}"' }.to_a.join(",\n  ") %>
+]
+<% end -%>
+<% end -%>
+
+retry_join = [
+  <%= consul_retry_join_ips.map{ |s| %Q'"#{s}"' }.to_a.join(",\n  ") %>
+]
+
+limits {
+  http_max_conns_per_client = 1000
+  rpc_max_conns_per_client = 1000
+}
+
+node_meta {
+  hostname = "<%= hostname %>"
+
+  <%# Single instance will be blank; cluster or HA will be a list like "web-server metrics-server"  %>
+  cluster_roles = "<%= cluster_roles.join(',') %>"
+
+  <%# The is_ keys correspond to boolean `...?` methods %>
+  is_cluster_dr_enabled = "<%= cluster_dr_enabled? %>"
+  is_cluster_ha_enabled = "<%= cluster_ha_enabled? %>"
+  is_cluster_ha_primary = "<%= cluster_ha_primary? %>"
+  is_cluster_ha_replica = "<%= cluster_ha_replica? %>"
+  is_cluster_ha_replica_active = "<%= cluster_ha_replica_active? %>"
+  is_cluster_ha_replica_cache = "<%= cluster_ha_replica_cache? %>"
+  is_cluster_ha_replica_disabled = "<%= cluster_ha_replica_disabled? %>"
+  is_cluster_ha_replica_enabled = "<%= cluster_ha_replica_enabled? %>"
+  is_cluster_multi_dc = "<%= cluster_multi_dc? %>"
+  is_cluster_regular_enabled = "<%= cluster_regular_enabled? %>"
+  is_cluster_delegate = "<%= ghes_cluster_delegate? %>"
+  is_single_node = "<%= single_node? %>"
+}
+
+telemetry {
+  statsd_address = "localhost:8125"
+  filter_default = false
+  prefix_filter = [
+    "+consul.raft.state",
+    "+consul.serf.member.flap",
+    "+consul.raft.apply",
+    "+consul.raft.replication.appendEntries"
+  ]
+}

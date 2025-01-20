@@ -1,0 +1,83 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-announce [options]
+#/
+#/ Get, set or clear a global announcement banner, to be displayed to all users.
+#/
+#/ OPTIONS:
+#/   -h, --help                  Show this message.
+#/   -s MESSAGE, --set=MESSAGE   Set a global announcement banner.
+#/   -e DATE, --expires=DATE     Only valid when the -s option is provided. Sets
+#/                               the date when the announcement should expire.
+#/                               DATE must be provided in the YYYY-MM-DD format.
+#/   -d, --dismissible           Make the global announcement banner dismissible to each user.
+#/   -g, --get                   Get the global announcement banner.
+#/   -u, --unset                 Unset the global announcement banner.
+
+require "optparse"
+require "github/enterprise_announcement"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+set_announcement = false
+announcement = nil
+expires_at = nil
+user_dismissible = false
+get_announcement = false
+unset_announcement = false
+
+ARGV.options do |opts|
+  opts.on("-s MESSAGE", "--set=MESSAGE") do |message|
+    set_announcement = true
+    announcement = message
+  end
+  opts.on("-e DATE", "--expires=DATE") do |date|
+    expires_at = date
+  end
+  opts.on("-d", "--dismissible", "--dismissable") { user_dismissible = true }
+  opts.on("-g", "--get") { get_announcement = true }
+  opts.on("-u", "--unset") { unset_announcement = true }
+  opts.on_tail("-h", "--help") { help! }
+  opts.parse!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+if get_announcement
+  announcement = GitHub::EnterpriseAnnouncement.get_announcement
+  if message = announcement.text
+    user_dismissible_message = announcement.user_dismissible ? " user dismissible and is" : ""
+    puts "The current message is#{user_dismissible_message}: \"#{message}\""
+  else
+    puts "There isn't an announcement message set."
+  end
+elsif set_announcement
+  if announcement.present?
+    result = GitHub::EnterpriseAnnouncement.set_announcement \
+      announcement: announcement, expires_at: expires_at.presence, user_dismissible: user_dismissible
+    abort result.errors.to_sentence unless result.success?
+
+    expiry_message = " with expiry set to #{expires_at}" if expires_at.present?
+    puts "Announcement message set#{expiry_message}."
+  else
+    help!
+  end
+elsif unset_announcement
+  announcement = GitHub::EnterpriseAnnouncement.get_announcement
+  if message = announcement.text
+    GitHub::EnterpriseAnnouncement.clear_announcement
+    user_dismissible_message = announcement.user_dismissible ? ", which was user dismissible" : ""
+    puts "Removed the announcement message#{user_dismissible_message}: \"#{message}\""
+  else
+    puts "There isn't an announcement message set."
+  end
+else
+  help!
+end
+
+# vim: set syntax=ruby:

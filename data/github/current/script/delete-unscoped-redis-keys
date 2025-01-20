@@ -1,0 +1,35 @@
+#!/usr/bin/env safe-ruby
+#
+# Check a redis key pattern for the prefixed key and delete the unprefixed version of the key
+#
+# Dry run to report the keys to be deleted
+# $ script/delete-unscoped-redis-keys 'Hounds::*:*:heartbeat' --uri localhost:6379 <file>
+#
+# Delete unscoped keys
+# $ script/delete-unscoped-redis-keys -f 'Hounds::*:*:heartbeat' --uri localhost:6379 <file>
+#
+require "optparse"
+require "logger"
+
+options = {
+  dry_run: true,
+  input: ARGF,
+}
+
+OptionParser.new do |opts|
+  opts.on("--uri REDIS_URI", String) { |uri| options[:redis_uri] = uri }
+  opts.on("-f", "--force") { |bool| options[:dry_run] = !bool }
+  opts.on("--throttle-wait THROTTLE_WAIT_MS", Integer) { |ms| options[:throttle_wait] = ms }
+end.parse!
+
+options[:logger] = Logger.new(STDOUT)
+options[:key_pattern] = ARGV.pop
+abort "No key pattern specified" unless options[:key_pattern]
+abort "No redis connection specified" unless options[:redis_uri]
+
+require_relative "../config/environment"
+
+options[:redis_config] = GitHub.merge_redis_config(options.delete(:redis_uri))
+
+transition = GitHub::Redis::UnscopedKeyDeletionTransition.new(options)
+transition.run

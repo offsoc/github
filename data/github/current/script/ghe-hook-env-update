@@ -1,0 +1,109 @@
+#!/bin/bash
+#/ Downloads a tarball and extracts it to a pre-receive-hook environment
+#/ This is but a shadow of the script that runs in enterprise
+#/
+#/ Usage:
+#/          ghe-hook-env-update environment-id tarball-url [options]
+#/ Options:
+#/          -h | --help           Show this message
+#/
+#/ Exit codes:
+#/          0                     Everything went swimmingly
+#/          3                     Invalid arguments
+#/          4                     Error fetching the tarball
+#/          5                     Tarball isn't a valid tarball
+#/          6                     Error extracting the tarball
+
+set -e
+
+main() {
+  while [ "$1" ]; do
+    case "$1" in
+      -h)
+        usage
+        exit
+        ;;
+      *)
+        if [ -z "$ENVIRONMENT_ID" ]; then
+          ENVIRONMENT_ID="$1"
+        elif [ -z "$TARBALL_URL" ]; then
+          TARBALL_URL="$1"
+        else
+          exit_invalid_args "Unknown argument '$1'!"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$ENVIRONMENT_ID" ] || exit_invalid_args "environment-id is required"
+  [ -n "$TARBALL_URL" ] || exit_invalid_args "tarball-url is required"
+
+  TARBALL_URL="$(build_file_url $TARBALL_URL)" || err_exit 3 \
+    "'$TARBALL_URL' is neither a valid url nor the path to an existing file."
+
+  PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+
+  # Create required directories
+  tar_filename=$(basename "$TARBALL_URL")
+  USER_TMP_DIR=${USER_TMP_DIR:-"$PROJECT_ROOT/tmp"}
+  export dl_tmp=$(mktemp -d --tmpdir="$USER_TMP_DIR" hook-env-XXXXXX)
+
+  trap "rm -rf $dl_tmp" EXIT
+
+  # Download the tarball
+  (
+    cd $dl_tmp
+    curl -O $TARBALL_URL 2>/dev/null || err_exit 4 "There was an error downloading '$TARBALL_URL'"
+  )
+
+  # Make sure the tarball is valid
+  tar -tf "$dl_tmp/$tar_filename" > /dev/null || err_exit 5 "That's a bad tarball"
+
+  # Move the tarball to its permanent home
+  sha=$(shasum -a 256 $dl_tmp/$tar_filename | cut -d ' ' -f1)
+
+  HOOK_ENV_DIR=${HOOK_ENV_DIR:-"$PROJECT_ROOT/git-hooks/environments"}
+  perm_tar="$HOOK_ENV_DIR/tarballs/$ENVIRONMENT_ID/$sha/$tar_filename"
+  mkdir -p "$(dirname $perm_tar)"
+  mv -f "$dl_tmp/$tar_filename" "$perm_tar"
+
+  # Extract the tarball
+  env_dir="$HOOK_ENV_DIR/$ENVIRONMENT_ID/$sha"
+  mkdir -p "$env_dir"
+
+  tar -xf "$perm_tar" -C "$env_dir" > /dev/null || err_exit 6 "There was an error extracting this tarball"
+
+  echo $sha
+}
+
+# checks whether the url passed in is really a file path. If it is, it turns it into a file:/// url
+# returns 1 if the url isn't http, https, file or the path to a file on the local server
+build_file_url() {
+  input_url="$1"
+  if [[ $input_url =~ ^(https?|file):// ]]; then
+    echo "$input_url"
+  elif [ -f "$input_url" ]; then
+    echo "file://$input_url"
+  else
+    return 1
+  fi
+}
+
+
+exit_invalid_args() {
+  echo "$1" >&2
+  usage
+  exit 3
+}
+
+err_exit() {
+  [ -n "$2" ] && echo "$2" >&2
+  exit $1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+main "$@"

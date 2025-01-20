@@ -1,0 +1,195 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%
+  attribution = pull.user ? " by #{pull.user}" : ""
+  page_info title: "Resolve Conflicts · Pull Request ##{pull.number} · #{current_repository.name_with_display_owner}",
+  container_xl: true,
+  responsive: false,
+  selected_link: :repo_pulls,
+  dashboard_pinnable_item_id: pull.global_relay_id,
+  class: "full-width"
+%>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "editor" %>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix new-discussion-timeline mt-4">
+  <div class="px-4 mx-2">
+    <a href="<%= gh_show_pull_request_path(pull) %>" class="Link--primary no-underline" data-pjax>
+      <h1 class="d-inline text-normal">
+        <%= truncate(pull.title, length: 50) %> <span class="color-fg-muted">#<%= pull.number %></span>
+      </h1>
+    </a>
+
+    <div class="d-flex flex-justify-between flex-items-start mb-3">
+      <div class="flex-shrink-0">
+        <span class="color-fg-muted">
+          <span class="text-bold">Resolving conflicts</span> between <%= pull_branch_label(pull, :head, expandable: true) %> and <%= pull_branch_label(pull, :base, expandable: true) %> and committing changes <span class="mx-1"><%= primer_octicon(:"arrow-right") %></span> <%= pull_branch_label(pull, :head, expandable: true) %>
+        </span>
+      </div>
+      <div>
+        <div class="stale-files-tab d-none js-resolve-conflicts-failed">
+          This page is out of date. <a class="stale-files-tab-link Link--inTextBlock" href="<%= pull_request_path(pull) + "/conflicts" %>">Start over</a>
+        </div>
+
+        <div class="stale-files-tab d-none js-resolve-conflicts-repository-rule-violations">
+          Repository rule violations found. <a class="stale-files-tab-link Link--inTextBlock" href="<%= view_repository_rulesets_path(current_repository.owner, current_repository, ref: "refs/heads/#{pull.base_ref}") %>">View rules</a> or <a class="stale-files-tab-link Link--inTextBlock" href="<%= pull_request_path(pull) + "/conflicts" %>">Start over</a>
+        </div>
+
+        <% if pull.conflicted_files.blank? %>
+          <div class="stale-files-tab">
+            This page is out of date. <a class="stale-files-tab-link Link--inTextBlock" href="<%= pull_request_path(pull) + "/conflicts" %>">Start over</a>
+          </div>
+        <% else %>
+          <div class="d-none js-resolve-conflicts-complete wants-full-width-container">
+            <% if pull.head_is_default_or_protected_branch? %>
+              <%= render partial: "pull_requests/conflicted_files_branch_selector", locals: { pull: pull } %>
+            <% else %>
+              <%= render partial: "pull_requests/conflicted_files_form", locals: { pull: pull } %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <% if pull.conflicted_files %>
+    <div class="col-3 float-left border-top">
+      <h3 class="py-3 px-4 color-fg-muted f6 color-bg-subtle border-bottom">
+        <%= pull.conflicted_files.size %> conflicting <%= "file".pluralize(pull.conflicted_files.size) %>
+      </h3>
+
+      <div class="conflicts-nav menu border-bottom rounded-0 color-bg-subtle overflow-scroll js-conflict-list">
+        <% pull.conflicted_files.each_with_index do |filename, index| %>
+          <% fileinfo = pull.conflict.file_info(filename) %>
+          <a href="<%= pull_request_path(pull) %>/conflict?name=<%= CGI.escape(CGI.escape(filename)) %><%= fileinfo['ancestor'].nil? ? "" : "&ancestor_oid=#{CGI.escape(fileinfo['ancestor']['oid'])}" %>&base_oid=<%= CGI.escape(fileinfo['base']['oid']) %>&head_oid=<%= CGI.escape(fileinfo['head']['oid']) %>"
+            class="menu-item conflict-nav-item border-bottom py-3 pl-4 pr-3 rounded-0 js-conflicted-file <%= "selected" if index.zero? %>"
+            data-filename="<%= CGI.escape(filename) %>">
+
+            <div class="clearfix">
+              <div class="float-left mr-2">
+                <%= primer_octicon(:"file-code", size: :medium, color: :muted, mt: 1) %>
+              </div>
+              <div class="overflow-hidden">
+                <div class="discussion-item-icon color-bg-success-emphasis float-right mt-1">
+                  <%= primer_octicon(:check, mr: 0, color: :on_emphasis) %>
+                </div>
+                <div class="color-fg-default css-truncate css-truncate-target">
+                  <%= GitHub::Encoding.try_guess_and_transcode(::File.basename(filename)) %>
+                </div>
+                <div class="color-fg-muted f6">
+                  <%= reverse_truncate(GitHub::Encoding.try_guess_and_transcode(filename), length: 40) %>
+                </div>
+              </div>
+            </div>
+          </a>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="col-9 float-right">
+    <div class="clearfix conflict-resolver loading js-conflict-resolver">
+      <%
+        # JavaScript prevents this form from being submitted, so we don't have to
+        # use `form_tag`, which adds a CSRF token input tag to the form. Because
+        # the form doesn't have an action, generating a CSRF token for it messes
+        # with our per-form CSRF token code, which expects forms to specify a
+        # method and action.
+      %>
+      <form class="resolve-file-form js-resolve-file-form">
+        <div class="form-group mt-0">
+          <input type="hidden" name="filename">
+          <div class="file border rounded-0 js-code-editor mt-0">
+            <div class="file-header border-bottom color-bg-subtle px-4">
+              <span class="file-info js-filename"></span>
+
+              <div class="resolved-notice float-right mt-1 color-fg-muted">
+                <%= render(Primer::Beta::Octicon.new(icon: "check")) %> Resolved
+              </div>
+
+              <div class="file-actions mr-2">
+                <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, ml: 3, float: :right, classes: "tooltipped-nw js-mark-resolved", "data-disabled": "", "data-disabled-label": "Remove all conflict markers to resolve this file") do %>Mark as resolved<% end %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+
+                <details class="dropdown float-right mx-3 details-reset details-overlay js-dropdown-details">
+                  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, mt: 1, "aria-label": "Editor setting") do %>
+                    <%= primer_octicon(:gear, classes: "Link--secondary") %>
+                    <div class="dropdown-caret Link--secondary"></div>
+                  <% end %>
+
+                  <div class="dropdown-menu dropdown-menu-sw code-formatting-menu mt-1">
+                    <div class="d-table table-fixed width-full px-3 py-2  border-bottom">
+                      <label for="formatting-code-indent-mode" class="text-normal d-table-cell v-align-middle col-6">Indent mode</label>
+                      <div class="d-table-cell">
+                        <select class="form-select select-sm js-code-indent-mode" id="formatting-code-indent-mode">
+                          <%= options_for_select({
+                                "Spaces" => "space",
+                                "Tabs" => "tab"
+                              }, "spaces") %>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="d-table table-fixed width-full px-3 py-2 border-bottom">
+                      <label for="formatting-code-indent-width" class="text-normal d-table-cell v-align-middle col-6">Indent size</label>
+                      <div class="d-table-cell">
+                        <select class="form-select select-sm js-code-indent-width" id="formatting-code-indent-width">
+                          <%= options_for_select [2, 4, 8], 2 %>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="d-table table-fixed width-full px-3 py-2">
+                      <label for="formatting-code-wrap-mode" class="text-normal d-table-cell v-align-middle col-6">Line wrap mode</label>
+                      <div class="d-table-cell">
+                        <select class="form-select select-sm js-code-wrap-mode" id="formatting-code-wrap-mode">
+                          <%= options_for_select({
+                                "No wrap" => "off",
+                                "Soft wrap" => "on"
+                              }, "off") %>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+
+                <div class="mt-1 f6 mr-3 float-right">
+                  <strong class="color-fg-danger">
+                    <span class="js-conflict-count"></span>
+                    <span class="js-conflict-label" data-singular-string="conflict" data-plural-string="conflicts"></span>
+                  </strong>
+                  <%= render Primer::ButtonComponent.new(scheme: :link, ml: 3, classes: "Link--primary no-underline js-prev-conflict") do %>
+                    Prev <%= primer_octicon(:"chevron-up", vertical_align: :middle, color: :muted) %>
+                  <% end %>
+                  <%= render Primer::ButtonComponent.new(scheme: :link, ml: 3, classes: "Link--primary no-underline js-next-conflict") do %>
+                    Next <%= primer_octicon(:"chevron-down", vertical_align: :middle, color: :muted) %>
+                  <% end %>
+                </div>
+              </div>
+            </div>
+
+            <textarea
+              class="form-control file-editor-textarea js-blob-contents js-code-textarea"
+              rows="25" name="name"
+              spellcheck="false"
+              autofocus
+              disabled
+              data-merge-mode="true"
+            ></textarea>
+          </div>
+        </div>
+      </form>
+      <%= image_tag "spinners/octocat-spinner-128.gif", size: "64x64", alt: "",
+        class: "conflict-loader mx-auto" %>
+    </div>
+  </div>
+
+  <div class="d-none js-conflict-gutters">
+    <div class="js-start conflict-gutter-marker conflict-gutter-marker-start">&nbsp;</div>
+    <div class="js-middle conflict-gutter-marker conflict-gutter-marker-middle">&nbsp;</div>
+    <div class="js-end conflict-gutter-marker conflict-gutter-marker-end">&nbsp;</div>
+    <div class="js-line conflict-gutter-marker conflict-gutter-marker-line">&nbsp;</div>
+  </div>
+</div>
+<% end %>

@@ -1,0 +1,47 @@
+#!/bin/bash
+#/ Usage: git-bare-merge-helper <merge-base-sha> <head1-sha> <head2-sha>
+#/
+#/ Merge head2 into head1 (if there are no conflicts). Operates
+#/ purely on a tmp index and worktree, so it can work in a bare
+#/ repository. Returns the resulting tree sha1 on stdout.
+#/
+#/ You probably don't want to run this yourself; it's
+#/ used as a helper for git-merge-commit and git-revert-commit.
+#/
+#/ Exits 0 on success
+#/ Exits 2 on merge conflict
+#/ Exits non-zero for other errors
+
+# Show usage.
+if [ "$1" = "--help" ]
+then grep '^#/' <"$0" |cut -c 4-
+  exit 1
+fi
+
+# merge-index produces cruft on stdout; send it to stderr,
+# but remember stdout for our output
+exec 3>&1
+exec 1>&2
+
+set -e
+set -x # be noisy for failbot logging
+
+# Setup GIT environment. We can work completely in a
+# temporary directory without any locking, as we don't
+# care about other simultaneous activity in the repository.
+# We may write new objects, but that is idempotent, and we
+# do not update any refs ourselves.
+tmpdir_base="$(pwd)/merge-trees"
+mkdir -p "$tmpdir_base"
+tmpdir=$(mktemp -d "$tmpdir_base/$2-$3.XXXXXX")
+trap 'cd "$GIT_DIR"; rm -rf "$tmpdir"' 0
+
+export GIT_WORK_TREE="$tmpdir/work"
+export GIT_INDEX_FILE="$tmpdir/index"
+mkdir "$GIT_WORK_TREE"
+cd $GIT_WORK_TREE
+
+# Do the merge (without git-merge).
+git read-tree -i -m --aggressive $1 $2 $3
+git merge-index git-merge-one-file -a || exit 2
+git write-tree >&3

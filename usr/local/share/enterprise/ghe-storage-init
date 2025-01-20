@@ -1,0 +1,241 @@
+#!/bin/bash
+#/ Usage: ghe-storage-init
+#/ Find and initialize any available blank storage device as /data/user
+set -e
+set -x
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+. /etc/github/enterprise-release
+
+# succeed if already mounted
+if mountpoint -q /data/user && test -f /data/user/version; then
+  for dir in "/data/user/git-hooks" "/data/user/git-hooks/environments" "/data/user/git-hooks/repos"; do
+    if [ ! -d "$dir" ]; then
+      mkdir -p "$dir"
+      chown git:git "$dir"
+    fi
+  done
+  mkdir -p /data/user/common
+  /usr/local/share/enterprise/ghe-fix-permissions
+  exit 0
+fi
+
+VGNAME=$(lvs --noheadings -o vg_name | grep ghe_storage_ | awk '{ print $1 }')
+
+if [ -e /run/virt-what/docker ] || [ -e /run/virt-what/podman ]; then
+  if ! mountpoint -q /data/user; then
+    echo "Error: no data volume mounted at /data/user" >&2
+    exit 1
+  fi
+  if [ -f /data/user/version ]; then
+    exit 0
+  fi
+  # todo: do some sanity checking on data volume? (verify ext3, etc)
+else
+  # enable lvm volume if present
+  if [ -n "$VGNAME" ]; then
+    vgchange -ay $VGNAME || [ -L /dev/ghe-loop0 ] && vgchange --refresh $VGNAME
+    vgscan --mknodes
+  fi
+
+  # mount if found (hotplugged?)
+  if [ -a /dev/mapper/$VGNAME-ghe_user_data ]; then
+    mountpoint -q /data/user || mount -o defaults,noauto,noatime,nofail,data=ordered /dev/$VGNAME/ghe_user_data /data/user
+    exit 0
+  fi
+
+  # find fresh storage device
+  DEVICE="$(ghe-storage-find 2>/tmp/ghe-storage-find-error)"
+
+  # todo: take lock?
+
+  # create lvm volume group (ghe_storage) and ext4 fs (ghe_user_data)
+  VOLUME=ghe_storage_$(openssl rand -hex 4)
+  pvcreate -ffy $DEVICE
+  vgcreate -f $VOLUME $DEVICE
+  lvcreate --zero n -n ghe_user_data -l 100%FREE $VOLUME || \
+  (sleep 1 && lvcreate --zero n  -n ghe_user_data -l 100%FREE $VOLUME) || \
+  (sleep 1 && lvcreate --zero n  -n ghe_user_data -l 100%FREE $VOLUME) || \
+  (sleep 1 && lvcreate --zero n  -n ghe_user_data -l 100%FREE $VOLUME) || true
+  vgscan --mknodes
+  mkfs.ext4 -L ghe_user_data /dev/$VOLUME/ghe_user_data
+
+  # mount
+  mount -o defaults,noauto,noatime,nofail,data=ordered /dev/$VOLUME/ghe_user_data /data/user
+fi
+
+# populate with initial contents
+rmdir /data/user/lost+found || true
+
+# Set ACLs on /var/log/journal.  Needs to happen here for docker images.
+setfacl -R -nm g:adm:rx,d:g:adm:rx /var/log/journal
+
+# import ssh keys
+mkdir -p /data/user/common
+chown admin:admin /data/user/common
+chmod 2775 /data/user/common
+setfacl -m d:o::0 /data/user/common
+setfacl -m u:enterprise-manage:rwx,d:u:enterprise-manage:rw /data/user/common
+setfacl -m u:ghes-manage-agent:rwx,d:u:ghes-manage-agent:rw /data/user/common
+# gateway needs access to HMAC secret
+setfacl -m u:ghes-manage-gateway:rx,d:u:ghes-manage-gateway:r /data/user/common
+
+for i in ssh_host_{rsa,dsa,ecdsa,ed25519}_key{,.pub}
+do
+  [ -f "/etc/ssh/$i" ] && cp "/etc/ssh/$i" /data/user/common/
+  [ -f "/data/user/common/$i" ] || continue
+  chown babeld:babeld "/data/user/common/$i"
+  setfacl -b "/data/user/common/$i"
+done
+cp /home/admin/.ssh/authorized_keys /data/user/common/authorized_keys
+setfacl -m u:ghes-manage-agent:rw /data/user/common/authorized_keys
+# when the instance started for the first time, cluster-node-init need permission to add ssh keys
+setfacl -m u:ghes-manage-agent:rw-x /home/admin/.ssh/
+setfacl -Rm u:ghes-manage-agent:rw-x /home/admin/.ssh/authorized_keys
+
+# babeld config goes here.
+mkdir -p /data/babeld/shared
+chown -R babeld:babeld /data/babeld/shared
+
+mkdir -p /data/ghes-manage-agent/current
+chown -R ghes-manage-agent:ghes-manage-agent /data/ghes-manage-agent/current
+
+# unique per-node uuid
+if [ ! -f /data/user/common/uuid ]; then
+  uuid -o /data/user/common/uuid || true
+fi
+chown admin:admin /data/user/common/uuid
+chmod 0644 /data/user/common/uuid
+
+# repos
+if [ ! -d /data/user/repositories ]; then
+  mkdir -p /data/user/repositories/info
+  date -u +"%Y-%m-%dT%H:%M:%SZ" > /data/user/repositories/info/nw-layout
+  chown git:git -R /data/user/repositories
+else
+  chown git:git /data/user/repositories
+fi
+
+# pages
+for part in $(seq 0 7); do
+  mkdir -p "/data/user/pages/$part"
+done
+touch /data/user/pages/.dpages-layout
+chown -R git:git /data/user/pages
+
+#uploads and storage
+for dir in /data/user/alambic_assets /data/user/storage; do
+  if [ -L "$dir" ]; then
+    chown -h alambic:alambic "$dir"
+    mkdir -p "$(readlink -f "$dir")"
+  fi
+  mkdir -p "$dir"
+  chown alambic:alambic "$dir"
+done
+
+for part in $(seq 0 15); do
+  char=$(printf "%x" $part)
+  mkdir -p "/data/user/storage/${char}"
+done
+chown -R alambic:alambic /data/user/storage
+
+# codeload config goes here.
+mkdir -p /data/codeload/shared
+chown -R codeload:codeload /data/codeload/shared
+chmod 700 /data/codeload/shared
+
+# codeload cache
+mkdir -p /data/user/codeload_archives
+chown codeload:codeload /data/user/codeload_archives
+chmod 0700 /data/user/codeload_archives
+
+# redis
+mkdir -p /data/user/redis
+chown redis:redis /data/user/redis
+chmod 0700 /data/user/redis
+
+# elasticsearch
+mkdir -p /data/user/elasticsearch
+chown elasticsearch:elasticsearch /data/user/elasticsearch
+chmod 700 /data/user/elasticsearch
+
+# auditlog migration
+mkdir -p /var/log/es8-auditlog-migration/supervisor
+chown -R elasticsearch:elasticsearch /var/log/es8-auditlog-migration
+chmod 700 /var/log/es8-auditlog-migration
+
+# mysql
+mkdir -p /data/user/mysql
+chown -R mysql:mysql /data/user/mysql
+chmod 700 /data/user/mysql
+
+# gitmon
+mkdir -p /data/user/gitmon /var/run/gitmon
+chown -R git:git /data/user/gitmon /var/run/gitmon
+
+# pre-receive hooks
+mkdir -p /data/user/git-hooks/environments/1
+ln -s /data/git-hooks/default /data/user/git-hooks/environments/1/0
+chown -R git:git /data/user/git-hooks
+
+# graphite-web
+chown -R graphite-web:graphite-web /opt/graphite
+
+# consul
+mkdir -p /data/user/consul
+chown -R consul:consul /data/user/consul
+
+# nomad
+mkdir -p /data/user/nomad
+chown -R nomad:nomad /data/user/nomad
+
+# docker
+mkdir -p /data/user/docker
+if [ -f /etc/github/.codespaces ]; then
+  chown  docker:docker /data/user/docker
+else 
+  chown -R docker:docker /data/user/docker
+fi
+
+# minio
+if ghe-config --true 'app.minio.enabled'; then
+  mkdir -p /data/user/minio
+  chown -R minio:minio /data/user/minio
+fi
+
+# postfix
+mkdir -p /var/spool/postfix
+
+# write blank slate version; existence of this file will start ghe-storage
+echo 0 > /data/user/version
+
+# if haproxy-pre-config.service is masked unmask, enable, and start it
+if systemctl list-unit-files --state=masked | grep haproxy-pre-config &>/dev/null; then
+  systemctl unmask haproxy-pre-config
+  systemctl start haproxy-pre-config
+  systemctl enable haproxy-pre-config
+fi
+
+if [ ! -d /data/ghes-manage-agent/current/log ]; then
+  mkdir -p /data/ghes-manage-agent/current/log
+  chown -R ghes-manage-agent:ghes-manage-agent /data/ghes-manage-agent/current/log
+fi
+
+if [ ! -f /data/user/common/maintenance_mode_message.txt ]; then
+  touch /data/user/common/maintenance_mode_message.txt
+fi
+
+# set permissions on ghes.yml if it exists on initial install
+# this is to configure the gh es cli tool when running ghe-config-apply, particularly for
+# cluster installs
+if [ -f /home/admin/.config/gh/ghes.yml ]; then
+  chown admin:admin /home/admin/.config/gh/ghes.yml
+  chmod 0600 /home/admin/.config/gh/ghes.yml
+fi

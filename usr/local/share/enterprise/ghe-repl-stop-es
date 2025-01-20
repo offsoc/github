@@ -1,0 +1,106 @@
+#!/bin/bash
+#/ Stops the Elasticsearch Nomad job
+#/ Usage: ghe-repl-stop-es
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+# we should only use this script to stop elasticsearch on replica nodes
+ensure_replica
+
+promote=false
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long promote --options p -- "$@") || {
+  usage
+  exit 2
+}
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--promote)
+      promote=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    esac
+done
+
+eslocal=$(curl -s -w "%{http_code}" -o /dev/null "http://localhost:9201/_cluster/health?pretty")
+
+if [ "$eslocal" -eq 200 ]; then
+  cluster=$(curl -s 'http://localhost:9201/_cluster/health?pretty') || true
+
+  status=$(echo "$cluster" | jq -r '.status')
+  unassigned=$(echo "$cluster" | jq -r '.unassigned_shards')
+
+  if [ "$status" = "yellow" ] && [ "$unassigned" -eq 0 ]; then
+    yellow_ok='true'
+  else
+    yellow_ok='false'
+  fi
+
+  if [ "$status" = "green" ] || [ "$yellow_ok" = "true" ]; then
+
+    # temporarily hard coding curl commands here
+    node_ip=$(sudo ghe-call-configrb node_ip)
+    replica_hostname=$(sudo ghe-call-configrb cluster_node_name)
+
+    curl -s -o /dev/null -XPUT \
+      "localhost:9201/_cluster/settings?pretty" \
+      -H "Content-Type: application/json" \
+      -d "{ \"persistent\": { \"cluster.routing.allocation.exclude._ip\": \"$node_ip\" } }"
+
+    retry_count=0
+    max_retries=3
+
+    while [ $retry_count -lt $max_retries ]; do
+      curl -s -XPOST "localhost:9201/_cluster/voting_config_exclusions?node_names=$replica_hostname&timeout=3m&pretty" \
+        && break
+
+      retry_count=$((retry_count + 1))
+      sleep 1
+    done
+
+    timeout=30
+    elapsed_time=0
+
+    while [ $elapsed_time -lt $timeout ]; do
+     # Run the curl command to get shard information
+     shard_info=$(curl -s http://localhost:9201/_cat/allocation?format=json | jq)
+
+     # Extract the shard count for the replica node
+     replica_shards=$(echo "$shard_info" | jq -r ".[] | select(.node == \"$replica_hostname\") | .shards")
+
+     # Check if the shard count is 0
+     if [ -n "$replica_shards" ] && [ "$replica_shards" -eq 0 ]; then
+       echo "Shards for $replica_hostname are 0, stopping Elasticsearch"
+         break
+     fi
+
+     # Sleep for 1 second
+     sleep 1
+
+     # Increment the elapsed time
+     elapsed_time=$((elapsed_time + 1))
+    done
+
+    if [ "$promote" = true ]; then
+      curl -s -X DELETE "localhost:9200/_cluster/voting_config_exclusions?wait_for_removal=false"
+    fi
+
+    /usr/local/share/enterprise/ghe-nomad-local-alloc-stop elasticsearch || echo "Failed to stop Elasticsearch"
+  elif [ "$status" = "yellow" ] && [ "$yellow_ok" = "false" ]; then
+    echo "Cannot stop elasticsearch because the cluster is in a yellow state."
+    exit 1
+  elif [ "$status" = "red" ]; then
+    echo "Cannot stop elasticsearch because the cluster is in a red state and would not recover"
+    exit 2
+  fi
+fi

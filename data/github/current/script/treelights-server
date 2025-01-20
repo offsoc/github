@@ -1,0 +1,45 @@
+#!/bin/bash
+#/ Usage: script/treelights-server
+#/
+#/ Runs treelights service.
+
+# If we need to run the service multiple times on different ports, this name should be parameterized with the port.
+NAME="treelights"
+
+if [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  source $SCRIPT_DIR/dx/lib/subproject-containers
+
+  SUBPROJECT_VERSION=$(subproject_version "treelights")
+  echo "treelights version $SUBPROJECT_VERSION"
+
+  # Ensure we clean up any existing containers, and remove after shutdown.
+  cleanup_docker() {
+    echo "Stopping ${NAME}..."
+    docker stop ${NAME} || true
+    exit 0
+  }
+
+  trap cleanup_docker EXIT INT QUIT TERM HUP
+
+  docker stop ${NAME} &> /dev/null || true
+  docker rm ${NAME} &> /dev/null || true
+
+  # Run the service.
+  docker run -d --rm --name ${NAME} --network host \
+    "ghcr.io/github/treelights/treelights-focal:$SUBPROJECT_VERSION"
+
+  docker logs --follow ${NAME} &
+  wait
+else
+  script/build-subproject treelights || exit 1
+
+  cd vendor/treelights
+  TREELIGHTS_BIN="script/server"
+
+  until [ -x "$TREELIGHTS_BIN" ]; do
+    sleep 1
+  done
+
+  exec "$TREELIGHTS_BIN"
+fi

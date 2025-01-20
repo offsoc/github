@@ -1,0 +1,87 @@
+#!/bin/bash
+# usage: source ./script/setup-issues-graph
+
+IG_EDITOR=false
+SETUP_DEV=false
+
+while test $# -gt 0; do
+  case "$1" in
+    --help)
+      echo "setup-issues-graph: Setup issues-graph dev environment."
+      echo
+      echo "Usage: script/setup-issue-graph [-e|--editor same|new] [--setup-dev]"
+      echo
+      echo "  -e, --editor         Auto-open issues-graph folder (in VSCode):"
+      echo "                         same: Add the folder to the current workspace (reloads the window)"
+      echo "                         new: Open the folder in a new window"
+      echo "  --setup-dev          Run all make rules to reinstall and rebuild the required tools/executables."
+      echo
+      exit;
+      ;;
+    -e|--editor)
+      IG_EDITOR="$2"
+      shift
+      shift
+      ;;
+    --setup-dev)
+      SETUP_DEV=true
+      shift
+      ;;
+    *)
+      echo "Unknown option '$1'."
+      echo
+      $(basename $0) --help && exit
+  esac
+done
+
+BASE_PATH=/workspaces/issues-graph
+
+YELLOW='\033[0;33m'
+NOCOLOR='\033[0m'
+
+if [[ ! -d $BASE_PATH ]]; then
+  git clone https://github.com/github/issues-graph $BASE_PATH
+else
+  echo -e "$BASE_PATH already exists; ${YELLOW}skipping cloning repository${NOCOLOR}"
+fi
+
+echo "=> Enabling issues-graph feature flags"
+bin/toggle-feature-flag enable issues_graph_api \
+  -F extract_checklists \
+  -F tasklist_block \
+  -F tasklist_block_markdown_at_rest \
+  -F tasklist_block_nested_html_pipeline \
+  -F issue_hierarchy_state \
+  -F issue_tasklist_block_writes \
+  -F issue_tasklist_block_updates \
+  -F project_hierarchy_columns \
+  -F tasklist_update_by_diffing \
+
+# issue_hierarchy_state, issue_tasklist_block_writes, issue_tasklist_block_updates
+# are all circuit breaker flags that are enabled by default in production - see: https://github.com/github/issues-graph/issues/1178
+
+# additional relevant flags, currently disabled by default
+# -F convert_to_tasklist_block \ (https://github.com/github/issues-graph/issues/918)
+# -F tasklist_block_nested_html_pipeline \ (https://github.com/github/issues-graph/issues/894)
+
+cd $BASE_PATH
+if [[ "$SETUP_DEV" == true ]]; then
+  echo "=> Preparing to rebuild issues-graph for development..."
+  ./script/setup -y
+else
+  echo "=> Sourcing issues-graph dependencies..."
+  . script/setup-dotnet
+  .devcontainer/scripts/source-goproxyenv.sh
+fi
+cd -
+
+case $IG_EDITOR in
+  new)
+    code $BASE_PATH
+    ;;
+  same)
+    code --add /workspaces/github $BASE_PATH
+    ;;
+esac
+
+echo "=> issues-graph setup is done!"

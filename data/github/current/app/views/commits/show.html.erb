@@ -1,0 +1,115 @@
+<%
+  title = current_blob_path ? "History for #{current_blob_path} - #{current_repository.name_with_display_owner}" : "Commits · #{current_repository.name_with_display_owner}"
+  page_info(
+    title: title,
+    container_xl: true,
+    selected_link: current_blob_path ? :repo_source : :repo_commits,
+    dashboard_pinnable_item_id: current_repository.global_relay_id,
+  )
+%>
+
+<% content_for :head do %>
+  <%= discover_commits_feed unless repository_offline? %>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <div class="Subhead">
+    <h2 class="Subhead-heading">Commits</h2>
+  </div>
+  <% if current_blob_path %>
+    <div class="file-navigation">
+      <div class="breadcrumb">
+        History for <%= breadcrumb_trail current_blob_path.split("/"), linker: :commits_path %>
+      </div>
+    </div>
+  <% else %>
+    <% if commit.present? %>
+      <a href="<%= commit_path(commit, commit.repository) %>" class="d-none js-permalink-shortcut" data-hotkey="y">Permalink</a><%# erblint:disable DataHotkey %>
+    <% end %>
+
+    <div class="file-navigation">
+      <%= render partial: "refs/list" %>
+    </div>
+  <% end %>
+
+  <% if commits.present? %>
+    <div class="js-navigation-container js-active-navigation-container mt-3" data-navigation-scroll="page" data-hpc>
+      <% if params[:browsing_rename_history] %>
+        <div class="TimelineItem TimelineItem--condensed pt-0 pb-2">
+          <div class="TimelineItem-badge">
+            <%= render Primer::Beta::Octicon.new(icon: "git-commit") %>
+          </div>
+          <div class="mt-1">
+            Renamed to <%= params[:new_path] %>
+            <a href="<%= commits_path(params[:new_path], params[:original_branch]) %>">
+              (Browse History)
+            </a>
+          </div>
+        </div>
+      <% end %>
+      <% grouped_commits(commits).reverse.each_with_index do |item, i| %>
+        <% date, commit_group = item[0], item[1] %>
+        <div class="TimelineItem TimelineItem--condensed <% if i == 0 %>pt-0<% else %>pt-2<% end %> pb-2">
+          <div class="TimelineItem-badge">
+            <%= render Primer::Beta::Octicon.new(icon: "git-commit") %>
+          </div>
+          <div class="TimelineItem-body">
+            <h2 class="f5 text-normal" <%= test_selector("commit-group-title") %>>Commits on <%= date.strftime("%b %-d, %Y") %></h2>
+            <ol class="mt-3 list-style-none Box Box--condensed ml-n6 ml-sm-0 position-relative" <%= test_selector("commit-group") %>>
+              <% commit_group.each do |commit| %>
+                <%= render Commits::ListItemComponent.new(
+                    commit: commit,
+                    current_blob_path: current_blob_path,
+                    turbo_frame: "repo-content-turbo-frame"
+                  ) %>
+              <% end %>
+            </ol>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <% if current_blob_path && !pagination_cursor.has_next_page? %>
+      <% current_blob_path = utf8(current_blob_path) %>
+      <%= render GitHub::BatchDeferredContentComponent.new(
+        url: check_for_rename_commits_path,
+        inputs: { current_blob_path: current_blob_path, last_commit: commits.last.oid, branch: utf8(params[:original_branch] || params[:branch]), new_path: params[:new_path] || current_blob_path },
+      ) do %>
+        <div class="TimelineItem TimelineItem--condensed pt-0 pb-2">
+          <div class="TimelineItem-badge">
+            <%= render Primer::Beta::Spinner.new(size: :small) %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+
+    <div class="paginate-container" <%= repo_turbo_frame_attr(flagged: true) %> data-html-cleaner-suppress-children>
+      <%= cursor_paginate(pagination_cursor, previous_label: "Newer", next_label: "Older") %>
+    </div>
+
+    <% if from_profile %>
+      <div class="text-center">
+        <p class="color-fg-muted f6 mt-4">
+          Seeing something unexpected? Take a look at the
+          <%= link_to "GitHub commits guide", GitHub.help_url + "/articles/troubleshooting-commits-on-your-timeline", class: "Link--inTextBlock" %>.
+        </p>
+      </div>
+    <% end %>
+
+  <% elsif commit.present? %>
+    <p data-hpc>
+      No commits found
+      <% if params[:author] %>
+        for "<%= params[:author] %>"
+        <%# Also let them know the search term if they should know it %>
+      <% end %>
+      <% if path_string.present? %>
+        at "<%= utf8(path_string) %>"
+      <% end %>
+    </p>
+  <% else %>
+    <p data-hpc>No commits found.</p>
+  <% end %>
+</div>
+<% end %>

@@ -1,0 +1,165 @@
+#!/bin/bash
+#/ Usage: ghe-config-apply-logs <subcommand>
+#/ Subcommands:
+#/   rotate - move the current ghe-config.log file to /data/user/config-apply/logs/<YYYYMMDD>/ghe-config.<hostname>.<config-apply-run-id>.log
+#/
+
+GHE_HOSTNAME=$(hostname)
+ROOT_DIRECTORY=/data/user
+GHE_CONFIG_DIR="$ROOT_DIRECTORY/common"
+GHE_CONFIG_LOG="$GHE_CONFIG_DIR/ghe-config.log"
+CONFIG_APPLY_DIR="$ROOT_DIRECTORY/config-apply"
+
+function rotate-config-log() {
+  CONFIG_APPLY_LOGS_DIR="$CONFIG_APPLY_DIR/logs"
+
+  # Perform initial checks on the logfile
+  if [ ! -f "$GHE_CONFIG_LOG" ];then
+    echo "No current log file at $GHE_CONFIG_LOG found. Skipping rotate."
+    exit 0
+  fi
+
+  # Parse the last modified date on the logfile + create a new dir if needed
+  LAST_CONFIG_APPLY_TIMESTAMP=$(date -r "$GHE_CONFIG_LOG" +%Y%m%d)
+  mkdir -p "$CONFIG_APPLY_LOGS_DIR/$LAST_CONFIG_APPLY_TIMESTAMP"
+
+  # Move config log into timestamed dir with updated format while preserving any fds on the log file
+  ROTATED_LOG="$CONFIG_APPLY_LOGS_DIR/$LAST_CONFIG_APPLY_TIMESTAMP/ghe-config.$GHE_HOSTNAME.$PREV_GHE_CONFIG_APPLY_RUN_ID.log"
+  cp "$GHE_CONFIG_LOG" "$ROTATED_LOG" && truncate -s 0 "$GHE_CONFIG_LOG"
+
+  echo "Rotated $GHE_CONFIG_LOG with Config Apply Run ID $PREV_GHE_CONFIG_APPLY_RUN_ID successfully to $ROTATED_LOG" >> "$ROTATED_LOG"
+}
+
+function rotate-traces-log(){
+  TRACES_LOG_DIR="$CONFIG_APPLY_DIR/traces"
+  TRACES_LOG="$TRACES_LOG_DIR/config-apply-traces.json"
+
+  # Perform initial checks on the logfile
+  if [ ! -f "$TRACES_LOG" ];then
+    echo "No current log file at $TRACES_LOG found. Skipping rotate."
+    exit 0
+  fi
+
+  # Parse the last modified date on the traces log + create a new dir if needed
+  LAST_CONFIG_APPLY_TIMESTAMP=$(date -r "$TRACES_LOG" +%Y%m%d)
+  mkdir -p "$TRACES_LOG_DIR/$LAST_CONFIG_APPLY_TIMESTAMP"
+
+  # Move traces log into timestamed dir with updated format while preserving any fds on the log file
+  ROTATED_TRACES_LOG="$TRACES_LOG_DIR/$LAST_CONFIG_APPLY_TIMESTAMP/config-apply-traces.$GHE_HOSTNAME.$PREV_GHE_CONFIG_APPLY_RUN_ID.json"
+  cp "$TRACES_LOG" "$ROTATED_TRACES_LOG" && truncate -s 0 "$TRACES_LOG"
+  echo "Rotated trace-log $TRACES_LOG to $ROTATED_TRACES_LOG successfully"
+}
+
+function rotate-events-log(){
+  EVENTS_LOG_DIR="$CONFIG_APPLY_DIR/events"
+  EVENTS_LOG="config-apply.$GHE_HOSTNAME.$PREV_GHE_CONFIG_APPLY_RUN_ID.log"
+
+  # Perform initial checks on the event log
+  if [ ! -f "$EVENTS_LOG_DIR/$EVENTS_LOG" ];then
+    echo "No current log file at $EVENTS_LOG_DIR/$EVENTS_LOG found. Skipping rotate."
+    exit 0
+  fi
+
+  # Parse the last modified date on the logfile + create a new dir if needed
+  EVENTS_LOG_MODIFIED_TIMESTAMP=$(date -r "$GHE_CONFIG_LOG" +%Y%m%d)
+  mkdir -p "$EVENTS_LOG_DIR/$EVENTS_LOG_MODIFIED_TIMESTAMP"
+
+  # Move events log into timestamed dir with updated format while preserving any fds on the log file
+  ROTATED_EVENTS_LOG="$EVENTS_LOG_DIR/$LAST_CONFIG_APPLY_TIMESTAMP/$EVENTS_LOG"
+  cp "$EVENTS_LOG" "$ROTATED_EVENTS_LOG" && truncate -s 0 "$EVENTS_LOG"
+  echo "Rotated event-log $EVENTS_LOG to $ROTATED_EVENTS_LOG successfully"
+}
+
+function rotate-centralized-logs(){
+  CENTRALIZED_LOGS_DIR="$CONFIG_APPLY_DIR/centralized-logs"
+
+  # find most recent centralized log files
+  CENTRALIZED_LOGS=$(find $CENTRALIZED_LOGS_DIR -maxdepth 1 -type f -exec ls -t1 {} \;)
+  for log in $CENTRALIZED_LOGS; do
+    MODIFIED_TIMESTAMP=$(date -r "$log" +%Y%m%d)
+    mkdir -p "$CENTRALIZED_LOGS_DIR/$MODIFIED_TIMESTAMP"
+    mv "$log" "$CENTRALIZED_LOGS_DIR/$MODIFIED_TIMESTAMP"
+    echo "Rotated centralized-log $log to $CENTRALIZED_LOGS_DIR/$MODIFIED_TIMESTAMP"
+  done
+  echo "Rotated centralized-logs successfully"
+}
+
+function rotate-centralized-events(){
+  CENTRALIZED_EVENTS_DIR="$CONFIG_APPLY_DIR/centralized-events"
+
+  # find most recent centralized log files
+  CENTRALIZED_EVENT_LOGS=$(find $CENTRALIZED_EVENTS_DIR -maxdepth 1 -type f -exec ls -t1 {} \;)
+  for log in $CENTRALIZED_EVENT_LOGS; do
+    MODIFIED_TIMESTAMP=$(date -r "$log" +%Y%m%d)
+    mkdir -p "$CENTRALIZED_EVENTS_DIR/$MODIFIED_TIMESTAMP"
+    mv "$log" "$CENTRALIZED_EVENTS_DIR/$MODIFIED_TIMESTAMP"
+    echo "Rotated centralized-event $log to $CENTRALIZED_EVENTS_DIR/$MODIFIED_TIMESTAMP"
+  done
+  echo "Rotated centralized-events successfully"
+}
+
+function cleanup-logs(){
+  # grab the days of logs to keep, otherwise default to 30
+  DAYS_TO_KEEP=$(ghe-config --get config-apply.cleanup-logs.days-to-keep)
+  if [ -z "$DAYS_TO_KEEP" ];then
+    DAYS_TO_KEEP=30
+  fi
+
+  # cleanup all files older than DAYS_TO_KEEP
+  echo "Cleaning the following files:"
+  find $CONFIG_APPLY_DIR -type f -mtime +"$DAYS_TO_KEEP" -exec sudo rm -v {} \;
+
+  # cleanup all dirs older than DAYS_TO_KEEP except the top-level ones
+  TOP_LEVEL_DIRS=$(find $CONFIG_APPLY_DIR -mindepth 1 -maxdepth 1 -type d)
+  echo "Cleaning the following dirs under $dir:"
+  for dir in $TOP_LEVEL_DIRS; do
+    find "$dir" -mindepth 1 -type d -mtime +"$DAYS_TO_KEEP" -exec sudo rm -v {} \;
+  done
+
+  echo "Cleaned up logs older than $DAYS_TO_KEEP days successfully!"
+}
+
+if [[ $# -lt 1 ]]; then
+  echo "No subcommand specified. Exiting."
+  exit 1
+fi
+
+# Skip if for some reason our previous config apply run id is empty
+if [ -z "$PREV_GHE_CONFIG_APPLY_RUN_ID" ];then
+  echo "No Config Apply Run ID found in $GHE_CONFIG_LOG. Skipping."
+  exit 0
+fi
+
+# use the latest entry for the run id — there may be multiple rows with either the same or different run ids
+PREV_GHE_CONFIG_APPLY_RUN_ID=$(echo "$PREV_GHE_CONFIG_APPLY_RUN_ID" | tail -n 1)
+
+# Skip if our previous config apply run id is the same as our current config apply run id
+if [ -n "$GHE_CONFIG_APPLY_RUN_ID" ] && [ "$PREV_GHE_CONFIG_APPLY_RUN_ID" == "$GHE_CONFIG_APPLY_RUN_ID" ];then
+  echo "Previous Config Apply Run ID: $PREV_GHE_CONFIG_APPLY_RUN_ID matches current Config Apply Run ID: $GHE_CONFIG_APPLY_RUN_ID. Skipping rotate."
+  exit 0
+fi
+
+case "$1" in
+  "rotate-config-log")
+    rotate-config-log
+    ;;
+  "rotate-traces-log")
+    rotate-traces-log
+    ;;
+  "rotate-events-log")
+    rotate-events-log
+    ;;
+  "rotate-centralized-logs")
+    rotate-centralized-logs
+    ;;
+  "rotate-centralized-events")
+    rotate-centralized-events
+    ;;
+  "cleanup-logs")
+    cleanup-logs
+    ;;
+  *)
+    echo "Invalid subcommand. Exiting."
+    exit 1
+    ;;
+esac

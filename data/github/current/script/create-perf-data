@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+#/ Usage: create-perf-data
+#/ Create an organization for performance testing, 200 of users as org owners and a root public team in the database.
+#/ Each login will start with <perfuser> prefix and is suffixed with a number.
+
+# Show usage
+if ARGV.include?("--help")
+  system "grep ^#/ '#{__FILE__}' |cut -c4-"
+  exit 1
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+
+# organization name for performance testing
+org_name = "perftestorg"
+
+# user name prefix
+prefix   = "perfuser"
+
+# root team for nested team api tests
+team_name = "perfteam"
+# number of user to be created
+count = 200
+admins = Array.new(count)
+
+#default password for all perf users
+password = GitHub.default_password
+
+# Create all the users and add as org owners
+User.transaction do
+  (1..count).each do |num|
+    login = "%s%03d" % [prefix, num]
+
+    if User.find_by_login(login)
+      puts "    exists: %s" % [login]
+      admins << login
+      next
+    end
+
+    user =
+      User.new(
+        login: login,
+        email: "#{login}@email.com",
+        password: password,
+        password_confirmation: password,
+        spammy_reason: "Not spammy",
+      )
+    puts "  creating: %s <%s>" % [user.login, user.email]
+    user.save!
+    admins << login
+  end
+  puts "The password for all users is: #{password}"
+end
+
+# Create org_name
+org = Organization.find_by_login(org_name)
+if org
+  puts "    exists: %s , deleting..." % [org_name]
+  org.destroy
+end
+org = Organization.new
+org.login = org_name
+org.billing_email = "#{org_name}@email.org"
+org.admin_logins = admins
+org.save!
+puts "Org #{org_name} created"
+
+#Create perf team
+team = Team.new
+team.organization_id = org.id
+team.organization = org
+team.name = team_name
+team.privacy = :closed
+team.save!
+puts "Team #{team_name} created."

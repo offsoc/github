@@ -1,0 +1,234 @@
+#!/bin/bash
+#/ Usage: ghe-aqueduct <command> [options]
+#/
+#/ Interact with the aqueduct queue service.
+#/ Commands:
+#/   ghe-aqueduct list                                                 List all queues
+#/   ghe-aqueduct queue_depth [--app <app>] --queue <queue>            Get the queue depth for a queue
+#/   ghe-aqueduct in_progress [--app <app>] [--queue <queue>]          List in-progress jobs
+#/   ghe-aqueduct pause [--app <app>] --queue <queue>                  Pause work on a queue
+#/   ghe-aqueduct paused                                               List all paused queues
+#/   ghe-aqueduct resume [--app <app>] --queue <queue>                 Resume work on a queue
+#/   ghe-aqueduct status                                               Dump all queues, queue depths and paused state
+#/   ghe-aqueduct delete_queue [--app <app>] --queue <queue> [--force] Deletes a queue
+#/
+#/ Examples:
+#/     $ ghe-aqueduct list | jq .
+#/     {
+#/       "queues": [
+#/         {
+#/           "app": "github-production",
+#/           "name": "index_high"
+#/         }
+#/       ]
+#/     }
+#/
+#/     $ ghe-aqueduct pause --app github-production --queue index_high
+#/     Paused app=github-production queue=index_high
+#/
+#/     $ ghe-aqueduct resume --app github-production --queue index_high
+#/     Resumed app=github-production queue=index_high
+#/
+set -e
+
+URL=http://localhost:9096
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+list_queues() {
+  curl -s \
+    --header 'Content-Type:application/json' \
+    --data '{}' \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/ListQueues
+}
+
+queue_depth() {
+  local app=$1
+  local queue=$2
+
+  curl -s \
+    --header 'Content-Type:application/json' \
+    --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/QueueDepth | jq -r '.depth = ((.depth | tonumber) // 0)'
+}
+
+in_progress() {
+  local app=$1
+  local queue=$2
+
+  curl -s \
+    --header 'Content-Type:application/json' \
+    --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/InProgressJobs | jq .
+}
+
+pause_queue() {
+  local app=$1
+  local queue=$2
+
+  curl -s \
+    --header 'Content-Type:application/json' \
+    --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/Pause > /dev/null
+}
+
+resume_queue() {
+  local app=$1
+  local queue=$2
+
+  curl -s \
+    --header 'Content-Type:application/json' \
+    --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/Resume > /dev/null
+}
+
+paused_queues() {
+  curl -s -w "\n" \
+    --header 'Content-Type:application/json' \
+    --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+    $URL/twirp/aqueduct.api.v1.JobQueueService/Paused
+}
+
+status() {
+  curl -s $URL/admin/queue_depth
+}
+
+delete_queue() {
+  local app=$1
+  local queue=$2
+  local force=$3
+
+  if [ "$force" != 1 ]; then
+    depth=$(curl -s \
+      --header 'Content-Type:application/json' \
+      --data "{\"app\": \"$app\", \"queue\": \"$queue\"}" \
+      $URL/twirp/aqueduct.api.v1.JobQueueService/QueueDepth | jq -r '.depth = ((.depth | tonumber) // 0) | .depth')
+
+    read -r -p "Delete $app queue $queue ($depth jobs)? y/n: " confirm
+  else
+    confirm="y"
+  fi
+
+  if [[ $confirm = "y" ]]; then
+    magic_word=$(curl -s -d app="$app" -d queue="$queue" $URL/admin/delete_queue | jq -r .magic_word)
+    curl -s -d app="$app" -d queue="$queue" -d magic_word="$magic_word" $URL/admin/delete_queue
+  fi
+}
+
+CMD=$1
+if [ -z "$CMD" ]; then
+  >&2 echo "Error: Need to specify a command"
+  usage
+  exit 2
+fi
+shift
+
+# Default to the github app
+APP="github-${RAILS_ENV:-production}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -a|--app)
+      APP=$2
+      shift
+      ;;
+    -q|--queue)
+      QUEUE=$2
+      shift
+      ;;
+    -v|--verbose)
+      set -x
+      ;;
+    --force)
+      FORCE=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+case "$CMD" in
+  -h|--help)
+    usage
+    exit 2
+    ;;
+  list)
+    list_queues
+    ;;
+  queue_depth)
+    if [ -z "$APP" ]; then
+      >&2 echo "Error: Missing required flag --app"
+      exit 2
+    fi
+
+    if [ -z "$QUEUE" ]; then
+      >&2 echo "Error: Missing required flag --queue"
+      exit 2
+    fi
+
+    queue_depth "$APP" "$QUEUE"
+    ;;
+  in_progress)
+    in_progress "$APP" "$QUEUE"
+    ;;
+  pause)
+    if [ -z "$APP" ]; then
+      >&2 echo "Error: Missing required flag --app"
+      exit 2
+    fi
+
+    if [ -z "$QUEUE" ]; then
+      >&2 echo "Error: Missing required flag --queue"
+      exit 2
+    fi
+
+    pause_queue "$APP" "$QUEUE"
+    >&2 echo "Paused app=$APP queue=$QUEUE"
+    ;;
+  resume)
+    if [ -z "$APP" ]; then
+      >&2 echo "Error: Missing required flag --app"
+      exit 2
+    fi
+
+    if [ -z "$QUEUE" ]; then
+      >&2 echo "Error: Missing required flag --queue"
+      exit 2
+    fi
+
+    resume_queue "$APP" "$QUEUE"
+    >&2 echo "Resumed app=$APP queue=$QUEUE"
+    ;;
+  paused)
+    paused_queues
+    ;;
+  status)
+    status
+    ;;
+  delete_queue)
+    if [ -z "$APP" ]; then
+      >&2 echo "Error: Missing required flag --app"
+      exit 2
+    fi
+
+    if [ -z "$QUEUE" ]; then
+      >&2 echo "Error: Missing required flag --queue"
+      exit 2
+    fi
+
+    delete_queue "$APP" "$QUEUE" "$FORCE"
+    ;;
+  *)
+    >&2 echo "Error: Unknown command '$CMD'"
+    usage
+    exit 2
+    ;;
+esac

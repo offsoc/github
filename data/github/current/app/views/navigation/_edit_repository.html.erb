@@ -1,0 +1,345 @@
+<%#
+These first two lines set the label, which can be set to "Collaborators".
+In a case when a repo is owned by a user that is an emu owned we do not want to display it,
+thus hide_collaboration variable is set only when repo is not owned by an organization.
+The code here either displays correct label or hiding it.
+%>
+<%
+collaboration_label = current_repository.in_organization? ? "Collaborators and teams" : "Collaborators"
+is_emu_repo = current_repository.is_enterprise_managed?
+collaboration_label = is_emu_repo && !current_repository.organization&.business&.emu_repository_collaborators_enabled? ? "Teams" : collaboration_label
+hide_collaboration = is_emu_repo && !current_repository.in_organization?
+show_interaction_limit_nav = GitHub.interaction_limits_enabled? && !current_repository.private? && current_repository.can_set_interaction_limits?(current_user)
+show_tiered_reporting_nav = current_repository.can_access_tiered_reporting?(current_user)
+show_code_review_limit_nav = current_repository.public? && GitHub.code_review_limits_enabled?
+is_admin = current_repository.adminable_by?(current_user)
+
+menu_item_link_classes = "SideNav-item d-flex flex-items-center repo-menu-item"
+sub_menu_classes = "SideNav color-bg-default border-top py-3 pl-3 repo-sub-menu"
+sub_menu_item_link_classes = "SideNav-subItem"
+%>
+
+<% if GitHub.custom_tabs_enabled? && current_page?(repository_tabs_path) %>
+  <% @selected_link = :custom_tabs %>
+<% end %>
+
+<div data-pjax="#repo-content-pjax-container" data-turbo-frame="repo-content-turbo-frame">
+  <%= render(Primer::Beta::NavList.new(selected_item_id: @selected_link, aria: { label: "General settings" }, item_classes: "repo-menu-item", data: test_selector_hash("repo-settings-nav"))) do |component| %><%# rubocop:disable Lint/InstanceVariable %>
+    <% if is_admin %>
+      <% component.with_item(label: "General", href: edit_repository_path(current_repository), selected_by_ids: :repo_settings) do |item| %>
+        <% item.with_leading_visual_icon(icon: :gear) %>
+      <% end %>
+
+      <% component.with_group do |group| %>
+        <% group.with_heading(heading_level: 2, title: "Access") %>
+
+        <% if hide_collaboration %>
+          <% group.with_item(label: "Collaboration and access", href: repository_access_management_path, selected_by_ids: :collaborators) do |item| %>
+            <% item.with_leading_visual_icon(icon: :people) %>
+          <% end %>
+        <% else %>
+          <% group.with_item(label: collaboration_label, href: repository_access_management_path, selected_by_ids: :collaborators) do |item| %>
+            <% item.with_leading_visual_icon(icon: :people) %>
+          <% end %>
+        <% end %>
+
+        <% if current_repository.owner.custom_roles_supported? %>
+          <% group.with_item(label: "Team and member roles", href: settings_role_details_path, selected_by_ids: :role_details, data: test_selector_hash("role_details")) do |item| %>
+            <% item.with_leading_visual_icon(icon: :"id-badge") %>
+          <% end %>
+        <% end %>
+
+        <% if show_interaction_limit_nav || show_code_review_limit_nav || show_tiered_reporting_nav %>
+          <% group.with_item(label: "Moderation options", submenu_classes: "repo-sub-menu") do |item| %>
+            <% if show_interaction_limit_nav %>
+              <% item.with_item(label: "Interaction limits", href: repository_interaction_limits_path(current_repository.owner, current_repository), selected_by_ids: :interaction_limits) do |subitem| %>
+                <% if RepositoryInteractionAbility.has_active_limits?(current_repository) %>
+                  <% subitem.with_trailing_visual_icon(icon: :clock, color: :success) %>
+                <% end %>
+              <% end %>
+            <% end %>
+            <% if show_code_review_limit_nav %>
+              <% item.with_item(label: "Code review limits", href: repository_code_review_limits_path(current_repository.owner, current_repository), selected_by_ids: :code_review_limits) %>
+            <% end %>
+            <% if show_tiered_reporting_nav %>
+              <% item.with_item(label: "Reported content", href: reported_content_path(current_repository.owner, current_repository), selected_by_ids: :reported_content) %>
+            <% end %>
+
+            <% item.with_leading_visual_icon(icon: :"comment-discussion") %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% component.with_group do |group| %>
+        <% group.with_heading(heading_level: 2, title: "Code and automation") %>
+
+        <% if current_repository.heads.any? %>
+          <% unless BranchProtectionsConfig.new(current_repository).branch_protection_disabled? %>
+            <% group.with_item(label: "Branches", href: edit_repository_branches_path, selected_by_ids: :repo_branch_settings) do |item| %>
+              <% item.with_leading_visual_icon(icon: :"git-branch") %>
+            <% end %>
+          <% end %>
+
+          <% group.with_item(label: "Tags", href: edit_repository_tag_protection_path, selected_by_ids: :repo_protected_tags_settings) do |item| %>
+            <% item.with_leading_visual_icon(icon: :"tag") %>
+          <% end %>
+        <% end %>
+
+        <% group.with_item(label: "Rules", id: "repo_rules") do |item| %>
+          <% item.with_item(label: "Rulesets", href: repository_rulesets_path, selected_by_ids: :repo_rulesets) %>
+          <% if current_repository.plan_supports?(:enterprise_rulesets) || current_repository.in_organization? %>
+            <% item.with_item(label: "Insights", href: repository_rule_insights_path, selected_by_ids: :repo_rule_insights) %>
+          <% end %>
+          <% if current_repository.plan_supports?(:enterprise_rulesets) && current_repository.delegated_bypass_enabled? && !current_repository.fork? && !current_repository.public?%>
+            <% item.with_item(label: "Bypass requests", href: repository_rules_bypass_requests_path, selected_by_ids: :repo_rules_bypass_requests) do |item| %>
+              <% item.with_trailing_visual_label(
+                scheme: :success,
+                title: "Feature Release Label: Beta",
+                aria: { label: "Feature Release Label: Beta" }) { "Beta" } %>
+            <% end %>
+          <% end %>
+          <% item.with_leading_visual_icon(icon: "repo-push") %>
+        <% end %>
+
+        <% if GitHub.actions_enabled? %>
+          <% group.with_item(
+            component_klass: Settings::ActionsNavComponent,
+            entity: current_repository
+          ) %>
+        <% end %>
+
+        <% group.with_item(label: GitHub.enterprise? ? 'Hooks' : 'Webhooks', href: hooks_path(current_repository), selected_by_ids: :hooks) do |item| %>
+          <% item.with_leading_visual_icon(icon: :webhook) %>
+        <% end %>
+
+        <%= render_nothing_if_database_fails do %>
+          <% group.with_item(
+            component_klass: Settings::CopilotRepoNavComponent,
+            entity: current_repository,
+          ) %>
+        <% end %>
+
+        <% if GitHub.actions_enabled? %>
+          <% if current_repository.can_use_environments? %>
+            <% group.with_item(label: "Environments", href: repository_environments_path, selected_by_ids: :repository_environments) do |item| %>
+              <% item.with_leading_visual_icon(icon: :server) %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <% if Codespaces::RepositoryPolicy.async_with_prefill(current_user, current_repository).sync.can_modify_codespace_repo_settings? %>
+          <% group.with_item(label: "Codespaces", href: codespaces_repository_settings_path, selected_by_ids: :codespaces_repository_settings) do |item| %>
+            <% item.with_leading_visual_icon(icon: :codespaces) %>
+          <% end %>
+        <% end %>
+
+        <% group.with_item(label: "Pages", href: repository_pages_settings_path, selected_by_ids: :repo_pages_settings) do |item| %>
+          <% item.with_leading_visual_icon(icon: :browser) %>
+        <% end %>
+
+        <% if current_repository.owner.organization? %>
+          <% group.with_item(label: "Custom properties", href: repository_custom_properties_settings_path, selected_by_ids: :repo_custom_properties) do |item| %>
+            <% item.with_leading_visual_icon(icon: :note) %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% component.with_group do |group| %>
+        <% group.with_heading(heading_level: 2, title: "Security") %>
+
+        <% group.with_item(label: "Code security and analysis", href: repository_security_and_analysis_path, data: test_selector_hash("security_analysis_repository_nav"), selected_by_ids: :security_analysis) do |item| %>
+          <% item.with_leading_visual_icon(icon: :codescan) %>
+        <% end %>
+
+        <% group.with_item(label: "Deploy keys", href: repository_keys_path, selected_by_ids: :repo_keys_settings) do |item| %>
+          <% item.with_leading_visual_icon(icon: :key) %>
+        <% end %>
+
+        <% group.with_item(
+          component_klass: Settings::SecretsNavComponent,
+          user: current_user,
+          entity: current_repository
+        ) %>
+      <% end %>
+
+      <% component.with_group do |group| %>
+        <% group.with_heading(heading_level: 2, title: "Integrations") %>
+
+        <% group.with_item(label: "GitHub Apps", href: repository_installations_path(current_repository.owner, current_repository), selected_by_ids: :integration_installations) do |item| %>
+          <% item.with_leading_visual_icon(icon: :hubot) %>
+        <% end %>
+
+        <% group.with_item(label: "Email notifications", href: repository_notification_settings_path(current_repository.owner, current_repository), selected_by_ids: :notifications) do |item| %>
+          <% item.with_leading_visual_icon(icon: :mail) %>
+        <% end %>
+
+        <% if current_repository.plan_supports?(:custom_key_links) %>
+          <% group.with_item(label: "Autolink references", href: key_links_path, selected_by_ids: :key_links_settings) do |item| %>
+            <% item.with_leading_visual_icon(icon: :"cross-reference") %>
+          <% end %>
+        <% end %>
+
+        <% if GitHub.custom_tabs_enabled? %>
+          <% group.with_item(label: "Custom tabs", href: repository_tabs_path, selected_by_ids: :custom_tabs) do |item| %>
+            <% item.with_leading_visual_icon(icon: :"tab-external") %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if current_repository.supports_enterprise_banner? %>
+        <%= render partial: "navigation/edit_repository_announcement_sidebar", locals: { component: component } %>
+      <% end %>
+    <% else %>
+      <%
+        can_toggle_wiki = current_repository.async_can_toggle_wiki?(current_user)
+        can_toggle_projects = current_repository.async_can_toggle_projects?(current_user)
+        can_manage_security_product_settings = SecurityProduct::Permissions::RepoAuthz.new(current_repository, actor: current_user).async_can_manage_security_products?
+        can_edit_repo_protections = current_repository.async_can_edit_repo_protections?(current_user)
+        can_manage_webhooks = current_repository.async_can_manage_webhooks?(current_user)
+        can_manage_pages = GitHub.pages_enabled? ? current_repository.async_can_toggle_page_settings?(current_user) : Promise.resolve(false)
+        can_manage_deploy_keys = current_repository.async_can_manage_deploy_keys?(current_user)
+        can_edit_announcements = current_repository.async_can_edit_announcement_banners?(current_user)
+
+        show_options = can_toggle_wiki.sync || can_toggle_projects.sync
+        show_security_and_analysis = can_manage_security_product_settings.sync
+        show_branches = show_tags = can_edit_repo_protections.sync
+        show_branches = show_branches && !BranchProtectionsConfig.new(current_repository).branch_protection_disabled?
+        show_rules = can_edit_repo_protections.sync
+        show_webhooks = can_manage_webhooks.sync
+        show_pages = can_manage_pages.sync
+        show_custom_properties = current_repository.owner.organization? && current_repository.async_can_edit_custom_property_values_as_repo_actor?(current_user).sync
+        show_deploy_keys = can_manage_deploy_keys.sync
+        show_announcements = current_repository.supports_enterprise_banner? && can_edit_announcements.sync
+      %>
+
+      <% if show_options %>
+        <% component.with_item(
+          label: "General",
+          data: test_selector_hash("general_repository_nav"),
+          href: edit_repository_path(current_repository),
+          selected_by_ids: :repo_settings
+        ) do |item| %>
+          <% item.with_leading_visual_icon(icon: :gear) %>
+        <% end %>
+      <% end %>
+
+      <% if show_interaction_limit_nav %>
+        <% component.with_group do |group| %>
+          <% group.with_heading(heading_level: 2, title: "Access") %>
+          <% group.with_item(
+            label: "Moderation options",
+            submenu_classes: "repo-sub-menu",
+            test_selector: "moderation_repository_nav",
+          ) do |item| %>
+            <% item.with_item(label: "Interaction limits", href: repository_interaction_limits_path(current_repository.owner, current_repository), selected_by_ids: :interaction_limits) do |subitem| %>
+              <% if RepositoryInteractionAbility.has_active_limits?(current_repository) %>
+                <% subitem.with_trailing_visual_icon(icon: :clock, color: :success) %>
+              <% end %>
+            <% end %>
+
+            <% item.with_leading_visual_icon(icon: :"comment-discussion") %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if show_branches || show_tags || show_rules || show_webhooks || show_pages || show_custom_properties %>
+        <% component.with_group do |group| %>
+          <% group.with_heading(heading_level: 2, title: "Code and automation") %>
+
+          <% if show_branches && current_repository.heads.any? %>
+            <% group.with_item(
+              label: "Branches",
+              href: edit_repository_branches_path,
+              selected_by_ids: :repo_branch_settings
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :"git-branch") %>
+            <% end %>
+          <% end %>
+
+          <% if show_tags %>
+            <% group.with_item(
+              label: "Tags",
+              href: edit_repository_tag_protection_path,
+              selected_by_ids: :repo_tags
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :"tag") %>
+            <% end %>
+          <% end %>
+
+          <% if show_rules %>
+            <% group.with_item(label: "Rules", id: "repo_rules") do |item| %>
+              <% item.with_item(label: "Rulesets", href: repository_rulesets_path, selected_by_ids: :repo_rulesets) %>
+              <% if current_repository.plan_supports?(:enterprise_rulesets) || current_repository.in_organization? %>
+                <% item.with_item(label: "Insights", href: repository_rule_insights_path, selected_by_ids: :repo_rule_insights) %>
+              <% end %>
+              <% if current_repository.plan_supports?(:enterprise_rulesets) && current_repository.delegated_bypass_enabled? && !current_repository.fork? %>
+                <% item.with_item(label: "Bypass requests", href: repository_rules_bypass_requests_path, selected_by_ids: :repo_rules_bypass_requests) %>
+              <% end %>
+              <% item.with_leading_visual_icon(icon: "repo-push") %>
+            <% end %>
+          <% end %>
+
+          <% if show_webhooks %>
+            <% group.with_item(
+              label: GitHub.enterprise? ? "Hooks" : "Webhooks",
+              data: test_selector_hash("webooks_repository_nav"),
+              href: hooks_path(current_repository),
+              selected_by_ids: :hooks
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :webhook) %>
+            <% end %>
+          <% end %>
+
+          <% if show_pages %>
+            <% group.with_item(
+              label: "Pages",
+              data: test_selector_hash("pages_repository_nav"),
+              href: repository_pages_settings_path,
+              selected_by_ids: :repo_pages_settings
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :browser) %>
+            <% end %>
+          <% end %>
+
+          <% if show_custom_properties %>
+            <% group.with_item(label: "Custom properties", href: repository_custom_properties_settings_path, selected_by_ids: :repo_custom_properties) do |item| %>
+              <% item.with_leading_visual_icon(icon: :note) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if show_security_and_analysis || show_deploy_keys %>
+        <% component.with_group do |group| %>
+          <% group.with_heading(heading_level: 2, title: "Security") %>
+
+          <% if show_security_and_analysis %>
+            <% group.with_item(
+              label: "Code security and analysis",
+              data: test_selector_hash("security_analysis_repository_nav"),
+              href: repository_security_and_analysis_path,
+              selected_by_ids: :security_analysis
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :codescan) %>
+            <% end %>
+          <% end %>
+
+          <% if show_deploy_keys %>
+            <% group.with_item(
+              label: "Deploy keys",
+              data: test_selector_hash("deploy_hooks_repository_nav"),
+              href: repository_keys_path,
+              selected_by_ids: :repo_keys_settings
+            ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :key) %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if show_announcements %>
+        <%= render partial: "navigation/edit_repository_announcement_sidebar", locals: { component: component } %>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>

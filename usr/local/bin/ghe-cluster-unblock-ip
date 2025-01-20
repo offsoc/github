@@ -1,0 +1,113 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-unblock-ip [-h] [ip]
+#/
+#/ Removes GHES firewall rules from current cluster node that block all traffic to and from a given IP.
+#/ Currently only supports ipv4 addresses.
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   ip                 IP to unblock
+#/
+set -euo pipefail
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+get_opts() {
+  while getopts "h" OPTION; do
+    case $OPTION in
+      h)
+        usage
+        exit 0
+        ;;
+      \?)
+        usage
+        exit 3
+        ;;
+    esac
+  done
+}
+
+main() {
+  if [ "$#" -ne 1 ]; then
+    echo "[ Error ] Invalid number of parameters. Exiting." >&2
+    usage
+    exit 2
+  fi
+
+  get_opts "$@"
+
+  # Check if we're on a cluster.
+  if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ] || [ ! -f "/data/user/common/cluster.conf" ]; then
+    echo "[ Error ] Clustering is not configured on this host. Exiting." >&2
+    exit 4
+  fi
+
+  # Check if cluster.conf is configured for standalone HA.
+  if [ -n "$(ghe-config --true cluster.ha)" ]; then
+    echo "[ Error ] ghe-cluster-unblock-ip is not supported on standalone HA. Exiting." >&2
+    exit 12
+  fi
+
+  # Check that the parameter is not empty
+  if [ -z "$1" ]; then
+    echo "[ Error ] No IP address specified. Exiting." >&2
+    exit 5
+  fi
+
+  # Check that the parameter is a valid IP
+  if ! [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[ Error ] '$1' is not a valid ipv4 address. Exiting." >&2
+    exit 6
+  fi
+
+  current_host_ip=$(hostname -I | tr -d '[:blank:]')
+  if [[ "$current_host_ip" == "$1" ]]; then
+    echo "[ Warning ] '$1' specifies the current host. Exiting." >&2
+    exit 7
+  fi
+
+  # Expecting up to 2 blocking rules - one for incoming and one for outgoing
+  ghes_block_rules=$(sudo ufw status numbered | grep "GHES - ghe-cluster-block-ip" || true)
+  if [ -z "$ghes_block_rules" ]; then
+    echo "[ Warning ] No GHES managed rules found. Exiting." >&2
+    exit 8
+  fi
+
+  # There should be at most two rules for a given IP
+  ghes_block_rules_matching_ip=$(echo "$ghes_block_rules" | grep "$1" || true)
+
+  if [ -z "$ghes_block_rules_matching_ip" ]; then
+    echo "[ Warning ] No GHES managed rules that match '$1' were found. Exiting." >&2
+    exit 9
+  fi
+
+  # Return the count of the number of matching rules
+  ghes_block_rules_matching_ip_count=$(echo "$ghes_block_rules_matching_ip" | wc -l)
+
+  # If there are more than two matching rules, return an error
+  if [ "$ghes_block_rules_matching_ip_count" -gt 2 ]; then
+    echo "[ Error ] More than two GHES managed rules that match '$1' were found. Please reach out to GHES support for assistance. Exiting." >&2
+    exit 10
+  fi
+
+  # Need to return these in reverse order because of the way ufw deletes rules
+  rule_ids_to_delete=$(echo "$ghes_block_rules_matching_ip" | cut -d'[' -f2 | cut -d']' -f1 | tr -d '[:blank:]' | sort -r)
+
+  # Delete the rules
+  for rule in $rule_ids_to_delete; do
+    sudo ufw --force delete "$rule"
+  done
+
+  # Check that there are no longer any rules that match the provided IP
+  if [ -n "$(sudo ufw status numbered | grep "GHES - ghe-cluster-block-ip" | grep "$1")" ]; then
+    echo "[ Warning ] Rule(s) for '$1' still exist. Please reach out to GHES support for assistance. Exiting." >&2
+    exit 11
+  fi
+
+  current_host=$(hostname -I | tr -d '[:blank:]')
+  echo "Successfully unblocked '$1' on '$current_host'."
+}
+
+main "$@"

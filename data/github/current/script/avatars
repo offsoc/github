@@ -1,0 +1,274 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require "json"
+require "net/http"
+
+DEST_PATH = "public/images/modules/site/avatars"
+
+APPROVED_HANDLES_FILES = [
+  "config/site/approved_handles.json",
+  "config/site/approved_handles_diversity.json",
+  "config/site/approved_handles_misc.json",
+]
+
+MAX_SIZE = 200 # avatar width and height in pixels, i.e. 200
+
+HELP = <<HEREDOC
+A script that facilitates managing allowed handles and static avatar imagery used to display STAFF avatars in marketing pages.
+
+Approved handles lists: #{APPROVED_HANDLES_FILES.to_json}
+Static avatar path:     "#{DEST_PATH}"
+
+Usage:                   script/avatars [function] [values]...
+Example:                 script/avatars add stamat
+
+Functions:
+    add   [handle]                     Adds the provided handle to the approved_handles.json and downloads the corresponding avatar image.
+    add   [handle] [file]              Adds the provided handle to the specified JSON file and downloads the corresponding avatar image.
+    check [handle]                     Checks if the provided handle is found on the approved lists.
+    check [handle] [file]              Checks if the provided handle is found on the specified approved list file.
+    fetch                              Downloads all avatar images from all approved lists
+    fetch [handle]                     Downloads a single avatar image for the provided handle, replacing the old one
+    rm                                 Removes all avatar images!
+    rm    [handle]                     Removes the provided handle from all JSON approved lists and deletes the corresponding avatar image.
+    rm    [handle] [file]              Removes the provided handle from the specified JSON file and deletes the corresponding avatar image.
+    remove                             Alias for "rm" function
+    update                             Removes all avatar images for handles not found on approved lists and downloads missing avatar images
+
+Help options:
+    help                               Displays this help message
+HEREDOC
+
+def get_final_avatar_url(avatar_url, limit = 10)
+  return avatar_url if limit == 0
+
+  resp = Net::HTTP.get_response(URI(avatar_url))
+
+  case resp
+  when Net::HTTPSuccess then
+    avatar_url
+  when Net::HTTPRedirection then
+    redirect_url = resp["location"]
+    get_final_avatar_url(redirect_url, limit - 1)
+  else
+    nil
+  end
+end
+
+def add_url_params(url, params = {})
+  uri = URI(url)
+  params = Hash[URI.decode_www_form(uri.query || "")].merge(params)
+  uri.query = URI.encode_www_form(params)
+  uri.to_s
+end
+
+def parse_file(file)
+  loaded = File.read(file) if File.exist?(file)
+  JSON.parse!(loaded) if loaded
+end
+
+def generate_cumulative_handles_list
+  handles = nil
+
+  APPROVED_HANDLES_FILES.each do |file|
+    parsed = parse_file(file)
+    next if parsed.nil?
+
+    if handles.nil?
+      handles = parsed["handles"]
+    else
+      handles.concat(parsed["handles"])
+    end
+  end
+
+  handles.uniq
+end
+
+def generate_full_file_path(handle)
+  Dir.foreach(DEST_PATH) do |avatar_file|
+    next if !/\.png|\.jpe?g$/i.match(avatar_file)
+    return File.join(DEST_PATH, avatar_file) if Regexp.new("#{handle}\.[a-z]+$", Regexp::IGNORECASE).match(avatar_file)
+  end
+  File.join(DEST_PATH, "#{handle}.png")
+end
+
+def delete(handle, *args)
+  dest = generate_full_file_path(handle)
+  if File.exist?(dest)
+    File.delete(dest)
+    puts "✕ \"#{dest}\" file deleted!"
+  end
+end
+
+def delete_all(*args)
+  Dir.foreach(DEST_PATH) do |avatar_file|
+    next if !/\.png|\.jpe?g$/i.match(avatar_file)
+    handle = avatar_file.gsub(/\.png|\.jpe?g$/i, "")
+    delete(handle)
+  end
+end
+
+def delete_avatar_files_that_are_not_on_the_list(*args)
+  puts "Deleting avatars not found on the approved lists: #{APPROVED_HANDLES_FILES.to_json}"
+  handles = generate_cumulative_handles_list
+
+  Dir.foreach(DEST_PATH) do |avatar_file|
+    next if !/\.png|\.jpe?g$/i.match(avatar_file)
+    handle = avatar_file.gsub(/\.png|\.jpe?g$/i, "")
+
+    delete(handle) if !handles.include?(handle)
+  end
+end
+
+def fetch(handle, *args)
+  dest = generate_full_file_path(handle)
+  final_url = get_final_avatar_url("https://github.com/#{handle}.png")
+  final_url = add_url_params(final_url, s: MAX_SIZE)
+  system("curl -L -s \"#{final_url}\" --output #{dest}")
+  puts "✓ Downloaded: \"#{dest}\""
+end
+
+def fetch_all(*args)
+  handles = generate_cumulative_handles_list
+
+  handles.each do |handle|
+    fetch(handle)
+  end
+end
+
+def fetch_new(*args)
+  puts "Fetching nonexisting avatar images for handles found on approved lists"
+  handles = generate_cumulative_handles_list
+
+  handles.each do |handle|
+    dest = generate_full_file_path(handle)
+    fetch(handle) if !File.exist?(dest)
+  end
+end
+
+def remove_handle(handle, file = nil, *args)
+  files = file.nil? ? APPROVED_HANDLES_FILES : [file]
+
+  files.each do |file|
+    parsed = parse_file(file)
+    next if parsed.nil?
+
+    handle_id = parsed["handles"].find_index(handle)
+
+    delete(handle)
+
+    if !handle_id.nil?
+      parsed["handles"].delete_at(handle_id)
+      File.write(file, JSON.pretty_generate(parsed) + "\n")
+      puts "\"#{handle}\" removed from: \"#{file}\""
+    end
+  end
+end
+
+def add_handle(handle, file = nil)
+  file = APPROVED_HANDLES_FILES[0] if file.nil?
+  parsed = parse_file(file)
+  return if parsed.nil?
+
+  handle_id = parsed["handles"].find_index(handle)
+
+  if handle_id.nil?
+    parsed["handles"] << handle
+    parsed["handles"] = parsed["handles"].sort_by(&:downcase)
+    File.write(file, JSON.pretty_generate(parsed) + "\n")
+    fetch(handle)
+    puts "\"#{handle}\" added to: \"#{file}\""
+  else
+    puts "\"#{handle}\" already exists in: \"#{file}\""
+  end
+end
+
+def update(*args)
+  delete_avatar_files_that_are_not_on_the_list
+  fetch_new
+end
+
+def help(*args)
+  puts HELP
+end
+
+if ARGV.empty?
+  help
+  exit
+end
+
+def agree(msg)
+  puts msg
+  STDIN.gets.strip.downcase == "y"
+end
+
+def remove_command(handle = nil, *args)
+  if handle.nil?
+    delete_all if agree "This deletes all of the avatar images. Are you sure? [Y/n]"
+  else
+    remove_handle(handle)
+  end
+end
+
+def fetch_command(handle = nil, *args)
+  delete_avatar_files_that_are_not_on_the_list
+
+  if handle.nil?
+    fetch_all if agree "This downloads all of the avatar images. Are you sure? [Y/n]"
+  else
+    fetch(handle)
+  end
+end
+
+def check(handle = nil, file = nil, *args)
+  found = false
+  files = file.nil? ? APPROVED_HANDLES_FILES : [file]
+
+  if handle.nil?
+    puts "Please provide a handle"
+    return
+  end
+
+
+  files.each do |file|
+    parsed = parse_file(file)
+    next if parsed.nil?
+    handle_id = parsed["handles"].find_index(handle)
+
+    if !handle_id.nil?
+      puts "\"#{handle}\" found in: \"#{file}\""
+      found = true
+
+      if !File.exist?(generate_full_file_path(handle))
+        puts "Avatar image not found for: \"#{handle}\""
+
+        if agree "Download avatar image? [Y/n]"
+          fetch(handle)
+        end
+      end
+    end
+  end
+
+  puts "\"#{handle}\" not found" if !found
+end
+
+def test(handle = nil, *args)
+  puts generate_full_file_path(handle)
+end
+
+fn_index = {
+  "remove" => method(:remove_command),
+  "rm" => method(:remove_command),
+  "add" => method(:add_handle),
+  "update" => method(:update),
+  "help" => method(:help),
+  "fetch" => method(:fetch_command),
+  "check" => method(:check),
+  "test" => method(:test)
+}
+
+if fn_index.key?(ARGV[0])
+  fn_index[ARGV[0]].call(ARGV[1], ARGV[2]) if fn_index.key?(ARGV[0])
+else
+  puts "Bad command: \"#{ARGV[0]}\""
+end

@@ -1,0 +1,89 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%= form_tag update_branch_pull_request_path(id: pull), method: :post, class: class_names("branch-action-btn float-right js-update-branch-form js-needs-timeline-marker-header js-update-branch-async-button") do %>
+  <input type="hidden" name="expected_head_oid" value="<%= pull.head_sha %>">
+  <% mergeability_check = pull.updateability.check_mergeability(current_user) %>
+  <% rebaseability_check = pull.updateability.check_rebaseability(current_user) %>
+  <% head_branch_linear_history_check = pull.updateability.check_required_linear_history %>
+  <% update_with_rebase_disabled = GitHub.flipper[:cprmc_skip_rebase_via_api].enabled?(pull.repository) && !pull.repository.merge_commit_allowed? && !pull.repository.rebase_merge_allowed? %>
+
+  <input type="hidden" class="js-update-branch-type" name="update_method" value="merge">
+  <div class="select-menu d-inline-block">
+    <div class="BtnGroup position-relative">
+      <button
+        type="submit"
+        <% if mergeability_check.success? %>
+          class="btn-group-update-merge rounded-left-2 btn BtnGroup-item hx_create-pr-button"
+        <% else %>
+          class="btn-group-update-merge rounded-left-2 btn BtnGroup-item hx_create-pr-button tooltipped-multiline"
+          disabled aria-label="<%= mergeability_check.failure_reason %>"
+        <% end %>
+      >
+        Update branch
+      </button>
+
+      <button
+        type="submit"
+        <% if GitHub.flipper[:pull_request_generate_rebase_sync].enabled?(current_repository) || rebaseability_check.success? %>
+          class="btn-group-update-rebase rounded-left-2 btn BtnGroup-item hx_create-pr-button"
+        <% else %>
+          class="btn-group-update-rebase rounded-left-2 btn BtnGroup-item hx_create-pr-button tooltipped-multiline"
+          disabled aria-label="<%= rebaseability_check.failure_reason %>"
+        <% end %>
+      >
+        Rebase branch
+      </button>
+
+      <% if mergeability_check.success? %>
+        <details class="details-reset details-overlay BtnGroup-parent">
+          <%= render Primer::ButtonComponent.new(tag: :summary, group_item: true, classes: "select-menu-button js-update-method-menu-button", "aria-label": "Select update method") do %><% end %>
+
+          <details-menu
+            class="select-menu-modal position-absolute right-0 left-md-0 js-update-branch-method-menu"
+            style="top: 100%; z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="select-menu-list">
+              <button class="width-full select-menu-item"
+                      <% unless head_branch_linear_history_check.success? %>disabled aria-label="<%= head_branch_linear_history_check.failure_reason %>"<% end %>
+                      role="menuitemradio"
+                      value="merge"
+                      type="button"
+                      <% if head_branch_linear_history_check.success? %> aria-checked="true" <% end %>>
+                <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                <div class="select-menu-item-text">
+                  <span class="select-menu-item-heading">Update with merge commit</span>
+                  <span class="description">The latest changes will be merged into this branch with a merge commit.</span>
+                  <% unless head_branch_linear_history_check.success? %>
+                    <span class="unavailable-merge-method">Not allowed on this branch</span>
+                  <% end %>
+                </div>
+              </button>
+
+              <button class="width-full select-menu-item"
+                      role="menuitemradio"
+                      value="rebase"
+                      type="button"
+                      <% if update_with_rebase_disabled %> disabled <% end %>
+                      <% unless head_branch_linear_history_check.success? %> aria-checked="true" <% end %>>
+                <%= primer_octicon(:check, classes: 'select-menu-item-icon') %>
+                <div class="select-menu-item-text">
+                  <span class="select-menu-item-heading">Update with rebase</span>
+                  <% if update_with_rebase_disabled %>
+                    <span class="description">Rebase updates are disabled if squash is the only merge strategy.</span>
+                  <% elsif GitHub.flipper[:pull_request_generate_rebase_sync].enabled?(current_repository) || rebaseability_check.success? %>
+                    <span class="description">This pull request will be rebased on top of the latest changes and then force pushed.</span>
+                  <% elsif pull.rebase_conflicts? %>
+                    <span class="color-fg-attention">This branch cannot be rebased due to conflicts.</span>
+                  <% else %>
+                    <span class="color-fg-attention">This branch cannot be rebased due to too many changes.</span>
+                  <% end %>
+                </div>
+              </button>
+            </div>
+          </details-menu>
+        </details>
+      <% else %>
+        <%= render Primer::ButtonComponent.new(group_item: true, classes: "btn disabled select-menu-button BtnGroup-item", "aria-label": "Select update method", disabled: true) do %><% end %>
+      <% end %>
+    </div>
+  </div>
+<% end %>

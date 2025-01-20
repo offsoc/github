@@ -1,0 +1,92 @@
+server {
+  listen 9102;
+  listen [::]:9102 ipv6only=on;
+
+  expires 10m;
+
+  root $http_x_github_pages_root;
+  server_name_in_redirect off;
+  port_in_redirect off;
+
+  # For lazy builds we need recursive 503 so enable the feature.
+  # Nginx won't allow more than 10 recursions (that we don't need).
+  recursive_error_pages on;
+
+  index index.html index.htm index.xhtml index.xml;
+  error_page 400 /400-enterprise.html;
+  error_page 403 404 =404 @error;
+
+  access_by_lua '
+    if not ngx.var.http_x_github_pages_root then
+      ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+
+    -- check if ".." appears anywhere in the root path
+    if ngx.var.http_x_github_pages_root:find("%.%.") then
+      ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+
+    if ngx.var.http_x_github_pages_root:find("/data/user/pages/") ~= 1 then
+      ngx.exit(ngx.HTTP_FORBIDDEN)
+    end
+  ';
+
+  more_set_headers "Access-Control-Allow-Origin: *";
+
+  location / {
+    etag on;
+    try_files $uri $uri/ $uri.html $uri.xml =404;
+  }
+
+  location @error {
+    try_files /404.html @check_404;
+  }
+
+  location @check_404 {
+    content_by_lua_block {
+      -- Check for the pages-build-version file to make sure that there is a pages site at
+      -- this location.
+      res = ngx.location.capture("/pages-build-version")
+      if res.status == 503 then
+        -- If not then issue a request to rebuild the page.
+        ngx.status = ngx.HTTP_SERVICE_UNAVAILABLE
+        return ngx.exec("@request_page_build")
+      else
+        -- If so, then render the 404 page.
+        return ngx.exec("/404-fs-enterprise.html")
+      end
+    }
+  }
+
+  location = /400-enterprise.html {
+    more_set_headers "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'";
+    root /data/pages-lua/public;
+  }
+
+  location = /404-fs-enterprise.html {
+    more_set_headers "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'";
+    root /data/pages-lua/public;
+  }
+
+  location = /503-building-enterprise.html {
+    more_set_headers "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'";
+    root /data/pages-lua/public;
+  }
+
+  location = /pages-build-version {
+    # Return 503 if this location is missing. Most likely indicates the whole site is too.
+    try_files /pages-build-version =503;
+  }
+
+  # Request a Page build via an internal API call: outcome 503 (we are rebuilding) or 500 (error).
+  location @request_page_build {
+    lua_ssl_verify_depth 10;
+    lua_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+    resolver 127.0.0.1;
+
+    error_page 503 /503-building-enterprise.html;
+    error_page 500 /500.html;
+
+    access_by_lua_file /data/pages-lua/request-page-build.lua;
+  }
+}

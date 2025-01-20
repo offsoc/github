@@ -1,0 +1,195 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% view = Stafftools::LockedIp::LockedIpView.new(:ip_address => @ip_address) %>
+
+<% page_info :title => view.page_title %>
+
+<%= render layout: "stafftools/stafftools" do %>
+  <div class="boxed-group">
+    <h3>Locked IPs</h3>
+    <div class="boxed-group-inner">
+      <%= form_tag stafftools_locked_ip_path, :method => :get do %>
+        <dl class="form-group">
+          <dt>
+            <label>IP Address</label>
+          </dt>
+          <dd>
+            <%= text_field_tag :ip_address, @query_string, :placeholder => "exact IP required" %>
+          </dd>
+        </dl>
+        <dl class="form-group">
+          <dd>
+            <%= render Primer::Beta::Button.new(type: :submit) do %>Search<% end %>
+          </dd>
+        </dl>
+      <% end %>
+      <% if @ip_address %>
+        <div class="boxed-group">
+          <h3>IP Lockout</h3>
+          <div class="boxed-group-inner clearfix">
+            <h4>Remove IP Lockout</h4>
+            <% if view.at_auth_limit? %>
+              <%= render(Primer::Experimental::Dialog.new(
+                dialog_id: "remove-lockout-dialog-#{@ip_address}",
+                header_variant: :large,
+                width: :large,
+                title: "Remove Lockout for #{@ip_address}",
+                form_url: stafftools_remove_locked_ip_path(@ip_address),
+                form_method: :delete
+              )) do |c| %>
+                <% c.with_show_button(
+                  color: :danger,
+                  classes: "boxed-action"
+                ) do |s| %>
+                  Remove Lockout for <%= @ip_address %>
+                <% end %>
+                <% c.with_body do %>
+                  <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Hold it!" } %>
+
+                  <p>
+                    Removing this lockout should only be done after verifying audit log
+                    activity for
+                    <%= link_to @ip_address, stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where actor_ip == '#{@ip_address}'" : @ip_address), class: "Link--inTextBlock" %>.
+                    Please use the audit log to help determine whether there are
+                    recurring attempts to brute force user passwords to compromise
+                    accounts.
+                  </p>
+                <% end %>
+                <% c.with_button(
+                  data: { "close-dialog-id": "remove-lockout-dialog-#{@ip_address}" }
+                ) { "Cancel" } %>
+                <% c.with_button(
+                  type: :submit,
+                  scheme: :danger,
+                  data: { "disable-with": "" }
+                ) { "Remove lockout" } %>
+              <% end %>
+
+              <p>
+                Lockout for <%= @ip_address %> will automatically unlock <%= time_ago_in_words_js(view.expiration) %>.
+                <br>
+                This will remove the lockout for this IP and allow users to login<% if GitHub.web_ip_lockouts_enabled? %>and use the API/git<% end %>.
+              </p>
+            <% else %>
+              <%= render Primer::Beta::Button.new(type: :button, scheme: :danger, classes: "boxed-action", disabled: true) do %>
+                Remove Lockout for <%= @ip_address %>
+              <% end %>
+              <p>
+                There is no lockout for <%= @ip_address %>.
+              </p>
+            <% end %>
+
+            <h4>Allowlist status</h4>
+            <% if view.whitelisted? %>
+              <p>
+                <% GitHub.web_ip_lockouts_enabled? ? "Authentication attempts" : "API and git authentication attempts" %>
+                from this IP will not be rate limited for
+                <strong><%= time_ago_in_words(view.whitelist_entry.expires_at) %></strong>.
+              </p>
+              <div class="d-flex">
+                <div class="flex-auto">
+                  <%= avatar_for view.whitelist_entry.creator, 20 %>
+                  <strong><%= view.whitelist_entry.creator %></strong>
+                  <br>
+                  <p><%= view.whitelist_entry.note %></p>
+                </div>
+                <div>
+                  <div class="d-flex">
+                    <%= render(Primer::Experimental::Dialog.new(
+                      dialog_id: "update-allowlist-entry-#{@ip_address}",
+                      header_variant: :large,
+                      width: :large,
+                      title: "Update allowlist entry",
+                      form_url: stafftools_whitelist_ip_path(@ip_address),
+                      form_method: :post
+                    )) do |c| %>
+                      <% c.with_show_button(size: :small, mr: 2) do |s| %>
+                        <%= primer_octicon(:pencil) %>
+                      <% end %>
+                      <% c.with_body do %>
+                        <dl class="form-group">
+                          <dt><label for="expire-in">Expire in</label></dt>
+                          <dd>
+                            <input name="expires_value" id="expire-in" type="text" class="form-control shorter input-sm required" placeholder="10">
+                            <select name="expires_unit" class="form-select">
+                              <option value="minutes">minutes</option>
+                              <option value="hours">hours</option>
+                              <option value="days">days</option>
+                              <option value="months">months</option>
+                              <option value="years">years</option>
+                            </select>
+                          </dd>
+                        </dl>
+                        <dl class="form-group">
+                          <dt><label>Note</label></dt>
+                          <dd><input name="note" type="text" class="form-control required" placeholder="Unhackathonicon"></dd>
+                        </dl>
+                      <% end %>
+                      <% c.with_button(
+                        data: { "close-dialog-id": "update-allowlist-entry-#{@ip_address}" }
+                      ) { "Cancel" } %>
+                      <% c.with_button(
+                        type: :submit,
+                        data: { "disable-with": "" }
+                      ) { "Update" } %>
+                    <% end %>
+
+                    <%= form_tag stafftools_unwhitelist_ip_path(@ip_address), :method => :delete do %>
+                      <%= render Primer::Beta::Button.new(type: :submit, size: :small, scheme: :danger, "aria-label": "Delete") do %>
+                        <%= primer_octicon(:trash) %>
+                      <% end %>
+                    <% end %>
+                  </div>
+                </div>
+              </div>
+            <% else %>
+              <%= render(Primer::Experimental::Dialog.new(
+                dialog_id: "create-allowlist-entry",
+                header_variant: :large,
+                width: :large,
+                title: "Create allowlist entry",
+                form_url: stafftools_whitelist_ip_path(@ip_address),
+                form_method: :post
+              )) do |c| %>
+                <% c.with_show_button(
+                  classes: "boxed-action"
+                ) do |s| %>
+                  Create allowlist entry
+                <% end %>
+                <% c.with_body do %>
+                  <dl class="form-group">
+                    <dt><label for="expire-in">Expire in</label></dt>
+                    <dd>
+                      <input name="expires_value" id="expire-in" type="text" class="form-control shorter input-sm required" placeholder="10">
+                      <select name="expires_unit" class="form-select">
+                        <option value="minutes">minutes</option>
+                        <option value="hours">hours</option>
+                        <option value="days">days</option>
+                        <option value="months">months</option>
+                        <option value="years">years</option>
+                      </select>
+                    </dd>
+                  </dl>
+                  <dl class="form-group">
+                    <dt><label>Note</label></dt>
+                    <dd><input name="note" type="text" class="form-control required" placeholder="Unhackathonicon"></dd>
+                  </dl>
+                <% end %>
+                <% c.with_button(
+                  data: { "close-dialog-id": "create-allowlist-entry" }
+                ) { "Cancel" } %>
+                <% c.with_button(
+                  type: :submit,
+                  data: { "disable-with": "" }
+                ) { "Create" } %>
+              <% end %>
+
+              <p>This IP address is not allowlisted.</p>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% end %>

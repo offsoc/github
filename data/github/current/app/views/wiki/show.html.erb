@@ -1,0 +1,170 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info(
+    title: "#{wiki_page_title} · #{current_repository.name_with_display_owner} Wiki",
+    container_xl: true,
+    selected_link: :repo_wiki,
+    dashboard_pinnable_item_id: current_repository.global_relay_id,
+    richweb: {
+      title: wiki_page_title,
+      url: "#{base_url}#{gh_wiki_path(@page, current_repository)}",
+      description: h(repo_meta_description),
+      image: repository_open_graph_image_url(current_repository),
+      card: repository_twitter_image_card(current_repository)
+    }
+  )
+%>
+<% wiki = @unsullied_wiki %>
+<% sidebar = @page.sidebar %>
+<% footer  = @page.footer %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+  <div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4 page" id="wiki-wrapper">
+    <div class="d-flex flex-column flex-md-row gh-header">
+      <h1 class="flex-auto min-width-0 mb-2 mb-md-0 mr-0 mr-md-2 gh-header-title"><%= wiki_page_title %></h1>
+
+      <% if !wiki_preview? -%>
+        <div class="mt-0 mt-lg-1 flex-shrink-0 gh-header-actions">
+          <a href="#wiki-pages-box" class="d-md-none <%= "pl-2 float-right" if writable_wiki? %>">Jump to bottom</a>
+
+          <% if writable_wiki? %>
+            <%= render Primer::Beta::Button.new(size: :small, tag: :a, ml: 0, href: "/#{current_repository.name_with_display_owner}/wiki/#{CGI.escape(@page.to_param)}/_edit") do %>Edit<% end %>
+            <%= render Primer::Beta::Button.new(size: :small, tag: :a, scheme: :primary, href: new_wiki_path) do %>New page<% end %>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+
+    <% if !wiki_preview? -%>
+      <div class="mt-2 mt-md-1 pb-3 gh-header-meta">
+        <% if updated = @page.updated_at -%>
+        <%= link_author @page.latest_revision.author_name, :class=> 'author' %> edited this page <%= time_ago_in_words_js(updated) %>
+        &middot;
+        <% end -%>
+        <a href="<%= wiki_history_path(@page) %>" class="Link--muted">
+          <%= pluralize(@page.revision_count, 'revision') %>
+        </a>
+      </div>
+    <% end -%>
+
+    <div id="wiki-content" class="mt-4">
+      <%= render(Primer::Alpha::Layout.new(first_in_source: :main)) do |component| %>
+        <%# min-width: 0 so that for narrower screens, long sidebar entries will truncate %>
+        <% component.with_sidebar(col_placement: :end, row_placement: :end, style: "min-width: 0") do %>
+          <div class="wiki-rightbar">
+            <nav id="wiki-pages-box" class="mb-4 wiki-pages-box js-wiki-pages-box" aria-labelledby="wiki-pages-box-heading">
+              <%= render "wiki/pages_partial", collapsed: sidebar.present? %>
+            </nav>
+
+            <% if sidebar %>
+              <div class="gollum-<%= sidebar.format %>-content">
+                <div class="Box Box--condensed mb-4">
+                  <div
+                    class="<%= class_names(
+                      "Box-body",
+                      "wiki-custom-sidebar",
+                      "markdown-body",
+                      {
+                        "wiki-writable" => writable_wiki?
+                      }
+                    ) %>">
+                    <% if writable_wiki? %>
+                      <a
+                        href="<%= "#{gh_wiki_path(sidebar, current_repository)}/_edit" %>"
+                        class="position-relative float-right ml-3 Link--muted"
+                        title="Edit sidebar"
+                        style="z-index: 10"
+                      ><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                        <%= render(Primer::Beta::Octicon.new(icon: "pencil")) %>
+                      </a>
+                    <% end %>
+                    <%= wiki_data(sidebar, "sidebar") %>
+                  </div>
+                </div>
+              </div>
+            <% elsif writable_wiki? %>
+              <div class="mb-4">
+                <%= link_to(
+                  new_wiki_path(wiki:  { name:  "_Sidebar" }),
+                  class: "d-block p-3 Link--muted text-center border border-dashed rounded-2",
+                ) do %>
+                  <%= primer_octicon(:plus, mr: 1) %> Add a custom sidebar
+                <% end %>
+              </div>
+            <% end %>
+
+            <h5 class="mt-0 mb-2">Clone this wiki locally</h5>
+            <div class="width-full input-group">
+              <input
+                  id="wiki-clone-url"
+                  type="text"
+                  data-autoselect
+                  class="form-control input-sm text-small color-fg-muted input-monospace"
+                  aria-label="Clone URL for this wiki"
+                  value="<%= wiki.http_url %>"
+                  readonly>
+              <span class="input-group-button">
+                <%= render Primer::Beta::ClipboardCopyButton.new(for: "wiki-clone-url", "aria-label": "Copy to clipboard", size: :small, classes: "rounded-left-0 border-left-0") %>
+              </span>
+            </div>
+          </div>
+        <% end %>
+
+        <% component.with_main do %>
+          <div id="wiki-body" class="gollum-<%= @page.format %>-content">
+            <% content = wiki_data(@page, "page", current_user) %>
+            <% if !content.timed_out? %>
+              <div class="markdown-body">
+                <%= content %>
+              </div>
+            <% else %>
+              <%= render Primer::Beta::Blankslate.new do |c| %>
+                <% c.with_visual_icon(icon: "alert") %>
+
+                <% c.with_heading(tag: :h2) do %>
+                  The wiki page took too long to render.
+                <% end %>
+
+                <% c.with_description do %>
+                  <%= writable_wiki? ? "Please edit this wiki page’s content so it renders faster." : "This wiki page’s content is too large to render on this page." %>
+                <% end %>
+              <% end %>
+            <% end %>
+
+            <% if footer %>
+              <div id="wiki-footer" class="mt-5 mb-0 wiki-footer gollum-<%= footer.format %>-content">
+                <div class="Box Box--condensed color-bg-subtle color-shadow-small">
+                  <div class="Box-body <% if writable_wiki? %>wiki-writable<% end %> markdown-body">
+                    <% if writable_wiki? %>
+                      <a
+                        href="<%= "#{gh_wiki_path(footer, current_repository)}/_edit" %>"
+                        class="position-relative float-right Link--muted"
+                        title="Edit footer"
+                        style="right: -5px; z-index: 2"
+                      ><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                        <%= render(Primer::Beta::Octicon.new(icon: "pencil")) %>
+                      </a>
+                    <% end %>
+                    <%= wiki_data(footer, "footer") %>
+                  </div>
+                </div>
+              </div>
+            <% elsif writable_wiki? %>
+              <div id="wiki-footer" class="mt-5 Link--muted wiki-footer">
+                <%= link_to(
+                  new_wiki_path(wiki: { name: "_Footer" }),
+                  class: "d-block p-3 Link--muted text-center border border-dashed rounded-2"
+                ) do %>
+                  <%= primer_octicon(:plus, mr: 1) %> Add a custom footer
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<% content_for :scripts do -%><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle 'wiki' %>
+<% end -%>

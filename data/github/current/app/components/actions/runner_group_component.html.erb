@@ -1,0 +1,421 @@
+<%# erblint:counter DeprecatedComponentsCounter 6 %>
+<% if is_update? && @runner_group.inherited? %>
+  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+    <%= render Primer::Alpha::Banner.new(icon: :info, mb: 4) do %>
+      This group is owned by the <span class="text-bold"><%= @owner.business %></span> enterprise.
+    <% end %>
+  <% else %>
+    <%= render Primer::Beta::Flash.new(icon: :info, mb: 4) do %>
+      This group is owned by the <span class="text-bold"><%= @owner.business %></span> enterprise.
+    <% end %>
+  <% end %>
+<% end %>
+<% if is_update? && network_configuration_visible? %>
+  <% if is_current_configuration_disabled? %>
+    <%= render Primer::Beta::Flash.new(scheme: :danger, mb: 4, test_selector: "disabled-network-configuration-flash-banner") do %>
+      The network configuration <span class="text-bold"> <%= @current_network_configuration[:name].to_s %></span> has been disabled. Select an active configuration to ensure that this runner group is working.
+    <% end %>
+  <% end %>
+<% end %>
+<div class="d-flex flex-column">
+  <div class="col-12 form-group mt-0">
+    <div class="form-group-body" <%= test_selector is_update? ? "runner-group-#{@runner_group.id}" : "new" %>>
+      <%= form_for :runner_group,
+          url: form_path,
+          :method => is_update? ? :put : :post,
+          :html => {
+            class: "d-flex flex-column js-runner-group-form",
+            :id => is_update? ? "edit_runner_group_#{@runner_group.id}" : "new",
+            "data-hpc": "",
+          } do |f| %>
+
+        <label for="<%= aria_id_prefix %>-name" class="f3 text-normal mb-2">Group name</label>
+        <div class="form-group-body mb-3">
+          <input required type="text" name="name" id="<%= aria_id_prefix %>-name" class="form-control <%= "color-fg-muted" if readonly? %>" value="<%= @runner_group.name if is_update? %>" <%= "disabled" if readonly? %>>
+          <% if is_update? && !readonly? %>
+            <%= render Primer::ButtonComponent.new(type: :submit, "data-disable-with": "Updating") do %>Save<% end %>
+          <% end %>
+        </div>
+
+        <% repo_org_access_label_id = "#{aria_id_prefix}-repo-org-access-label" %>
+        <% repo_org_access_title = "#{@owner.organization? ? 'Repository' : 'Organization'} access" %>
+        <div id="<%= repo_org_access_label_id %>" class="f3 text-normal mb-2"><%= repo_org_access_title %></div>
+        <div class="d-flex flex-items-center">
+          <details id="<%= aria_id_prefix %>-access" class="details-reset details-overlay">
+            <%= render Primer::ButtonComponent.new(tag: :summary, classes: "select-menu-button", "aria-haspopup": "true", "aria-labelledby": repo_org_access_label_id) do %>
+              <span data-menu-button class="mr-1"><%= visibilities[selected_visibility][:label] %></span>
+            <% end %>
+            <details-menu class="SelectMenu js-runner-group-component-visibility-menu" role="menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="SelectMenu-modal">
+                <div class="SelectMenu-list">
+                  <% visibilities.keys.each do |visibility_type| %>
+                    <label><div tabindex="0" class="select-menu-item flex-items-start"
+                      role="menuitemradio" value="<%= visibility_type %>" aria-checked="<%= selected_visibility == visibility_type %>" <%= "selected" if selected_visibility == visibility_type %>>
+                      <input
+                        <%# do not autosubmit if a new runner group is being created %>
+                        <% if is_update? %> data-autosubmit <% end %>
+                        type="radio"
+                        name="visibility"
+                        value="<%= visibility_type %>"
+                        hidden
+                        <% if selected_visibility == visibility_type %>checked <% end %>
+                        <% if visibility_type == Launch::Twirp::RunnerGroupsClient::GROUP_VISIBILITY_SELECTED %>
+                          data-action="click:selected-item-list#showDescription"
+                        <% else %>
+                          data-action="click:selected-item-list#hideDescription"
+                        <% end %>>
+                      <%= primer_octicon(:check, classes: "select-menu-item-icon select-menu-icon--check", style: "margin-top: 2px") %>
+                      <div class="select-menu-item-text">
+                        <span class="select-menu-item-heading" data-menu-button-text><%= visibilities[visibility_type][:label] %></span>
+                        <span class="text-normal description">
+                          <%= visibilities[visibility_type][:description] %>
+                        </span>
+                      </div>
+                    </div></label>
+                  <% end %>
+                </div>
+              </div>
+            </details-menu>
+          </details>
+          <div
+            class="pl-2 js-runner-group-targets-count"
+            <% unless show_selected_targets? %>hidden<% end %>>
+            <selected-item-list class="d-flex">
+              <selected-item-count>
+                <div
+                  data-target="selected-item-count.description"
+                  >
+                  <span data-target="selected-item-count.selectedCount">
+                    <%= selected_targets_count %>
+                  </span>
+                  selected
+                  <span
+                    data-target="selected-item-count.singularItemDescription"
+                    <%= selected_targets_count != 1 ? "hidden" : "" %>>
+                    <%= target_type %>
+                  </span>
+                  <span
+                    data-target="selected-item-count.pluralItemsDescription"
+                    <%= selected_targets_count == 1 ? "hidden" : "" %>>
+                    <%= target_type.pluralize %>
+                  </span>
+                </div>
+              </selected-item-count>
+              <%= render(GitHub::DialogComponent.new(title: repo_org_access_title, src: selection_component_path, details_classes: "ml-1", dialog_classes: "dialog-visibility")) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+                <% dialog.with_summary do %>
+                  <summary
+                    class=""
+                    role="button"
+                    aria-haspopup="dialog"
+                    aria-label="Configure <%= target_type.pluralize.capitalize %>"
+                    >
+                    <%= render Primer::Beta::Octicon.new(icon: "gear") %>
+                  </summary>
+                <% end %>
+                <% dialog.with_body do %>
+                  <div
+                    class="d-flex flex-column js-runner-group-targets-selection"
+                    <% unless show_selected_targets? %>hidden<% end %>>
+                    <div class="mb-2">Select the <%= target_type.pluralize %> that can use this runner group.</div>
+                    <include-fragment data-target="selected-item-list.includeFragment">
+                      <% if is_update? %>
+                        <%= render(selected_targets_component, layout: false) %>
+                      <% end %>
+                      <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block)) %>
+                    </include-fragment>
+                  </div>
+                <% end %>
+                <% dialog.with_footer do %>
+                  <div class="d-flex flex-items-center flex-justify-between">
+                    <div
+                      class="text-small lh-condensed-ultra color-fg-muted"
+                      data-target="selected-item-list.description">
+                      <span data-target="selected-item-list.selectedCount">
+                        <%= selected_targets_count %>
+                      </span>
+                      selected
+                      <span
+                        data-target="selected-item-list.singularItemDescription"
+                        <%= selected_targets_count != 1 ? "hidden" : "" %>>
+                        <%= target_type %>
+                      </span>
+                      <span
+                        data-target="selected-item-list.pluralItemsDescription"
+                        <%= selected_targets_count == 1 ? "hidden" : "" %>>
+                        <%= target_type.pluralize %>
+                      </span>
+                    </div>
+                    <div></div>
+                    <div>
+                      <%= render Primer::ButtonComponent.new(
+                        scheme: :primary,
+                        type: is_update? ? :submit : :button,
+                        disabled: :true,
+                        classes: "js-btn-select-items visibility-targets",
+                        data: { target: "selected-item-list.saveButton", "disable-with": "Updating" }) do %>Save group<% end %>
+                    </div>
+                  </div>
+                <% end %>
+              <% end %>
+            </selected-item-list>
+          </div>
+        </div>
+        <% unless GitHub.multi_tenant_enterprise? %>
+          <% allow_public_input_id = "#{aria_id_prefix}-allow_public" %>
+          <div class="form-group-body mb-3 d-flex flex-column">
+            <div class="Box-row pb-0">
+              <% if disable_allow_public? %>
+                <div class="color-fg-muted note pb-2">
+                  <%= primer_octicon(:"shield-lock") %>
+                  This setting has been disabled by <%= owner_type %> administrators.
+                </div>
+              <% end %>
+              <div class="d-flex flex-row">
+                <div class="d-flex flex-self-start pr-2 pt-1">
+                  <input
+                    <% if is_update? %>
+                      <%# autosubmit only when editing a runner group %>
+                      data-autosubmit
+                    <% end %>
+                    type="checkbox"
+                    class="js-allow-public-repository-checkbox d-flex flex-self-start pr-2 pt-1"
+                    name="allow_public"
+                    id="<%= allow_public_input_id %>"
+                    <% if disable_allow_public? %> disabled <% end %>
+                    <% if is_update? && @runner_group.allow_public && !disable_allow_public? %> checked <% end %> >
+                </div>
+                <div class="d-flex flex-column">
+                  <div class="d-flex flex-items-center">
+                    <span class="text-bold css-truncate css-truncate-overflow">
+                      <label for="<%= allow_public_input_id %>" <% if disable_allow_public? %> class="color-fg-muted" <% end %>>Allow public repositories</label>
+                    </span>
+                  </div>
+                  <div class="color-fg-muted pt-1">
+                    Runners can be used by public repositories. Allowing self-hosted runners on public repositories and allowing workflows on public forks introduces a significant security risk.
+                    <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/actions/hosting-your-own-runners/about-self-hosted-runners#self-hosted-runner-security-with-public-repositories">
+                      Learn more about self-hosted runners.
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        <% end %>
+
+        <% workflow_access_label_id = "#{aria_id_prefix}-workflow-access-title" %>
+        <div class="f3 text-normal" id="<%= workflow_access_label_id %>">Workflow access</div>
+        <span class="color-fg-muted mb-2">
+          <% if workflow_restrictions_read_only? %>
+            Your enterprise allows this group to run only specific workflow files.
+          <% else %>
+            Control how these runners are used by restricting them to specific workflows.
+          <% end %>
+          <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/actions/hosting-your-own-runners/managing-access-to-self-hosted-runners-using-groups#changing-what-workflows-can-access-a-runner-group", classes: "Link--inTextBlock")) { "Learn more about managing runner groups." } %>
+        </span>
+        <div class="d-flex flex-items-center mb-3">
+          <%= render Primer::Beta::Details.new(overlay: :default, reset: true, id: "#{aria_id_prefix}-workflow") do |details| %>
+            <%= details.with_summary(classes: "select-menu-button", "aria-haspopup": "true", "aria-labelledby": workflow_access_label_id) do %>
+              <span data-menu-button class="mr-1"><%= restricted_to_workflows? ? "Selected workflows" : "All workflows" %></span>
+            <% end %>
+
+            <%= details.with_body(tag: :"details-menu", classes: "SelectMenu js-runner-group-component-workflow-menu", role: "menu") do %><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="SelectMenu-modal">
+                <div class="SelectMenu-list">
+                  <label><div
+                    tabindex="0"
+                    class="select-menu-item flex-items-start"
+                    role="menuitemradio"
+                    aria-checked="<%= restricted_to_workflows? %>"
+                    for="<%= aria_id_prefix %>-workflow-is-restricted-true"
+                    value="<%= Launch::Twirp::RunnerGroupsClient::GROUP_VISIBILITY_SELECTED %>">
+                    <input
+                      type="radio"
+                      id="<%= aria_id_prefix %>-workflow-is-restricted-true"
+                      name="restricted_to_workflows"
+                      value="<%= true %>"
+                      hidden
+                      <% if workflow_restrictions_read_only? %> disabled <% end %>
+                      <% if restricted_to_workflows? %>checked <% end %>
+                      <% if restricted_to_workflows? %>
+                        data-action="click:selected-item-list#showDescription"
+                      <% else %>
+                        data-action="click:selected-item-list#hideDescription"
+                      <% end %>>
+                    <%= primer_octicon(:check, classes: "select-menu-item-icon select-menu-icon--check", style: "margin-top: 2px") %>
+                    <div class="select-menu-item-text">
+                      <span class="select-menu-item-heading" data-menu-button-text>Selected workflows</span>
+                      <span class="text-normal description">
+                        Restrict these runners to specific workflow files.
+                      </span>
+                    </div>
+                  </div></label>
+
+                  <label><div
+                    tabindex="0"
+                    class="select-menu-item flex-items-start"
+                    role="menuitemradio"
+                    aria-checked="<%= !restricted_to_workflows? %>"
+                    for="<%= aria_id_prefix %>-workflow-is-restricted-false"
+                    value="<%= Launch::Twirp::RunnerGroupsClient::GROUP_VISIBILITY_ALL %>">
+                    <input
+                      <% if is_update? %> data-autosubmit <% end %>
+                      type="radio"
+                      id="<%= aria_id_prefix %>-workflow-is-restricted-false"
+                      name="restricted_to_workflows"
+                      value="<%= false %>"
+                      hidden
+                      <% if workflow_restrictions_read_only? %> disabled <% end %>
+                      <% if !restricted_to_workflows? %>
+                        checked
+                        data-action="click:selected-item-list#showDescription"
+                      <% else %>
+                        data-action="click:selected-item-list#hideDescription"
+                      <% end %>>
+                    <%= primer_octicon(:check, classes: "select-menu-item-icon select-menu-icon--check", style: "margin-top: 2px") %>
+                    <div class="select-menu-item-text">
+                      <span class="select-menu-item-heading" data-menu-button-text>All workflows</span>
+                      <span class="text-normal description">
+                        Any workflow can use these runners.
+                      </span>
+                    </div>
+                  </div></label>
+                </div>
+              </div>
+            <% end %>
+          <% end %>
+          <div
+            class="pl-2 js-runner-group-workflow-count"
+            <% if !restricted_to_workflows? %>hidden<% end %>>
+            <selected-item-list class="d-flex">
+              <span hidden data-target="selected-item-list.selectedCount">
+                <%= selected_workflow_refs_count || 0 %>
+              </span>
+              <selected-item-count>
+                <div data-target="selected-item-count.description">
+                  <span data-target="selected-item-count.selectedCount">
+                    <%= selected_workflow_refs_count || 0 %>
+                  </span>
+                  selected
+                  <span
+                    data-target="selected-item-count.singularItemDescription"
+                    <%= selected_workflow_refs_count != 1 ? "hidden" : "" %>>
+                    <%= "workflow" %>
+                  </span>
+                  <span
+                    data-target="selected-item-count.pluralItemsDescription"
+                    <%= selected_workflow_refs_count == 1 ? "hidden" : "" %>>
+                    <%= "workflows" %>
+                  </span>
+                </div>
+              </selected-item-count>
+
+              <%= render(GitHub::DialogComponent.new(title: "Workflow access" , variant: :wide, src: selection_component_path, details_classes: 'details-dialog-workflow ml-1', dialog_classes: "dialog-workflow")) do |dialog| %><%# erblint:disable A11yDetailsDialogMigration %>
+                <% dialog.with_summary do %>
+                  <summary class="" role="button" aria-label="Configure workflows" aria-haspopup="dialog">
+                    <%= render Primer::Beta::Octicon.new(icon: "gear") %>
+                  </summary>
+                <% end %>
+                <% dialog.with_body do %>
+
+                  <div class="d-flex flex-items-start flex-column js-runner-group-workflow-selection">
+                    <label class="text-normal mb-2" for="<%= aria_id_prefix %>-selected-workflow-refs">
+                      <% if workflow_restrictions_read_only? %>
+                        Your enterprise allows this group to run the following workflows:
+                      <% else %>
+                        Enter the workflow files allowed to use this runner group:
+                      <% end %>
+                    </label>
+
+                    <textarea
+                      <% if workflow_restrictions_read_only? %>disabled <% end %>
+                      autofocus
+                      tabindex="0"
+                      class="form-control text-small input-contrast width-full mt-3"
+                      type="text"
+                      name="selected_workflow_refs"
+                      placeholder="monalisa/octocat/.github/workflows/cd.yaml@main,&#10;monalisa/octocat/.github/workflows/build.yaml@v2"
+                      data-action="focus:actions-policy-form#enableForm"
+                      style="height:80px; min-height:80px; word-break: break-all;"
+                      spellcheck=false
+                      data-uninitialized
+                      id="<%= aria_id_prefix %>-selected-workflow-refs"><%= @runner_group&.selected_workflow_refs&.join(",\n") -%></textarea>
+                  </div>
+
+                  <% if !workflow_restrictions_read_only? %>
+                    <p class="text-small color-fg-muted mt-3">
+                      References are mandatory: branches, tags, and SHAs are allowed.
+                    </p>
+                  <% end %>
+                <% end %>
+                <% dialog.with_footer do %>
+                  <div class="d-flex flex-items-center flex-justify-between flex-row-reverse">
+                    <div>
+                      <% if !workflow_restrictions_read_only? %>
+                        <%= render Primer::ButtonComponent.new(
+                          scheme: :primary,
+                          type: is_update? ? :submit : :button,
+                          disabled: true, # we require a change to the textarea value to enable the button
+                          classes: "js-btn-select-items workflow-refs",
+                          data: { target: "selected-item-list.saveButton", "disable-with": "Updating" }) do %>Save<% end %>
+                      <% end %>
+                    </div>
+                    <div class="text-small lh-condensed-ultra color-fg-muted">
+                      Learn more about
+                      <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/actions/hosting-your-own-runners/managing-access-to-self-hosted-runners-using-groups#changing-what-workflows-can-access-a-runner-group", tabindex: "0", classes: "Link--inTextBlock")) { "managing access to runner groups" } %>
+                    </div>
+                  </div>
+                  <div data-target="selected-item-list.description" hidden>
+                    <span data-target="selected-item-list.selectedCount">
+                      <%= selected_workflow_refs_count || 0 %>
+                    </span>
+                    selected
+                    <span
+                      data-target="selected-item-list.singularItemDescription"
+                      <%= selected_workflow_refs_count != 1 ? "hidden" : "" %>>
+                      <%= "workflow" %>
+                    </span>
+                    <span
+                      data-target="selected-item-list.pluralItemsDescription"
+                      <%= selected_workflow_refs_count == 1 ? "hidden" : "" %>>
+                      <%= "workflows" %>
+                    </span>
+                  </div>
+                <% end %>
+              <% end %>
+            </selected-item-list>
+          </div>
+        </div>
+
+        <%# This UI may be guarded by the runners + runner groups fine-grained permission in the future %>
+        <% if network_configuration_visible? %>
+          <div class="d-flex flex-items-center mb-3">
+            <%= render_react_partial ssr: false, name: "network-configurations-select-panel", props: { networkConfigurations: @network_configurations, selectedNetworkConfig: @current_network_configuration, isReadonly: !network_configuration_editable?, isUpdate: is_update?, formId: is_update? ? "edit_runner_group_#{@runner_group.id}" : nil } %>
+          </div>
+        <% end %>
+
+        <% unless is_update? %>
+          <%= render Primer::Beta::Button.new(
+            scheme: :primary,
+            mt: 2,
+            align_self: :start,
+            type: :submit,
+            classes: "js-btn-create-group",
+            data: {disable_with: "Saving"}) do %>
+            Create group
+          <% end %>
+        <% end %>
+
+        <div class="js-public-repository-warning d-flex pt-2" hidden>
+          <%= render(Primer::Beta::Octicon.new(:"alert-fill", color: :danger, mr: 2)) %>
+          <%= render(Primer::Beta::Text.new(tag: :p, color: :danger, font_size: :small)) { "You have selected a public repository, please check the \"Allow public repositories\" checkbox." } %>
+        </div>
+
+        <div class="js-vnet-public-repository-warning d-flex pt-2" hidden>
+          <%= render(Primer::Beta::Octicon.new(:"alert-fill", color: :danger, mr: 2)) %>
+          <%= render(Primer::Beta::Text.new(tag: :p, color: :danger, font_size: :small)) { "It is not safe to use Larger Runners with VNET injection enabled in public repositories. Public repositories can potentially run dangerous code on runners with access to your internal network via a vNet by creating a pull request that executes the code in a workflow." } %>
+        </div>
+
+      <% end %>
+    </div>
+  </div>
+</div>

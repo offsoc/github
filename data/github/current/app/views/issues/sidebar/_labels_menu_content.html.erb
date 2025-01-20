@@ -1,0 +1,82 @@
+<%
+  allow_quick_label_creation = current_user_can_push? && current_repository_writable?
+  inline ||= nil
+  data_url = issue_show_partial_path(issue: issue, partial: "issues/sidebar/labels_menu_content", inline: inline)
+  label_typeahead_cutoff = 3000
+  typeahead_mode_initial_label_count = 30
+  use_label_typeahead = use_label_typeahead && current_repository.labels.size > label_typeahead_cutoff
+%>
+
+<div class="select-menu-list js-issue-labels-menu-content">
+  <% form_fields = capture do %>
+    <input type="hidden" name="issue[labels][]" value="">
+    <% if use_label_typeahead %>
+      <div
+        class="js-filterable-issue-labels"
+        data-filterable-data-pre-rendered
+        data-filterable-for="label-filter-field"
+        data-filterable-type="labels-typeahead"
+        data-filterable-src="<%= data_url %>">
+        <template>
+          <%= render "issues/sidebar/label", selected: false, label: nil, only_js_labels: true %>
+        </template>
+        <div class="js-divider-suggestions" ></div>
+        <div id="prerender">
+          <% current_repository.sorted_labels(issue_or_pr: issue, cache_label_html: true, limit: typeahead_mode_initial_label_count).each do |label|%>
+            <% selected = issue.unique_label_ids.include?(label.id) %>
+            <%= render "issues/sidebar/label", selected: selected, label: label %>
+          <% end %>
+        </div>
+      </div>
+    <% else %>
+      <div class="js-filterable-issue-labels" data-filterable-for="label-filter-field" data-filterable-type="fuzzy-prio">
+        <% current_repository.sorted_labels(issue_or_pr: issue, cache_label_html: true).each do |label|%>
+          <% selected = issue.unique_label_ids.include?(label.id) %>
+          <%= render "issues/sidebar/label", selected: selected, label: label %>
+        <% end %>
+      </div>
+    <% end %>
+    <% unless allow_quick_label_creation %>
+      <div class="select-menu-no-results">Nothing to show</div>
+    <% end %>
+  <% end %>
+
+  <% if issue.new_record? %>
+    <%= form_fields %>
+  <% else %>
+    <%= form_tag set_labels_issue_path(current_repository.owner.display_login, current_repository.name, issue.number, inline: inline),
+      method: :put,
+      "aria-label": "Apply labels",
+      class: "js-issue-sidebar-form" do %>
+      <%= form_fields %>
+    <% end %>
+  <% end %>
+</div>
+
+<% if allow_quick_label_creation %>
+  <% if issue.new_record? %>
+    <button type="button"
+      class="width-full js-open-label-creation-modal js-add-label-button select-menu-item border-top" role="menuitem">
+      Create new label &ldquo;<span class="js-new-label-name"></span>&rdquo;
+    </button>
+  <% else %>
+    <%= render layout: "shared/details_dialog", locals: {
+      button_text: safe_join(["Create new label “", content_tag(:span, "", class: "js-new-label-name"), "”"]),
+      button_class: "d-block color-fg-muted select-menu-item js-add-label-button border-0",
+      button_role: "menuitem",
+      hidden: true,
+      details_class: "width-full js-new-label-modal new-label-modal",
+      dialog_class: "Box-overlay--narrow",
+      title: "Create new label"
+    } do %>
+      <%= render Issues::LabelCreationModalComponent.new(
+        labelable: issue,
+        repository: current_repository,
+      ) %>
+    <% end %>
+  <% end  %>
+  <a class="select-menu-item d-block color-fg-muted last-visible border-top edit-labels-button" href="<%= issues_labels_path(current_repository.owner, current_repository) %>" role="menuitem">
+    <%= primer_octicon(:pencil, float: :left, mr: 1, classes: "label-options-icon") %>
+    <span class="select-menu-item-text f6">Edit labels</span>
+  </a>
+<% end %>

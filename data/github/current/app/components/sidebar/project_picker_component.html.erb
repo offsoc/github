@@ -1,0 +1,133 @@
+<% issue_number = issue.number unless issue.nil? || issue.new_record? %>
+<% project_picker_result_id = options[:project_picker_result_id].nil? ? 'project-picker-results' : options[:project_picker_result_id] %>
+<project-picker>
+  <virtual-filter-input
+      class="breadcrumb TableObject SelectMenu-filter p-0 border-bottom-0 d-block"
+      style="margin: 10px 10px 0"
+      <%# aria-owns is set to ID of the controlled component. Data from virtual-filter-input will be added to the controlled element %>
+      aria-owns="<%= project_picker_result_id %>"
+      data-property="projects"
+      data-target="project-picker.input"
+      data-action="
+        loadstart:project-picker#willLoad
+        loadend:project-picker#didLoad
+        error:project-picker#didError
+      "
+      src="<%= projects_suggestions_path(repository.owner, repository, scope: selected_tab, access_level: access_level, issue_number: issue_number, search_query: options[:search_query], load_classic_projects: options[:load_classic_projects]) %>"
+      loading="eager">
+      <input type="text" name="query" class="SelectMenu-input form-control" autofocus placeholder="Filter projects" aria-label="Filter projects" autocomplete="off">
+  </virtual-filter-input>
+
+  <tab-container class="d-flex flex-column" data-action="tab-container-changed:project-picker#changeTab">
+    <div data-action="keydown:project-picker#focusInputAndAppendKeyValue" tabindex="-1" class="width-full">
+      <nav class="SelectMenu-tabs" role="tablist" aria-label="Project type">
+        <% tabs.each do |tab| %>
+          <%# aria-selected will be toggled by javascript and act as a source of truth for the tab-container %>
+          <button type="button" role="tab" class="SelectMenu-tab" aria-selected="<%= selected_tab == tab %>"><%= tab.capitalize %></button>
+        <% end %>
+      </nav>
+
+      <% tabs.each do |tab| %>
+        <%# The data-src property will be copied from the selected tab and put as a src attribute onto virtual-filter-input to drive requests %>
+        <div data-src="<%= projects_suggestions_path(repository.owner, repository, scope: tab, access_level: access_level, issue_number: issue_number, search_query: options[:search_query], load_classic_projects: options[:load_classic_projects]) %>" role="tabpanel" hidden tabindex="-1"></div>
+      <% end %>
+
+      <virtual-list
+        id="<%= project_picker_result_id %>"
+        style="max-height: 300px;"
+        tabindex="0"
+        class="d-block SelectMenu-list overflow-y-auto"
+        data-target="project-picker.list"
+        data-action="
+          virtual-list-update:project-picker#willRenderItems
+          virtual-list-render-item:project-picker#renderItem
+        "
+        data-close-action="<%= options[:close_menu_action] %>"
+        data-search-query="<%= options[:search_query] %>"
+      >
+
+        <%# This template will be used to populate virtual-list with items %>
+        <template data-target="project-picker.itemTemplate">
+          <li role="presentation">
+            <%# A combination of label input[type=checkbox] is needed for details-menu element to work properly %>
+            <label
+              id="pp-{{ id }}"
+              class="SelectMenu-item text-normal"
+              title="{{ name }}"
+              aria-checked="{{ selected }}"
+              role="menuitemcheckbox"
+              tabindex="-1"
+              data-project-id="{{ id }}"
+              data-project-search-slug="{{ search_slug }}"
+              data-project-type="{{ type }}"
+              data-scrolltop
+              aria-setsize
+              aria-posinset
+            ><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+              <%# This input should not have name attribute assigned, as it should not be submitted with the form by design %>
+              <input type="checkbox" checked="{{ selected }}" hidden><%# erblint:disable BooleanAttributes %>
+              <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+              <div class="overflow-hidden">
+                <div class="d-flex Truncate">
+                  <div hidden="{{ table_icon_hidden }}"><%# erblint:disable BooleanAttributes %>
+                    <%= render(Primer::Beta::Octicon.new(:table, color: :muted, mr: 2)) %>
+                  </div>
+                  <div hidden="{{ template_icon_hidden }}"><%# erblint:disable BooleanAttributes %>
+                    <%= render(Primer::Beta::Octicon.new(:"project-template", color: :muted, mr: 2)) %>
+                  </div>
+                  <div hidden="{{ project_icon_hidden }}"><%# erblint:disable BooleanAttributes %>
+                    <%= render(Primer::Beta::Octicon.new(:project, color: :muted, mr: 2)) %>
+                  </div>
+                  <span class="Truncate-text {{ project_selection_dimmed_text_class }}"><strong>{{ name }}</strong></span>
+                </div>
+                <div class="mt-1 description {{ project_selection_dimmed_text_class }}">
+                  {{ owner }}
+                </div>
+                <div hidden="{{ project_maximum_items_warning_hidden }}" class="color-fg-danger mt-1">Maximum number of items reached. To add more, please archive or delete existing items from the project.</div><%# erblint:disable BooleanAttributes %>
+              </div>
+            </label>
+          </li>
+        </template>
+
+        <div class="SelectMenu-blankslate color-fg-muted p-2" data-target="project-picker.blankslate" hidden>No projects</div>
+
+        <div class="SelectMenu-blankslate color-fg-danger p-2" data-target="project-picker.errorNotice" hidden>Something went wrong. Please try refreshing the page.</div>
+
+        <%= render Primer::Beta::Spinner.new(
+          my: 4,
+          mx: :auto,
+          display: :block,
+          "aria-label": "Loading projects",
+          "data-target": "project-picker.loadingIndicator",
+        ) %>
+
+        <ul
+          role="listbox"
+          class="list-style-none m-0"
+          aria-label="Filtered projects"
+          data-pjax="#repo-content-pjax-container"
+          data-turbo-frame="repo-content-turbo-frame"
+          data-action="click:project-picker#<%= options[:click_item_action] %>"
+        ></ul>
+      </virtual-list>
+    </div>
+  </tab-container>
+
+  <%# This template will be used for serializing the selection state of virtual-list entries %>
+  <template data-target="project-picker.selectionTemplate">
+        <input type="{{ type }}" hidden name="{{ name }}" checked="{{ checked }}"><%# erblint:disable BooleanAttributes %>
+  </template>
+
+  <%# This element is used as a container for serialized input elements representing the selection state. Can be used for debugging %>
+  <div hidden data-target="project-picker.submitContainer">
+    <%# We need to include input field for new issue record, so the list of projects is added to the form creating an issue. %>
+    <% if issue && issue.new_record? %>
+      <% issue.project_ids.each do |project_id| %>
+        <input type="checkbox" name="issue_project_ids[<%= project_id %>]" checked <%= test_selector "new-issue-project-input" %>>
+      <% end %>
+      <% issue.memex_project_ids.each do |project_id| %>
+        <input type="checkbox" name="issue_memex_project_ids[<%= project_id %>]" checked <%= test_selector "new-issue-memex-project-input" %>>
+      <% end %>
+    <% end %>
+  </div>
+</project-picker>

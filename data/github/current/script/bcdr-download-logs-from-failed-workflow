@@ -1,0 +1,44 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# This script downloads the logs for failing jobs for a given workflow id.
+# The logs will be saved to files named after the job name.
+#
+# Usage: bcdr-download-logs-from-failed-workflow <workflow-run-id>
+
+
+require "json"
+require "uri"
+
+if ARGV.length < 1
+  puts "Usage: bcdr-download-logs-from-failed-workflow <workflow-run-id>"
+  exit 1
+end
+
+output = `gh run view #{ARGV[0]} --json jobs`
+if $? != 0
+  puts "Error: unable to view workflow run: #{ARGV[0]}"
+  exit 1
+end
+
+jobs = JSON.parse(output)
+
+jobs["jobs"].each do |job|
+  if job["conclusion"] != "success"
+    puts "Downloading job logs for non-successful job: #{job["name"]}..."
+
+    file_path = job["name"].gsub(/\W/, " ").downcase
+    job_id = URI(job["url"]).path.split("/").last
+
+    log = `gh run view --job #{job_id} --log`
+    if $? != 0
+      puts "Error: unable to download logs for job #{job["url"]}"
+    end
+
+    File.open(file_path, "a+") do |f|
+      f.write(log)
+    end
+
+    puts "Wrote log to #{file_path}"
+  end
+end

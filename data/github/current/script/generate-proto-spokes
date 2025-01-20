@@ -1,0 +1,84 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#/ Usage: bin/generate-proto-spokes [--update SPOKESD_REVISION]
+#/
+#/ Ensures protoc and the needed plugins are installed, then runs them to
+#/ regenerate the client stubs for lib/spokes/spokes.proto.
+#/
+#/ If --update is used, downloads a new version of spokes.proto from the
+#/ github/spokesd repo before running protoc.
+#/
+#/ This command is only supported in Codespaces.
+
+require "json"
+require "net/http"
+require "uri"
+
+CONTENTS_DIR = "https://api.github.com/repos/github/spokesd/contents/services/spokes"
+PROTO_FILE = "lib/spokes/spokes.proto"
+
+# This matches the gem version we're using.
+TWIRP_RUBY_VERSION = "v1.8.0"
+
+def main
+  ensure_protoc
+
+  puts "Generating protobuf client ..."
+  system "protoc",
+    "--proto_path=.",
+    PROTO_FILE,
+    "--ruby_out=.",
+    "--twirp_ruby_out=." or exit 1
+
+  puts "DONE!"
+end
+
+def ensure_protoc
+  install_protoc unless system("which", "protoc", out: "/dev/null", err: "/dev/null")
+  install_twirp unless system("which", "protoc-gen-twirp_ruby", out: "/dev/null", err: "/dev/null")
+end
+
+def install_protoc
+  puts "Installing protoc ..."
+  system("sudo", "apt-get", "-y", "install", "--no-install-recommends", "protobuf-compiler") or exit 1
+end
+
+def install_twirp
+  puts "Installing protoc-gen-twirp_ruby ..."
+  system("go", "install", "github.com/twitchtv/twirp-ruby/protoc-gen-twirp_ruby@#{TWIRP_RUBY_VERSION}") or exit 1
+end
+
+def update(ref)
+  puts "Downloading spokes.proto from github/spokesd@#{ref} ..."
+
+  url = CONTENTS_DIR + "?ref=#{ref}"
+  headers = { "Authorization" => "Bearer #{ENV["GITHUB_TOKEN"]}" }
+  contents = JSON.parse(Net::HTTP.get(URI(url), headers))
+  if contents.is_a?(Hash)
+    puts "error: #{contents["message"]}"
+    exit 1
+  end
+
+  proto_entry = contents.find { |e| e["name"] == File.basename(PROTO_FILE) }
+  if proto_entry.nil?
+    puts "error: #{File.basename(PROTO_FILE)} not found in #{url}"
+    exit 1
+  end
+
+  proto_contents = Net::HTTP.get(URI(proto_entry.fetch("download_url")))
+  File.write(PROTO_FILE, proto_contents)
+end
+
+while arg = ARGV.shift
+  case arg
+  when "--update"
+    update(ARGV.shift)
+  else
+    puts "unrecognized option #{arg.inspect}"
+    exit 1
+  end
+end
+
+main
+
+# vim: ft=ruby

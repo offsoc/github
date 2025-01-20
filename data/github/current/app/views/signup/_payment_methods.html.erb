@@ -1,0 +1,82 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%
+  # This partial renders the fields for our payment forms. It requires:
+  #
+  # owner - The User/Organization whose account we're updating.
+  # form  - A Rails FormBuilder to use as context for this form.
+
+  view = BillingSettings::PaymentMethodFieldsView.new(owner, form)
+  condensed_view ||= false
+
+  SecureHeaders.append_content_security_policy_directives(
+    request,
+    img_src: [GitHub.paypal_checkout_url],
+    connect_src: [GitHub.braintreegateway_url, GitHub.braintree_analytics_url],
+    frame_src: [GitHub.zuora_payment_page_server]
+  )
+%>
+
+<% currency_message = capture do %>
+<p class="color-fg-muted f6 mb-7">
+  Charges to your account will be made in US Dollars. Converted prices are
+  provided as a convenience and are only an estimate based on current exchange
+  rates. Local prices will change as the exchange rate fluctuates.
+</p>
+<% end %>
+
+<div class="payment-methods js-payment-methods <%= "has-paypal-account" if owner.has_paypal_account? %> <%= "condensed-payment-methods" if condensed_view %>">
+  <div class="js-selected-payment-method selected-payment-method pay-by-credit-card <%= "active" unless owner.has_paypal_account? %>">
+    <%= render layout: "signup/billing_heading", locals: { title: "Payment details" } do %>
+      <button type="button" class="btn-link js-payment-method-href" for="pay-by-credit-card-<%= owner.display_login %>" data-selected-tab="pay-with-paypal">
+        Pay with PayPal
+      </button>
+    <% end %>
+
+    <%= render partial: "payment_method/name_fields" %>
+
+    <div class="js-zuora-spinner d-flex flex-items-center my-4">
+      <%= image_tag "spinners/octocat-spinner-32.gif", class: "mr-2", size: "16x16", alt: "", valign: "top" %>
+      Loading payment information…
+    </div>
+    <%= render Billing::Settings::ZuoraHppContainerComponent.new(
+      user_id: current_user.id,
+      signature_path: signup_signature_path,
+      container_class: "js-zuora-payment-page",
+      ignore_default_classes: true,
+      hydro_payload: {
+        account_id: owner.id,
+      },
+      organization_id: (owner.display_login if owner.organization? && owner.persisted?),
+    ) %>
+    <%= render Billing::Settings::ZuoraBillingInfoComponent.new(
+      target: owner,
+      mt: 3,
+      border: true,
+      border_radius: 2,
+      px: 3,
+      py: 2,
+      mb: 3,
+      display: :none,
+    ) do %>
+      <p class="d-flex flex-justify-between mb-0">
+        <span class="">
+          <%= primer_octicon(:"credit-card", color: :muted) %>
+          <strong class="js-new-card-type"></strong> ending
+          <span class="js-new-card-number"></span>
+        </span>
+        <%= render Primer::ButtonComponent.new(scheme: :link, font_size: 6, classes: "js-edit-card-details") do %>Edit<% end %>
+      </p>
+    <% end %>
+  </div>
+
+  <div class="js-selected-payment-method selected-payment-method pay-with-paypal <%= "active" if owner.has_paypal_account? %>">
+    <%= render layout: "signup/billing_heading", locals: { title: "Payment details" } do %>
+      <button type="button" class="btn-link js-payment-method-href" for="pay-by-credit-card-<%= owner.display_login %>" data-selected-tab="pay-by-credit-card">
+        Pay with credit card
+      </button>
+    <% end %>
+
+    <%= render :partial => "payment_method/paypal_fields", :locals => { :view => view, :condensed_view => condensed_view } %>
+  </div>
+</div>

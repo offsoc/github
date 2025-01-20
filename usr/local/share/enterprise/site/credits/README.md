@@ -1,0 +1,1 @@
+This folder powers the page at https://<ghe-host>/site/credits

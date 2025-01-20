@@ -1,0 +1,95 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/dgit"
+require "github/routing"
+require "github/config/mysql"
+require "terminal-table"
+
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+include GitHub::DGit::Routing
+include GitHub::DGit::Routing::GistById
+include GitHub::Routing
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{File.basename(__FILE__)} nwo"
+  exit 1
+end
+
+def fetch_network_routes(network_id)
+  [
+    all_network_replicas(network_id).select(&:healthy?),
+    network_path(network_id),
+  ]
+end
+
+def fetch_repo_routes(owner, name)
+  repo_id, _, _, _, _ = lookup_repo(owner, name)
+  [
+    all_repo_replicas(repo_id).select(&:healthy?),
+    repo_path(owner, name),
+  ]
+end
+
+def fetch_gist_routes(gist_name)
+  # Update gist_name to the name from the database, in case
+  # we're looking up by id ("gist/<id>").
+  gist_id, gist_name = lookup_gist_by_reponame(gist_name)
+  [
+    all_gist_replicas(gist_id).select(&:healthy?),
+    gist_storage_path(repo_name: gist_name),
+  ]
+end
+
+def main
+  @json = false
+  while !ARGV.empty? && ARGV[0] =~ /^-/
+    arg = ARGV.shift
+    case arg
+    when "-j"
+      @json = true
+    else
+      usage
+    end
+  end
+  usage unless ARGV.length == 1
+
+  nwo = ARGV[0]
+
+  repo_owner, repo_name = nwo.split("/", 2)
+
+  begin
+    replicas, path = case repo_owner
+    when "network"
+      fetch_network_routes(repo_name.to_i)
+    when "gist"
+      fetch_gist_routes(repo_name)
+    else # nwo
+      fetch_repo_routes(repo_owner, repo_name)
+    end
+  rescue GitHub::DGit::RepoNotFound
+    puts "No such route."
+    exit 1
+  end
+
+  if @json
+    puts(replicas.map do |replica|
+      {
+        host: replica.host,
+        fqdn: replica.fileserver.fqdn,
+        path: path
+      }
+    end.to_json)
+  elsif replicas.empty?
+    puts "No such route."
+    exit 1
+  else
+    puts replicas.map { |replica| "#{replica.host}:#{path}" }
+  end
+end
+
+main

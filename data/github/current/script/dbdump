@@ -1,0 +1,42 @@
+#!/usr/bin/env ruby
+# Usage: [RAILS_ENV=<env>] dbdump [-p]
+# Dump the database to stdout.
+require File.expand_path("../../config/basic", __FILE__)
+require "erb"
+require "yaml"
+require "optparse"
+require "trilogy"
+
+include_password = false
+
+OptionParser.new do |opt|
+  opt.banner = "Usage: dbconsole [options] [environment]"
+  opt.on("-p", "--include-password", "Automatically provide the password from database.yml") do |_v|
+    include_password = true
+  end
+  opt.parse!(ARGV)
+  abort opt.to_s unless (0..1).include?(ARGV.size)
+end
+
+env = ARGV.first || ENV["RAILS_ENV"] || "development"
+config = YAML::load(ERB.new(IO.read(Rails.root.to_s + "/config/database.yml")).result)[env]
+abort "No database is configured for the environment '#{env}'" unless config
+
+args = {
+  "host"      => "--host",
+  "port"      => "--port",
+  "socket"    => "--socket",
+  "username"  => "--user",
+  "encoding"  => "--default-character-set",
+}.map { |opt, arg| "#{arg}=#{config[opt]}" if config[opt] }.compact
+
+if config["password"] && include_password
+  args << "--password=#{config['password']}"
+elsif config["password"] && !config["password"].empty?
+  args << "-p"
+end
+
+args << "--set-gtid-purged=OFF"
+args << config["database"]
+
+exec "mysqldump", *args

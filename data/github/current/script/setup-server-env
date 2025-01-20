@@ -1,0 +1,59 @@
+#!/bin/bash
+
+readonly GITHUB_ROOT=$(readlink -f "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/..")
+readonly MULTI_TENANT_DOMAIN=ghe.localhost
+readonly SINGLE_TENANT_DOMAIN=github.localhost
+readonly DEFAULT_DEV_TENANT=avocado-gmbh
+
+current_runtime() {
+  if [ -f "$GITHUB_ROOT/tmp/runtime/current" ]; then
+    cat "$GITHUB_ROOT/tmp/runtime/current"
+  else
+    echo "dotcom"
+  fi
+}
+
+# Add function to write out the env to a file
+write_server_env() {
+  cat > $GITHUB_ROOT/tmp/.server.env <<EOF
+GITHUB_RUNTIME=$(current_runtime)
+GH_HOSTNAME=$GH_HOSTNAME
+MULTI_TENANT_ENTERPRISE=$MULTI_TENANT_ENTERPRISE
+EOF
+}
+
+# set default hostname
+if [[ "$MULTI_TENANT_ENTERPRISE" -eq 1 ]]; then
+  export GH_HOSTNAME=$MULTI_TENANT_DOMAIN
+  export NGROK_HOST="$DEFAULT_DEV_TENANT.$MULTI_TENANT_DOMAIN"
+else
+  export GH_HOSTNAME=$SINGLE_TENANT_DOMAIN
+  export NGROK_HOST="$SINGLE_TENANT_DOMAIN"
+fi
+
+  # process tunnel file
+if [ -f "$GITHUG_WEB_TUNNEL_PATH" ]; then
+  codespace_host=$(jq .host $GITHUG_WEB_TUNNEL_PATH -r)
+  codespace_port=$(jq .port $GITHUG_WEB_TUNNEL_PATH -r)
+
+  if [ "$codespace_port" = "null" ]; then
+    # codespace in the browser
+    # If the port is null then we're using PFS URLs so make the API use paths
+    # instead of a subdomain.
+    export USE_API_PATH_PREFIX=1
+    export GH_HOSTNAME="$codespace_host"
+  else
+    # codespace in vscode
+
+    if [[ "$MULTI_TENANT_ENTERPRISE" -eq 1 ]]; then
+      export DOMAIN_NAME="$DEFAULT_DEV_TENANT.$MULTI_TENANT_DOMAIN"
+      export GH_HOSTNAME="$MULTI_TENANT_DOMAIN:${codespace_port}"
+    else
+      export DOMAIN_NAME="$SINGLE_TENANT_DOMAIN"
+      export GH_HOSTNAME="$SINGLE_TENANT_DOMAIN:${codespace_port}"
+    fi
+  fi
+fi
+
+# Write out the env to a file
+write_server_env

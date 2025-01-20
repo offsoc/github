@@ -1,0 +1,213 @@
+#!/bin/bash
+#/ Usage: ghe-welcome
+#/
+#/ Shows a Welcome splashscreen
+#/
+set -e
+
+if [ -e /run/virt-what/container ]; then
+   echo "Error:  ghe-welcome cannot be used inside containers." >&2
+   exit 1
+fi
+
+setterm -blank 0
+setterm -powersave off
+
+update=''
+sha=''
+journal_pid=''
+oprintk=$(cat /proc/sys/kernel/printk)
+
+function kill_journal() {
+  if [ -n "$journal_pid" ] ; then
+    pkill --parent $journal_pid
+    wait $journal_pid || true
+    journal_pid=''
+  fi
+}
+
+function cleanup() {
+  kill_journal
+  tput reset
+  echo $oprintk > /proc/sys/kernel/printk
+}
+
+trap cleanup EXIT
+echo "0 0 0 0" > /proc/sys/kernel/printk
+
+
+while true; do
+
+  SIZE_X=`tput cols`
+  SIZE_Y=`tput lines`
+
+  journal_offset=16
+
+  function fill_spaces() { for i in `seq 1 $1`; do echo -n " "; done }
+  function center() {
+    len=$2
+    if [ -z "$len" ]; then len="${#1}"; fi
+    sx=$((($SIZE_X - $len) / 2))
+    fill_spaces $sx
+    if [ -n "$3" ]; then
+      echo -n "$1"
+    else
+      echo "$1"
+    fi
+  }
+
+  function label() {
+    tput bold
+    len="${#1}"
+    sx=$(($SIZE_X / 2 - $len))
+    fill_spaces $sx
+    echo -n "$1: "
+    shift
+    while [ "$#" -gt "0" ] ; do
+      if [ -z "$1" ]; then
+        tput smso
+        tput blink
+        tput setaf 1
+        echo -n "NOT SET"
+        tput sgr0
+      else
+        tput sgr0
+        echo -n "$1"
+      fi
+      shift
+    done
+    echo
+  }
+
+  # Convert the CIDR notation to netmask notation
+  function cidr2mask ()
+  {
+     # Number of args to shift, 255..255, first non-255 byte, zeroes
+     set -- $(( 5 - ($1 / 8) )) 255 255 255 255 $(( (255 << (8 - ($1 % 8))) & 255 )) 0 0 0
+     [ $1 -gt 1 ] && shift $1 || shift
+     echo ${1-0}.${2-0}.${3-0}.${4-0}
+  }
+
+  function update_info() {
+    net_mac=$(ip -o link show eth0 | awk '{ print $17 '})
+    net_hostname=$(hostname -f 2>/dev/null || hostname)
+    net_raw=$(ip -o -4 addr show eth0)
+    if [ -z "$net_raw" ] ; then
+      net_ip=""
+      net_broadcast=""
+      net_subnet=""
+      net_gateway=""
+    else
+      net_ip=$(echo "$net_raw" | awk '{ print $4 }' | cut -d/ -f1)
+      net_broadcast=$(echo "$net_raw" | awk '{ print $6 }')
+      net_subnet=$(cidr2mask $(echo "$net_raw" | awk '{ print $4 }' | cut -d/ -f2))
+      net_gateway=$(ip route | grep default | awk '{ print $3 }')
+    fi
+    net_dns=$(cat /etc/resolv.conf | grep ^nameserver | head -3 | awk '{ print $2 }' | tr "\n" "," | sed -e 's/,$/\n/' -e 's/,/, /g')
+    if [ -f /data/user/common/network.conf ]; then
+      source /data/user/common/network.conf
+      if [ "$net4_mode" = "dhcp" ]; then
+        net_mode_title="DHCP"
+      elif [ "$net4_mode" = "manual" ]; then
+        net_mode_title="Manual"
+      else
+        net_mode_title="Static"
+      fi
+    else
+      net_mode_title='DHCP'
+    fi
+
+    if mountpoint -q /data/user ; then
+      user_disk=$(pvdisplay -c | grep ghe_storage | head -n1 | cut -d: -f1 | xargs)
+      user_disk_info=$(df -h --output=used,size /data/user | tail -n1 | xargs | sed -e 's/ / used of /')
+    else
+      user_disk=''
+      user_disk_info="please attach storage"
+    fi
+
+    if [ -f /etc/haproxy/ssl.crt ] && grep -q "BEGIN CERTIFICATE" /etc/haproxy/ssl.crt; then
+      cert_fingerprint=$(openssl x509 -fingerprint -in /etc/haproxy/ssl.crt -noout | cut -d= -f2)
+    else
+      cert_fingerprint=""
+    fi
+
+    if [ -f /etc/github/enterprise-release ]; then
+      ghe_release=$(grep RELEASE_VERSION /etc/github/enterprise-release | cut -d\" -f2)
+    else
+      ghe_release=""
+    fi
+
+    t=`echo "$net_mode_title $net_ip $net_mac $net_hostname $net_broadcast $net_subnet $net_gateway $net_dns $user_disk $user_disk_info $cert_fingerprint" | sha1sum -t`
+    if [ "$sha" != "$t" ]; then
+      update='1'
+      sha="$t"
+    fi
+  }
+
+  update_info
+
+  if [ -n "$net_ip" ] ; then
+    journal_offset=$(($journal_offset + 1))
+  fi
+
+  if [ -n "$cert_fingerprint" ] ; then
+    journal_offset=$(($journal_offset + 3))
+  fi
+
+  if [ -n "$update" ]; then
+    kill_journal
+    tput reset
+    tput setaf 5
+
+    center "  ___ _ _   _  _      _      ___     _                    _" 69
+    center " / __(_) |_| || |_  _| |__  | __|_ _| |_ ___ _ _ _ __ _ _(_)___ ___" 69
+    center "| (_ | |  _| __ | || | '_ \\ | _|| ' \\  _/ -_) '_| '_ \\ '_| (_-</ -_)" 69
+    center " \\___|_|\\__|_||_|\\_,_|_.__/ |___|_||_\\__\\___|_| | .__/_| |_/__/\\___|" 69
+    center "                                                |_| $ghe_release" 69
+
+    tput sgr0
+
+    label "Network configuration" "$net_mode_title"
+    label "IP address / subnet" "$net_ip" " / " "$net_subnet"
+    label "MAC address" "$net_mac"
+    label "Hostname" "$net_hostname"
+    label "Broadcast" "$net_broadcast"
+    label "Gateway address" "$net_gateway"
+    label "DNS nameservers" "$net_dns"
+    label "Storage" "$user_disk" " " "($user_disk_info)"
+
+    echo
+    if [ -n "$cert_fingerprint" ] ; then
+      center "Certificate fingerprint"
+      center "$cert_fingerprint"
+      echo
+    fi
+
+    tput bold
+    center "Press S to start network setup"
+    tput sgr0
+
+    if [ -n "$net_ip" ] ; then
+      center "Visit http://$net_ip/setup to configure GitHub Enterprise."
+    fi
+
+    tput csr $journal_offset $(($SIZE_Y - 1))
+    tput cup $journal_offset 0
+
+    tput civis
+    /usr/local/share/enterprise/ghe-welcome-journal $(($SIZE_Y - $journal_offset)) &
+    journal_pid=$!
+    update=''
+  fi
+
+  input=''
+  read -s -n 1 -t 5 input 2>/dev/null || true
+
+  if [ "$input" = "s" -o "$input" = "S" ]; then
+    kill_journal
+    tput reset
+    /usr/local/bin/ghe-setup-network -v || true
+    update='1'
+  fi
+
+done

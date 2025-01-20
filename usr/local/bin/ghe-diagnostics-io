@@ -1,0 +1,48 @@
+#!/bin/bash
+#/ Usage: ghe-diagnostics-io [-h] [<timeout>]
+#/
+#/ Gather an I/O diagnostics bundle.
+#/
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/   <timeout>      Time in seconds to gather data. Defaults to 120 seconds.
+#/
+set -e
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+if [ "$(whoami)" != "admin" ]; then
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+fi
+
+exec 3>&2
+
+run() {
+  echo '>' "$@" >&3
+  sudo "$@"
+}
+
+timeout=${1:-120}
+device=$(findmnt -o SOURCE -n /data/user)
+dir=$(mktemp -d /home/admin/ghe-diagnostics-io-XXXXXXXXX)
+trap "rm -rf $dir" EXIT
+
+run gpstree > $dir/gpstree.txt
+run ps fauxx > $dir/ps.txt
+run timeout $timeout iosnoop > $dir/iosnoop.txt 2>/dev/null || true
+run iotop -o -b -d 1 -n $timeout > $dir/iotop.txt
+run pidstat -ldht 5 $timeout > $dir/pidstat.txt
+run iostat -dx 5 $timeout > $dir/iostat.txt
+
+for ((n=0; n<3; n++)); do
+  run hdparm -t $device 2>/dev/null || echo "Error: hdparm failed to benchmark $device disk"
+  sleep 1
+done > $dir/hdparm.txt
+
+tar --acls -czf $dir.tar.gz -C /home/admin $(basename $dir)
+echo "Created I/O diagnostics bundle: $dir.tar.gz"

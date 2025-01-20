@@ -1,0 +1,57 @@
+#!/bin/sh
+#/ Usage: dump-queries [-n <samples>] [<environment>]
+#/ Show currently executing queries in database for the given <environment>.
+#/ With -n, run <samples> queries with a 100ms delay between them and report
+#/ the result in aggregate.
+set -e
+
+PATH="$(dirname $0):$PATH"
+
+# parse arguments
+samples=1
+while [ $# -gt 0 ]
+do
+    case "$1" in
+    --help) grep ^#/ <"$0" | cut -c4-
+            exit 0
+            ;;
+   -n)      samples="$2"
+            shift 2
+            ;;
+    *)      break
+            ;;
+   esac
+done
+
+# run dbconsole to get the full PROCESSLIST in tab-delimited format
+(
+    i=0
+    while [ $i -lt $samples ]
+    do dbconsole -p --execute 'SHOW PROCESSLIST' "$@"
+       i=$(( i + 1 ))
+       sleep 0.100
+    done
+) |
+
+# remove duplicate entries based on the transaction id
+sort -u -k1,1n                    |
+
+# remove SHOW PROCESSLIST queries that we generate
+grep -v 'SHOW PROCESSLIST$'       |
+
+# remove connections that are sleeping. we don't care.
+grep -v '	Sleep	'                 |
+
+# get rid of .(rs|stg).github.com from host records
+sed 's/\.[rstg.]*github\.com//'   |
+
+# get rid of Info header name
+sed 's/Info//'                    |
+
+# grab only the fields we want
+cut -d '	' -f 1,3,5,6,8          |
+
+# turn tabs into spaces with sensible tab stops
+expand -t 12,30,42,50
+
+# vim: ts=2

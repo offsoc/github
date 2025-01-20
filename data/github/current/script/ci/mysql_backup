@@ -1,0 +1,201 @@
+#!/bin/bash -ex
+#
+# Create or restore a backup of the MySQL data directory.
+#
+# This follows an approach similar to xtrabackup, offering very fast table creation.
+# As our parallel test databases schema requires more than 7,000 tables, this allows
+# us to sidestep MySQL's otherwise slow DDL operations as we prepare to run tests.
+#
+# We use this rather than xtrabackup because xtrabackup was designed for use in a
+# production environment and, since we're in a test environment, we can use a less
+# robust approach that is up to 10x faster.
+#
+# How this works:
+#
+# 1. Stop MySQL
+# 2. Copy or replace data directory
+# 3. Start MySQL
+#
+function print_usage() {
+  echo "Usage: $0 {create|restore} BACKUP_PATH"
+}
+
+function create() {
+  if [[ -d "$DATA_DIR" ]]; then
+    stop_mysql_until_exit
+
+    mkdir -p $(dirname "$BACKUP")
+    sudo --non-interactive tar $TAR_COMPRESSION_FLAG --create --file "$BACKUP" --directory "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")"
+    sudo --non-interactive chown build:build "$BACKUP"
+    echo "Created MySQL data directory backup: $BACKUP"
+  else
+    echo "MySQL data directory not found at $DATA_DIR"
+    exit 1
+  fi
+}
+
+function restore() {
+  stop_mysql_until_exit
+  restore_backup
+
+  if start_mysql && can_connect_to_mysql; then
+    echo "MySQL data directory restored from backup"
+    script/ci/dogstats increment mysql_backup.restore status:succeeded
+  else
+    echo "MySQL data directory backup restore failed"
+    restore_stash
+    script/ci/dogstats increment mysql_backup.restore status:failed
+    exit 1
+  fi
+}
+
+function can_connect_to_mysql() {
+  mysql -u root --execute "SELECT 1" > /dev/null
+}
+
+function restore_backup() {
+  if [[ -d "$DATA_DIR" ]]; then
+    if mountpoint -q "$DATA_DIR"; then
+      mkdir -p "$STASH_DIR"
+      sudo --non-interactive rsync -r --remove-source-files "${DATA_DIR}/" "${STASH_DIR}/" && sudo --non-interactive find "${DATA_DIR}" -type d -empty -delete -mindepth 1
+    else
+      mkdir -p $(dirname "$STASH_DIR")
+      sudo --non-interactive mv "$DATA_DIR" "$STASH_DIR"
+    fi
+  fi
+
+  mkdir -p "$RESTORE_DIR"
+  time tar $TAR_COMPRESSION_FLAG --extract --file "$BACKUP" --directory "$RESTORE_DIR"
+  find "$RESTORE_DIR" -name "mysql-bin.*"
+  find "$RESTORE_DIR" -name "mysql-bin.*" -print0 | xargs -0 --no-run-if-empty rm
+
+  if mountpoint -q "$DATA_DIR"; then
+    sudo --non-interactive rsync -r --remove-source-files "${RESTORE_DIR}/mysql/" "${DATA_DIR}/" && sudo --non-interactive rm -rf "$RESTORE_DIR"
+  else
+    sudo --non-interactive mv "${RESTORE_DIR}/mysql" "$DATA_DIR"
+  fi
+
+  sudo --non-interactive chown -R mysql:mysql "$DATA_DIR"
+}
+
+function restore_stash() {
+  echo "Restoring stashed MySQL data directory: $STASH_DIR"
+
+  if [[ ! -d "$STASH_DIR" ]]; then
+    echo "No stash found, cannot restore"
+    return
+  fi
+
+  if mysql_running; then
+    echo "Refusing to restore stash because MySQL is running"
+    return
+  fi
+
+  sudo --non-interactive rm -rf "$DATA_DIR"
+  sudo --non-interactive mv "$STASH_DIR" "$DATA_DIR"
+}
+
+function start_mysql() {
+  sudo --non-interactive service mysql start
+
+  echo -n "Starting MySQL..."
+  for i in {1..20}; do
+    if mysql_running; then
+      echo "ok"
+      return 0
+    else
+      sleep 1
+    fi
+  done
+
+  echo "failed"
+  return 1
+}
+
+# Stop MySQL until the script exits
+MYSQL_STOPPED=""
+function stop_mysql_until_exit() {
+  if mysql_running; then
+    MYSQL_STOPPED="1"
+  fi
+
+  echo -n "Stopping MySQL"
+  sudo --non-interactive service mysql stop
+}
+
+function mysql_running() {
+  sudo --non-interactive service mysql status > /dev/null
+}
+
+function tidy_up() {
+  # Start MySQL when we stopped it and didn't started it back up.
+  # If we're unable to start up, attempt to restore from stashed data directory.
+  if [[ -n "${MYSQL_STOPPED}" ]] && ! mysql_running; then
+    if ! start_mysql; then
+      restore_stash
+      start_mysql
+    fi
+  fi
+
+  if [[ -d "$STASH_DIR" ]]; then
+    sudo --non-interactive rm -rf "$STASH_DIR"
+  fi
+
+  if [[ -d "$RESTORE_DIR" ]]; then
+    rm -rf "$RESTORE_DIR"
+  fi
+}
+
+for ARG; do
+  case "$ARG" in
+  --help) print_usage; exit ;;
+  esac
+done
+
+if ! mysql_running; then
+  echo "MySQL isn't running"
+  exit 1
+fi
+
+# WARNING: These paths are tightly coupled to the build pipeline change.
+#          If you change something here, be sure to update this file too:
+#          https://github.com/github/bp-agents/blob/main/agents/github-full/build-sudo
+DATA_DIR="/var/lib/mysql"
+STASH_DIR="/workspace/mysql-datadir-stash"
+RESTORE_DIR="/workspace/mysql-datadir-restore"
+BACKUP="$WORKSPACE/tmp/mysql-backup.tar.gz"
+
+if [[ -z "$BACKUP" ]]; then
+  echo "Must provide command: create or restore"
+  print_usage
+  exit 1
+fi
+
+ACTUAL_DATA_DIR=$(mysql -u root --batch --skip-column-names --execute "SHOW VARIABLES LIKE 'datadir'" | awk '{print $2}')
+ACTUAL_DATA_DIR=${ACTUAL_DATA_DIR%/} # Remove trailing slash
+if [[ "$DATA_DIR" != "$ACTUAL_DATA_DIR" ]]; then
+  echo "Unexpected MySQL data directory \(expect: $DATA_DIR, actual: $ACTUAL_DATA_DIR\)"
+  echo "Unable to proceed with backup"
+  exit 1
+fi
+
+# Utilize pigz if available for faster compression in tar
+TAR_COMPRESSION_FLAG="--gzip"
+if command -v pigz &> /dev/null; then
+  echo "Using parallel gzip (pigz) for tar compression"
+  TAR_COMPRESSION_FLAG="-I pigz"
+fi
+
+trap "tidy_up" EXIT
+
+case "$1" in
+  create)
+    create
+    ;;
+  restore)
+    restore
+    ;;
+  *)
+    print_usage
+    exit 1
+esac

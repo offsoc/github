@@ -1,0 +1,177 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%graphql
+  fragment ProjectOwner on ProjectOwner {
+    ... on Organization {
+      login
+      viewerIsAMember
+
+      resourcePath
+    }
+
+    project(number: $projectNumber) {
+      isPublic
+      organizationPermission
+      closed
+
+      settingsResourcePath
+      orgSettingsResourcePath
+      teamsSettingsResourcePath
+      usersSettingsResourcePath
+    }
+
+    ...Views::ProjectSettings::Breadcrumbs::ProjectOwner
+    ...Views::ProjectSettings::Tabs::ProjectOwner
+  }
+%><%# erblint:disable NoGraphqlFragments %>
+<% project_owner = Views::ProjectSettings::Index::ProjectOwner.new(project_owner) %>
+<% project = project_owner.project %>
+
+<% page_info title: "Collaboration options · Project settings" %>
+
+<%= render partial: "project_settings/breadcrumbs", locals: { project_owner: project_owner } %>
+
+<div class="d-flex flex-column flex-lg-row mt-lg-4">
+  <div class="mb-lg-0 mb-4" role="navigation"><%# erblint:disable GitHub::Accessibility::NavigationHasLabel %>
+    <%= render partial: "project_settings/tabs", locals: { project_owner: project_owner } %>
+  </div>
+
+  <div class="flex-auto">
+    <% if Project.owner_can_have_public_projects?(this_project.owner) %>
+      <%= render Primer::Beta::Subhead.new do |component| %>
+        <% component.with_heading(tag: :h2) do %>Visibility<% end %>
+      <% end %>
+
+      <% if disable_visibility_section? %>
+        <p>Only organization owners can change project visibilities.</p>
+      <% else %>
+        <p>Visibility settings only impact the project itself. Project content that belongs to a repository the user does not have access to will be redacted.</p>
+      <% end %>
+
+      <%= form_tag project.settings_resource_path.to_s, method: :put do %>
+        <fieldset class="form-group" <% if disable_visibility_section? || project.closed? %>disabled<% end %>>
+          <dl class="form-checkbox">
+            <dt class="m-0">
+              <label>
+                <%= radio_button_tag("project[public]", "true", project.is_public?) %>
+                <%= public_project_label.capitalize %>
+              </label>
+            </dt>
+            <dd class="note">
+              <%= public_project_description %>
+            </dd>
+          </dl>
+
+          <dl class="form-checkbox">
+            <dt class="m-0">
+              <label>
+                <%= radio_button_tag("project[public]", "false", !project.is_public?) %>
+                Private
+              </label>
+            </dt>
+            <dd class="note">
+              You choose who can see and make changes to this project.
+            </dd>
+          </dl>
+        </fieldset>
+
+        <div class="d-flex d-md-block">
+          <%= render Primer::ButtonComponent.new(type: :submit, flex: :auto, disabled: disable_visibility_section? || project.closed?, test_selector: "project-visibility-save-button") do %>Save<% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <% if project_owner.is_a?(PlatformTypes::Organization) %>
+      <%= render Primer::Beta::Subhead.new(mt: 6) do |component| %>
+        <% component.with_heading(tag: :h2) do %>Organization member permission<% end %>
+      <% end %>
+
+      <% if project_owner.viewer_is_a_member? %>
+        <%= render(Primer::Beta::Flash.new(mb: 4, classes: "flash-notice", icon: :info)) do %>
+          Organization members can have permissions from multiple sources. If a member belongs to a <a class="Link--inTextBlock" href="<%= project.teams_settings_resource_path %>">team</a> that has a higher level of access, or has been added as a <a class="Link--inTextBlock" href="<%= project.users_settings_resource_path %>">collaborator</a> with a higher level of access, their permission level cannot be lowered by lowering the organization member permission below.
+        <% end %>
+
+        <p>Choose the baseline permission level that all members of the <%= project_owner.login %> organization will have on this project. This permission level <strong>only applies to organization members</strong>, not to <%= outside_collaborators_verbiage(project_owner) %>.</p>
+        <%= form_tag project.org_settings_resource_path.to_s, method: :put do %>
+          <div class="form-group">
+            <div>
+              <dl class="form-checkbox">
+                <dt class="m-0">
+                  <label>
+                    <%= radio_button_tag(
+                          :permission,
+                          "admin",
+                          project.organization_permission == "ADMIN"
+                        ) %>
+
+                    Admin
+                  </label>
+                </dt>
+                <dd class="note">
+                  Organization members will be able to see, make changes to, and add new collaborators to this project.
+                </dd>
+              </dl>
+              <dl class="form-checkbox">
+                <dt class="m-0">
+                  <label>
+                    <%= radio_button_tag(
+                          :permission,
+                          "write",
+                          project.organization_permission == "WRITE"
+                        ) %>
+
+                    Write
+                  </label>
+                </dt>
+                <dd class="note">
+                  Organization members will be able to see and make changes to this project.
+                </dd>
+              </dl>
+
+              <dl class="form-checkbox">
+                <dt class="m-0">
+                  <label>
+                    <%= radio_button_tag(
+                          :permission,
+                          "read",
+                          project.organization_permission == "READ"
+                        ) %>
+
+                    Read
+                  </label>
+                </dt>
+                <dd class="note">
+                  Organization members will be able to see this project.
+                </dd>
+              </dl>
+
+              <dl class="form-checkbox">
+                <dt class="m-0">
+                  <label>
+                    <%= radio_button_tag(
+                          :permission,
+                          "none",
+                          project.organization_permission == "NONE"
+                        ) %>
+
+                    None
+                  </label>
+                </dt>
+                <dd class="note">
+                  Organization members will only be able to see this project if it’s <%= public_project_label %>. To give an organization member additional access, you’ll need to add them to a team that has access to this project, or add them as a collaborator to this project.
+                </dd>
+              </dl>
+            </div>
+          </div>
+
+          <div class="d-flex d-md-block">
+            <%= render Primer::ButtonComponent.new(type: :submit, flex: :auto) do %>Save<% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning, icon: :lock)) do %>
+          Only members of the <a class="Link--inTextBlock" href="<%= project_owner.resource_path %>"><%= project_owner.login %></a> organization can change this project’s organization member permission.
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+</div>

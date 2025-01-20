@@ -1,0 +1,186 @@
+#!/bin/bash
+#/ Usage: ghe-ssl-certificate-setup [options]
+#/
+#/ This utility will install an SSL certificate for this instance.
+#/
+#/ To install the certificate either specify the full path to the file
+#/ on the server using the -c option or pipe the file contents directly
+#/ into the utility.
+#/
+#/ The certificate needs to be a single file containing the certificate,
+#/ any intermediates and the private key.
+#/
+#/   ghe-ssl-certificate-setup -c /home/admin/my_certificate
+#/
+#/     or
+#/
+#/   ghe-ssl-certificate-setup < /home/admin/my_certificate
+#/
+#/ With the -r option is possible to reset HTTPS. It will generate
+#/ a new self signed certificate and install it.
+#/
+#/ It can be used remotely over SSH as follows:
+#/
+#/   ssh -p 122 admin@[hostname] -- \
+#/     '/usr/local/share/enterprise/ghe-ssl-certificate-setup' \
+#/     < /path/to/my_certificate
+#/
+#/ OPTIONS:
+#/   -h    Show this message.
+#/   -c    The path to the certificate to install
+#/   -r    Reset HTTPS
+#/   -R    Reset HTTPS to IP
+#/   -v    Run in verbose mode.
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+VERBOSE=
+CERT=
+RESET=
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+message() {
+  echo " --> ${1}"
+}
+
+setup_config_certificate() {
+  ghe-config 'github-ssl.cert' "${1}"
+  ghe-config 'github-ssl.key' "${2}"
+
+  if [ -z "$RESET" ]; then
+    ghe-config 'github-ssl.enabled' "true"
+    message "Restarting system services..."
+    ghe-single-config-apply > /dev/null 2>&1
+  fi
+}
+
+while getopts "hc:rR:v" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      exit 2
+      ;;
+    r)
+      RESET=1
+      ;;
+    R)
+      RESET=$OPTARG
+      ;;
+    c)
+      CERT=$OPTARG
+      ;;
+    v)
+      set -x
+      VERBOSE=1
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+if [ -n "$RESET" ]; then
+  message "Resetting certificate..."
+
+  # regardless of value, see if ACME is present
+  if ghe-config 'github-ssl.acme.enabled' > /dev/null; then
+    message "Deleting ACME settings..."
+    ghe-config --remove-section github-ssl.acme
+    ghe-config --remove-section secrets.acme >/dev/null 2>&1 || true
+  fi
+
+  if [ "$RESET" != "1" ]; then
+    ghe-ssl-generate-self-signed "$RESET"
+  else
+    ghe-ssl-generate-self-signed
+  fi
+
+  CHAIN=`cat /etc/haproxy/ssl.crt`
+  KEY=`cat /etc/haproxy/ssl.key`
+  setup_config_certificate "$CHAIN" "$KEY"
+
+  # wait for haproxy to start
+  if systemctl is-active haproxy-pre-config; then
+    # If we are on haproxy-pre-config reload that instead.
+    service haproxy-pre-config restart
+  else
+    # Send SIGUSR2 to haproxy service
+    # needs to dynamically determine the name of the local node as pre-config all hosts are named localhost
+    /usr/local/share/enterprise/ghe-nomad-signal -n "$(nomad node status -self -json | jq -r '.Name')" haproxy-frontend SIGHUP
+  fi
+  message "Done."
+  exit 0
+fi
+
+[ ! -t 0 ] || {
+  if [ -z "$CERT" ]; then
+    echo "No certificate file specified." >&2
+    exit 2
+  fi
+}
+
+message "Adding certificate..."
+
+if [ -t 0 ]; then
+  DATA=`cat $CERT`
+else
+  DATA=`cat`
+fi
+
+DATA=`echo "$DATA" | sed s/-----BEGIN/\|-----BEGIN/g`
+IFS="|"
+PARTS=( $DATA )
+
+# First part is not used because it starts with a BEGIN
+unset PARTS[0]
+PARTS=( "${PARTS[@]}" )
+
+KEY=
+CHAIN=
+
+for p in "${PARTS[@]}"; do
+  if grep -q "PRIVATE KEY" <<<$p; then
+    KEY=$p
+  else
+    CHAIN+=$p
+  fi
+done
+
+if [ -z $KEY ]; then
+  echo "No private key found"
+  exit 4
+fi
+
+if [ -z $CHAIN ]; then
+  echo "No certificate chain found"
+  exit 5
+fi
+
+# This is only used to deploy a cert manually, so disable the ACME feature
+if [ "$(ghe-config 'github-ssl.acme.enabled')" = "true" ]; then
+  echo "New cert is being installed manually, so disabling ACME support."
+  ghe-config --bool 'github-ssl.acme.enabled' false
+fi
+
+if [ ! -f "/data/user/common/enabled" ]; then
+  echo "$CHAIN" > /etc/haproxy/ssl.crt
+  echo "$KEY" > /etc/haproxy/ssl.key
+  cat /etc/haproxy/ssl.crt /etc/haproxy/ssl.key > /etc/haproxy/ssl.crt+key
+  chmod 400 /etc/haproxy/ssl.key /etc/haproxy/ssl.crt+key
+  /usr/sbin/update-ca-certificates --fresh
+  service haproxy restart
+else
+  setup_config_certificate "$CHAIN" "$KEY"
+fi
+
+message "Done."

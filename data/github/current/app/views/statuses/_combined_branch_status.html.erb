@@ -1,0 +1,114 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 2 %>
+<%#
+  `view` is an instance of Statuses::CombinedStatusView
+%>
+
+<% if view.statuses.count >= 1 || view.retention_message %>
+  <div class="branch-action-item js-details-container Details
+              <% if view.list_checks? %>open<% end %>
+              <% if view.simple_view %>branch-action-item-simple<% end %>">
+    <% unless view.simple_view %>
+      <div class="branch-action-item-icon completeness-indicator
+                 <% if view.workflows_pending_approval? %> completeness-indicator-warning
+                 <% elsif view.combined_status.green? %> completeness-indicator-success
+                 <% elsif view.all_failing? %>completeness-indicator-error
+                 <% end %>">
+        <% if view.workflows_pending_approval? %>
+          <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+        <% elsif view.all_succeeded? %>
+          <%= primer_octicon(:check) %>
+        <% elsif view.all_failing? %>
+          <%= primer_octicon(:x) %>
+        <% else %>
+          <%= donut_svg view.status_counts_by_context %>
+        <% end %>
+      </div>
+    <% end %>
+
+    <div class="<% status_state_text_class(view.state) %>">
+      <% if view.render_show_hide_checks_button? %>
+        <%= render Primer::ButtonComponent.new(scheme: :link, float: :right, classes: "js-details-target", "aria-expanded": view.list_checks? ? 'false' : 'true') do %>
+          <span class="statuses-toggle-opened">Hide all checks</span>
+          <span class="statuses-toggle-closed">Show all checks</span>
+        <% end %>
+      <% end %>
+
+      <% if view.workflows_pending_approval? %>
+        <%= render Actions::PullRequestWorkflowApprovalComponent.new(
+          pull_request: view.pull,
+          check_suites: view.action_required_check_suites,
+          checks_status_summary: view.checks_status_summary,
+        ) %>
+      <% elsif view.all_succeeded? %>
+        <h3 class="h4 status-heading">All checks have passed</h3>
+        <span class="status-meta"><%= view.checks_status_summary %></span>
+      <% else %>
+        <% if view.all_failing? %>
+          <h3 class="h4 status-heading color-fg-danger">All checks have failed</h3>
+        <% elsif view.pending? %>
+          <h3 class="h4 status-heading color-fg-attention">Some checks haven’t completed yet</h3>
+        <% else  # All checks are complete, but some were unsuccessful %>
+          <h3 class="h4 status-heading color-fg-danger">Some checks were not successful</h3>
+        <% end %>
+        <span class="status-meta">
+          <%=
+            render partial: "statuses/merge_commit_status_message", locals: {
+              commit: view.required_status_decision_basis_commit,
+              head_sha: view.pull&.head_sha
+            }
+          %>
+          <%= view.checks_status_summary %>
+        </span>
+      <% end %>
+    </div>
+
+    <div class="merge-status-list hide-closed-list js-updatable-content-preserve-scroll-position" data-updatable-content-scroll-position-id="merge-status-list">
+      <% check_statuses = (GitHub.flipper[:sort_statuses_by_failing].enabled?(view.combined_status.repository) || GitHub.flipper[:sort_statuses_by_failing].enabled?(view.combined_status.repository.owner)) ? view.sorted_statuses : view.statuses %>
+      <% check_statuses.each do |status| %>
+        <div class="merge-status-item d-flex flex-items-baseline">
+          <div class="merge-status-icon flex-self-center">
+            <%= icon_or_progress_spinner_for(state: status.state, class: "mx-auto d-block #{status_state_text_class(status.state)}") %>
+          </div>
+
+          <% if status.application %>
+            <a href="<%= status.application.url %>" class="d-inline-block tooltipped tooltipped-e Link--muted lh-0 mr-2 rounded-2" aria-label="<%= status.application.name %> (@<%= status.application.user.display_login %>) generated this status." style="background-color: #<%= status.application.preferred_bgcolor %>"><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              <%= oauth_application_logo status.application, 20, :class => "avatar" %>
+            </a>
+          <% elsif status.creator %>
+            <a href="<%= user_path(status.creator) %>" class="d-inline-block tooltipped tooltipped-e Link--muted mr-2 rounded-2" aria-label="@<%= status.creator.display_login.chomp(Bot::LOGIN_SUFFIX) %> generated this status." style="background-color: #ffffff"><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              <%= avatar_for status.creator, 20, :class => "avatar" %>
+            </a>
+          <% end %>
+
+          <% target_url = if status.respond_to?(:permalink) %>
+            <% view.pull.present? ? status.permalink(pull: view.pull) : status.permalink %>
+          <% else %>
+            <% view.pull.present? && !status.is_a?(Status) ? status.target_url(pull_request_number: view.pull.number) : status.target_url %>
+          <% end %>
+
+          <%=
+            render partial: "statuses/status_check_item_body", locals: {
+              context: status.contextual_name,
+              state: status.state,
+              description: status.description || default_status_check_description(status.state),
+              additional_context: additional_status_check_context(status.state, status.duration_in_seconds),
+              is_required_for_pull_request: view.status_required?(status),
+              target_url: target_url,
+            }
+          %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% elsif !view.simple_view && view.workflows_pending_approval? %>
+  <div class="branch-action-item">
+    <div class="branch-action-item-icon completeness-indicator completeness-indicator-warning">
+      <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+    </div>
+    <%= render Actions::PullRequestWorkflowApprovalComponent.new(
+      pull_request: view.pull,
+      check_suites: view.action_required_check_suites,
+    ) %>
+  </div>
+<% end %>

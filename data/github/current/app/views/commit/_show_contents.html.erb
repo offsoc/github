@@ -1,0 +1,139 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedInPrimerCounter 2 %>
+<%
+  file_count = commit.diff.changed_files
+  file_tree_available = file_tree_available?(file_count: file_count)
+  file_tree_visible = file_tree_visible?(file_count: file_count)
+
+  default_hydro_payload = default_file_tree_hydro_payload(
+    file_count: file_count,
+    pull_request_id: commit.oid
+  )
+%>
+<% if view.show_claim_email_form? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning)) do |component| %>
+    If this commit is yours, make sure <strong><%= commit.author_email %></strong> is associated with your account.
+    <% component.with_action do %>
+      <%= form_for UserEmail.new, :url => user_emails_path(current_user), :html => {:class => "d-inline"} do |f| %>
+        <input type="hidden" name="user_email[email]" value="<%= commit.author_email %>">
+        <input type="hidden" name="ref" value="commit-claim-email-form">
+        <%= render Primer::ButtonComponent.new(type: :submit, variant: :small, classes: "primary flash-action") do %>Claim email address<% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if params[:toc] %>
+  <% tree_diff = current_repository.rpc.read_tree_diff(commit.oid) %>
+  <%= render :partial => "diff/tree_toc", :locals => {
+                :diffable => commit,
+                :tree_diff => tree_diff
+              } %>
+<% else %>
+  <% if file_list_view.commentable? %>
+    <%= render :partial => "diff/inline_comments_template", :locals => {
+          :thread => CommitCommentThread.new(repository: current_repository, commit_id: commit.oid)
+        } %>
+  <% end %>
+
+  <% if path_string.present? %>
+    <h3 class="my-4">
+      File <%= commit_tree_diff_page %> of <%= commit_tree_diff.size %> in
+      <a href="<%= commit_path(commit.oid) %>" data-pjax>
+        <code class="commit-sha"><%= commit.oid[0, 7] %></code>
+      </a>
+
+      <div class="float-right" data-pjax>
+        <div class="pagination">
+          <% if path = diff_previous_changed_path(commit_tree_diff, commit_tree_diff_page) %>
+            <a class="tooltipped tooltipped-s" href="<%= commit_path(commit.oid, current_repository, path) %>" aria-label="<%= path %>" data-hotkey="ArrowLeft"><%# erblint:disable DataHotkey, Primer::Accessibility::TooltippedMigration %>
+              Previous
+            </a>
+          <% else %>
+            <span class="disabled">Previous</span>
+          <% end %>
+
+          <% if path = diff_next_changed_path(commit_tree_diff, commit_tree_diff_page) %>
+            <a class="tooltipped tooltipped-s" href="<%= commit_path(commit.oid, current_repository, path) %>" aria-label="<%= path %>" data-hotkey="ArrowRight"><%# erblint:disable DataHotkey, Primer::Accessibility::TooltippedMigration %>
+              Next
+            </a>
+          <% else %>
+            <span class="disabled">Next</span>
+          <% end %>
+        </div>
+      </div>
+    </h3>
+  <% end %>
+
+  <diff-layout <% if !file_tree_visible %>sidebar-hidden<% end %>>
+    <div
+      class="pr-toolbar commit-toolbar mt-n2 color-bg-default d-flex js-sticky-offset-scroll"
+      data-target="diff-layout.diffToolbar"
+    >
+      <% if path_string.empty? %>
+        <%= render :partial => 'diff/summary_row', :locals => { file_list_view: file_list_view,  file_tree_available: file_tree_available} %>
+      <% end %>
+    </div>
+      <%= render(Primer::Alpha::Layout.new(
+        side: :left,
+        responsive: true,
+        gutter: :condensed,
+        stacking_breakpoint: file_tree_hide_below_breakpoint,
+        classes: "#{'hx_Layout--sidebar-hidden' unless file_tree_visible} hx_Layout wants-full-width-container",
+        data: {
+          target: "diff-layout.layoutContainer"
+        },
+        test_selector: "layout-component"
+      )) do |component| %>
+        <% component.with_sidebar(
+          row_placement: :none,
+          position: :sticky,
+          # Safe to remove padding after :global_focus_styles feature flag
+          # is graduated. See https://github.com/github/primer/issues/410.
+          p: 2,
+          classes: "overflow-y-auto hx_Layout--sidebar js-notification-shelf-offset-top",
+          data: {
+            target: "diff-layout.sidebarContainer",
+            action: "scroll:diff-layout.sidebarContainer#handleSidebarScroll"
+          }
+        ) do %>
+          <% if file_tree_available %>
+            <div <%= test_selector('file-tree') %>>
+              <%= render(PullRequests::FileTree::RootComponent.new(
+                file_list_view.diffs,
+                default_hydro_payload: default_hydro_payload
+              )) %>
+            </div>
+          <% end %>
+        <% end %>
+        <% component.with_main(
+          classes: "files-next-bucket",
+          data: { target: "diff-layout.mainContainer" },
+        ) do %>
+          <% if !file_list_view.available? %>
+            <%= render :partial => "diff/availability", :locals => { :diff => file_list_view.diffs } %>
+          <% end %>
+          <a name="diff-stat"></a>
+          <%= render :partial => 'diff/diff', :locals => { :file_list_view => file_list_view, :commit_id => commit.oid } %>
+          <% if !GitHub.flipper[:disable_commit_comments].enabled?(current_repository) || file_list_view.commentable? %>
+            <%= render :partial => 'commit/comments', :locals => { :view => view, :commit => commit } %>
+          <% end %>
+          <% if logged_in? %>
+            <%= render(
+              Notifications::ThreadSubscriptionComponent.new(
+                thread: commit,
+                list: current_repository,
+                display_explanation_text: true,
+                deferred: GitHub.flipper[:notifications_async_commit_subscription_button].enabled?(current_user)
+              ),
+            ) do |component| %>
+              <%= component.with_spinner do %>
+                <%= render(Primer::Beta::Spinner.new(my: 5, mx: :auto, display: :block)) %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+  </diff-layout>
+
+<% end %>

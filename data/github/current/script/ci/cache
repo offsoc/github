@@ -1,0 +1,166 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+$LOAD_PATH << File.expand_path("../../../test", __FILE__)
+
+require "fileutils"
+require "open3"
+require "optparse"
+
+require "test_helpers/github_test/build_cache"
+require "test_helpers/github_test/build_cache/command_runner"
+require "test_helpers/github_test/build_cache/checksum_generator"
+require "test_helpers/github_test/stats"
+
+options = {}
+OPTION_PARSER = OptionParser.new do |opts|
+  opts.banner = <<~MESSAGE
+    Usage: #{$PROGRAM_NAME} COMMAND [--verbose] --name=NAME --key-glob=GLOB [--key-glob=GLOB2] PATH_TO_CACHE
+
+    Read or write from a file cache. You can use this cache to speed up or skip expensive
+    operations, like asset compilation.
+
+    Every cache key is scoped by JOB_NAME, RUBY_VERSION, and Rails version. Cache entries expire after 90 days.
+
+    Add `--verbose` to see files that match your globbing patterns key to see what files match your
+    globbing patterns.
+
+    To ensure nothing is loaded from the cache, set DISABLE_BUILD_CACHE_READ. This will force a cache
+    miss. Writes to the cache will continue to work.
+
+    Watch this screencast to see it in action: https://tinyurl.com/y7nbvbve
+
+    Commands:
+
+      read   Read from the cache. If entry doesn't exist, command exits non-zero.
+      write  Add something to the cache. If an entry already exists, this overwrites it.
+      fetch  Read from the cache. If entry doesn't exist, run command and then write to cache.
+      key    Generate a key based on the contents of the files matching the provided key globs.
+             Useful while testing your globbing patterns.
+      diff   Compare cached value with value after running `--prewrite-command`. Useful when
+             introducing a new cache, allowing you to verify the cache key is accurate.
+
+    Examples:
+
+      # Read compiled assets from cache. On cache miss, compile assets and update the cache.
+      #{$PROGRAM_NAME} fetch public/assets \\
+        --name "assets" \\
+        --key-glob=app/**/*.{js,ts,css,scss} \\
+        --prewrite-command="bin/precompile-assets"
+
+      # Output cache key built using the contents of files matching the key globs.
+      #{$PROGRAM_NAME} key vendor/cache --key-glob=Gemfile*.lock --verbose
+
+    Options:
+  MESSAGE
+
+  opts.on("--name NAME", "Name of the cache (e.g., compiled-assets)") do |name|
+    options[:name] = name
+  end
+
+  opts.on("--prewrite-command COMMAND", "A command to run before writing to the cache") do |prewrite_command|
+    options[:prewrite_command] = prewrite_command
+  end
+
+  opts.on("--postread-command COMMAND", "A command to run after reading from the cache") do |postread_command|
+    options[:postread_command] = postread_command
+  end
+
+  options[:compression] = true
+  opts.on("--[no-]compression", TrueClass, "Compress before upload and decompress after download") do |compression|
+    options[:compression] = compression
+  end
+
+  opts.on("--verbose", "Output additional logging (useful for debugging)") do
+    options[:verbose] = true
+  end
+
+  opts.on("--key-glob GLOB", "Glob matching files used to generate cache key (you can specify multiple)") do |key_glob|
+    options[:key_globs] ||= []
+    options[:key_globs] << key_glob
+  end
+
+  opts.on("--key-string STRING", "Include string value in key checksum (you can specify multiple)") do |key_string|
+    options[:key_strings] ||= []
+    options[:key_strings] << key_string
+  end
+
+  opts.on("-h", "--help", "Print this") do |_pattern|
+    puts opts
+    exit
+  end
+end
+
+#
+# Parse options
+#
+def option_parse_error(message)
+  STDERR.puts OPTION_PARSER
+  STDERR.puts
+  STDERR.puts "\e[31m#{message}\e[0m"
+
+  exit 1
+end
+
+begin
+  OPTION_PARSER.parse!
+rescue OptionParser::InvalidOption => e
+  option_parse_error(e.message)
+end
+
+if ARGV.length > 2
+  option_parse_error("Too many arguments provided -- specify a command and a single path to cache")
+elsif ARGV.length < 2
+  option_parse_error("Missing command or cache path")
+else
+  action, cache_path = *ARGV
+end
+
+begin
+  ENV.fetch("GITHUB_BUILD_CACHE_BUCKET")
+rescue KeyError => e
+  puts "The cache bucket to use is missing. Cowardly falling back to the prewrite command: #{options[:prewrite_command]}"
+  exec options[:prewrite_command]
+end
+
+# Run in safe mode on CI. If something goes wrong, the cache is ignored and the prewrite command is exec'd.
+at_exit {
+  everything_okay = $!.nil? || ($!.is_a?(SystemExit) && $!.success?)
+
+  if ENV["CI"] && !ENV["SKIP_SAFE_MODE"] && !everything_okay
+    if $!.is_a?(SystemExit)
+      puts "Safe mode: non-zero (#{$!.status}) exit detected in safe mode"
+    else
+      puts "Safe mode: an uncaught exception caused an exit:"
+      puts "#{$!.class.name}: #{$!.message}"
+      puts $!.backtrace
+    end
+
+    if options[:prewrite_command]
+      puts "Failing over to prewrite command: #{options[:prewrite_command]}"
+      exec options[:prewrite_command]
+    else
+      puts "Safe mode: ignore non-zero exit, exiting zero"
+      exit
+    end
+  end
+}
+
+#
+# Run the command
+#
+command_runner = GitHubTest::BuildCache::CommandRunner.new(cache_path, options)
+
+case action
+when "read"
+  exit 2 unless command_runner.read
+when "write"
+  exit 2 unless command_runner.write
+when "fetch"
+  exit 2 unless command_runner.fetch
+when "key"
+  puts command_runner.key
+when "diff"
+  exit 2 unless command_runner.diff
+else
+  option_parse_error("Unrecognized action provided (#{action}): try read or write")
+end

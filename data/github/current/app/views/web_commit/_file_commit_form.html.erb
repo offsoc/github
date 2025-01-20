@@ -1,0 +1,186 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# `view` is Blob::EditorView or Tree::DeleteView %>
+<%# Depends on Javascript modules `blob-edit`, `blob-editor` %>
+<%
+  fullscreen = params["fullscreen"] && params["fullscreen"] == "true"
+  resource_path = "#"
+%>
+
+<% if blob_fullwidth? %>
+  <div class="d-flex flex-items-center file-commit-form--full border-top border-lg-0 p-responsive">
+    <% if fullscreen %>
+      <a href="<%= fullscreen_param_url(request.url, fullscreen: false) %>" class="render-fullscreen Link--muted mr-3 no-underline no-wrap f6" aria-label="Enter fullscreen mode">
+        <%= render Primer::Beta::Octicon.new(icon: "screen-normal") %> <span class="hide-md">Exit fullscreen</span>
+      </a>
+    <% elsif !show_marketplace_sidebar? %>
+      <a href="<%= fullscreen_param_url(request.url, fullscreen: true) %>" class="render-fullscreen Link--muted mr-3 no-underline no-wrap f6" aria-label="Enter fullscreen mode">
+        <%= render Primer::Beta::Octicon.new(icon: "screen-full") %> <span class="hide-md">Fullscreen</span>
+      </a>
+    <% end %>
+
+    <span>
+      <%= render Primer::ButtonComponent.new(tag: :a, href: view.cancel_url, display: [:none, nil, :inline_block], mr: 3) do %>
+        Cancel changes
+      <% end %>
+    </span>
+    <details class="js-file-commit-form Details border-top border-lg-0 details-reset details-overlay js-dropdown-details" id="commit-menu-dropdown">
+<% else %>
+  <div class="<%= responsive? ? "d-flex flex-column d-md-block col-md-11 offset-md-1 pr-lg-3": "file-commit-form" %> js-file-commit-form">
+<% end %>
+
+<% if blob_fullwidth? %>
+  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :primary, float: :right) do %>
+    Start commit <div class="dropdown-caret d-none d-lg-inline-block"></div>
+  <% end %>
+<% end %>
+
+<%= conditional_tag(:div, blob_fullwidth?, class: "color-bg-default p-4 mt-6 mr-lg-3 dropdown-menu dropdown-menu-sw file-commit-form-dropdown") do %>
+
+  <% if blob_fullwidth? %>
+    <button class="Box-btn-octicon btn-octicon float-right d-lg-none position-relative" type="button" aria-label="Close this dialog" style="z-index: 99" data-toggle-for="commit-menu-dropdown">
+      <%= render Primer::Beta::Octicon.new(icon: "x") %>
+    </button>
+  <% end %>
+
+  <span class="commit-form-avatar <%= "hide-sm hide-md" if responsive? %> <%= "d-none" if blob_fullwidth? %>">
+    <%= linked_avatar_for current_user, 48, img_class: "float-left rounded-2" %>
+  </span>
+
+  <div class="commit-form position-relative <% unless blob_fullwidth? %> mb-2 p-3 <%= responsive? ? "border-0 border-md-top border-md-right border-md-left border-md-bottom": "border" %> rounded-2<% end %>" <%= test_selector("web-commit-file-commit-form") %>>
+    <%= render(Primer::Beta::Text.new(tag: :h2, font_size: 3, test_selector: "commit-form-header")) { view.commit_button_copy } %>
+
+    <div class="color-fg-severe js-too-long-error d-none">
+      <%= render Primer::Beta::Octicon.new(icon: "light-bulb") %>
+      <strong>ProTip!</strong> Great commit summaries contain fewer than 50 characters. Place extra information in the extended description.
+    </div>
+
+    <label for="commit-summary-input" class="sr-only">
+      Commit summary
+    </label>
+    <input
+      id="commit-summary-input"
+      type="text"
+      class="form-control input-block input-contrast js-new-blob-commit-summary js-quick-submit"
+      placeholder="<%= commit_message_placeholder(view.action) %>"
+      name="message"
+      value="<%= params[:message] %>"
+      autocomplete="off"
+      data-hotkey="<%= hotkeys_for(current_user, :code_editor, :write_commit_message) %>"
+      data-hotkey-scope="<%= Blob::EditorView::CODE_EDITOR_HOTKEY_SCOPE_ID %>"
+    >
+    <input type="hidden" class="js-commit-message-fallback" name="placeholder_message"
+      value="<%= commit_message_placeholder(view.action) %>">
+
+    <label for="commit-description-textarea" class="sr-only">
+      Optional extended description
+    </label>
+
+    <div class="position-relative">
+      <text-expander
+        keys=": @ #"
+        data-issue-url="<%= suggestions_path(repository: view.parent_repo, user_id: view.parent_repo.owner, issue_suggester: 1) %>"
+        data-mention-url="<%= suggestions_path(repository: view.parent_repo, user_id: view.parent_repo.owner, mention_suggester: 1) %>"
+        data-emoji-url="<%= emoji_suggestions_path %>">
+        <textarea
+          id="commit-description-textarea"
+          name="description"
+          class="form-control input-block input-contrast comment-form-textarea js-quick-submit"
+          placeholder="Add an optional extended description…"
+          ><%= params[:description] %></textarea>
+      </text-expander>
+    </div>
+
+    <% if current_user.author_emails.any? %>
+      <% selected_email = current_user.default_author_email(view.parent_repo, view.current_oid) %>
+      <div class="<%= "d-flex d-sm-inline-block flex-items-start mt-3 mt-sm-2" if responsive? %>">
+        <% if responsive? %>
+          <span class="d-lg-none commit-form-avatar ml-0 mr-2 lh-0 <%= "d-none" if blob_fullwidth? %>">
+            <%= linked_avatar_for current_user, 36, img_class: "rounded-2 d-block" %>
+          </span>
+        <% end %>
+        <div class="d-flex flex-column">
+          <select class="form-select <%= "flex-auto" if responsive? %>" id="commit-author-email" name="author_email">
+            <% current_user.author_emails.each do |email| %>
+              <option <% if email == selected_email %>selected<% end %> value="<%= email %>">
+                <%= email %>
+              </option>
+            <% end %>
+          </select>
+          <% if view.parent_repo.dco_signoff_enabled? %>
+            <%= render Repositories::DcoLabelComponent.new(
+              repo: view.parent_repo,
+              choose_email: true,
+              label_for: "commit-author-email"
+            ) %>
+          <% else %>
+            <p class="my-1 f6 color-fg-muted">
+              <label for="commit-author-email" class="text-normal">
+                Choose which email address to associate with this commit
+              </label>
+            </p>
+          <% end %>
+        </div>
+      </div>
+    <% elsif view.parent_repo.dco_signoff_enabled? %>
+      <%= render Repositories::DcoLabelComponent.new(
+        repo: view.parent_repo
+      ) %>
+    <% end %>
+
+    <%= render "web_commit/quick_pull", view: view if view.quick_pull_choice? %>
+  </div>
+  <input type="hidden" name="guidance_task" value="<%= params[:guidance_task] %>">
+
+  <input type="hidden" name="commit" class="js-commit-oid" value="<%= view.last_commit %>">
+  <% if view.forked_repo? %>
+    <input type="hidden" name="quick_pull" value="<%= view.quick_pull_base %>">
+  <% elsif view.quick_pull_choice? %>
+    <input type="hidden" name="same_repo" value="1">
+  <% end %>
+  <%# pull request to return to after successful edit %>
+  <input type="hidden" name="pr" value="<%= params[:pr] %>">
+
+  <%= render(Primer::ButtonComponent.new(
+    id: "submit-file",
+    type: :submit,
+    scheme: :primary,
+    classes: "js-blob-submit",
+    disabled: view.action != "delete",
+    data: {
+      edit_text: view.direct_edit_submit_message,
+      pull_text: view.quick_pull_submit_message,
+      disable_with: "Saving..."
+    },
+    flex: :auto,
+    mx: 3,
+    ml: [nil, nil, 3, 0],
+    mr: [nil, nil, 0],
+    mb: [3, nil, 0],
+  )) do %>
+    <%= view.commit_button_copy %>
+  <% end %>
+
+  <% unless blob_fullwidth? %>
+    <%= link_to "Cancel", view.cancel_url, class: "btn btn-danger #{"flex-auto text-center mx-3 mx-md-0" if responsive?}" %>
+  <% end %>
+
+  <% if view.forked_repo? %>
+    <poll-include-fragment src="<%= check_repo_path(view.forked_repo.owner, view.forked_repo) %>" class="ml-2 d-inline-block js-check-for-fork">
+      <div data-hide-on-error>
+        <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+        Waiting for your fork…
+      </div>
+      <div data-show-on-error hidden>
+        <%= render Primer::Beta::Octicon.new(icon: "alert") %>
+        Something went wrong. Please fork the project, then try from your fork.
+      </div>
+    </poll-include-fragment>
+  <% end %>
+<% end %>
+
+<% if blob_fullwidth? %>
+    </details><%# erblint:disable ProperTagNesting %>
+  </div>
+<% else %>
+  </div><%# erblint:disable ProperTagNesting %>
+<% end %>

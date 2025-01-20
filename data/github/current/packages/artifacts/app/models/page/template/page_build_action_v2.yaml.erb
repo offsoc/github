@@ -1,0 +1,81 @@
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+name: pages build and deployment
+on: dynamic
+
+concurrency:
+  group: <%= ("${{ github.workflow }} @ " + checkout_branch).to_json %>
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: <%= runs_on %>
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: <%= checkout_branch.to_json %>
+          submodules: recursive
+          <% if protected_by_ip_allowlist %>
+          token: ${{ secrets.GITHUB_PAGES_TOKEN }}
+          <% end %>
+
+      <% if !nojekyll? %>
+      - name: Build with Jekyll
+        uses: <%= build_pages_action %>
+        with:
+          source: <%= working_directory %>
+          destination: <%= working_directory %>/_site
+          <% if protected_by_ip_allowlist %>
+          token: ${{ secrets.GITHUB_PAGES_TOKEN }}
+          <% end %>
+      <% end %>
+
+      - name: Upload artifact
+        uses: <%= upload_pages_artifact_action %>
+        with:
+          path: <%= nojekyll? ? working_directory : "#{working_directory}/_site" %>
+
+  report-build-status:
+    if: ${{ !cancelled() }}
+    runs-on: <%= runs_on %>
+    needs: build
+    steps:
+      - name: Report Build Status
+        <% if use_curl_for_telemetry %>
+        run: |
+          curl -v -X POST \
+          -H "Authorization: token $GITHUB_TOKEN" \
+          -H "Accept: */*" \
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages/telemetry" \
+          -d '{"github_run_id":"'$GITHUB_RUN_ID'", "conclusion":"'$CONCLUSION'"}'
+        <% else %>
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/pages/telemetry" \
+            -F github_run_id="$GITHUB_RUN_ID" \
+            -F conclusion="$CONCLUSION"
+        <% end %>
+        env:
+          GITHUB_TOKEN: ${{ <% if protected_by_ip_allowlist %>secrets.GITHUB_PAGES_TOKEN<% else %>secrets.GITHUB_TOKEN<% end %> }}
+          CONCLUSION: ${{ needs.build.result || null }}
+        continue-on-error: true
+
+  deploy:
+    if: ${{ success() && !cancelled() }}
+    runs-on: <%= runs_on %>
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: <%= deploy_pages_action %>
+        <% if protected_by_ip_allowlist %>
+        with:
+          token: ${{ secrets.GITHUB_PAGES_TOKEN }}
+        <% end %>
+

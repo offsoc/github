@@ -1,0 +1,75 @@
+#!/usr/bin/env ruby
+require File.expand_path("../../config/boot", __FILE__)
+require "erb"
+require "yaml"
+require "optparse"
+require "trilogy"
+
+include_password = false
+execute_query = nil
+env = ENV["RAILS_ENV"] || "development"
+database = "mysql1_primary"
+
+OptionParser.new do |opt|
+  opt.banner = "Usage: dbconsole [options] [environment]"
+  opt.on("-p", "--include-password", "Automatically provide the password from database.yml") do |_v|
+    include_password = true
+  end
+
+  opt.on("-e", "--execute QUERY", "Execute QUERY and exit instead of loading interactive console") do |query|
+    execute_query = query
+  end
+
+  opt.on("-d", "--database=db", "Connect to the provided database for the env. Default is mysql1_primary.") do |db|
+    database = db
+  end
+
+  opt.on("-n", "--environment=environment", "Connect to the provided environment. Default is development.") do |environment|
+    env = environment
+  end
+
+  opt.parse!(ARGV)
+  abort opt.to_s unless (0..1).include?(ARGV.size)
+end
+
+configs = YAML.safe_load(ERB.new(IO.read(GitHub::AppEnvironment.root.to_s + "/config/database.yml")).result, aliases: true)[env]
+
+unless config = configs[database]
+  abort "No database is configured for the '#{env}' environment and '#{database}' database."
+end
+
+abort "use gh-dbconsole for production, please." unless env != "production" || !ENV["FI"].nil?
+
+def find_cmd(*commands)
+  dirs_on_path = ENV["PATH"].to_s.split(File::PATH_SEPARATOR)
+  commands.detect do |cmd|
+    dirs_on_path.detect do |path|
+      File.executable? File.join(path, cmd)
+    end
+  end || abort("Couldn't find database client: #{commands.join(', ')}. Check your $PATH and try again.")
+end
+
+args = {
+  "host"      => "--host",
+  "port"      => "--port",
+  "socket"    => "--socket",
+  "username"  => "--user",
+  "encoding"  => "--default-character-set",
+}.map { |opt, arg| "#{arg}=#{config[opt]}" if config[opt] }.compact
+
+if config["password"] && include_password
+  args << "--password=#{config['password']}"
+elsif config["password"] && !config["password"].empty?
+  args << "-p"
+end
+
+args << "--protocol=TCP" unless ENV["FI"].nil?
+
+if execute_query
+  args << "--execute"
+  args << execute_query
+end
+
+args << config["database"]
+
+exec(find_cmd("mysql", "mysql5"), *args)

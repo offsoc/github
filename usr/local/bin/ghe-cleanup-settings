@@ -1,0 +1,81 @@
+#!/bin/bash
+#/ Usage: ghe-cleanup-settings [-fhv]
+#/
+#/ Wipe all existing Management Console settings.
+#/
+#/ Typically, you will only execute this if you've contacted support and they've asked you to do so.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -f | --force     Force cleanup.
+#/   -v | --verbose   Run in verbose mode.
+#/
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+message() {
+  echo " --> ${1}"
+}
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+FORCE=
+
+ARGS=$(getopt --name "$0" --long verbose,help,force --options vhf -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      set -x
+      verbose=1
+      shift
+      ;;
+    -f|--force)
+      FORCE=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+if [ -z $FORCE ]; then
+  message "$(basename $0) should only be used when requested by the GitHub Enterprise"
+  message "Support team. Incorrect use could cause damage or data loss."
+  message "This process will wipe all settings you have configured in the Management"
+  message "Console. To proceed, run this command again with the -f option."
+  usage
+  exit
+else
+  if [ -f /data/user/common/github.conf ]; then
+    message "Clearing settings..."
+    mv /data/user/common/github.conf /data/user/common/github.conf.`date +"%Y%m%d%H%M%S"`.bak
+
+    message "Restarting Management Console..."
+    systemctl restart enterprise-manage 2>&1>/dev/null || {
+      message 'Restart failed!'
+    }
+  else
+    message "Settings already cleared."
+  fi
+fi
+
+message "Done."

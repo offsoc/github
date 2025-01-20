@@ -1,0 +1,123 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#/ Usage: create-seed-orgs
+#/   --login=<login>: specify organization login
+#/   --admin=<login>: specify organization (and business) admin login
+#/   --seats=<num>: the number of seats (default: 1,000)
+#/   --business[=<name>]: creates a business; named <name> if given
+#/   --debug: enable debug logging
+
+def usage
+  system "grep ^#/ '#{__FILE__}' |cut -c3-"
+  exit 1
+end
+
+# Show usage
+usage if ARGV.include?("--help")
+
+DEFAULT_PLAN = "business_plus"
+DEFAULT_SEATS = 1000
+
+$debug = false
+
+org_login = "company-#{SecureRandom.hex(8)}"
+admin_login = "monalisa"
+plan = "business_plus"
+seats = 1000
+biz_name = nil
+make_business = false
+
+args = ARGV.dup
+until (arg = args.shift).nil?
+  case arg
+  when /--login=(.*)/
+    org_login = $1
+    usage if org_login.nil?
+  when /--admin=(.*)/
+    admin_login = $1
+    usage if admin_login.nil?
+  when /--seats=(.*)/
+    seats = $1.to_i
+    usage if seats.zero?
+  when "--business"
+    make_business = true
+  when /--business=(.*)/
+    make_business = true
+    biz_name = $1
+    usage if biz_name.nil?
+  when "--debug"
+    $debug = true
+  else
+    puts "did not recognize argument '%s'" % arg
+    usage
+  end
+end
+
+# Bring in the big environment
+require_relative "../config/environment"
+require "faker"
+require_relative "../test/test_helpers/sham"
+
+unless Rails.env.development?
+  puts "This can only be run in the development environment!"
+  exit 1
+end
+
+unless org_login =~ User::LOGIN_REGEX
+  puts "'#{org_login}' is not a valid organization login"
+  exit 1
+end
+
+# Run jobs inline for this script
+Rails.application.config.active_job.queue_adapter = :inline
+
+admin = User.find_by_login(admin_login)
+unless admin
+  puts "Couldn't find admin '#{admin_login}'"
+  exit 1
+end
+
+def create_organization(login:, admin:, plan:, seats:, billing_email: Sham.email)
+  p [:create_organization, login, plan, seats, billing_email, admin] if $debug
+  org = Organization.create!(
+    login: login,
+    admin: admin,
+    plan: plan,
+    seats: seats,
+    billing_email: billing_email,
+  )
+  p org if $debug
+  org
+end
+
+def create_business(organization:, name:, seats:, admin:)
+  p [:create_business, name || organization.login, organization, admin] if $debug
+  business = Business.create!(
+    name: name || organization.login,
+    seats: seats,
+  )
+  business.add_owner(admin, actor: admin)
+  p business if $debug
+  membership = create_business_organization_membership(business: business, organization: organization)
+  p membership if $debug
+  business
+end
+
+def create_business_organization_membership(business:, organization:)
+  Business::OrganizationMembership.create!(
+    business: business,
+    organization: organization,
+  )
+end
+
+puts
+
+ActiveRecord::Base.transaction do # rubocop:disable GitHub/DoNotCallMethodsOnActiveRecordBase
+  org = create_organization(login: org_login, admin: admin, seats: seats, plan: plan)
+  puts "#{org} created"
+
+  if make_business
+    business = create_business(organization: org, name: biz_name, admin: admin, seats: seats)
+    puts "business #{business} created"
+  end
+end

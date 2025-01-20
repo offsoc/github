@@ -1,0 +1,164 @@
+#!/bin/bash
+#/ Usage: ghe-revert-external-mysql [-h] [--skip-database-restore] [backup file]
+#/
+#/ Revert an external database configuration back to a bundled internal one.
+#/ This should be run from what is going to be the new mysql-master.
+#/ The script will exit early if the .conf file has not been updated to specify
+#/ a mysql-master or if the script is called from the non-primary node.
+#/
+#/ OPTIONS:
+#/   -h | --help              Show this message.
+#/   --skip-database-restore  Explicitly skip restoring the database when
+#/                            reverting external mysql. A backup file does not
+#/                            need to be supplied when this flag is used.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the MySQL data from a backup file:
+#/    $ ghe-revert-external-mysql backup.tar.gz
+#/
+#/  Transfer the backup file onto the appliance and restore from MySQL data
+#/    $ cat <backup file> | ssh -p 122 admin@[hostname] ghe-revert-external-mysql
+#/
+#/  Skip restoring the MySQL database:
+#/    $ ghe-revert-external-mysql --skip-database-restore
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+
+usage () {
+  grep "^#/" <"$0" | cut -c4-
+  #shellcheck disable=SC2086
+  exit 2
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,skip-database-restore --options h -- "$@") || {
+  usage
+}
+
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+case "$1" in
+  -h|--help)
+    usage
+    ;;
+  --skip-database-restore)
+    SKIP_DATABASE_RESTORE=1
+    ;;
+  # this case happens because of the argument munging above, only if there are no arguments
+  # passed to the script
+  --)
+    ;;
+  -*)
+    echo "error: unexpected flag ${1%%=*}" 1>&2
+    usage 1>&2
+    exit 1
+    ;;
+esac
+
+message() {
+  echo "${1}" | ts
+}
+
+# Ensure appliance is configured for external database
+message "Ensuring appliance is configured for external database"
+if ! is_service_external "mysql"; then
+  message "This script is used to revert an appliance configured for an external database to one configured for an internal database." \
+          "This appliance is not configured for an external database."
+  exit 1
+fi
+
+# Check maintenance mode is set
+if ! ghe-maintenance -q > /dev/null ; then
+  message "Maintenance mode not set, please set GHES to maintenance mode"
+  exit 1
+fi
+
+# Generate command run id
+export GHE_CMD_RUN_ID="$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)"
+
+# Ensure password to use for new internal database is present
+message "Ensuring secrets.mysql still exists"
+if ! ghe-config --exists secrets.mysql; then
+  message "secrets.mysql is required to configure an internal database with proper credentials. secrets.mysql does not exist"
+  message "Generating new password for secrets.mysql"
+  password="$(openssl rand -hex 32)"
+  ghe-config secrets.mysql "$password"
+  message "Successfully generated new internal MySQL password"
+fi
+
+# In Single node config, the single node is the primary so its true by default
+# For Cluster/HA config, we need to explicitly check the .conf file
+if [ -f /etc/github/cluster ]; then
+  message "Checking new mysql-master is set"
+
+  if ! ghe-config --exists cluster.mysql-master; then
+    message "Please set a new mysql-master in cluster.conf before running this script"
+    exit 1
+  fi
+
+  mysql_primary="$(ghe-config cluster.mysql-master)"
+  local_host="$(cat /etc/github/cluster)"
+
+  # Ensure that the cluster.conf file is correct
+  message "Checking the node set as new mysql-master is enabled as a mysql server"
+  if ! ghe-config --true "cluster.$mysql_primary.mysql-server" ;then
+    message "Please ensure the new mysql-master node has mysql-server=true in cluster.conf"
+    exit 1
+  fi
+
+  # Ensure this script is called from the right node
+  message "Ensuring this script is called from the new mysql-master"
+  if [ "$local_host" != "$mysql_primary" ]; then
+    message "Please call this script from the node specified as the new mysql-master in cluster.conf"
+    exit 1
+  fi
+
+  # If HA, ensure that all replicas are replicating mysql
+  if ghe-config --exists cluster.ha; then
+    if ghe-config --true cluster.ha; then
+      message "Ensuring all nodes in an HA cluster are enabled as mysql servers"
+      hosts=$(ghe-config --get-regexp cluster.*.hostname | awk '{print $2}')
+      for hostname in $hosts; do
+        if ! ghe-config --true "cluster.$hostname.mysql-server"; then
+          message "Please ensure all nodes in an HA cluster have mysql-server=true before reverting to an internal database"
+          exit 1
+        fi
+      done
+    fi
+  fi
+fi
+
+message "Unconfiguring external database settings"
+ghe-config --remove-section mysql.external
+ghe-config mysql.external.enabled false
+ghe-config --unset secrets.external.mysql
+
+# removing any setting for: cluster-external-mysql.*
+for node in $(ghe-config --get-regexp 'cluster-external-mysql.*' | cut -d' ' -f1); do
+  ghe-config --unset "$node"
+done
+
+# ghe-config-apply might consume /dev/stdin which cause later import to fail,
+# use `: | ` to make sure it consumes an empty string
+message "Running config apply to get internal MySQL running"
+: | ghe-config-apply
+
+if [ -z "$SKIP_DATABASE_RESTORE" ]; then
+  message "Importing MySQL database"
+  if ghe-config --true 'mysql.backup.binary'; then
+    ghe-import-mysql-xtrabackup --restore-from-external "$@"
+  else
+    ghe-import-mysql-mysqldump "$@"
+  fi
+fi
+
+message "Configuring internal MySQL to use binary backup strategy"
+ghe-config mysql.backup.binary true
+
+message "Running config apply to reseed MySQL repicas"
+ghe-config-apply

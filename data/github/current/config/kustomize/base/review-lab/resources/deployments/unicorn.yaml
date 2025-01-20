@@ -1,0 +1,407 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: unicorn
+    annotations:
+        heaven.githubapp.com/deploy-requirement: "true"
+        heaven.githubapp.com/image-placeholder: "702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master"
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "unicorn,voltron"
+        moda.github.net/inject-otel-env-vars-into-containers: "unicorn,voltron"
+        # Cluster Preference overrides for tuning clusters or testing new settings
+        # on a per cluster basis
+        #
+        # net.core.somaxconn is being set here to A/B test this as an improvement
+        # for https://github.com/github/github/issues/111813 (api 502 errors)
+        # as part of https://github.com/github/k8s-net-debug/issues/18 (sysctl regression)
+        heaven.githubapp.com/cluster-preferences: |
+            {
+              "marias": {
+                "spec": {
+                  "template": {
+                    "spec": {
+                      "securityContext": {
+                        "sysctls": [
+                          {
+                            "name": "net.core.somaxconn",
+                            "value": "10240"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+spec:
+    replicas: 1
+    strategy:
+        rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
+    template:
+        metadata:
+            labels:
+                service: unicorn
+            annotations:
+                ad.datadoghq.com/nginx.checks: |
+                    {
+                      "nginx": {
+                        "instances":[
+                          {
+                            "nginx_status_url": "http://%%host%%:8081/stats"
+                          }
+                        ]
+                      }
+                    }
+                ad.datadoghq.com/unicorn.checks: |
+                    {
+                      "kube_unicorn": {
+                        "instances": [
+                          {
+                            "host_pid": "%%pid%%",
+                            "uid": "%%kube_pod_uid%%",
+                            "worker_regex": "^unicorn .*? worker",
+                            "sockets": ["/build/tmp/sockets/unicorn.sock"]
+                          }
+                        ]
+                      }
+                    }
+                observability.github.com/splunk_index-unicorn: rails
+                observability.github.com/kafka_topic-unicorn: rails
+                fluentbit.io/exclude-nginx: 'true'
+                fluentbit.io/parser-unicorn: logfmt_sloppy
+                fluentbit.io/parser-voltron: logfmt_sloppy
+                ad.datadoghq.com/tolerate-unready: "true"
+        spec:
+            volumes:
+                - name: geoip2
+                  emptyDir: {}
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: nginx-conf
+                  configMap:
+                    name: unicorn-nginx-conf
+                - name: nginx-pidfile
+                  emptyDir: {}
+                - name: assets
+                  emptyDir: {}
+                - name: sockets
+                  emptyDir: {}
+                - name: kubeinfo
+                  downwardAPI:
+                    items:
+                        - path: "annotations"
+                          fieldRef:
+                            fieldPath: metadata.annotations
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            restartPolicy: Always
+            initContainers:
+                - name: unicorn-assets
+                  image: 702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master
+                  imagePullPolicy: IfNotPresent
+                  command:
+                    - 'cp'
+                    - '--recursive'
+                    - '--no-preserve=mode'
+                    - '--verbose'
+                    - '/build/public'
+                    - '/assets'
+                  resources:
+                    limits:
+                        cpu: 500m
+                        memory: 1Gi
+                    requests:
+                        cpu: 50m
+                        memory: 500Mi
+                  volumeMounts:
+                    - name: assets
+                      mountPath: /assets
+                - name: geoip
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/geoip2:master
+                  # this container is updated regularly
+                  imagePullPolicy: IfNotPresent
+                  command:
+                    - sh
+                    - -c
+                    - cp /data/geoip2/* /shared-geoip2
+                  resources:
+                    requests:
+                        cpu: 50m
+                  volumeMounts:
+                    - name: geoip2
+                      mountPath: /shared-geoip2
+            containers:
+                - name: voltron
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/voltron:acb5e526c1b8930ba8bd99aa65fb9b84eb305c23
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["inotifywait", "-e", "delete_self", "/nginx-pidfile/nginx.pid"]
+                  resources:
+                    requests:
+                        cpu: 0.02
+                  readinessProbe:
+                    httpGet:
+                        path: /_ping
+                        port: 8089
+                    periodSeconds: 1
+                    failureThreshold: 1
+                    initialDelaySeconds: 3
+                  volumeMounts:
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                  env:
+                    - name: SERVER_ADDR
+                      value: ':8089'
+                    - name: TARGET
+                      value: 'http://localhost:8082'
+                    - name: GOMAXPROCS
+                      value: '4' # match CPU limit above
+                    - name: STATS_ADDR
+                      value: '$(KUBE_NODE_HOSTNAME):28125'
+                    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+                      valueFrom:
+                        secretKeyRef:
+                          key: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+                          name: vault-secrets
+                  envFrom:
+                    - configMapRef:
+                        name: kube-cluster-metadata
+                    - configMapRef:
+                        name: observability-config
+                - name: nginx
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/docker-nginx
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["sleep", "5"]
+                  ports:
+                    - name: http
+                      containerPort: 8080
+                      protocol: TCP
+                    - name: stats
+                      containerPort: 8081
+                      protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                        path: /status
+                        port: stats
+                    periodSeconds: 1
+                    failureThreshold: 1
+                  volumeMounts:
+                    - mountPath: /etc/nginx/
+                      name: nginx-conf
+                    - mountPath: /assets
+                      name: assets
+                      readOnly: true
+                    - mountPath: /sockets
+                      name: sockets
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                  env:
+                    - name: KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                - name: unicorn
+                  image: 702486989568.dkr.ecr.us-east-1.amazonaws.com/github:master
+                  args: ["bin/unicorn_rails", "-c", "config/unicorn.rb", "-E", "production", "--port", "8082", "config.ru"]
+                  lifecycle:
+                    # This preStop hook causes the unicorn to avoid any internal shutdown until such a time
+                    # as nginx deletes its pid file from the shared volume, indicating that it has completed
+                    # gracefully shutting down and quiescing active connections. Only at this point will the
+                    # unicorn process gracefully shut down (there should be no user connections by then).
+                    preStop:
+                        exec:
+                            command: ["inotifywait", "-e", "delete_self", "/nginx-pidfile/nginx.pid"]
+                  resources:
+                    requests:
+                        cpu: 0.02
+                        memory: "8G"
+                    limits:
+                        cpu: 1.0
+                        memory: "8G"
+                  ports:
+                    - name: http
+                      containerPort: 8082
+                      protocol: TCP
+                  readinessProbe:
+                    initialDelaySeconds: 31
+                    httpGet:
+                        path: /status
+                        port: http
+                  volumeMounts:
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - mountPath: "/build/tmp/sockets"
+                      name: "sockets"
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                    - name: geoip2
+                      mountPath: /usr/share/GeoIP
+                    - name: syslog
+                      mountPath: /dev/log
+                      readOnly: true
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+                  env:
+                    - name: LOAD_SHEDDING_ENABLED
+                      value: "true"
+                    - name: RAILS_ENV
+                      value: production
+                    - name: ALIVE_HOST
+                      valueFrom:
+                        configMapKeyRef:
+                            key: alive-hostname
+                            name: general
+                    - name: REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: rate-limiter-servers
+                    - name: MONOLITH_REDIS_RATE_LIMITER_URLS
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: monolith-rate-limiter-servers
+                    - name: JOB_COORDINATION_REDIS_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: job-coordination-url
+                    - name: RESQUED_QUEUE_PREFIX
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: DYNAMIC_LAB_NAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: dynamic-lab-name
+                    - name: SPOKESD_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            key: twirp-url
+                            name: spokesd
+                    - name: SPOKESD_CLIENT_ROLE
+                      value: review-lab
+                    - name: MEMCACHED_SERVERS
+                      value: cache:11211
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GPGVERIFY_URL
+                      value: http://gpgverify
+                    - name: SCIENTIST_REGION
+                      valueFrom:
+                        configMapKeyRef:
+                            key: KUBE_REGION
+                            name: kube-cluster-metadata
+                    - name: SECRET_KEY_BASE
+                      valueFrom:
+                        secretKeyRef:
+                            name: general
+                            key: secret-key-base
+                    - name: STAFF_ENVIRONMENT
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: staff-environment
+                    - name: GH_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: STAFF_ENVIRONMENT_HOSTNAME
+                      valueFrom:
+                        configMapKeyRef:
+                            name: general
+                            key: hostname
+                    - name: DATADOG_TRACING_ENABLED
+                      value: '0'
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: '0'
+                    - name: GH_WRITE_PIDFILE
+                      value: '0'
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:unicorn"
+                    - name: GITHUB_CONFIG_ROLE
+                      value: lab
+                    - name: SMTP_HOST
+                      value: smtp.service.github.net
+                    - name: FLIPPER_IN_MEMORY_ENABLED
+                      value: '0'
+                    - name: CONDUIT_URL
+                      value: "https://conduit-staging.service.iad.github.net/twirp"
+                    - name: COPILOT_API_URL
+                      value: "https://copilot-api-staging.service.iad.github.net"
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-unicorn"
+                    - name: OTEL_RUBY_BSP_START_THREAD_ON_BOOT
+                      valueFrom:
+                        secretKeyRef:
+                            key: UNICORN_OTEL_RUBY_BSP_START_THREAD_ON_BOOT
+                            name: vault-secrets
+                    - name: CPS_NETWORK_SERVICE_HMAC_SECRETS
+                      valueFrom:
+                        secretKeyRef:
+                          key: CPS_NETWORK_SERVICE_HMAC_SECRETS
+                          name: vault-secrets
+                    - name: CPS_NETWORK_SERVICE_URL
+                      value: "https://cps-network-service-production.githubapp.com/api/v1"
+                    - name: ORCA_BASE_URL
+                      value: https://orca-api-staging.service.azure-eastus.github.net/twirp
+                    - name: ORCA_ENVIRONMENT
+                      value: staging
+                    - name: ORCA_HMAC_KEY
+                      valueFrom:
+                        secretKeyRef:
+                            key: ORCA_HMAC_KEY
+                            name: vault-secrets
+                    - name: COPILOT_REDIS_URL
+                      valueFrom:
+                        configMapKeyRef:
+                            name: redis
+                            key: copilot-redis-url
+    selector:
+        matchLabels:
+            service: unicorn

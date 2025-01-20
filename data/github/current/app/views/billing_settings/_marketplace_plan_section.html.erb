@@ -1,0 +1,127 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% if GitHub.marketplace_enabled? %>
+  <% view.marketplace_items.each do |item| %>
+    <div class="Box mb-4" <%= test_selector "billing-marketplace" %>>
+      <div class="Box-header d-flex flex-items-center">
+        <div class="d-flex flex-items-center">
+          <img width="32" height="32" src="<%= item.subscribable.listing.logo_url %>" alt="<%= item.subscribable.listing.name %> logo preview">
+        </div>
+        <div class="Box-title flex-auto ml-1 pl-2">
+          <div><%= item.subscribable.listing.name %></div>
+          <div class="text-small text-normal color-fg-muted">
+            <strong><%= item.subscribable.name %></strong>
+            <% if item.on_free_trial? %>
+            free trial ends on <%= item.free_trial_ends_on.to_date.strftime("%-m/%-d/%y") %>
+            <% end %>
+            <% if item.subscribable.per_unit? %>
+              <%= pluralize item.quantity, item.subscribable.unit_name %>
+            <% end %>
+          </div>
+        </div>
+
+        <% if item.adminable_by?(view.current_user) && !item.pending_subscription_item_change&.cancellation? %>
+          <details class="dropdown details-reset details-overlay d-inline-block" <%= test_selector "marketplace-listing-edit-menu" %>>
+            <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, "aria-haspopup": "true") do %>
+              Edit
+              <div class="dropdown-caret"></div>
+            <% end %>
+
+            <details-menu class="dropdown-menu dropdown-menu-sw"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <% if item.subscribable.listing.publicly_listed? %>
+                <a href="<%= marketplace_order_path(listing_slug: item.subscribable.listing.slug, plan_id: item.subscribable.global_relay_id, account: view.organization_login) %>" class="dropdown-item" role="menuitem">Change plan</a>
+              <% end %>
+              <%= form_tag subscription_item_path(item.global_relay_id), method: :delete do %>
+                <%
+                  cancel_msg = "Are you sure you want to cancel this integration?"
+                  cancel_msg += " The cancellation will be effective on #{view.account.next_billing_date.to_formatted_s(:date)}." if item.account_has_been_charged?
+                %>
+                <button type="submit" role="menuitem" class="btn-link d-block dropdown-item" data-confirm="<%= cancel_msg %>">
+                  Cancel plan
+                </button>
+              <% end %>
+            </details-menu>
+          </details>
+        <% elsif view.enterprise_owned_self_serve_org? && !item.adminable_by?(view.current_user) %>
+          <span class="text-small color-fg-muted">
+            Contact an <%= link_to "enterprise owner", org_enterprise_owners_path(target), class: "Link--inTextBlock" %> if you wish to cancel or change this plan.
+          </span>
+        <% end %>
+      </div>
+
+      <div class="Box-footer py-2 border-top-0">
+        <div class="d-flex my-1 flex-items-baseline">
+          <div class="flex-auto ml-md-6 ml-0 pl-md-1 pl-0 text-small">
+            <% unless item.on_free_trial? %>
+              <span>Do you have any questions? Contact </span>
+            <% end %>
+
+            <% if item.subscribable.listing.support_email.present? %>
+                <a href="mailto:<%= item.subscribable.listing.support_email %>"><%= item.subscribable.listing.name %> support</a>
+            <% else %>
+              <a href="<%= item.subscribable.listing.support_url %>"><%= item.subscribable.listing.name %> support</a>
+            <% end %>
+
+            <% if item.on_free_trial? %>
+              <span>
+                Current price is prorated for <%= (view.subscription.post_free_trial_bill_date.to_date - (item.free_trial_ends_on + 1.day).to_date).to_i %> days
+              </span>
+            <% end %>
+          </div>
+
+          <span class="no-wrap" <%= test_selector("marketplace-item-price") %>>
+            <% if item.on_free_trial? && item.pending_subscription_item_change %>
+              <strong><%= item.post_trial_prorated_price.format %></strong>
+            <% else %>
+              <% if view.account.pending_cycle.changing_duration? %>
+                <strong><%=  item.price(duration: view.account.pending_cycle.plan_duration).format(no_cents_if_whole: true) %></strong>
+              <% else %>
+                <strong><%= item.price.format %></strong>
+              <% end %>
+            <% end %>
+          </span>
+        </div>
+      </div>
+
+      <% if item.has_pending_cycle_change? && item.pending_subscription_item_change %>
+        <% change = item.pending_subscription_item_change %>
+
+        <div class="Box-footer py-2 pl-0 flash-warn rounded-bottom-1">
+          <div class="d-flex my-1 flex-items-baseline">
+            <div class="col-1 text-center text-small flex-items-center">
+              <%= primer_octicon(:clock) %>
+            </div>
+            <div class="flex-auto text-small">
+              <div class="mb-0">
+                <% if change.cancellation? %>
+                  Cancelling <%= change.subscribable.listing.name %>
+                <% else %>
+                  Downgrade to <%= change.subscribable.name %>
+                <% end %>
+                <% if change.subscribable.per_unit? %>
+                  with <%= pluralize change.quantity, change.subscribable.unit_name %>
+                <% end %>, effective on <%= view.account.pending_cycle.active_on.strftime("%b %d, %Y") %>
+
+                <% if item.adminable_by?(view.current_user) %>
+                  <% if change.can_apply? %>
+                    <%= form_tag pending_subscription_item_change_path(change.id), class: "inline-form", method: :put do %>
+                      <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, mr: 2, font_size: 6, "data-confirm": "Are you sure you want to apply this pending marketplace change?") do %>
+                        Apply Pending Change
+                      <% end %>
+                    <% end %>
+                  <% end %>
+                  <%= form_tag pending_subscription_item_change_path(change.id), class: "inline-form", method: :delete, data: test_selector_hash("marketplace-item-change-cancel-link") do %>
+                    <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, mr: 2, font_size: 6, "data-confirm": "Are you sure you want to cancel this pending marketplace change?") do %>
+                      Cancel
+                    <% end %>
+                  <% end %>
+                <% end %>
+              </div>
+            </div>
+            <strong><%= change.price.format(no_cents_if_whole: true) %></strong>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

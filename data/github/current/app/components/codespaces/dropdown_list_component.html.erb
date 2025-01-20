@@ -1,0 +1,180 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+
+<include-fragment data-target="get-repo.codespaceList"
+  data-replace-remote-form-target
+  <%= test_selector("codespaces-list-component") %>
+  data-src="<%= data_src %>"
+  data-action="include-fragment-replace:get-repo#hideSpinner loadstart:get-repo#showSpinner error:get-repo#refreshOnError"
+>
+  <% repository_policy = query.repository_policy %>
+
+  <% if query.pull_request %>
+    <% if !missing_head_repo && missing_head_ref %>
+      <%= render(Primer::Beta::Flash.new(scheme: :danger, p: 2, mx: 2, mt: 2, font_size: :small)) do |component| %>
+        The branch for this pull request no longer exists. You may be able to create a codespace from the
+        <% if query.pull_request.merged? %>
+          detached <%= render Primer::Beta::Link.new(href: tree_path('', query.pull_request.head_sha, query.repository), classes: "Link--inTextBlock").with_content("head commit") %>
+        <% else %>
+          <%= render Primer::Beta::Link.new(href: query.repository.permalink, classes: "Link--inTextBlock").with_content("base repository") %>
+        <% end %>.
+      <% end %>
+     <% elsif missing_head_repo %>
+      <%= render(Primer::Beta::Flash.new(scheme: :danger, p: 2, mx: 2, mt: 2, font_size: :small)) do |component| %>
+        The head repository for this pull request no longer exists. You may be able to create a codespace from the
+        <% if query.pull_request.merged? %>
+          detached <%= render Primer::Beta::Link.new(href: tree_path('', query.pull_request.head_sha, query.repository), classes: "Link--inTextBlock").with_content("head commit") %>
+        <% else %>
+          <%= render Primer::Beta::Link.new(href: query.repository.permalink, classes: "Link--inTextBlock").with_content("base repository") %>
+        <% end %>.
+      <% end %>
+    <% elsif query.pull_request.closed? %>
+      <%= render(Primer::Beta::Flash.new(scheme: :danger, p: 2, mx: 2, mt: 2, font_size: :small)) do |component| %>
+        This pull request must be reopened to create new codespaces on it.
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render Codespaces::CodeMenuHeaderComponent.new(
+    codespace: codespace,
+    repository: query.repository,
+    repository_policy: repository_policy,
+    current_user: current_user,
+    user_id: query.repository.owner,
+    open_in_deeplink: user_settings.prefers_non_web_editor?,
+    default_sku: default_sku,
+    cap_filter: cap_filter,
+    at_limit: is_at_limit?,
+    is_spoofed_commit: is_spoofed_commit?,
+    missing_head_ref: missing_head_ref,
+    missing_head_repo: missing_head_repo
+  )%>
+
+  <% if show_empty_state? %>
+    <div <%= test_selector "codespaces-empty-state" %>>
+      <%= render Primer::BlankslateComponent.new(
+        title: "No codespaces",
+        title_tag: :h4,
+        pb: 3,
+        direction: :column,
+        display: :flex
+      ) do %>
+        <div class="text-center text-small color-fg-muted mx-auto mb-2 mt-1" style="max-width: 240px;">
+          <span>
+            You don't have any codespaces with this repository checked out
+          </span>
+        </div>
+
+        <%= render Codespaces::UnauthorizedOrganizationsComponent.new(
+          classes: "border-bottom color-bg-subtle pt-1",
+          cap_filter: cap_filter,
+          current_repository: query.repository,
+          billable_owner: repository_policy.billable_owner,
+        ) %>
+
+        <% if !missing_head_ref && !missing_head_repo %>
+          <div
+            class="p-3 mt-0"
+            data-action="details-dialog-close:get-repo#refreshList"
+          >
+            <%= render Codespaces::CreateWrapperComponent.new(
+              codespace: codespace,
+              current_user: current_user,
+              target: "#{event_target}_DROPDOWN",
+              open_in_deeplink: user_settings.prefers_non_web_editor?,
+              default_sku: default_sku,
+              defer_location_assignment: true,
+              cap_filter: cap_filter,
+              at_limit: is_at_limit?,
+              is_spoofed_commit: is_spoofed_commit?,
+              dropdown: false,
+            ) %>
+
+          </div>
+        <% end %>
+
+        <div class="text-center text-small mx-auto my-2" style="max-width: 240px;">
+          <%= render(Primer::Beta::Link.new(
+            href: "#{GitHub.help_url}/codespaces",
+            underline: :false,
+            pt: 2
+          )) { "Learn more about codespaces..." } %>
+        </div>
+
+      <% end %>
+    </div>
+
+    <%= render Codespaces::CreateNoticeComponent.new(
+      billable_owner: repository_policy.billable_owner,
+      at_codespace_limit: is_at_limit?,
+      is_spoofed_commit: is_spoofed_commit?,
+      codespace: codespace,
+      user_codespace_limit: codespace_limit,
+      user: current_user,
+      extra_classes: "px-3 pb-3 mb-0 text-small color-fg-subtle pt-3 border-top color-border-muted",
+    ) %>
+
+  <% else %>
+    <ul id="codespaces-dropdown-list" role="menu" class="overflow-x-auto p-3" style="max-height: 370px;">
+      <%= render Codespaces::UnauthorizedOrganizationsComponent.new(
+          classes: "border-bottom color-bg-subtle pt-1",
+          cap_filter: cap_filter,
+          current_repository: query.repository,
+          billable_owner: repository_policy.billable_owner,
+        ) %>
+
+        <% if codespaces_by_branch[:current_branch].present? %>
+          <h4 class="text-small color-fg-muted pb-1">On current branch</h4>
+          <% codespaces_by_branch[:current_branch].each do |codespace| %>
+              <%= render Codespaces::DropdownListItemComponent.new(
+                  codespace: codespace,
+                  access_result: codespace_usage(codespace),
+                  repository: query.repository,
+                  event_target: pr_dropdown ? :PULL_REQUEST_PAGE_DROPDOWN : :REPO_PAGE_DROPDOWN,
+                  is_read_only: codespace.repository == query.repository && repository_policy.read_only_codespace_required?,
+                  needs_fork_to_push: needs_fork_to_push?(codespace),
+                  delete_confirmation_message: delete_confirmation_message(codespace)
+                ) %>
+          <% end%>
+        <% elsif codespaces_by_branch[:other_branches].any? %>
+          <h4 class="text-small color-fg-muted pb-1">On current branch</h4>
+          <%= render Primer::BlankslateComponent.new(
+              test_selector: "codespaces-blankslate",
+            ) do %>
+            <p class="my-2 text-small">No codespaces on current branch</p>
+          <% end%>
+        <% end %>
+
+        <% if codespaces_by_branch[:other_branches].present? %>
+          <div class="border-top color-border-muted mt-2">
+            <h4 class="text-small color-fg-muted pt-3 pb-1">On other branches</h4>
+            <% codespaces_by_branch[:other_branches].each do |codespace| %>
+              <%= render Codespaces::DropdownListItemComponent.new(
+                  codespace: codespace,
+                  access_result: codespace_usage(codespace),
+                  repository: query.repository,
+                  event_target: pr_dropdown ? :PULL_REQUEST_PAGE_DROPDOWN : :REPO_PAGE_DROPDOWN,
+                  is_read_only: codespace.repository == query.repository && repository_policy.read_only_codespace_required?,
+                  needs_fork_to_push: needs_fork_to_push?(codespace),
+                  delete_confirmation_message: delete_confirmation_message(codespace)
+                ) %>
+            <% end %>
+          </div>
+        <% end %>
+    </ul>
+    <% if !missing_head_ref && !missing_head_repo %>
+      <div data-action="details-dialog-close:get-repo#refreshList">
+      </div>
+      <div>
+        <%= render Codespaces::CreateNoticeComponent.new(
+          billable_owner: repository_policy.billable_owner,
+          at_codespace_limit: is_at_limit?,
+          is_spoofed_commit: is_spoofed_commit?,
+          codespace: codespace,
+          user_codespace_limit: codespace_limit,
+          user: current_user,
+          extra_classes: "px-3 pb-3 mb-0 text-small color-fg-subtle pt-3 border-top color-border-muted",
+        ) %>
+      </div>
+    <% end %>
+  <% end %>
+</include-fragment>

@@ -1,0 +1,63 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  project_cards ||= ProjectsClassicSunset.projects_classic_ui_enabled?(current_user, org: current_repository&.organization) ? issue.visible_cards_for(current_user).to_a : []
+  show_columns_menu ||= false
+  memex_items = []
+  count_user_defined_fields = {}
+  status_column_values = {}
+
+  if GitHub.projects_new_enabled?
+    memex_items = issue.visible_memex_items_for(current_user, prefill_template_predicate: true)
+    writable_memex_ids = issue.filter_writable_items(current_user, memex_items)
+    count_user_defined_fields = issue.count_user_defined_fields(memex_items) if memex_items.any?
+    status_column_values = issue.status_column_values_by_memex_item_id(memex_items) if memex_items.any?
+  end
+  open_cards, closed_cards = project_cards.partition { |c| c.project.open? }
+  open_memex, closed_memex = memex_items.partition { |m| m.memex_project.closed_at.nil? }
+  open_items = (open_cards + open_memex).sort_by { |p| p.is_a?(MemexProjectItem) ? p.memex_project.display_title : p.project.name }
+  closed_items = (closed_cards + closed_memex).sort_by { |p| p.is_a?(MemexProjectItem) ? p.memex_project.display_title : p.project.name }
+%>
+<div aria-live="polite">
+ <% if error_message.present? %>
+    <%= render Primer::Beta::Flash.new(scheme: :danger, p: 2, mb: 2) do %>
+      <%= error_message %>
+    <% end %>
+  <% end %>
+</div>
+<span class="css-truncate sidebar-progress-bar">
+  <% if open_items.any? %>
+    <% open_items.each do |item| %>
+      <% if item.is_a?(ProjectCard) %>
+        <%= render partial: "issues/sidebar/project_card_move", locals: { card: item, show_columns_menu: show_columns_menu } %>
+      <% elsif item.is_a?(MemexProjectItem) %>
+        <%= render partial: "issues/sidebar/memex_project_item", locals: { item: item, count_user_defined_fields: count_user_defined_fields, status_column_values: status_column_values, viewer_can_write: writable_memex_ids.include?(item.memex_project.id) } %>
+      <% end %>
+    <% end %>
+  <% elsif closed_items.any?  %>
+    <span class="css-truncate d-block pb-2">No open projects</span>
+  <% else %>
+    None yet
+  <% end %>
+
+  <% if closed_items.any? %>
+    <div class="Details js-details-container">
+      <button type="button" class="btn-link color-fg-muted js-details-target no-underline" aria-expanded="false">
+        <span><%= closed_items.size %> closed <%= "project".pluralize(closed_items.size) %></span>
+        <span class="Details-content--hidden"><%= primer_octicon(:"triangle-up") %></span>
+        <span class="Details-content--shown"><%= primer_octicon(:"triangle-down") %></span>
+      </button>
+
+      <div class="Details-content--hidden mt-1">
+        <% closed_items.each do |item| %>
+          <% if item.is_a?(ProjectCard) %>
+            <%= render partial: "issues/sidebar/project_card_move", locals: { card: item, show_columns_menu: show_columns_menu } %>
+          <% elsif item.is_a?(MemexProjectItem) %>
+            <%= render partial: "issues/sidebar/memex_project_item", locals: { item: item, count_user_defined_fields: count_user_defined_fields, status_column_values: status_column_values, viewer_can_write: writable_memex_ids.include?(item.memex_project.id) } %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+</span>

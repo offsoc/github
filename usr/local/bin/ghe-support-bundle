@@ -1,0 +1,851 @@
+#!/bin/bash
+#/ Usage: ghe-support-bundle [options]
+#/
+#/ Creates a support bundle tarball containing important logs from your instance.
+#/ You can also use this command to upload the support bundle, and any other file,
+#/ directly to GitHub Enterprise support.
+#/
+#/ OPTIONS:
+#/   -h | --help                  Show this message.
+#/   -u | --upload                Upload bundle to Enterprise Support.
+#/   -o | --out                   Stream output to STDOUT.
+#/   -x | --extended              Extended bundle. Includes coredumps, rotated log files and extended logs from services.
+#/   -p | --period                Specify the duration in day(s) to collect logs for support bundle. Eg. '1 day', '2 days'
+#/   -l | --num-jobs              Limit number of jobs to run in parallel at once.
+#/   -j | --janitor-report        Include git-janitor report.
+#/   -n | --no-async              Disable backgrounding of psed log sanitization.
+#/   -t <id> | --ticket <id>      Upload bundle to Enterprise Support with a ticket ID.
+#/
+#/ EXAMPLES:
+#/   Download a standard bundle:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-support-bundle -o' > support-bundle.tgz
+#/
+#/   Download an extended bundle:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-support-bundle -x -o' > support-bundle.tgz
+#/
+#/   Send a bundle to support:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-support-bundle -u'
+#/
+#/   Send a bundle to support and associate it with a support ticket:
+#/     $ ssh -p 122 admin@hostname -- 'ghe-support-bundle -t ticket-id'
+#/
+#/
+set -e
+shopt -s nullglob
+export PATH="$PATH:/usr/local/share/enterprise"
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-support-lib
+. ghe-support-lib
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-cluster-commons
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+#shellcheck disable=SC2120
+sanitize_config () {
+  LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-config.psed "$@"
+}
+
+# Filter any sensitive environment variables that could be in a docker container config.v2.json
+sanitize_container_config () {
+  LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-container-config.psed "$@"
+}
+
+sanitize_log () {
+  LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-log.psed "$@"
+}
+
+sanitize_hcl_config () {
+  LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-hcl.psed "$@"
+}
+
+sanitize_logs () {
+  local sourcelogs="$1"
+  local targetdir="$2"
+
+  mkdir -p $targetdir
+  local commands=()
+  local command
+
+  for log_file in $(find -L $sourcelogs -type f -exec echo {} \;); do
+    # Filter out files based on 'days' passed via -p
+   # find logrotated files with numeric suffixes in their extensions and optionally gzip'd as a function of days specified
+   # examples: github.log.1.gz, resqued.log.1, enterprise-manage.log.2
+    if [[ -z "$EXTENDED" && $log_file =~ \.([$PERIOD_DAYS-9]|[0-9]{2,})(\.gz)?$ ]]; then
+      continue
+    fi
+    # Sanitize and re-archive if the source is gzipped
+    support_bundle_logfile="$targetdir/$(basename "$log_file")"
+    if [[ $log_file =~ \.gz$ ]]; then
+      command="zcat -f -c \"$log_file\" | psed -f /usr/local/share/enterprise/ghe-sanitize-log.psed | pigz > ${support_bundle_logfile}"
+    else
+      command="psed -f /usr/local/share/enterprise/ghe-sanitize-log.psed \"$log_file\" > ${support_bundle_logfile}"
+    fi
+    # add this command to the list of commands to run in parallel
+    old_IFS="${IFS}"
+    IFS=$'\n'
+    commands+=("$command")
+    IFS="${old_IFS}"
+  done
+  # use 1/3 of available CPUs or two parallel subprocesses if we have two or fewer visible CPUs
+  if [ "$(nproc)" -gt 2 ]; then
+    NUM_JOBS_DEFAULT=$(($(nproc)/3))
+  else
+    NUM_JOBS_DEFAULT=2
+  fi
+  # use the default calculated above if parallelism is not specified
+  NUM_JOBS="${NUM_JOBS:-$NUM_JOBS_DEFAULT}"
+  # run all commands in parallel in the background and return from this function immediately
+  # note that this is moreutils parallel and not GNU parallel
+  old_IFS="${IFS}"
+  IFS=$'\n'
+  if [ -n "$NO_ASYNC" ]; then
+    LANG=C PSEDEXTBRE='<>wWyB' parallel.moreutils -j "${NUM_JOBS}" -- ${commands[@]}
+  else
+    LANG=C PSEDEXTBRE='<>wWyB' parallel.moreutils -j "${NUM_JOBS}" -- ${commands[@]} &
+  fi
+  IFS="${old_IFS}"
+}
+
+[ "$(whoami)" = "root" ] || {
+  # lower the scheduling class and priority of this script and subprocesses
+  exec ionice -c 3 nice -n 19 sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+[ -n "$LOCKED_GHE_SUPPORT_BUNDLE" ] || {
+  export LOCKED_GHE_SUPPORT_BUNDLE=1
+  exec lockrun --lockfile=/var/run/ghe-support-bundle.lock -- "$0" "$@"
+}
+
+BUNDLE_DIR="$TMP_DIR/github-support-bundle"
+BUNDLE_STATUS="/tmp/ghe-support-bundle-status"
+USE_STDOUT=
+UPLOAD=
+SKIP_BUNDLE=
+NO_ASYNC=
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,out,upload,ticket:,verbose,extended,janitor-report,period:,num-jobs:,compress-program:,file:,no-async --options jhout:vxp:l:I:f:n -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -o|--out)
+      USE_STDOUT=1
+      ;;
+    -u|--upload)
+      UPLOAD=1
+      ;;
+    -t|--ticket)
+      UPLOAD=1
+      TICKET_ID="$2"
+      shift
+      ;;
+    -p|--period)
+      PERIOD="$2"
+      shift
+      ;;
+    -I|--compress-program)
+      COMPRESS_PROGRAM="$2"
+      shift
+      ;;
+    -x|--extended)
+      EXTENDED=1
+      ;;
+    -j|--janitor-report)
+      JANITOR_REPORT=1
+      ;;
+    -f|--file)
+      message "Note: The '$1' argument has been removed."
+      message "Please use 'ghe-support-upload' to send a file or data from STDIN to Enterprise Support."
+      exit 2
+      ;;
+    -v|--verbose) # internal/development use
+      set -x
+      ;;
+    -n|--no-async)
+      NO_ASYNC=1
+      ;;
+    -l|--num-jobs)
+      NUM_JOBS="$2"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -n "$UPLOAD" ]; then
+  display_privacy_statement
+  if ! check_connectivity; then
+    if ! prompt_manual_upload; then
+      exit
+    fi
+    MANUAL_UPLOAD=1
+  fi
+fi
+
+# default to pigz if -I or --compress-program is not specified
+COMPRESS_PROGRAM=${COMPRESS_PROGRAM:-"pigz"}
+
+# if we are using zstd to compress the tar, use a .tzst extension
+if [[ "${COMPRESS_PROGRAM}" =~ "zstd" ]]; then
+  FILE_EXTENSION="tzst"
+else
+  FILE_EXTENSION="tgz"
+fi
+
+FILE_PATH=$(mktemp -p "$TMP_DIR" "$(hostname | cut -c1-60)_$(date +%Y%m%d-%H%M)_bundle_XXXXXX.${FILE_EXTENSION}")
+
+# exit if -p value does not include day(s) or hour(s)
+if [ -n "$PERIOD" ] && [[ ! $PERIOD =~ (day|days) ]]; then
+    echo "Unable to parse -p|--period value for number of days. If the number of days has a space in it please remove it (Eg. -p '8 days' -> -p 8days)." >&2
+  exit 1
+fi
+
+# if nothing is specified default period is '2 days'
+if [ -n "$PERIOD" ]; then
+  DEFAULT_PERIOD="$PERIOD"
+elif [ -n "$EXTENDED" ]; then
+  DEFAULT_PERIOD='8 days'
+else
+  DEFAULT_PERIOD='2 days'
+fi
+
+JOURNAL_START="$DEFAULT_PERIOD ago"
+PERIOD_DAYS=$(echo "$DEFAULT_PERIOD" | grep -oE '[0-9]+')
+
+# if --period is >= '8 days' then collect all the logs we do for --extended
+if [ -n "$PERIOD" ] && [[ $(systemd-analyze timespan "$PERIOD" | grep μs | awk '{print $2}') -ge $(systemd-analyze timespan '8 days' | grep μs | awk '{print $2}') ]]; then
+  EXTENDED=1
+fi
+
+# Keep enterprise-manage in the loop about how the support bundle is going.
+# This also let's us know when a file is ready.
+#
+# Other processes will look for these states:
+# "running"   - bundle is currently in progress
+# "failed"    - bundle has failed
+# "complete"  - bundle has completed successfully
+update_status () {
+    echo "$1" > "$BUNDLE_STATUS" 2>/dev/null
+    chown enterprise-manage:enterprise-manage "$BUNDLE_STATUS"
+}
+
+[ -n "$USE_STDOUT" ] || {
+  message "Creating bundle '${FILE_PATH}'..."
+}
+
+trap "update_status failed" EXIT
+update_status "running"
+
+# Cleanup previous support bundle
+rm -rf "${BUNDLE_DIR}"
+
+# Determine and store number of reboots for use later
+REBOOTS=$(journalctl --list-boots | wc -l)
+
+# System Logs
+mkdir -p ${BUNDLE_DIR}/system-logs
+mkdir -p ${BUNDLE_DIR}/system-logs/logrotate
+/usr/sbin/logrotate -d /etc/logrotate.conf > ${BUNDLE_DIR}/system-logs/logrotate/logrotate_test.log 2>&1 || true
+ln -nfs /var/lib/logrotate/status ${BUNDLE_DIR}/system-logs/logrotate/
+ln -nfs /var/log/kern.log* ${BUNDLE_DIR}/system-logs/
+dmesg > ${BUNDLE_DIR}/system-logs/dmesg
+ln -nfs /var/log/syslog* ${BUNDLE_DIR}/system-logs/
+sanitize_logs "/var/log/haproxy.log*" ${BUNDLE_DIR}/system-logs/
+ln -nfs /var/log/dpkg.log* ${BUNDLE_DIR}/system-logs/
+ln -nfs /var/log/apt ${BUNDLE_DIR}/system-logs/apt
+ln -nfs /var/log/chrony ${BUNDLE_DIR}/system-logs/chrony
+sanitize_logs "/var/log/ssh-console-audit.log*" ${BUNDLE_DIR}/system-logs/
+
+# ghe-config-apply diagnostic aids
+config_file_history_dir="/data/user/common/ghe-config-apply/config-file-history"
+bundle_config_dir="${BUNDLE_DIR}/ghe-config-apply/config-file-history/"
+mkdir -p "$bundle_config_dir"
+if [ -d "$config_file_history_dir" ]; then
+  # Exclude secrets.conf and ghe-config_*.diff files from the support bundle, but keep the sanitized.diff
+  cd "$config_file_history_dir"
+  find . -type f \( ! -name 'secrets.conf' ! -name 'ghe-config_*.diff' -o -name 'ghe-config_*_sanitized.diff' \) -exec cp --parents -rfp {} "$bundle_config_dir" \;
+  cd - >/dev/null
+  # Sanitize all config and .diff output files in the bundle config-file-history directory
+  conf_files_to_sanitize=$(find "$bundle_config_dir" -name '*.conf' -o -name "*.diff")
+  for conf_file_to_sanitize in ${conf_files_to_sanitize[@]}; do
+    cat $conf_file_to_sanitize | sanitize_config > "$conf_file_to_sanitize".sanitized
+    mv "$conf_file_to_sanitize".sanitized "$conf_file_to_sanitize"
+    chown admin:users "$conf_file_to_sanitize"
+    chmod 640 "$conf_file_to_sanitize"
+  done
+else
+  echo "Failed to add config file history to support bundle - $config_file_history_dir is missing." >&2
+fi
+
+# auth log can contain mssql secrets
+for file in $(find /var/log/auth.log* -type f); do
+  cat $file | ghe-sanitize-secrets 'secrets.mssql' > ${BUNDLE_DIR}/system-logs/$(basename "$file")
+done
+
+# systemd-related logs
+mkdir -p ${BUNDLE_DIR}/system-logs/systemd
+
+# nomad-related logs
+mkdir -p ${BUNDLE_DIR}/system-logs/nomad-jobs
+
+# kern.log. Not available on lxc, hence || true. Will by default only show messages of the current boot id, so collect the last and the current boot
+if [ "$REBOOTS" -ge 2 ]; then
+  journalctl -k -b -1 --no-pager > ${BUNDLE_DIR}/system-logs/systemd/journalctl-k.log.1 || true
+fi
+journalctl -k --no-pager > ${BUNDLE_DIR}/system-logs/systemd/journalctl-k.log || true
+
+# Recreate a boot.log equivalent
+journalctl -a -b 0 --no-pager | head -5000 | sanitize_log | ghe-sanitize-secrets 'secrets.mssql' > ${BUNDLE_DIR}/system-logs/systemd/journalctl-ab.log
+systemctl status | ghe-sanitize-secrets 'secrets.' > ${BUNDLE_DIR}/system-logs/systemd/systemctl-status.log
+# systemd equivalent of all the /var/log/upstart/ logs
+ghe_services="
+consul
+consul-replicate
+elasticsearch-upgrade
+enterprise-manage
+fluent-bit
+ghe-user-disk
+ghe-reconfigure
+ghe-preflight-check
+ghe-welcome
+ghes-manage-agent
+ghes-manage-gateway
+nomad
+nomad-jobs
+otelcol-contrib
+samplicator
+wireguard
+"
+
+# Only called on regular (non-HA) cluster DR — this will only appear on the
+# cluster delegate node (usually the MySQL read/write master) as that's the
+# only node that this service is called from
+if [ -f /etc/github/cluster ] && ! ghe-config --true cluster.ha && ghe-config --present cluster.mysql-master-replica; then
+  replica_nomad_delegate=$(ghe-config "cluster.mysql-master-replica")
+  replica_dc=$(ghe-config "cluster.$replica_nomad_delegate.datacenter")
+  ghe_services+="elasticsearch-setup-cluster@$replica_dc"
+fi
+
+for service in $ghe_services; do
+  # If a service has not started, there won't be a log for it.
+  journalctl -u $service --since "$JOURNAL_START" | sanitize_log > ${BUNDLE_DIR}/system-logs/systemd/$service.log || true
+done
+
+# Nomad Job and Allocation information
+if systemctl is-active --quiet "nomad.service"; then
+  /usr/local/share/enterprise/ghe-support-nomad "${BUNDLE_DIR}/system-logs/nomad-jobs"
+fi
+
+# Logs for each nomad allocation. Preserve the directory structure under /data/user/nomad
+# to keep them organized by allocation id
+cut_length=$(echo "/data/user/nomad" | wc -c)
+nomad_jobs_dir="${BUNDLE_DIR}"/system-logs/nomad-jobs
+
+mkdir -p "${BUNDLE_DIR}/packages-logs"
+
+for log_full_path in /data/user/nomad/alloc/*/alloc/logs/*; do
+  log_cut_path=$(echo "$log_full_path" | cut -c "$cut_length"-)
+  destination_dir="${nomad_jobs_dir}"$(dirname "$log_cut_path")
+  sanitize_logs "$log_full_path" "$destination_dir"
+
+  # Create a symlink entrypoint for packages logs so we do not have to search through allocation IDs
+  if [[ $(basename "${log_full_path}") =~ ^packages.std.+[0-9]+$ ]]; then
+    ln -nfs "${log_full_path}" "${BUNDLE_DIR}/packages-logs/$(basename "${log_full_path}")"
+  fi
+done
+
+# Docker diagnostics
+mkdir -p "${BUNDLE_DIR}/docker/"
+timeout 5 docker version 2>/dev/null > "${BUNDLE_DIR}/docker/version.txt" || true
+timeout 5 docker info 2>/dev/null > "${BUNDLE_DIR}/docker/info.txt" || true
+timeout 5 docker ps -a 2>/dev/null > "${BUNDLE_DIR}/docker/ps.txt" || true
+timeout 5 docker stats -a --no-stream 2>/dev/null > "${BUNDLE_DIR}/docker/stats.txt" || true
+timeout 5 docker images 2>/dev/null > "${BUNDLE_DIR}/docker/images.txt" || true
+timeout 5 docker volume ls 2>/dev/null > "${BUNDLE_DIR}/docker/volumes.txt" || true
+
+# Docker container logs
+mkdir -p "${BUNDLE_DIR}/docker/container-logs"
+for container in echo $(journalctl --since "$JOURNAL_START" --field CONTAINER_TAG | grep -vw babeld); do
+  journalctl CONTAINER_TAG="$container" --since "$JOURNAL_START" --all | sanitize_log > "${BUNDLE_DIR}/docker/container-logs/$container.log" || true
+done
+
+# Docker container info
+for id in /data/user/docker/containers/*/; do
+  id="${id%/}"
+  id="${id##*/}"
+  mkdir -p "${BUNDLE_DIR}/docker/container-info/${id}"
+  sanitize_container_config "/data/user/docker/containers/${id}/config.v2.json" > "${BUNDLE_DIR}/docker/container-info/${id}/config.v2.json" || true
+  ln -nfs "/data/user/docker/containers/${id}/hostconfig.json" "${BUNDLE_DIR}/docker/container-info/${id}/hostconfig.json"
+done
+
+if [ -f /var/log/ghe-upgrade.log ]; then
+  ln -nfs /var/log/ghe-upgrade.log ${BUNDLE_DIR}/system-logs/
+fi
+
+if [ "$(ls /var/log/coredumps.* 2>/dev/null | wc -l)" -gt 0 ]; then
+  ln -nfs /var/log/coredumps.log* ${BUNDLE_DIR}/system-logs/
+fi
+
+# Core dumps
+if [ -n "$EXTENDED" ]; then
+  if [ -d /cores ]; then
+    ln -nfs /cores ${BUNDLE_DIR}/core-dumps
+  fi
+fi
+
+# Configuration Logs
+mkdir -p ${BUNDLE_DIR}/configuration-logs
+if [ -f /data/user/common/ghe-config.log ]; then
+  cp -p /data/user/common/ghe-config.log* ${BUNDLE_DIR}/configuration-logs
+  cp -pr "/data/user/config-apply/logs/" "${BUNDLE_DIR}/configuration-logs"
+fi
+if [ -f /var/log/ghe-configuration/ghe-config-check.debug.log ]; then
+  cp -p /var/log/ghe-configuration/ghe-config-check.debug.log ${BUNDLE_DIR}/configuration-logs
+fi
+if [ -d /var/log/dbmigration ]; then
+  ln -nfs /var/log/dbmigration ${BUNDLE_DIR}/configuration-logs/dbmigration
+fi
+if [ -d /data/user/config-apply/events ]; then
+  mkdir -p "${BUNDLE_DIR}/configuration-logs/events"
+  cp -pr "/data/user/config-apply/events/" "${BUNDLE_DIR}/configuration-logs"
+fi
+if [ -d /data/user/config-apply/traces ]; then
+  mkdir -p "$BUNDLE_DIR/configuration-logs/traces"
+  cp -pr "/data/user/config-apply/traces/" "$BUNDLE_DIR/configuration-logs"
+fi
+if [ -f /data/user/config-apply/status.json ]; then
+  cp -p /data/user/config-apply/status.json "$BUNDLE_DIR/configuration-logs"
+fi
+
+
+LIVE_UPGRADE_PATH=$(ghe-config --default "" live-upgrade.working-path)
+if [[ -n "$LIVE_UPGRADE_PATH" && -d "$LIVE_UPGRADE_PATH" ]]; then
+  ln -nfs "$LIVE_UPGRADE_PATH" ${BUNDLE_DIR}/configuration-logs/live-upgrade
+fi
+
+# Application Logs
+ln -nfs /var/log/babeld/ ${BUNDLE_DIR}/babeld-logs
+sanitize_logs /data/enterprise-manage/current/log/ ${BUNDLE_DIR}/enterprise-manage-logs
+ln -nfs /opt/graphite/storage/log/webapp ${BUNDLE_DIR}/enterprise-manage-logs/graphite-web
+sanitize_logs /data/github/current/log/ ${BUNDLE_DIR}/github-logs
+if [ -d /var/log/lfs-server ]; then
+  sanitize_logs /var/log/lfs-server/lfs-server.log ${BUNDLE_DIR}/lfs-server-logs
+fi
+
+if [ -n "$EXTENDED" ]; then
+  #shellcheck disable=SC2043
+  current=$(readlink -f /data/github/current/log)
+  for instance in /data/github/shared/log/* ; do
+    if [ "$(readlink -f $instance)" != "$current" ] ; then
+      sanitize_logs "$instance/" "${BUNDLE_DIR}/github-logs/$(basename "$instance")"
+    fi
+  done
+fi
+
+# Audit logs
+# Capture all available audit logs if rotation has occured once, not just the one symbolically linked to /data/github/current/log/github-audit.log
+if [ -f /var/log/github-audit.log.1 ]; then
+  sanitize_logs "/var/log/github-audit.log.*" "${BUNDLE_DIR}/github-logs/"
+fi
+
+# rename the default audit.log file to github-audit.log for naming consistency
+if [ -f "${BUNDLE_DIR}/github-logs/audit.log" ]; then
+  mv "${BUNDLE_DIR}/github-logs/audit.log" "${BUNDLE_DIR}/github-logs/github-audit.log"
+fi
+
+# Consul output
+mkdir -p ${BUNDLE_DIR}/consul
+
+CONSUL_HTTP_TOKEN="$(ghe-config secrets.consul.acl-master-token)"
+export CONSUL_HTTP_TOKEN
+{ timeout 2 /usr/bin/consul info 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/consul/info.txt
+{ timeout 2 /usr/bin/consul catalog datacenters 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/consul/datacenters.txt
+{ timeout 2 /usr/bin/consul catalog services 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/consul/services.txt
+{ timeout 2 /usr/bin/consul members -wan 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/consul/members.txt
+{ timeout 2 /usr/bin/consul operator raft list-peers -stale 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/consul/stale-peers.txt
+unset CONSUL_HTTP_TOKEN
+
+# Redis logs
+mkdir -p ${BUNDLE_DIR}/redis-logs
+ghe-resque-info > ${BUNDLE_DIR}/redis-logs/resque-info.txt 2>${BUNDLE_DIR}/redis-logs/resque-info.txt.err || true
+ghe-aqueduct-info > ${BUNDLE_DIR}/redis-logs/aqueduct-info.txt 2>${BUNDLE_DIR}/redis-logs/aqueduct-info.txt.err || true
+
+# MySQL logs
+mkdir -p "${BUNDLE_DIR}/database-logs"
+ln -nfs /var/log/mysql "${BUNDLE_DIR}/database-logs"
+
+## MySQL state
+( sudo mysqladmin status || echo "Warning: 'mysqladmin status' exited with status $?" ) > "${BUNDLE_DIR}/database-logs/mysqladmin-status.txt" 2>&1
+( sudo mysqladmin processlist || echo "Warning: 'mysqladmin processlist' exited with status $?" ) > "${BUNDLE_DIR}/database-logs/mysqladmin-processlist.txt" 2>&1
+
+# MySQL binary backup logs
+if [ -d /var/log/xtrabackup ]; then
+  ln -nfs /var/log/xtrabackup "${BUNDLE_DIR}/database-logs"
+fi
+
+# Orchestrator logs are only relevant for regular (non-HA) cluster configuration
+if [ -f /etc/github/cluster ] && ! ghe-config --true cluster.ha; then
+
+  # Orchestrator runs only when BYODB is disabled
+  if ! is_service_external "mysql" ; then
+    ORCHESTRATOR_LOG_DIR="${BUNDLE_DIR}/database-logs/orchestrator-logs"
+    mkdir -p "${ORCHESTRATOR_LOG_DIR}"
+    if [ -f /var/log/orchestrator.log ]; then
+      sanitize_logs /var/log/orchestrator.log "${ORCHESTRATOR_LOG_DIR}" || true
+    fi
+    cp -p /etc/orchestrator.conf.json "${ORCHESTRATOR_LOG_DIR}/orchestrator.conf.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c topology -alias ghe 2>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" > "${ORCHESTRATOR_LOG_DIR}/topology.txt" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path status 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/status.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path all-instances 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/all-instances.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path problems 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/problems.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path replication-analysis 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/replication-analysis.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path audit-failure-detection 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/audit-failure-detection.json" || true
+    /usr/local/share/enterprise/ghe-orchestrator-client -c api -path audit-recovery 2>>"${ORCHESTRATOR_LOG_DIR}/exceptions.txt" | jq . > "${ORCHESTRATOR_LOG_DIR}/audit-recovery.json" || true
+  fi
+fi
+
+# MSSQL logs
+if [ -d /data/user/mssql/data ] ; then
+  ln -nfs /data/user/mssql/log ${BUNDLE_DIR}/mssql-logs
+  ghe-mssql-diagnostics > ${BUNDLE_DIR}/mssql-logs/diagnostics.txt || true
+fi
+
+# Web Server Logs
+sanitize_logs /var/log/nginx/ ${BUNDLE_DIR}/web-logs
+
+# Installation Metadata
+mkdir -p ${BUNDLE_DIR}/metadata
+mkdir -p ${BUNDLE_DIR}/metadata/configs
+mkdir -p ${BUNDLE_DIR}/metadata/nomad-files
+
+# get hcl file path and cut /etc/ from the beginning of the path
+hcl_file_path_list=$(find /etc '(' -name '*.hcl' ')' | cut -d'/' -f3-)
+# sanitize and push all hcl files to the bundle
+for hcl_file_path in $hcl_file_path_list; do
+  directory_name=$(dirname "$hcl_file_path")
+  mkdir -p "${BUNDLE_DIR}/metadata/nomad-files/$directory_name"
+  sanitize_hcl_config "/etc/$hcl_file_path" > "${BUNDLE_DIR}/metadata/nomad-files/$hcl_file_path"
+done
+
+TEMP_DIAG_FILE=$(mktemp -p "$TMP_DIR")
+ghe-diagnostics 2>"${BUNDLE_DIR}/metadata/diagnostics.txt.err" > "${TEMP_DIAG_FILE}" || true
+# sanitization must be done after file is created, or regex expressions containing secrets can show up as args in the running processes log
+ghe-sanitize-secrets 'secrets.actions' 'secrets.mssql' < "${TEMP_DIAG_FILE}" > "${BUNDLE_DIR}/metadata/diagnostics.txt"
+rm --force "${TEMP_DIAG_FILE}"
+
+/sbin/sysctl -a > ${BUNDLE_DIR}/metadata/sysctl.txt 2> /dev/null
+
+if [ -d /var/lib/dpkg ] && [ -r /var/lib/dpkg ]; then
+  /usr/bin/dpkg-query -W > "${BUNDLE_DIR}"/metadata/packages.txt 2> /dev/null
+else
+  echo "Warning: /var/lib/dpkg directory is missing or unreadable. Skipping dpkg-query." >> "${BUNDLE_DIR}"/metadata/packages.txt
+fi
+
+ln -nfs /data/enterprise/customer.gpg ${BUNDLE_DIR}/metadata/
+
+if [ -n "$EXTENDED" ]; then
+  touch ${BUNDLE_DIR}/metadata/extended
+fi
+if [ -f /data/user/common/github.conf ]; then
+  cat /data/user/common/github.conf | sanitize_config > ${BUNDLE_DIR}/metadata/github.conf
+else
+  touch ${BUNDLE_DIR}/metadata/github.conf
+fi
+if [ -f /etc/github/configapply.json ]; then
+  cat /etc/github/configapply.json | sanitize_config > ${BUNDLE_DIR}/metadata/configapply.json
+else
+  touch ${BUNDLE_DIR}/metadata/configapply.json
+fi
+ghe-system-info > ${BUNDLE_DIR}/metadata/system.json
+ln -nfs /etc/github/status/nodes.json ${BUNDLE_DIR}/metadata/nodes_consul_status.json || true
+ln -nfs /etc/github/status/services.json ${BUNDLE_DIR}/metadata/services_consul_status.json || true
+source /data/enterprise-manage/shared/env.sh
+ln -nfs /data/user/common/enterprise.ghl ${BUNDLE_DIR}/metadata/
+ln -nfs /data/enterprise/license.gpg ${BUNDLE_DIR}/metadata/
+ln -nfs /etc/sysctl.d/90-github-customer.conf ${BUNDLE_DIR}/metadata/configs/
+
+if [ -f /data/user/common/ghe-update-check.log ]; then
+  ln -nfs /data/user/common/ghe-update-check.log ${BUNDLE_DIR}/metadata/
+fi
+
+if [ -f /var/lib/ghe-updates/ghe-update-check.status ]; then
+  ln -nfs /var/lib/ghe-updates/ghe-update-check.status ${BUNDLE_DIR}/metadata/
+fi
+
+/usr/local/share/enterprise/ghe-mysql-row-count > "${BUNDLE_DIR}/metadata/mysql_row_count.txt" 2> /dev/null || true
+if is_service_external "mysql" ; then
+  /usr/local/share/enterprise/github-mysql 'SHOW GLOBAL VARIABLES;' > "${BUNDLE_DIR}/metadata/external_mysql_primary.conf" 2> /dev/null || true
+  if [ -f /etc/github/cluster ]; then
+    external_mysql_replicas=$(ghe-config --get-regexp 'cluster-external-mysql.*' | grep -oP 'cluster-external-mysql\.\K[^\.]+' | sort | uniq || true)
+    for node in $external_mysql_replicas; do
+      host="$(ghe-config "cluster-external-mysql.$node.address")"
+      port="$(ghe-config "cluster-external-mysql.$node.port")"
+      /usr/local/share/enterprise/ghe-external-mysql "$host" "$port" 'SHOW GLOBAL VARIABLES;' > "${BUNDLE_DIR}/metadata/external_mysql_replica_$node.conf" 2> /dev/null || true
+    done
+  fi
+fi
+
+# ElasticSearch logs
+ln -nfs /var/log/elasticsearch/ ${BUNDLE_DIR}/elasticsearch-logs
+
+# Elasticsearch Upgrader instance logs
+ln -nfs /var/log/es8-auditlog-migration ${BUNDLE_DIR}/es8-auditlog-migration-logs
+
+## Only run on the nodes with elasticsearch-server role or standalone nodes
+if ! is_in_cluster || cluster_node_has_role elasticsearch-server "$(cluster_local_node_name)"; then
+  /usr/local/share/enterprise/ghe-elastomer-index-build-progress > ${BUNDLE_DIR}/elasticsearch-logs/ghe-elastomer-index-build-progress.txt || echo "ERROR: Failed to get elastomer index build progress. Check that all expected GHES services are healthy."
+fi
+
+# Dependency Graph env logs
+ln -nfs /var/log/dependency-graph-api-env ${BUNDLE_DIR}/dependency-graph-api-env-logs
+
+# Include user histories
+mkdir -p "${BUNDLE_DIR}/metadata/history"
+for homedir in /home/* /root; do
+  if [ -f "${homedir}/.bash_history" ]; then
+    ghe-sanitize-secrets 'secrets.actions' 'secrets.mssql' < "${homedir}/.bash_history" | LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-log.psed > "${BUNDLE_DIR}/metadata/history/$(basename "${homedir}")"
+  fi
+done
+
+# Collectd
+echo FLUSHALL | sudo socat - UNIX-CONNECT:/var/run/rrdcached.sock > /dev/null
+sleep 2
+
+mkdir -p ${BUNDLE_DIR}/collectd/logs
+ln -nfs /var/log/collectd.log* ${BUNDLE_DIR}/collectd/logs/
+
+mkdir -p ${BUNDLE_DIR}/collectd/graphs/rrd
+collectd_hostname="$(grep -Po 'Hostname "?\K.[^"]*' /etc/collectd/conf.d/hostname.conf || echo localhost)"
+if [ -d "/var/lib/collectd/rrd/$collectd_hostname" ]; then
+  ln -nfs "/var/lib/collectd/rrd/$collectd_hostname" "${BUNDLE_DIR}/collectd/graphs/rrd/"
+fi
+
+if is_service_external "mysql" ; then
+  if external_mysql_hostname=$(ghe-config mysql.external.address 2>/dev/null); then
+    if [ -d "/var/lib/collectd/rrd/${external_mysql_hostname}" ]; then
+      ln -nfs "/var/lib/collectd/rrd/${external_mysql_hostname}" "${BUNDLE_DIR}/collectd/graphs/rrd/"
+    fi
+  fi
+
+  if [ -f /etc/github/cluster ]; then
+    external_mysql_replicas=$(ghe-config --get-regexp 'cluster-external-mysql.*' | grep -oP 'cluster-external-mysql\.\K[^\.]+' | sort | uniq || true)
+    for node in $external_mysql_replicas; do
+      if [ -d "/var/lib/collectd/rrd/${node}" ]; then
+        ln -nfs "/var/lib/collectd/rrd/${node}" "${BUNDLE_DIR}/collectd/graphs/rrd/"
+      fi
+    done
+  fi
+fi
+
+# Gitmon
+mkdir -p ${BUNDLE_DIR}/gitmon
+ln -nfs /var/log/gitmon ${BUNDLE_DIR}/gitmon/logs
+if [ -d /data/user/gitmon ]; then
+  ln  -nfs /data/user/gitmon ${BUNDLE_DIR}/gitmon/data
+fi
+
+# HAProxy stats page
+curl http://127.0.0.1:8086/ 2>/dev/null > "${BUNDLE_DIR}/metadata/haproxy.html" || true
+curl http://127.0.0.1:8789/ 2>/dev/null > "${BUNDLE_DIR}/metadata/haproxy-cluster-proxy.html" || true
+curl http://127.0.0.1:8889/ 2>/dev/null > "${BUNDLE_DIR}/metadata/haproxy-data-proxy.html" || true
+
+
+# HAProxy configuration
+mkdir -p "${BUNDLE_DIR}/haproxy-config"
+for i in haproxy-cluster-proxy.cfg haproxy-cluster-proxy.cfg.previous \
+haproxy-data-proxy.cfg haproxy-data-proxy.cfg.previous \
+haproxy-frontend.cfg haproxy-data-proxy.cfg haproxy-cluster-proxy.cfg\
+maintenance-ip-exception-list.acl maintenance-ip-exception-list.acl.previous
+do
+  if [ -f /etc/haproxy/${i} ]; then
+    cp -p /etc/haproxy/${i} "${BUNDLE_DIR}/haproxy-config/"
+  fi
+done
+
+# kafka-lite metrics and metadata
+curl http://127.0.0.1:9094/metrics 2>/dev/null > "${BUNDLE_DIR}/metadata/kafka-lite-metrics.txt" || true
+curl http://127.0.0.1:9094/admin/metadata 2>/dev/null > "${BUNDLE_DIR}/metadata/kafka-lite-metadata.json" || true
+curl "http://127.0.0.1:9094/debug/pprof/goroutine?debug=1" 2>/dev/null > "${BUNDLE_DIR}/metadata/kafka-lite-goroutines.txt" || true
+curl "http://127.0.0.1:9094/debug/pprof/heap?debug=1" 2>/dev/null > "${BUNDLE_DIR}/metadata/kafka-lite-heap.txt" || true
+curl "http://127.0.0.1:9094/debug/pprof/profile?seconds=5" 2>/dev/null > "${BUNDLE_DIR}/metadata/kafka-lite-profile.pprof" || true
+
+# aqueduct-lite metadata
+ghe-aqueduct status > "${BUNDLE_DIR}/metadata/aqueduct.txt" || true
+curl http://127.0.0.1:9096/metrics 2>/dev/null > "${BUNDLE_DIR}/metadata/aqueduct-lite-metrics.txt" || true
+curl "http://127.0.0.1:9096/debug/pprof/goroutine?debug=1" 2>/dev/null > "${BUNDLE_DIR}/metadata/aqueduct-lite-goroutines.txt" || true
+curl "http://127.0.0.1:9096/debug/pprof/heap?debug=1" 2>/dev/null > "${BUNDLE_DIR}/metadata/aqueduct-lite-heap.txt" || true
+curl "http://127.0.0.1:9096/debug/pprof/profile?seconds=5" 2>/dev/null > "${BUNDLE_DIR}/metadata/aqueduct-lite-profile.pprof" || true
+
+# Dependabot Alerts metadata
+if ghe-config --true app.dependency-graph.enabled; then
+  { timeout --foreground 2m ghe-dependabot-alerts-info -o 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/metadata/dependabot-alerts-info.json
+fi
+
+# Security Configurations metadata
+{ timeout --foreground 2m ghe-security-configurations-info -o 2>&1 || echo "timed out"; } > ${BUNDLE_DIR}/metadata/security-configurations-info.json
+
+#postfix queue
+postfix_container=$(docker ps --format '{{.Names}}' --filter name=postfix) || true
+docker exec -ti $postfix_container postqueue -p 2>/dev/null > ${BUNDLE_DIR}/metadata/postfix-queue.txt || true
+
+# Alambic CDN metadata
+curl -H "Fastly-Key: $ALAMBIC_CDN_FASTLY_TOKEN" http://127.0.0.1:5115/origin/cdn/stats 2>/dev/null > ${BUNDLE_DIR}/metadata/alambic-cdn.txt || true
+
+# Cluster related stuff
+if [ -f /etc/github/cluster ]; then
+  mkdir -p $BUNDLE_DIR/cluster/
+  cp -p /etc/github/cluster $BUNDLE_DIR/cluster/node_name
+  cp -p /data/user/common/cluster.conf $BUNDLE_DIR/cluster/
+fi
+
+# Include replica replication Status
+if ghe-config --true cluster.ha; then
+  if [[ -f /etc/github/repl-state && "$(cat /etc/github/repl-state)" == "replica" ]]; then
+    { timeout --foreground 2m /usr/local/bin/ghe-repl-status 2>&1 || echo "Running ghe-repl-status took over 2 minutes. Timed out."; } > "${BUNDLE_DIR}/cluster/replication-status.txt"
+  fi
+fi
+
+# Run git janitor and capture the logs
+
+if [ -n "$JANITOR_REPORT" ]; then
+  sudo find /data/user/repositories/ -type d -name \*.git | ghe-git-janitor --stdin > ${BUNDLE_DIR}/metadata/git-janitor.txt || true
+fi
+
+# MySQL config
+if [ -f /etc/mysql/mysql.cnf ]; then
+  cp -p /etc/mysql/mysql.cnf ${BUNDLE_DIR}/metadata/configs/mysql.cnf
+fi
+if [ -f /etc/mysql/conf.d/tuning.cnf ]; then
+  cp -p /etc/mysql/conf.d/tuning.cnf ${BUNDLE_DIR}/metadata/configs/mysql-tuning.cnf
+fi
+
+# Elasticsearch config
+if [ -f /etc/elasticsearch/elasticsearch.yml ]; then
+  cp -p /etc/elasticsearch/elasticsearch.yml ${BUNDLE_DIR}/metadata/configs/elasticsearch.yml
+fi
+
+# Include hotpatching logs if available
+last_hotpatch=$(tail -n1 /etc/github/hotpatch 2>/dev/null | cut -d: -f2 || true)
+if [ -s "/data/user/patch/$last_hotpatch/hotpatch.log" ]; then
+  mkdir -p $BUNDLE_DIR/hotpatch-logs
+  if [ -n "$EXTENDED" ]; then
+    for file in $(find /data/user/patch -name hotpatch.log); do
+      # /data/user/patch/<version>/hotpatch.log -> <version>.log
+      dest_log=$(echo $file | awk -F/ '{print $5}')
+      cp -p $file $BUNDLE_DIR/hotpatch-logs/$dest_log.log
+    done
+  else
+    cp -p /data/user/patch/$last_hotpatch/hotpatch.log $BUNDLE_DIR/hotpatch-logs/$last_hotpatch.log
+  fi
+fi
+
+# Include ES 5.X migration logs if available
+if [ -s "/data/user/log/es-indices-rebuild.log" ]; then
+  mkdir -p $BUNDLE_DIR/es-5x-migration
+  cp -p /data/user/log/es-indices-rebuild.log $BUNDLE_DIR/es-5x-migration/
+fi
+
+# Include Actions Lightrail logs if there are any (even if actions is disabled)
+lightrail_directory="/data/user/actions/lightrail/"
+if [ -d "$lightrail_directory" ]; then
+  for file in "$lightrail_directory"/*/logs/*; do
+    [ -d "$file" ] && continue
+
+    relative_path="${file:${#lightrail_directory}}" # remove lightrail_directory from beginning of path
+    target_dir=$(dirname "$BUNDLE_DIR/actions-logs/$relative_path") # consistent naming with mssql-logs/, redis-logs/, etc
+    mkdir -p "$target_dir"
+    file_name=$(basename "$file")
+    ghe-sanitize-secrets 'secrets.actions' 'secrets.mssql' < "$file" | LANG=C PSEDEXTBRE='<>wWyB' psed -f /usr/local/share/enterprise/ghe-sanitize-log.psed > "$target_dir/$file_name"
+  done
+fi
+
+# Wait for all background jobs to complete
+wait
+
+# Always include Actions Service States even if actions are not enabled
+actions_states_directory="/data/user/actions/states/"
+if [ -d "$actions_states_directory" ]; then
+  for file in "$actions_states_directory"/*; do
+    [ -d "$file" ] && continue
+
+    target_dir=$(dirname "$BUNDLE_DIR/metadata/actions-states/")
+    mkdir -p "$target_dir"
+    file_name=$(basename "$file")
+    cp -p "$file" "$target_dir/$file_name"
+  done
+fi
+
+# Include Enterprise and Organizations policies and settings
+/usr/local/bin/github-env /usr/local/share/enterprise/ghe_enterprise_and_orgs_config_entries.rb > "${BUNDLE_DIR}/metadata/enterprise_and_orgs_policies_settings.txt" || true
+
+# Include Audit Log settings
+/usr/local/bin/github-env /usr/local/share/enterprise/ghe_audit_log_config_entries.rb > "${BUNDLE_DIR}/metadata/audit_log_settings.txt" || true
+
+# Include list of Enterprise and Organizations GitHub Actions self-hosted runners
+if [ "$(ghe-config app.actions.enabled)" = "true" ]; then
+  /usr/local/bin/github-env /usr/local/share/enterprise/ghe_self_hosted_actions_runners_list.rb > "${BUNDLE_DIR}/metadata/actions_self_hosted_runners.txt" || true
+fi
+
+# Create the Support Bundle
+if [ -n "$EXTENDED" ]; then
+  tar --acls -chf ${FILE_PATH} -C $TMP_DIR -I "${COMPRESS_PROGRAM}" --ignore-failed-read --warning=none github-support-bundle/ || true
+else
+  # Generate an exclude list of all *.gz files, except ones ending in .1.gz to allow for log files compressed on the first rotation, e.g. babeld.log.
+  exclude_list=$(mktemp "$TMP_DIR/bundle-exclude-XXXXXX")
+  exclude_pattern="\.([$PERIOD_DAYS-9]|[0-9]{2,})(\.gz)?$"
+  sudo find -L $BUNDLE_DIR ! -type d -printf 'github-support-bundle/%P\n' | grep -E "$exclude_pattern" > $exclude_list || true
+  tar --acls -chf $FILE_PATH -C $TMP_DIR -I "${COMPRESS_PROGRAM}" --ignore-failed-read --warning=none --exclude-from $exclude_list github-support-bundle/ || true
+  rm -f $exclude_list
+fi
+
+[ -f "${FILE_PATH}" ] || {
+  echo "Failed to create support bundle." >&2
+  exit 1
+}
+
+# Correct permissions
+chown admin:admin ${FILE_PATH}
+
+[ -z "$UPLOAD" ] || {
+  if [ -z "$MANUAL_UPLOAD" ]; then
+    upload_file ${TICKET_ID:+--ticket="$TICKET_ID"} -d "[$(hostname)] Support Bundle.tgz" "$FILE_PATH"
+    if [ -z "$SKIP_BUNDLE" ]; then
+      rm "$FILE_PATH"
+    fi
+  else
+    if [ -z "$SKIP_BUNDLE" ]; then
+      manual_upload_help "$FILE_PATH" 1 "$TICKET_ID"
+    else
+      manual_upload_help "$FILE_PATH" 0 "$TICKET_ID"
+    fi
+  fi
+}
+
+[ -z $USE_STDOUT ] || {
+  cat ${FILE_PATH}
+  rm ${FILE_PATH}
+}
+
+trap "" EXIT
+update_status "complete"

@@ -1,0 +1,92 @@
+<%
+  diff = GitHub::Diff.new(commit.repository, commit.first_parent_oid, commit.oid).summary
+
+  associated_prs = begin
+    commit.async_associated_pull_requests(order_by: { field: "created_at", direction: "ASC" }, viewer: current_user).sync
+  rescue Commit::AssociatedPullRequestSearchFailed
+    []
+    # Gracefully degradation: commit.pull_requests is left empty,
+    # so we show the commit page without PR information while ElasticSearch is down.
+  end
+
+  message_html = commit.async_truncated_message_body_html(300).sync
+%>
+
+<div class="p-3" <%= test_selector("commit-hovercard") %>>
+  <%= content_tag :div, "", data: hydro_view_tracking_attributes("commit-hovercard-hover", { commitGlobalRelayId: commit.global_relay_id, subject: params[:subject] }) %>
+
+  <div class="d-flex">
+    <div>
+      <%= primer_octicon(:"git-commit", color: :muted) %>
+    </div>
+
+    <div>
+      <pre class="h5 lh-condensed mb-2 ml-2 mt-1 dashboard-break-word" style="white-space: pre-wrap;"><a href="<%= commit_path(commit) %>" class="no-underline Link--primary d-block"><%= commit.short_message_text %></a></pre>
+
+      <% if message_html.present? %>
+        <div class="lh-condensed color-fg-muted mt-2 mb-0 ml-2">
+          <div class="commit open">
+            <div class="commit-desc">
+              <pre class="text-small dashboard-break-word"><%= message_html %></pre>
+            </div>
+          </div>
+        </div>
+      <% end %>
+
+      <% if diff.available? %>
+        <div class="d-flex flex-items-start f6 color-fg-muted mt-1 ml-2">
+          <span class="lh-condensed">
+            <span class="diffstat position-relative float-left" style="top: 0">
+              <span class="color-fg-success">
+                +<%= number_with_delimiter(diff.additions) %>
+              </span>
+              <span class="color-fg-danger">
+                −<%= number_with_delimiter(diff.deletions) %>
+              </span>
+              <span class="sr-only"><%= number_with_delimiter(diff.changes) %> lines changed</span>
+              <span aria-hidden="true">
+                <%= format_diffstat_line_from(total: 5, changes: diff.changes, additions: diff.additions, deletions: diff.deletions) %>
+              </span>
+            </span>
+          </span>
+        </div>
+      <% end %>
+    </div>
+  </div>
+
+  <div class="border-top mr-n3 ml-n3 mt-3 pt-3">
+    <% if associated_prs.any? %>
+      <div class="d-flex flex-items-start f6 color-fg-muted px-3">
+        <div class="mr-1 flex-shrink-0 hovercard-icon">
+          <%= primer_octicon(:"git-pull-request", width: 20, color: :muted) %>
+        </div>
+
+        <span class="lh-condensed">
+          <% if associated_prs.size == 1 %>
+            <% pr = associated_prs.first %>
+            <%= link_to(truncate(pr.title, length: 35) + " ##{pr.number}", pull_request_path(pr), class: "color-fg-default") %>
+          <% else %>
+            Included in
+            <%= link_to "#{associated_prs.size} pull requests", issues_path(commit.repository.owner_display_login, commit.repository.name, q: "is:open is:pr #{commit.oid}"), class: "Link--inTextBlock" %>
+          <% end %>
+        </span>
+      </div>
+    <% end %>
+
+    <% if commit.author_actor %>
+      <div class="d-flex flex-items-start f6 color-fg-muted px-3 <%= "mt-1" if associated_prs.any? %>">
+        <div class="mr-1 flex-shrink-0 hovercard-icon">
+          <img src="<%= commit.author_actor.async_visible_avatar_url(current_user, size: 32).sync %>" alt="<%= commit.author_actor.display_name %>" width="16" height="16" class="<%= avatar_class_names(commit.author_actor) %> v-align-baseline">
+        </div>
+
+        <span class="lh-condensed">
+          <%= render Commits::AttributionInfoComponent.new(commit: commit, repository: commit.repository) %>
+        </span>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="sr-only">
+    Press escape to close this hovercard
+  </div>
+</div>

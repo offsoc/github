@@ -1,0 +1,205 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require "pathname"
+require "optparse"
+
+$LOAD_PATH << Pathname.new(__FILE__).dirname.dirname.join("test")
+ENV["RAILS_ENV"] = "test"
+
+Options = Struct.new(:test, :command, :namespace, :actors, :endpoint, :parallel)
+
+SUBCOMMANDS = %w[console run print review validate]
+
+def is_endpoint_definition?(args)
+  %w[get post put patch delete].include?(args.first.downcase)
+end
+
+def parse_args(args)
+  options = Options.new(nil, nil, nil, nil, nil)
+  OptionParser.new do |opts|
+    opts.banner = "Usage: test-authz <#{SUBCOMMANDS.join("|")}|help> [OPTIONS]"
+
+    opts.on("-t=TEST", "--test=TEST", "Test ID to run") do |arg|
+      options.test = arg
+    end
+
+    opts.on("-nNAMESPACE", "--namespace=NAMESPACE", "Test namespace to run") do |arg|
+      options.namespace = arg
+    end
+
+    opts.on("-aACTOR", "--actor=ACTOR", "Limit the actors asserted during this test run") do |arg|
+      options.actors = arg.split(",")
+    end
+
+    opts.on("-eENDPOINT", "--endpoint=Endpoint", "Test endpoint to run") do |arg|
+      options.endpoint = arg
+    end
+
+    opts.on("-p", "--parallel", "Set PARALLEL_* env's to run tests in parallel") do
+      options.parallel = true
+    end
+
+    opts.on("-h", "--help", "Prints this help") do
+      puts opts
+      exit 1
+    end
+  end.parse!(args)
+  options.command = args.shift if SUBCOMMANDS.include?(args.first)
+
+  if options.test.nil? && options.namespace.nil? && options.endpoint.nil? && !args.empty? && is_endpoint_definition?(args)
+    options.endpoint = "#{args.shift} #{args.shift}"
+  end
+
+  if options.command.nil? && args.empty? && (options.test || options.namespace || options.endpoint)
+    options.command = "run"
+  end
+
+  options
+end
+
+def setup_cli_env
+  require "active_support/core_ext/string/starts_ends_with"
+  require "apps"
+  require "test_helpers/rest_authz/automated_authz_test"
+  require "pry"
+end
+
+def test_env(options)
+  env = { "TEST_PATS_V2" => "1" }
+
+  env["TEST_NAMESPACE"] = options.namespace if options.namespace
+  env["TEST_ENDPOINT"] = options.endpoint if options.endpoint
+  env["TEST_ID"] = options.test if options.test
+  env["TEST_ACTORS"] = options.actors.join(",") if options.actors
+
+  if options.parallel
+    env["PARALLEL_WORKERS"] = (Etc.nprocessors - 2).to_s
+    env["PARALLEL_SERVER_URL"] = "druby://0.0.0.0:1222"
+  end
+
+  env
+end
+
+def run_tests(options)
+  validate_test(options)
+
+  Kernel.exec(test_env(options), "./bin/rails", "test", "-p", "test/test_helpers/rest_authz/runnable_class_test.rb")
+end
+
+def validate_test(options)
+  if options.test
+    AutomatedAuthzTest::TestEngine.validate_test(options.test)
+  elsif options.endpoint
+    if is_endpoint_definition?(options.endpoint.split(" "))
+      def_arg = AutomatedAuthzTest::Print::Review::EndpointDefinitionArgument.resolve(options.endpoint.split(" "))
+      if def_arg.valid?
+        options.endpoint = def_arg.endpoint_id
+      end
+    end
+
+    AutomatedAuthzTest::TestEngine.validate_endpoint(options.endpoint)
+  elsif options.namespace
+    AutomatedAuthzTest::TestEngine.validate_namespace(options.namespace)
+  end
+end
+
+def print_tests(options)
+  validate_test(options)
+  ENV.merge!(test_env(options))
+
+  test_data = if options.test
+    AutomatedAuthzTest::TestEngine.generate_test_plan_for_test_id(options.test).to_hash
+  elsif options.endpoint
+    AutomatedAuthzTest::TestEngine.generate_test_plan_for_endpoint(options.endpoint).to_hash
+  elsif options.namespace
+    AutomatedAuthzTest::TestEngine.generate_test_plans_for_namespace(options.namespace).map { |plan| plan.to_hash }
+  else
+    $stderr.puts "Can't print the whole test configuration. You must specify a namespace, endpoint or test id"
+    exit 1
+  end
+
+  puts JSON.pretty_generate(test_data)
+end
+
+def display_successful_output(msg)
+  $stdout.isatty && puts(msg)
+end
+
+def validate_configuration
+  access_errors = AutomatedAuthzTest::ConfigurationValidator::AccessDefs.validate(
+    AutomatedAuthzTest::AccessDefinitionProvider::DefinitionCollection.values
+  )
+
+  if access_errors.any?
+    $stderr.puts "Your programmatic_access.yaml contain the following errors:"
+    access_errors.each do |err|
+      $stderr.puts err.message
+    end
+    puts "--"
+  else
+    display_successful_output("No errors detected in programmatic_access.yaml")
+  end
+
+  global_yaml_file = Pathname.new(__FILE__).dirname.dirname.join("test/rest_authz_config/global.yaml")
+  global = YAML.load_file(global_yaml_file)
+  global_errors = AutomatedAuthzTest::ConfigurationValidator::GlobalYaml.validate(global)
+
+  if global_errors.any?
+    $stderr.puts "Your global.yaml contain the following errors:"
+    global_errors.each do |err|
+      $stderr.puts err.message
+    end
+  else
+    display_successful_output("No errors detected in global.yaml")
+    puts "Please address errors in your programmatic_access.yaml" if access_errors.any?
+  end
+
+  (access_errors.empty? && global_errors.empty?) ? :valid : :invalid
+end
+
+def runnable_command?(options)
+  help_command = %w[help -h --help].include?(options.command)
+  valid_command = SUBCOMMANDS.include?(options.command)
+
+  !help_command && valid_command
+end
+
+if ARGV.include?("review")
+  setup_cli_env
+  ARGV.shift # Drop review
+
+  status = AutomatedAuthzTest::Print.review(ARGV)
+  exit status
+end
+
+options = parse_args(ARGV)
+
+if runnable_command?(options)
+  setup_cli_env
+  status = validate_configuration
+
+  if status != :valid
+    exit 1
+  end
+end
+
+case options.command
+when "console"
+  require "pry"
+  Pry.start
+  exit false
+when "validate"
+  # This is a valid command but gets handled above in validate_configuration.
+  # This clause prevents printing the help info at the end of the command.
+when "print"
+  print_tests(options)
+when "run"
+  run_tests(options)
+when "help", "-h", "--help"
+  parse_args(%w[-h])
+else
+  parse_args(%w[-h])
+end
+
+# vi: ft=ruby

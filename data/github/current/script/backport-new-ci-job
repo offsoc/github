@@ -1,0 +1,51 @@
+#!/bin/bash
+# Usage: ./script/backport-new-ci-job your-new-ci-job
+#
+# Backports a no-op `script/cibuild-*` script to the latest 4
+# `enterprise-*-release` branches and opens a pull request for each of the
+# targets.
+#
+# Dependencies: hub
+
+set -e
+
+if [ -z "$1" ] || [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+  echo "Usage: ./script/backport-new-ci-job your-new-ci-job"
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "Please install gh first" 1>&2
+  exit 1
+fi
+
+check_name="$1"
+script_file="script/cibuild-${check_name}"
+num_enterprise_releases=4
+
+sort_versions() {
+  sed 'h; s/[+-]/./g; s/.p\([[:digit:]]\)/.z.\1/; s/$/.z/; G; s/\n/ /' | \
+    LC_ALL=C sort -t. -k 1,1 -k 2,2n -k 3,3n -k 4,4n -k 5,5n | awk '{print $2}'
+}
+
+enterprise_targets() {
+  git branch --list -r origin/enterprise-*-release | grep -v 'enterprise-11\.' | grep -v 'enterprise-99\.' | \
+    sort_versions | tail -${1?} | cut -d/ -f2-
+}
+
+for rel in $(enterprise_targets $num_enterprise_releases); do
+  echo "Creating PR for $rel"
+  v="${rel%-release}"
+  head="${v}-backport-${check_name}"
+  git fetch -q origin "$rel"
+  git checkout -qB "$head" FETCH_HEAD
+  git clean -fx "$script_file"
+  if [ -e "$script_file" ]; then
+    echo "skipping ${rel}: ${script_file} already exists" >&2
+    continue
+  fi
+  cat >"$script_file" <<<"#!/bin/bash"
+  chmod +x "$script_file"
+  git add "$script_file"
+  git commit -qm "Backport a no-op ${script_file}"
+  gh pr create --base "$rel" --title "Backport a no-op ${script_file} for ${v}"  --body "This is to avoid the new \`${check_name}\` CI jobs failing on \`$rel\`."
+done

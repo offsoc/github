@@ -1,0 +1,182 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%
+  view = Registry::Packages::ListView.new(owner: owner, params: params)
+
+  # Assume owner has packages if query params present. Do not show empty state.
+  owner_has_visible_packages = has_package_query_params? || packages.count > 0
+
+  base_ecosystem_opts = { all: "All", container: "Container" }
+
+  # add actions to ecosystem options if user has search_action_packages FF enabled
+  if GitHub.flipper[:search_action_packages].enabled?(current_user)
+    base_ecosystem_opts.merge!(actions: "Actions")
+  end
+
+  ecosystem_param_to_display_name = base_ecosystem_opts.merge(Registry::Package.pretty_type_names).stringify_keys
+
+  if GitHub.enterprise? && !PackageRegistryHelper.ghes_registry_v2_enabled?
+    ecosystem_param_to_display_name.delete("container")
+  end
+
+  visibility_param_to_display_name = {
+    all: "All",
+    public: "Public",
+    internal: ("Internal" if view.user_or_org&.organization?),
+    private: "Private",
+  }.compact.stringify_keys
+
+  sort_param_to_display_name = {
+    downloads_desc: "Most downloads",
+    downloads_asc: "Least downloads",
+  }.stringify_keys
+%>
+
+<% if PackageRegistryHelper.show_packages_blankslate? %>
+  <%= render partial: "registry/packages/ghes_enable_packages_blankslate" %>
+<% else %>
+<div class="d-flex flex-column flex-md-row flex-justify-between width-full mb-3">
+  <% if owner_has_visible_packages %>
+    <div class="d-flex width-full">
+      <div class="subnav-search-context">
+        <details class="details-reset details-overlay position-relative" id="">
+          <%= render Primer::ButtonComponent.new(tag: :summary) do %>
+            <i>Type:</i>
+            <span data-menu-button>
+              <%= ecosystem_param_to_display_name[params[:ecosystem]] || "All" %>
+            </span>
+            <span class="dropdown-caret"></span>
+          <% end %>
+
+          <details-menu class="SelectMenu left-md-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="SelectMenu-modal">
+              <header class="SelectMenu-header">
+                <span class="SelectMenu-title">Select type</span>
+                <button class="SelectMenu-closeButton" type="button" data-toggle-for="type-options"></button>
+              </header>
+              <div class="SelectMenu-list">
+                <% ecosystem_param_to_display_name.each do |url_param, pretty_name| %>
+                  <a href="<%= view.search_packages_path(filters: { ecosystem: url_param }) %>"
+                    class="SelectMenu-item"
+                    role="menuitemradio"
+                    aria-checked="<%= params[:ecosystem] == url_param %>"
+                    tabindex="0">
+                    <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                    <span class="text-normal" data-menu-button-text><%= pretty_name %></span>
+                  </a>
+                <% end%>
+              </div>
+            </div>
+          </details-menu>
+        </details>
+      </div>
+      <div class="mb-3 mb-md-0 mr-md-3 flex-auto">
+        <%= form_tag view.search_packages_path, :method => :get,
+              :"data-autosearch-results-container" => view.data_results_container,
+              :role => "search" do %>
+          <div class="auto-search-group">
+            <% if view.owner.is_a?(User) %>
+              <input type="hidden" name="tab" value="packages">
+            <% end %>
+            <% %w(ecosystem visibility sort_by).each do |sym| %>
+              <% if params[sym] %>
+              <input type="hidden" name="<%= sym %>" value="<%= params[sym] %>">
+              <% end %>
+            <% end %>
+
+            <input type="search" id="your-packages-filter" name="q"
+                    class="form-control subnav-search-input auto-search-input width-full"
+                    placeholder="Search packages&hellip;"
+                    style="border-top-left-radius: 0;border-bottom-left-radius: 0;margin-left: -1px;"
+                    required
+                    autocomplete="off"
+                    aria-label="Search packages&hellip;"
+                    value="<%= view.phrase %>"
+                    data-throttled-autosubmit>
+            <%= primer_octicon(:search, style: "z-index: 2") %>
+            <img src="<%= image_path "spinners/octocat-spinner-32.gif" %>" width="16" height="16" class="spinner" alt="">
+          </div>
+        <% end %>
+      </div>
+    </div>
+    <div class="d-flex">
+        <details class="details-reset details-overlay position-relative mr-2" id="visibility-options">
+          <%= render Primer::ButtonComponent.new(tag: :summary) do %>
+            <i>Visibility:</i>
+            <span data-menu-button>
+              <%= visibility_param_to_display_name[params[:visibility]] || "All" %>
+            </span>
+            <span class="dropdown-caret"></span>
+          <% end %>
+
+          <details-menu class="SelectMenu right-md-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <div class="SelectMenu-modal">
+              <header class="SelectMenu-header">
+                <span class="SelectMenu-title">Select visibility</span>
+                <button class="SelectMenu-closeButton" type="button" data-toggle-for="type-options">
+                  <%= primer_octicon(:x, :"aria-label" => "Close menu") %>
+                </button>
+              </header>
+              <div class="SelectMenu-list">
+                <% visibility_param_to_display_name.each do |url_param, pretty_name| %>
+                  <a href="<%= view.search_packages_path(filters: { visibility: url_param }) %>"
+                    class="SelectMenu-item"
+                    role="menuitemradio"
+                    aria-checked="<%= params[:visibility] == url_param %>"
+                    tabindex="0">
+                    <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                    <span class="text-normal" data-menu-button-text><%= pretty_name %></span>
+                  </a>
+                <% end %>
+              </div>
+            </div>
+          </details-menu>
+        </details>
+
+        <details class="details-reset details-overlay position-relative flex-auto" id="sort-options">
+            <%= render Primer::ButtonComponent.new(tag: :summary) do %>
+              <i>Sort by:</i>
+              <span data-menu-button>
+                <%= sort_param_to_display_name[params[:sort_by]] || "Most downloads" %>
+              </span>
+              <span class="dropdown-caret"></span>
+            <% end %>
+
+            <details-menu class="SelectMenu right-md-0"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <div class="SelectMenu-modal">
+                <header class="SelectMenu-header">
+                  <span class="SelectMenu-title">Select sort view</span>
+                  <button class="SelectMenu-closeButton" type="button" data-toggle-for="language-options">
+                    <%= primer_octicon(:x, :"aria-label" => "Close menu") %>
+                  </button>
+                </header>
+                <div class="SelectMenu-list">
+                  <% sort_param_to_display_name.each do |url_param, pretty_name| %>
+                    <a href="<%= view.search_packages_path(filters: { sort_by: url_param }) %>"
+                      class="SelectMenu-item"
+                      role="menuitemradio"
+                      aria-checked="<%= params[:sort_by] == url_param %>"
+                      tabindex="0">
+                      <%= primer_octicon(:check, classes: "SelectMenu-icon SelectMenu-icon--check") %>
+                      <span class="text-normal" data-menu-button-text><%= pretty_name %></span>
+                    </a>
+                  <% end %>
+                </div>
+              </div>
+            </details-menu>
+          </details>
+    </div>
+  <% end %>
+</div>
+
+<div id="package-results">
+  <% if owner_has_visible_packages %>
+    <%= render partial: "registry/packages/filtered_packages", locals: {
+          packages: packages,
+          view: view
+        }
+    %>
+  <% else %>
+    <%= render partial: "registry/packages/empty_state", locals: { view: view } %>
+  <% end %>
+</div>
+<% end %>

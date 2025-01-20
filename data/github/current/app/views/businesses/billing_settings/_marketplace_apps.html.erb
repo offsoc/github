@@ -1,0 +1,135 @@
+<% if marketplace_apps_usage.length.zero? %>
+  <p class="py-4 color-fg-muted f5 border-bottom" <%= test_selector "billing-no-marketplace-apps" %>>No marketplace apps installed by any organization yet</p>
+<% else %>
+  <% marketplace_apps_usage.each do |item| %>
+    <div class="Box mt-3 mb-3" <%= test_selector "billing-marketplace" %>>
+      <div class="Box-header d-flex flex-items-center">
+        <div class="d-flex flex-items-center">
+          <img width="24" height="24" src="<%= item[:listing].logo_url %>" alt="<%= item[:listing].name %> logo preview">
+        </div>
+        <div class="Box-title flex-auto ml-1 pl-2">
+          <div><%= item[:listing].name %></div>
+        </div>
+
+        <%= render Primer::Beta::Button.new(tag: :a, href: marketplace_listing_url(item[:listing]), size: :small) do %>
+          Start a new plan
+        <% end %>
+      </div>
+
+      <div class="Box-footer py-2 border-top-0">
+        <% item[:items].each do |i| %>
+          <div class="d-flex my-1 flex-items-center">
+            <div class="flex-auto ml-md-5 ml-0 pl-md-1">
+              <% if view.business.self_serve_payment? %>
+                <div>
+                  <%= i.organization.safe_profile_name %>
+                  <span class="text-small text-normal color-fg-muted pl-2">
+                    <%= i.subscribable.name %>
+                    <% if i.on_free_trial? %>
+                      free trial ends on <%= i.free_trial_ends_on.to_date.strftime("%b %d, %Y") %>
+                    <% end %>
+                    <% if i.subscribable.per_unit? %>
+                      - <%= pluralize i.quantity, i.subscribable.unit_name %>
+                    <% end %>
+                  </span>
+                </div>
+                <% if i.has_pending_cycle_change? && i.pending_subscription_item_change %>
+                  <% change = i.pending_subscription_item_change %>
+                  <div>
+                    <span class="no-wrap text-small color-fg-attention" <%= test_selector("marketplace-item-pending-change-message") %>>
+                      <%= primer_octicon(:clock, size: :small, pr: 1) %>
+                      <% if change.cancellation? %>
+                        Cancelling <%= change.subscribable.listing.name %>,
+                      <% else %>
+                        Changing to <%= change.subscribable.name %>
+                      <% end %>
+                      <% if change.subscribable.per_unit? && change.quantity > 0 %>
+                        with <%= pluralize change.quantity, change.subscribable.unit_name %>,
+                      <% end %> effective on <%= i.account.pending_cycle.active_on.strftime("%b %d, %Y") %>
+                      <%= form_tag pending_subscription_item_change_path(change.id), class: "inline-form", method: :delete do %>
+                        <%= render Primer::Beta::Button.new(type: :submit, scheme: :link, mr: 2, font_size: 6, "data-confirm": "Are you sure you want to cancel this pending marketplace change?") do %>
+                          Cancel
+                        <% end %>
+                      <% end %>
+                    </span>
+                  </div>
+                <% end %>
+              <% else %>
+                <%= i.account.name %>
+              <% end %>
+            </div>
+
+            <span class="no-wrap text-right">
+              <span <%= test_selector("marketplace-item-price") %>>
+                <% if i.on_free_trial? && i.pending_subscription_item_change %>
+                  <strong><%= i.post_trial_prorated_price.format %></strong>
+                <% else %>
+                  <strong><%= i.price.format %></strong>
+                <% end %>
+              </span>
+              <% if i.has_pending_cycle_change? && i.pending_subscription_item_change %>
+              <div class="no-wrap text-small color-fg-attention" <%= test_selector("marketplace-item-change-price") %>>
+                <strong><%= i.pending_subscription_item_change.price.format %></strong>
+              </div>
+              <% end %>
+            </span>
+
+            <%= render(Primer::Experimental::ActionMenu.new(menu_id: "marketplace-listing-edit-menu-#{i.id}", anchor_align: :end, pl: 3, test_selector: "marketplace-listing-edit-menu-#{i.id}")) do |c| %>
+              <% c.with_trigger(
+                "aria-label": "Menu",
+                px: 2,
+                disabled: i.pending_subscription_item_change&.cancellation?
+              ) do %>
+                <%= primer_octicon(:"kebab-horizontal") %>
+              <% end %>
+
+              <% c.with_item(
+                tag: :a,
+                href: marketplace_order_path(listing_slug: i.subscribable.listing.slug, plan_id: i.subscribable.global_relay_id, account: i.organization.display_login),
+                test_selector: "marketplace-listing-edit-menu-change-plan"
+              ) do |item| %>
+                Change plan
+              <% end %>
+
+              <% c.with_item(
+                tag: :button,
+                is_dangerous: true,
+                "aria-label": "Cancel plan",
+                classes: "",
+                data: { "show-dialog-id": "marketplace-listing-plan-cancel-dialog-#{i.id}", target: "modal-dialog.show-button" },
+                test_selector: "marketplace-listing-edit-menu-cancel-plan"
+              ) do |item| %>
+                Cancel plan
+              <% end %>
+            <% end %>
+          </div>
+
+          <%= render(Primer::Alpha::Dialog.new(id: "marketplace-listing-plan-cancel-dialog-#{i.id}", title: "Confirm plan cancellation", test_selector: "marketplace-listing-plan-cancel-dialog-#{i.id}")) do |d| %>
+            <%= form_tag(subscription_item_path(i.global_relay_id), method: :delete) do %>
+              <%
+                cancel_msg = "Are you sure you want to cancel this plan?"
+                cancel_msg += " The cancellation will be effective on #{i.account.next_billing_date.to_formatted_s(:date)}." if i.account_has_been_charged?
+              %>
+              <%= render(Primer::Alpha::Dialog::Body.new(mt: 2)) do %>
+                <%= cancel_msg %>
+              <% end %>
+              <%= render(Primer::Alpha::Dialog::Footer.new(show_divider: false)) do %>
+                <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "marketplace-listing-plan-cancel-dialog-#{i.id}" })) { "Cancel" } %>
+                <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit, "data-disable-with": "Canceling plan...")) { "Confirm" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% unless hide_pagination %>
+    <div class="paginate-container pt-3">
+      <%= will_paginate marketplace_apps_usage, class: "pagination js-marketplace-apps-pagination", renderer: MarketplaceAppsLinkRenderer %>
+      <p class="text-center mt-2 float-right">
+        <%= render(Primer::Beta::Spinner.new("aria-label": "Loading...", hidden: true, size: :small, "data-pager-loading": "")) %>
+      </p>
+    </div>
+  <% end %>
+<% end %>

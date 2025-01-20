@@ -1,0 +1,49 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "optparse/time"
+
+params = {
+  from: Time.utc(2020, 9, 23, 15, 2), # Sep 23, 15:02 UTC (when enterprise-2.22.0 was tagged)
+  to: Time.now.utc
+}
+optparse = OptionParser.new do |opts|
+  opts.banner = [
+    "Usage:  ghe-recover-dashboard-events [options]",
+    "Create missing index records for dashboard events created after upgrading to GHE 2.22\n",
+    "Options"
+  ].join("\n")
+  opts.on "-f", "--from TIME", Time, "Timestamp when you upgraded to GHE 2.22. Defaults to 2020-09-23T15:02:00Z."
+  opts.on "-t", "--to TIME", Time, "Timestamp when the latest GHE 2.22 patch was applied. Defaults to now."
+  opts.on_tail("-h", "--help", "Print help") { puts opts; exit }
+end
+
+begin
+  optparse.parse!(into: params)
+rescue OptionParser::ParseError => e
+  puts e.message
+  puts optparse
+  exit 1
+end
+
+require_relative "../config/environment"
+require "ruby-progressbar"
+
+events = Stratocaster::Model.where(updated_at: params[:from]..params[:to])
+total = events.count
+
+if total.zero?
+  puts "No dashboard events were created between #{params[:from].to_formatted_s(:db)} and #{params[:to].to_formatted_s(:db)}"
+else
+  puts "Creating index records for #{total} dashboard events created between #{params[:from].to_formatted_s(:db)} and #{params[:to].to_formatted_s(:db)}"
+  progressbar = ProgressBar.create(
+    format: "%t: |%B| %P%%",
+    total: total
+  )
+
+  events.find_each do |event|
+    UpdateEventFeedsJob.perform_later(event.to_event)
+    progressbar.increment
+  end
+end

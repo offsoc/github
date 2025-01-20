@@ -1,0 +1,148 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+#
+#/ Usage: ghe-es-index-status [options]
+#/
+#/ This utility outputs a summary of Elasticsearch indexes in CSV format.
+#/
+#/ OPTIONS:
+#/   -h, --help         Show this message
+#/   -d, --header       Display header row
+#/   -o, --stdout       Print output to STDOUT
+#/   -r, --repairs      Include details of repair jobs
+#/   -a, --all          Include all indexes
+
+require "optparse"
+require "csv"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}' | cut -c4-"
+end
+
+options = {}
+
+ARGV.options do |opts|
+  opts.on("-d", "--header")    { options.merge!(show_header: true) }
+  opts.on("-o", "--stdout")    { options.merge!(use_stdout: true) }
+  opts.on("-r", "--repairs")   { options.merge!(show_repair_status: true) }
+  opts.on("-a", "--all")       { options.merge!(show_all_indexes: true) }
+  opts.on_tail("-h", "--help") { help! }
+  begin
+    opts.parse!
+  rescue OptionParser::ParseError => e
+    puts e
+    help!
+  end
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+require File.expand_path("../../config/environment", __FILE__)
+
+# -----
+
+class IndexStatus
+
+  attr_reader :show_all_indexes
+  attr_accessor :show_header, :show_repair_status, :use_stdout
+
+  def initialize(args = {})
+    @show_header        = args[:show_header]        ? args[:show_header]        : false
+    @show_repair_status = args[:show_repair_status] ? args[:show_repair_status] : false
+    @show_all_indexes   = args[:show_all_indexes]   ? args[:show_all_indexes]   : false
+    @use_stdout         = args[:use_stdout]         ? args[:use_stdout]         : false
+
+    @indices            = get_indices
+    @index_headers      = %w[Name Primary Searchable Writable UpToDate RepairProgress Version].freeze
+    @repair_headers     = %w[JobExists JobEnabled ActiveJobs Processed Added Updated Removed RepairStarted RepairFinished Elapsed].freeze
+  end
+
+  def inspect
+    shortlist_instance_variables = [:@show_header, :@show_repair_status, :@show_all_indexes, :@use_stdout]
+    attributes = []
+    shortlist_instance_variables.map do |attribute|
+      attributes << "#{attribute}=#{self.instance_variable_get(attribute)}"
+    end
+
+    "#<IndexStatus:#{"0x00%x" % (object_id << 1)} #{attributes.join(", ")}>"
+  end
+
+  def generate
+    if @use_stdout
+      puts generate_csv
+    else
+      date = Time.now.strftime("%Y%m%d%H%M%S")
+      csv_file = "/tmp/indexes-#{date}.csv"
+      puts "Saving index report to '#{csv_file}'..."
+      File.write(csv_file, generate_csv)
+      puts "Done."
+    end
+  end
+
+  def show_all_indexes=(value)
+    @show_all_indexes = value
+    @indices = get_indices
+  end
+
+  private
+
+  def csv_headers
+    @show_repair_status ? @index_headers + @repair_headers : @index_headers
+  end
+
+  def index_names
+    names = ::Elastomer.env.index_names
+    sanitised_names = Stafftools::SearchIndexesController.new.send(:index_names)
+    @show_all_indexes ? names : sanitised_names
+  end
+
+  def repair_progress(index)
+    if index.repair_job && index.repair_job.exists?
+      "%.1f" % index.repair_job.progress
+    else
+      0
+    end
+  end
+
+  def repair_statistics(index)
+    if index.repair_job && index.repair_job.exists?
+      job_status = [index.repair_job.exists?, index.repair_job.enabled?, index.repair_job.working]
+      stats_keys = [:total, :added, :updated, :removed, :started, :finished, :elapsed]
+      job_status + stats_keys.collect { |k| index.repair_job.stats[k] }
+    else
+      [nil] * 10
+    end
+  end
+
+  def get_indices
+    index_list = []
+
+    index_map = ::Elastomer.router.index_map
+    index_names.each do |key|
+      ary = index_map.fetch(key)
+      next if ary.nil?
+      ary.each { |settings| index_list << Search::IndexView.new(settings.to_h) }
+    end
+    index_list
+  end
+
+  def generate_csv
+    CSV.generate do |csv|
+      csv << csv_headers if @show_header
+      @indices.sort_by { |n| n.name }.each do |i|
+        index_info = [i.name, i.primary, i.searchable, i.writable, i.up_to_date?, repair_progress(i), i.version]
+        csv << (@show_repair_status ? index_info + repair_statistics(i) : index_info)
+      end
+    end
+  end
+end
+
+# -----
+
+report = IndexStatus.new(options)
+report.generate
+
+# vim: set ft=ruby:

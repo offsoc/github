@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Create a symbolic link to this file called <working_dir>/.git/hooks/pre-push
+# to let this take effect:
+
+# `ln -s $(pwd)/script/git-hooks/pre-push .git/hooks/pre-push`
+
+# Called by "git push" after it has checked the remote status, but before
+# anything has been pushed.  If this script exits with a non-zero status
+# nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local sha1> <remote ref> <remote sha1>
+
+# Given the context of chdirs (navigate relative to the realpath of this file,
+# return to the previous working dir) all directory changes are safe outside of
+# an out-of-band change to the directory structure (e.g. rm in another process).
+# SC2164 can be disabled relatively safely.
+#
+# shellcheck disable=2164
+
+if [ "${SKIP_GH_PRE_PUSH_HOOKS}" = "1" ] || [ "${SKIP_ALL_PREPUSH_CHECKS}" = "1" ]; then
+  echo "Skipping all pre-push hooks"
+  exit 0
+fi
+
+export GITHUB_NO_AUTO_BOOTSTRAP=1
+
+CAN_PRECHECK="$(bin/safe-ruby -e 'puts "ok"' 2>&1)"
+
+if [ "${CAN_PRECHECK}" = "ok" ]; then
+	echo "Running pre-push checks.  Set SKIP_ALL_PREPUSH_CHECKS=1 to skip."
+
+	PRE_PUSH_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "$0")")")")"
+	pushd "${PRE_PUSH_ROOT}" > /dev/null
+
+	bin/safe-ruby script/git-hooks/parallel-pre-push.rb
+	PREPUSH=$?
+
+	popd > /dev/null
+	exit $PREPUSH
+else
+	echo "Pre-push checks skipped because of a non-bootstrapped environment (is bin/safe-ruby reporting an error?)  git push will proceed."
+fi

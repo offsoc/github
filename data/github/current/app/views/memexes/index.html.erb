@@ -1,0 +1,94 @@
+<%
+  open_projects_beta_index_path = org_projects_path(
+    project_owner.display_login,
+    query: Search::Queries::MemexProjectQuery.new(
+      parsed_query.raw_query + " is:open"
+    ).stringify
+  )
+  closed_projects_beta_index_path = org_projects_path(
+    project_owner.display_login,
+    query: Search::Queries::MemexProjectQuery.new(
+      parsed_query.raw_query + " is:closed"
+    ).stringify
+  )
+
+  is_created_by_me_selected = viewer_is_a_member && params[:query]&.include?("creator:@me")
+  is_templates_selected = !!(show_templates_index && params[:query]&.include?("is:template"))
+
+  query_field_value = if is_recent_selected
+    ""
+  else
+    parsed_query.stringify.present? ? parsed_query.stringify + " " : ""
+  end
+
+  selected_item_id = if is_recent_selected
+    Memex::UIIndexSearch::Categories::Recent
+  elsif is_created_by_me_selected
+    Memex::UIIndexSearch::Categories::CreatedByMe
+  elsif is_templates_selected
+    Memex::UIIndexSearch::Categories::Templates
+  else
+    Memex::UIIndexSearch::Categories::Projects
+  end
+
+  index_navigation_component_options = {
+    selected_item_id: selected_item_id.serialize,
+    recent_path: has_recent_projects ? org_projects_path : nil,
+    beta_path: org_projects_path(query: "is:open"),
+    # Template index will not be rendered if this value is nil
+    template_path: show_templates_index ? org_projects_path(query: "is:open is:template") : nil,
+    created_by_me_path: viewer_is_a_member ? org_projects_path(query: "is:open creator:@me") : nil,
+    classic_path:  disable_classic_projects ? nil : org_projects_path(type: "classic")
+  }
+%>
+<%
+  page_info(
+    title: "Projects · #{project_owner.display_login}",
+    container_xl: true,
+    skip_pjax_container: true,
+    breadcrumb: "Projects",
+    breadcrumb_owner: project_owner
+  )
+%>
+<%= render Memex::IndexHeadingComponent.new(
+    project_owner: project_owner,
+    search_category: selected_item_id
+  )
+%>
+<%= render Memex::ProjectListContainerComponent.new(
+      project_owner: project_owner,
+      display_legacy_org_warning: display_legacy_org_warning,
+      index_navigation_component_options: index_navigation_component_options
+    ) do %>
+  <%= render Memex::ProjectListComponent.new(
+    context: Organization,
+    projects: memexes,
+    owner: project_owner,
+    is_recent_selected: is_recent_selected,
+    has_next_page: has_next_page,
+    cursor: cursor,
+    sort_query_cursor: sort_query_cursor,
+    parsed_query: parsed_query,
+    open_memex_count: open_memex_count,
+    closed_memex_count: closed_memex_count,
+    load_more_path: org_projects_path,
+    write_accessible_project_ids: write_accessible_project_ids,
+  ) do |list| %>
+    <%= list.with_controls do %>
+      <%= render Primer::Box.new(ml: 0, flex: :auto) do %>
+        <%= primer_form_with(method: :get) do |f| %>
+          <%= render(Memex::ProjectList::SearchForm.new(f, parsed_query: parsed_query, context: Organization)) %>
+        <% end %>
+      <% end %>
+      <%= render(Memex::ProjectList::AddProjectButtonComponent.new(owner: project_owner, is_template: is_templates_selected, ui: MemexStats::UIValues::OrgIndex)) %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "projects-splash-dialog" %>
+<% end %>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle "projects" %>
+<% end %>

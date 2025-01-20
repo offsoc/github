@@ -1,0 +1,104 @@
+#!/bin/bash
+
+# This script must be invoked from docker and simulates what the build pipeline agent would do to run the github build.
+# It must be invoked from docker
+
+set -xe
+
+docker load < /golden.tar
+
+# create a volume with the golden image to use it as a base
+docker volume create -d local --opt o=bind --opt type=tmpfs --opt device=/workspace/github golden-github-github
+
+# we use this docker run (dind) to mount the content of the golden image to /workspace/github
+docker run --name github-golden -v golden-github-github:/workspace/github --entrypoint 'tail' -d octofactory.githubapp.com/github-golden-docker/github-github:bootstrap -f /dev/null
+
+cd /workspace/github
+
+# local-github contains the content of the local checkout of github.
+# We explicitly use that and avoid fetching from a remote, because when we use this script the API could be down.
+git init -q
+git remote add origin /local-github
+git fetch --depth=1 origin $BUILD_BRANCH
+git reset --hard origin/$BUILD_BRANCH
+
+export BUILD_SHA=`git rev-parse HEAD`
+#to avoid pushing the image set PUSH_DOCKER_IMAGE to 0
+export PUSH_DOCKER_IMAGE=1
+export EMERGENCY_MODE="true"
+export AWS_ECR_HOST="702486989568.dkr.ecr.us-east-1.amazonaws.com"
+
+# additional part to define an output folder
+mkdir -p /workspace/out
+export BUILD_ARTIFACT_DIR=/workspace/out
+
+# overwriting the AWS CLI with the version from python pip because we need the real AWS CLI
+apt update && apt-get install -y less python-pip
+# we force install the same version we use in the build pipeline agent
+pip install --force-reinstall python-dateutil awscli==1.15.21
+# the groff version that comes with debian stretch is broken, so we need to install it manually. It's relatively fast
+curl -LO http://ftp.gnu.org/gnu/groff/groff-1.22.3.tar.gz
+if [ "$(sha256sum groff-1.22.3.tar.gz | awk '{print $1}')" != '3a48a9d6c97750bfbd535feeb5be0111db6406ddb7bb79fc680809cda6d828a5' ]; then
+  echo "groff checksum does not match, exiting"
+  exit 1
+fi
+tar -xvf groff-1.22.3.tar.gz
+cd groff-1.22.3
+make
+make install
+cd ..
+
+./script/cibuild-github-build-deploy-artifacts
+
+# Create the moda config bundle
+# This is a separate bundle from the previously built bundle as it contains only the moda artifacts.
+# At the time of writing this script, it is implemented in the bp-agent project:
+# https://github.com/github/bp-agents/blob/d171da744ef279def80efc5123f9fb86a1604f7a/lib/build_pipelines/build_commands/moda_config_bundle.rb
+# Given that the script above introduces a number of dependencies on sites API and other systems, the script has been rewritten in bash:
+
+FILES=".meta" # .meta file contains metadata about the bundle
+DIRS="config/kubernetes" # moda directories to add to config-bundle.
+MAX_BUNDLE_SIZE=5 # Maximum bundle size.
+ORIGIN=$(git remote get-url origin)
+OWNER=$(basename $(dirname $ORIGIN | cut -d : -f 2))
+NAME=$(basename -s .git $ORIGIN)
+SHA=$(git rev-parse HEAD)
+TIMESTAMP=$(date '+%F:%T(%z)')
+ARCHIVE="github@$SHA.tar"
+MODA_BUILD_ARTIFACT_DIR="$BUILD_ARTIFACT_DIR/moda"
+mkdir -p $MODA_BUILD_ARTIFACT_DIR
+# populate `.meta` file
+tee -a .meta << END
+name: $NAME
+owner: $OWNER
+origin: $ORIGIN
+sha: $SHA
+timestamp: $TIMESTAMP
+END
+echo "# Creating archive $ARCHIVE"
+for file in $FILES; do
+  if [ -f $file ]; then
+    tar -rvhf $MODA_BUILD_ARTIFACT_DIR/$ARCHIVE $file
+  fi
+done
+for dir in $DIRS; do
+  if [ -d $dir ]; then
+    files=( $(find $dir -name '*.yml' -o -name '*.yaml') )
+    if (( ${#files[@]} > 0 )); then
+      find $dir \( -name '*.yml' -o -name '*.yaml' \) -print0 | xargs -0 tar -rvhf $MODA_BUILD_ARTIFACT_DIR/$ARCHIVE
+    else
+      echo "$dir must contain at least 1 yaml file."
+      exit 1
+    fi
+  else
+    echo "$dir does not exist."
+    exit 1
+  fi
+done
+if [ $(du -m $MODA_BUILD_ARTIFACT_DIR/$ARCHIVE | cut -f1) -gt $MAX_BUNDLE_SIZE ]; then
+  echo "Config bundles can't be larger than ${MAX_BUNDLE_SIZE}MB (this one is ${size}MB)." 1>&2
+  exit 1
+fi
+
+# this will copy all the tarballs
+cp -rf $BUILD_ARTIFACT_DIR /local-github

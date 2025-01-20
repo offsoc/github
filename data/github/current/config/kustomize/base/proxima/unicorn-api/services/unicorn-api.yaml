@@ -1,0 +1,48 @@
+# https://github.com/github/kube/blob/master/docs/kubernetes/resources/service.md
+apiVersion: v1
+kind: Service
+metadata:
+  name: unicorn-api
+  labels:
+    service: unicorn-api
+  annotations:
+    # These annotations tell Moda to export metadata about this service to
+    # consul (via github/kube-service-exporter) so GLB knows how to include it.
+    # The domain-name value here is not used anywhere, but necessary to enable
+    # this feature.
+    moda.github.net/domain-name: "api.tenant.ghe.com"
+    moda.github.net/dns-registration-enabled: "false"
+    moda.github.net/load-balancer-type: glb-http:multitenant
+
+    # include endpoints from this service in the haproxytech ingress controller
+    kubernetes.io/ingress.class: haproxytech-unicorn-api
+
+    # add backend-specific configuration to the haproxytech ingress controller
+    haproxy.org/load-balance: leastconn
+    haproxy.org/check-interval: "5s"
+    opaque.github.net/checks: |
+        - http:
+            url: "https://api.{{.Env.TEST_TENANT}}.ghe.com/rate_limit"
+            header:
+                authorization: "Bearer {{ .Env.GITHUB_API_TOKEN }}"
+          tags:
+              - "api-type:unicorn-api"
+              - "dotcom-api:true"
+    # use http health checks for upstream. Set host header to github.com so we
+    # can use the `/site/sha` endpoint, which is much lighter than `/status`
+    haproxy.org/backend-config-snippet: |
+      option redispatch 1
+      option httpchk
+      http-check connect
+      http-check send meth GET uri /site/sha ver HTTP/1.1 hdr host ghe.com
+
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    service: unicorn-api
+    deployGroup: production
+  type: LoadBalancer

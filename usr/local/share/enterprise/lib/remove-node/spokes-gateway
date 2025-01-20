@@ -1,0 +1,231 @@
+#!/bin/bash
+# This file contains utilties for removing spokes services from a node. It wraps many of the ghe-spokes commands
+# so that they are easier to work with in bash scripts.
+
+source /usr/local/share/enterprise/lib/ghe-cluster-commons
+
+#/ function: is_git_server
+#/ Description:
+#/    Returns 0 if host is a git server.
+#/    Returns 1 if host is NOT a git server.
+#/
+#/ Usage:
+#/    is_git_server <hostname>
+is_git_server() {
+  ghe-config --true "cluster.$1.git-server"
+}
+
+#/ function get_spokes_server_count
+#/ Description:
+#/    Prints the number of git-server nodes that exist in the cluster.conf to stdout.
+#/ Usage:
+#/    get_spokes_server_count
+get_spokes_server_count() {
+  ghe-config --get-regexp 'cluster.*.git-server' | awk '{print $2}' | grep -c 'true'
+}
+
+#/ function: get_spokes_network_object_count
+#/ Desciption:
+#/    Print the spokes network count to stdout.
+#/
+#/ Usage:
+#/    get_spokes_network_object_count <hostname>
+get_spokes_network_object_count() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    echo "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-spokesctl server status "git-server-$uuid")"
+  ## Expected output format:
+  # Hostname: git-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331.
+  #
+  # Repositories: 0
+  # Networks: 0
+  # Gists: 0
+  local network_count
+  network_count="$(echo "$output" | grep -oP 'Networks: \K\d+')"
+
+  if [ -z "$network_count" ]; then
+    echo "error: could not determine spokes network object count" >&2
+    return 1
+  fi
+  echo "$network_count"
+  return 0
+}
+
+#/ function: get_spokes_gist_object_count
+#/ Desciption:
+#/    Print the spokes gist count to stdout.
+#/
+#/ Usage:
+#/    get_spokes_gist_object_count <hostname>
+get_spokes_gist_object_count() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-spokesctl server status "git-server-$uuid")"
+  ## Expected output format:
+  # Hostname: git-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331.
+  #
+  # Repositories: 0
+  # Networks: 0
+  # Gists: 0
+  local gist_count
+  gist_count="$(echo "$output" | grep -oP 'Gists: \K\d+')"
+
+  if [ -z "$gist_count" ]; then
+    "error: could not determine spokes gist object count" >&2
+    return 1
+  fi
+  echo "$gist_count"
+  return 0
+}
+
+
+#/ function: mark_spokes_offline
+#/ Desciption:
+#/    Sets the git server status to offline.
+#/
+#/ Usage:
+#/    mark_spokes_offline <hostname>
+mark_spokes_offline() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    echo "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  # We enforce strict UUID validation here to avoid sql injection when passing this input
+  # to the query below.
+  /usr/local/share/enterprise/lib/remove-node/validate_uuid "$uuid" || {
+    return 1
+  }
+
+  /usr/local/share/enterprise/github-mysql "UPDATE fileservers SET online = 0 where host = 'git-server-$uuid'"
+
+  local output
+  output="$(/usr/local/share/enterprise/github-mysql "SELECT count(*) FROM fileservers where host = 'git-server-$uuid' and online = 0")"
+  ## Expected output format:
+  # count(*)
+  # 1
+  if ! [[ "$output" = *"count(*)"* ]]; then
+    echo "error: could not confirm git server is offline" >&2
+    echo "$output" >&2
+    return 1
+  fi
+
+  # Read the second line
+  offline_count=$(echo "$output" | sed -n '2p')
+
+  # Check if the second line is equal to "1"
+  if ! [ "$offline_count" == "1" ]; then
+    echo "error: git server not marked as offline" >&2
+    return 1
+  fi
+}
+
+#/ function: evacuate_spokes
+#/ Desciption:
+#/    Sets the git server status to evacuating.
+#/
+#/ Usage:
+#/    evacuate_spokes <hostname>
+evacuate_spokes() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    echo "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-spokesctl server set evacuating "git-server-$uuid" 'not specified')"
+  ## Expected output:
+  # Successfully completed evacuating operation on Fileserver git-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331
+
+  # TODO: load up a BUNCH of test data and see how the evacuation command behaves. I feel like the output shouldn't indicate success
+  # until the evacuation completes. I need to determine if this blocks or not by default.
+  # TODO: either accept an 'offline reason' as a param, or use a reasonable default
+}
+
+#/ function: is_spokes_evacuated
+#/ Desciption:
+#/    Returns 0 if evacuation is complete.
+#/    Returns 1 if evacuation is not complete.
+#/
+#/ Usage:
+#/    is_spokes_evacuated <hostname>
+is_spokes_evacuated() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    echo "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-spokesctl server evac-status "git-server-$uuid")"
+  ## Expected output
+  # +-------------------------------------------------+-------------------+----------+-------+
+  # |                      HOST                       |      REASON       | NETWORKS | GISTS |
+  # +-------------------------------------------------+-------------------+----------+-------+
+  # | git-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331 | Test node removal | 0        | 0     |
+  # +-------------------------------------------------+-------------------+----------+-------+
+  ## Expected output if the evacuation wasn't initiated:
+  # git-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331. is not evacuating
+
+  if [[ "$output" == *"is not evacuating" ]]; then
+    echo "error: spokes node is not evacuating" >&2
+    echo "$output"
+    return 1
+  fi
+
+  local row
+  row="$(echo "$output" | grep "$uuid")"
+  local gists_remaining
+  gists_remaining="$(echo "$row" | awk -F '|' '{print $(NF-1)}' | xargs)"
+  local networks_remaining
+  networks_remaining="$(echo "$row" | awk -F '|' '{print $(NF-2)}' | xargs)"
+  local objects_remaining
+  objects_remaining=$(( gists_remaining + networks_remaining ))
+  if (( objects_remaining > 0 )); then
+    return 1
+  else
+    return 0
+  fi
+}
+
+#/ function: destroy_spokes
+#/ Desciption:
+#/    Destroys the spokes server. Cannot be undone.
+#/
+#/ Usage:
+#/    destroy_spokes <hostname>
+destroy_spokes() {
+  local hostname="$1"
+  is_git_server "$hostname" || {
+    echo "warn: $hostname is not a git server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  ghe-spokesctl server destroy git-server-"$uuid"
+}
+

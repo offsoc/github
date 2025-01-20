@@ -1,0 +1,85 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# This layout must be only used for Orgs::RepositoriesController#show %>
+<%# `view` is an instance of Orgs::Repositories::IndexPageView %>
+<% view = local_assigns.fetch(:view) %>
+<%
+org_header_title(view.organization)
+page_info \
+  title: view.page_title,
+  description: this_organization_meta_description,
+  dashboard_pinnable_item_id: view.organization.id,
+  richweb: {
+    title: view.page_title,
+    url: user_url(view.organization),
+    description: this_organization_meta_description,
+    image: view.organization_avatar_url(280),
+    username: view.organization_login,
+    type: "profile",
+  },
+  canonical_url: request.original_url
+%>
+
+<% content_for :content do %>
+  <% if view.kicked_out_due_to_two_factor_enforcement? %>
+    <%= render Primer::Beta::Flash.new(full: true, scheme: :warning) do %>
+      <div class="container-lg px-3">
+        <%= form_tag org_destroy_removed_member_notifications_path(view.organization), :method => :delete do %>
+          <button class="flash-close" type="submit"><%= primer_octicon(:x) %></button>
+        <% end %>
+        You were removed from <%= view.organization.safe_profile_name %> organization because you do not have two-factor authentication enabled. <a href="<%= settings_security_url %>" class="Link--inTextBlock">Enable two factor authentication</a>.
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if view.removed_due_to_saml_enforcement? %>
+    <%= render Primer::Beta::Flash.new(full: true, scheme: :warning) do %>
+      <div class="container-lg px-3">
+        <%= form_tag org_destroy_removed_member_notifications_path(view.organization), :method => :delete do %>
+          <button class="flash-close" type="submit"><%= primer_octicon(:x) %></button>
+        <% end %>
+        You were removed from the <%= view.organization.safe_profile_name %> organization because you must <a href="<%= org_idm_sso_path(view.organization) %>" class="Link--inTextBlock">Single Sign-on</a> to be a member.
+      </div>
+    <% end %>
+  <% end %>
+
+  <%= render "orgs/identity_management/banner", organization: current_organization %>
+  <%= render Organizations::ArchivedNoticeComponent.new(organization: current_organization)%>
+    <% if view.show_notification_restrictions_banner? %>
+      <% if GitHub.flipper[:notifications_async_verified_domain_banner].enabled?(current_user) %>
+        <%= render(
+          VerifiableDomains::NotificationBannerComponent.new(
+            organization: current_organization,
+            deferred: true,
+          )
+        ) %>
+      <% else %>
+        <%= render partial: "verifiable_domains/verified_domain_notification_banner", locals: { org: current_organization } %>
+      <% end %>
+    <% end %>
+
+  <div itemscope itemtype="http://schema.org/Organization">
+    <%= render partial: "orgs/repositories/header", locals: {
+      view: create_view_model(
+        Orgs::OverviewView,
+        organization: view.organization,
+        show_new_business_org_message: flash[:show_new_business_org_message].present?,
+      ),
+    } %>
+
+    <% if view.organization.spammy? && current_user&.site_admin? %>
+      <%= render Primer::Beta::Flash.new(scheme: :danger, mb: 4) do %>
+        This organization is flagged <strong>spammy</strong>.
+      <% end %>
+    <% end %>
+
+    <%= render InteractionLimits::OverrideBannerComponent.new(
+      object: view.organization,
+      return_to: return_to_path,
+    ) %>
+
+    <%= yield %>
+  </div>
+<% end %>
+
+<%= render template: 'layouts/application', locals: { tags: local_assigns.fetch(:tags, []) } %>

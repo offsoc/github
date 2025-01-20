@@ -1,0 +1,1464 @@
+#!/bin/bash
+#/ Usage: ghe-diagnostics [-hv]
+#/
+#/ Perform a variety of checks and gathers information about your installation
+#/ that you can send to support to help diagnose problems you're having.
+#/
+#/ OPTIONS:
+#/   -h      | --help         Show this message
+#/   -u      | --upload       Upload diagnostics to Enterprise Support.
+#/   -t <id> | --ticket <id>  Upload diagnostics to Enterprise Support with a ticket ID.
+#/   -v      | --verbose      Run in verbose mode.
+#/
+
+set -o pipefail
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/ghe-actions-lib
+
+usage() {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+ARGS=$(getopt --name "$0" --long upload,ticket:,verbose,help --options ut:vh -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -u|--upload)
+      UPLOAD=1
+      ;;
+    -t|--ticket)
+      TICKET_ID="$2"
+      shift
+      ;;
+    -v|--verbose)
+      VERBOSE=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+relaunch="exec ionice -c 3 nice -n 19 sudo -u root $0 ${VERBOSE:+-v} 2>&1"
+if [ -n "$UPLOAD" ] || [ -n "$TICKET_ID" ]; then
+  # If the upload is blocked by a connectivity fault, a small amount of data (~54k) will still be
+  # gathered, but it will block fairly early and is much faster than waiting until the very end.
+  $relaunch | TMP_DIR='/tmp' ghe-support-upload -c 'diagnostics' -d "Diagnostics [$(hostname)]" ${TICKET_ID:+--ticket $TICKET_ID}
+  exit
+else
+  [ "$(whoami)" = "root" ] || {
+    $relaunch
+    echo Run this script as the root user. >&2
+    exit 1
+  }
+fi
+
+if [ -n "$VERBOSE" ]; then
+  set -x
+fi
+
+. /etc/github/enterprise-release
+
+starttime=$( date +%s )
+
+# The presence of this file disables GC while backups are running
+SYNC_IN_PROGRESS_FILE="/data/user/repositories/.sync_in_progress"
+
+function banner {
+  echo "===================================="
+  echo " $1"
+  echo "===================================="
+}
+
+function sub_banner {
+  echo
+  echo "$1"
+  echo "-------------------"
+}
+
+function get {
+  user_agent="ghe-diagnostics: $(ghe-version)"
+  curl_response=$(curl -f -s -w "%{content_type}" -H "User-Agent: $user_agent" "http://$1")
+  content_type=$(echo "${curl_response}" | tail -n 1)
+  if [[ "${content_type}" =~ 'application/json' ]]; then
+    echo "${curl_response}" | head -n -1
+  else
+    false
+  fi
+}
+
+DIAGNOSTICS_STATUS="/tmp/ghe-diagnostics-status"
+# Keep enterprise-manage in the loop about how the support bundle is going.
+# This also let's us know when a file is ready.
+#
+# Other processes will look for these states:
+# "running"   - bundle is currently in progress
+# "failed"    - bundle has failed
+# "complete"  - bundle has completed successfully
+function update_status () {
+    echo "$1" > "$DIAGNOSTICS_STATUS" 2>/dev/null
+    chown enterprise-manage:enterprise-manage "$DIAGNOSTICS_STATUS"
+}
+
+function private_mode_enabled {
+  if [ "$(ghe-config core.private-mode)" = "true" ]; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function public_pages_enabled {
+  if [ "$(ghe-config core.public-pages)" = "true" ]; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function ssl_enabled {
+  ghe-config github-ssl.enabled
+}
+
+function actions_enabled {
+  if [ "$(ghe-config app.actions.enabled)" = "true" ]; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function artifactcache_enabled {
+  if artifactcache-enabled; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function packages_enabled {
+  if [ "$(ghe-config app.packages.enabled)" = "true" ]; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function code_scanning_enabled {
+  if [ "$(ghe-config app.code-scanning.enabled)" = "true" ]; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function check_connectivity {
+  desc=$1
+  host=$2
+
+  if ! ipv4=$(dig +time=1 +short ${host} A); then
+    echo "Error in A record DNS resolution"
+  fi
+
+  if ! ipv6=$(dig +time=1 +short ${host} AAAA); then
+    echo "Error in AAAA record DNS resolution"
+  fi
+
+  echo "Host: ${host}"
+  echo
+  echo " * attempting to ping ${desc} host..."
+
+  if [ -n "$ipv4" ]; then
+    ping -w 3 -c 5 -i 0.5 ${host} 2>&1 || true
+  fi
+
+  if [ -n "$ipv6" ]; then
+    ping6 -w 3 -c 5 -i 0.5 ${host} 2>&1 || true
+  fi
+
+  if [ -z "$ipv4" ] && [ -z "$ipv6" ]; then
+    if grep -q ':' <<<$host; then
+      ping6 -w 3 -c 5 -i 0.5 ${host} 2>&1 || true
+    else
+      ping -w 3 -c 5 -i 0.5 ${host} 2>&1 || true
+    fi
+  fi
+  echo
+}
+
+function checksum {
+  target=$1
+  if [ -e $target ]; then
+    md5sum $target | awk '{print $1}' 2>/dev/null
+  else
+    echo 'No file found.'
+  fi
+}
+
+function is_replica {
+  if [ -f /etc/github/repl-state ]; then
+    if grep -q replica /etc/github/repl-state; then
+      return 0
+    else
+      return 1
+    fi
+  else
+    return 1
+  fi
+}
+
+function is_mysql_primary {
+  # two cases: standalone, multi-node
+  if [ -f /data/user/common/cluster.conf ]; then
+    # if multi-node check if the host executing this script is the primary
+    if [ "$(ghe-config cluster.mysql-master)" == "$(hostname)" ]; then
+      return 0  # true, it's the primary
+    else
+      return 1  # false, it's not the primary
+    fi
+  else
+    # in a single node topology, we are the primary (or only node)
+    return 0
+  fi
+}
+
+function should_node_call_stats_api {
+  # if we are in BYODB (external MySQL) mode
+  if [ "$(ghe-config mysql.external.enabled)" == "true" ]; then
+    # find the cluster delegate and see if the executing host is it
+    cluster_delegate="$(/usr/local/share/enterprise/ghe-call-configrb ghes_cluster_delegate)"
+    if [ "$cluster_delegate" == "$(hostname)" ]; then
+      return 0
+    else
+      return 1
+    fi
+  else
+   # otherwise see if we're the MySQL Primary
+    if is_mysql_primary; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+}
+
+function maintenance_mode_enabled {
+  if ghe-maintenance -q > /dev/null; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+function mysql_processlist_filter_sleeping {
+  ## Explicitly call 'gawk' as 'awk' is usually 'mawk' and some versions do not support '[:blank:]' even though it's POSIX.
+  gawk -F '|' '
+    BEGIN {
+        num_bands = split( "1|10|20|60|120|600|3600|9000", time_bands); for (idx=1; idx <= num_bands; ++idx) { band_threadcounts[idx]=0; }
+        show_per_band=3;
+        outofbounds_count=0;  trimmed_count=0;  thread_totalcount=-1; ## start at -1 since header line
+        time_bands[0]=-1; ## the array starts at 1, setting the 0th element simplifies printing the first band
+        PROCINFO["sorted_in"] = "@ind_num_asc";  ## NB: gawk-specific
+        }
+
+    ( ($3 ~ /^[[:blank:]]*github[[:blank:]]*$/) && ($6 ~ /^[[:blank:]]*Sleep[[:blank:]]*$/) ) { sleeptime=$7;     ## user==github and command==Sleep
+        is_matched=0;
+        for (idx=1; idx <= num_bands; ++idx) {
+            if (sleeptime <= time_bands[idx]) {
+                is_matched=1;
+                if (++band_threadcounts[idx] > show_per_band) { ++trimmed_count; next }     ## Skip printing
+                break
+                }
+            }
+
+        if (!is_matched) { ++outofbounds_count }
+        }
+
+        { print; if ((NF == 9 || NF == 10)) { ++thread_totalcount } }     ## Always print. NF is normally 10, but 9 is SQL is multi-line
+
+    END {
+        if (NR == 0) { print "ERROR: The \"mysqladmin processlist\" command did not generate any output. There is no input to process..."; exit(10) }
+        printf( "\nNB: To reduce output, Sleeping github threads were categorised by idle time into bands, with at most %d threads shown from each band.\n", show_per_band);
+        printf( "  (| %-12s | %6s |)\n", "Idle (secs)" , "Count");
+        for (idx=1; idx <= num_bands; ++idx) { printf( "  (| %-12s | %6d |)\n", (time_bands[idx-1]+1) " - " time_bands[idx], band_threadcounts[idx]); }
+        printf( "Totals: Threads trimmed: %d.  Threads shown: %d (includes %d thread%s with idle times > %d seconds).\n", trimmed_count, thread_totalcount, outofbounds_count, (outofbounds_count == 1 ? "" : "s"), time_bands[num_bands])
+        exit(0)
+        }
+  '
+}
+
+trap "update_status failed" EXIT
+update_status "running"
+
+banner "LICENSE"
+if [ -f /data/user/common/enterprise.ghl ]; then
+  ghe-license info
+else
+  echo " * No license installed."
+fi
+
+echo
+echo
+
+banner "RELEASE"
+cat /etc/github/enterprise-release
+
+if [ -e /etc/github/hotpatch ] ; then
+  sub_banner "HOTPATCHES"
+  cat /etc/github/hotpatch
+fi
+
+sub_banner "SHA1s"
+for file in /data/*/current/SHA1; do
+  echo "$(echo $file | cut -d/ -f3 | tr '[:lower:]' '[:upper:]'): $(cat $file)"
+done
+
+echo
+echo
+
+if [ -f /data/enterprise-manage/current/public/ghe-preflight-check-status.json ]; then
+  banner "PREFLIGHT CHECKS"
+  cat /data/enterprise-manage/current/public/ghe-preflight-check-status.json
+  echo
+  echo
+fi
+
+if [ -f /etc/github/repl-state ]; then
+  banner "REPLICATION"
+  for file in /etc/github/repl-*; do
+    echo "$(basename $file): $(cat $file)"
+  done
+
+  for key in "cluster.$(cat /etc/github/cluster)."{cache-server,cache-location,cache-domain}
+  do
+    echo "$key: $(ghe-config --get "$key")"
+  done
+
+  sub_banner "NODE IDENTITIES"
+  if ! ghe-cluster-nodes --uuid --ip; then
+    echo "Node identity list truncated."
+  fi
+
+  sub_banner "REPLICA PREDIAGNOSTICS"
+  if ! timeout 35s ghe-cluster-each --replica --serial -- "/usr/local/share/enterprise/ghe-prediagnostics"; then
+    echo "Replica prediagnostics gathering timed out. Are all replicas healthy?"
+  fi
+
+  echo
+  echo
+fi
+
+banner "STORAGE"
+
+sub_banner "DISK INFO"
+parted -ls 2>&1 | grep -v "unrecognised disk label" | sed -e 's/ *\r//g'
+
+sub_banner "LVM INFO"
+pvs 2>&1; echo
+vgs 2>&1; echo
+lvs 2>&1; echo
+lsblk; echo
+
+sub_banner "DISK USAGE"
+df -h; echo
+df -i
+
+sub_banner "MOUNTED FILESYSTEMS"
+cat /proc/mounts
+
+if mountpoint -q /data/user; then
+  if [ -d /data/user/mysql ]; then
+    sub_banner "MYSQL USAGE"
+    if ! timeout 5s du -h --max-depth=1 --time /data/user/mysql/; then
+      echo "MySQL usage truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mysql/github_enterprise ]; then
+    sub_banner "MYSQL USAGE PER TABLE"
+    if ! timeout 5s find /data/user/mysql/github_enterprise/ -name '*.ibd' -exec du -h --time {} \; | sort -rh | sed -n 1,20p; then
+      echo "MySQL usage per table truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mssql ]; then
+    sub_banner "MSSQL USAGE"
+    if ! timeout 5s du -h --max-depth=1 --time /data/user/mssql/ | sort -hr; then
+      echo "MSSQL usage truncated."
+    fi
+  fi
+
+  if [ -d /data/user/mssql/data ]; then
+    sub_banner "MSSQL DATA FILE SIZES"
+    if ! timeout 5s du -h --time /data/user/mssql/data/* | sort -hr; then
+      echo "MSSQL data file sizes truncated"
+    fi
+  fi
+
+  if [ -d /data/user/elasticsearch ]; then
+    es2x_source_path="/data/user/elasticsearch/github-enterprise/nodes/0/indices"
+    es5x_source_path="/data/user/elasticsearch/nodes/0/indices"
+    es8x_source_path="/data/user/elasticsearch/indices"
+
+    sub_banner "ELASTICSEARCH USAGE"
+
+    if [ -d "$es2x_source_path" ]; then
+      es_source_path=$es2x_source_path
+    elif [ -d "$es5x_source_path" ]; then
+      es_source_path=$es5x_source_path
+    elif [ -d "$es8x_source_path" ]; then
+      es_source_path=$es8x_source_path
+    else
+      echo "No Elasticsearch path found"
+    fi
+
+    if [ -d "$es_source_path" ]; then
+      if ! timeout 5s du -h --max-depth=1 --time ${es_source_path} | sort -hr; then
+        echo "Elasticsearch usage truncated."
+      fi
+    fi
+  fi
+
+  sub_banner "REDIS USAGE"
+  if ! timeout 5s du -h -all --time /data/user/redis/; then
+    echo "Redis usage truncated."
+  fi
+
+  sub_banner "ALAMBIC USAGE"
+  sql_alambic='SELECT COUNT(*) AS "Count", ROUND(SUM(size)/POWER(2,30)) AS "Size [GB]" FROM storage_blobs;'
+  if ! timeout 5s bash -c "echo '$sql_alambic' | ghe-dbconsole -y 2>/dev/null | column -t -s $'\t'"; then
+    echo "Alambic usage truncated."
+  fi
+fi
+
+sub_banner "CACHE USAGE"
+if ! timeout 5s du -h --max-depth=1 --time /var/cache | sort -hr; then
+  echo "Cache usage truncated."
+fi
+
+sub_banner "LOG USAGE"
+if ! timeout 5s du -P -h --max-depth=1 --time /var/log | sort -hr; then
+  echo "Log usage truncated."
+fi
+
+sub_banner "LARGEST LOG FILES"
+if ! timeout 5s find -L /var/log -type f -exec du --time -h {} + | sort -hr | head -10; then
+  echo "Largest log files truncated."
+fi
+
+sub_banner "UNLINKED OPEN FILES"
+if ! timeout 5s lsof -VnP +a +L1 / | awk 'NR==1{print;next}{print|"sort -k7,7rn -k2,2n"}'; then
+  echo "Unlinked open files truncated."
+fi
+
+sub_banner "SYSTEMD JOURNAL LOG USAGE"
+journalctl --merge --disk-usage
+
+sub_banner "CORE FILES"
+ls -lh /cores/
+
+sub_banner "/var/lib/ghe-updates CONTENTS"
+ls -lah /var/lib/ghe-updates/
+
+sub_banner "/data/user/tmp USAGE"
+if ! timeout --kill-after=1s  5s sudo du -x -h --max-depth=1 --time /data/user/tmp | sort -hr | head -30; then
+  echo "Time out. The list of largest tmp files has been truncated/omitted."
+fi
+
+sub_banner "HOME DIRECTORIES USAGE"
+if ! timeout --kill-after=1s 5s sudo du -x -h --max-depth=1 --time /home | sort -hr ; then
+  echo "Timed out. The list of home directories has been truncated/omitted."
+fi
+
+echo
+echo
+
+banner "MEMORY"
+
+sub_banner "FREE"
+free -lm
+
+sub_banner "PROPORTIONAL SET SIZE"
+sudo smemstat -l | sed 's/\s\+$//g'
+
+if [ "$RELEASE_PLATFORM" = "esx" ]; then
+  sub_banner "HYPERVISOR MEMORY"
+  echo "Ballooned: $(vmware-toolbox-cmd stat balloon 2>&1)"
+  echo "Swapped:   $(vmware-toolbox-cmd stat swap 2>&1)"
+fi
+
+echo
+echo
+
+banner "KERNEL"
+uname -a
+cat /proc/cmdline
+
+echo
+echo
+
+banner "CPU"
+lscpu
+
+sub_banner "Individual CPU Info"
+grep -i 'model name' /proc/cpuinfo
+
+sub_banner "NUMA Stats"
+numastat -v
+
+sub_banner "Interrupts"
+cat /proc/interrupts
+
+sub_banner "SMP affinity list"
+grep -H '' /proc/irq/*/smp_affinity_list | cut -c 11- | sort -n
+
+sub_banner "CPU features"
+grep -iE '^flags.*ssse3' /proc/cpuinfo >/dev/null
+if [ $? != 0 ]; then
+  echo "SSSE3 Enabled: false"
+else
+  echo "SSSE3 Enabled: true"
+fi
+
+sub_banner "Multi-Processor CPU Usage"
+# NB: When GHES uses Ubuntu 22 (Jammy), add the '-T' (topology) option.
+mpstat -u -n  -N ALL  -P ALL  2  2 || echo "Notice: Exit status from mpstat: $?"
+
+echo
+echo
+
+banner "NETWORK SETTINGS"
+
+sub_banner "NETWORK.CONF"
+if [ -f /data/user/common/network.conf ]; then
+  cat /data/user/common/network.conf 2>&1 || echo "Error: Unable to read /data/user/common/network.conf"
+else
+  echo "Info: File /data/user/common/network.conf does not exist - Network configuration is via DHCP."
+fi
+
+sub_banner "IFCONFIG"
+ifconfig -a
+
+sub_banner "eth0 driver info"
+ethtool -i eth0 || echo "eth0 not available."
+
+sub_banner "eth0 driver features"
+ethtool -k eth0 || echo "eth0 not available."
+
+sub_banner "HTTP PROXY"
+if [ -n "$(ghe-config core.http-proxy)" ]; then
+  echo "   Enabled: true"
+  echo "    Server: $(ghe-config core.http-proxy)"
+
+  if [ -n "$(ghe-config core.http-noproxy)" ]; then
+    echo "Exceptions: $(ghe-config core.http-noproxy)"
+  fi
+else
+  echo "   Enabled: false"
+fi
+
+sub_banner "ROUTE"
+route -n
+sub_banner "ROUTE (IPv6)"
+route -6 -n
+
+sub_banner "IPTABLES"
+iptables-save
+sub_banner "IPTABLES (IPv6)"
+ip6tables-save
+
+sub_banner "NETWORK SERVICES"
+netstat --listen -pn
+
+sub_banner "WIREGUARD"
+if ! timeout 5s wg show all; then
+  echo "WireGuard query timed out."
+fi
+
+echo
+echo
+
+banner "CONFIGURATION"
+
+sub_banner "UUID"
+cat /data/user/common/uuid
+
+sub_banner "DNS"
+cat /etc/resolv.conf
+
+sub_banner "DNS (CUSTOMIZED SETTINGS)"
+echo $'/etc/resolvconf/resolv.conf.d/head:\n'; cat /etc/resolvconf/resolv.conf.d/head
+echo $'\n/etc/resolvconf/resolv.conf.d/base:\n'; cat /etc/resolvconf/resolv.conf.d/base
+echo $'\n/etc/resolvconf/resolv.conf.d/tail:\n'; cat /etc/resolvconf/resolv.conf.d/tail
+
+sub_banner "DNSMASQ"
+dnsmasq_conf='/etc/dnsmasq.conf'
+if [ -e $dnsmasq_conf ]; then
+  ls -l $dnsmasq_conf  # display useful attributes of file
+  echo; echo $dnsmasq_conf':'
+  cat $dnsmasq_conf
+else
+  echo $dnsmasq_conf 'not found'
+fi
+unset dnsmasq_conf
+
+sub_banner "HOSTNAME"
+echo "Hostname: $(ghe-config core.github-hostname)"
+echo "Subdomain isolation: $(ghe-config core.subdomain-isolation)"
+
+sub_banner "HOSTS FILE"
+cat /etc/hosts
+
+sub_banner "DNSMASQ HOSTS FILE"
+dnsmasq_hosts='/etc/hosts.dnsmasq'
+if [ -e $dnsmasq_hosts ]; then
+  ls -l $dnsmasq_hosts  # display useful attributes of file
+  echo; echo $dnsmasq_hosts':'
+  cat $dnsmasq_hosts
+else
+  echo $dnsmasq_hosts 'not found'
+fi
+unset dnsmasq_hosts
+
+sub_banner "SYSTEMD TIME"
+timedatectl status
+
+sub_banner "NTP TIME"
+chronyc sources -v
+chronyc sourcestats -v
+chronyc tracking
+
+sub_banner "AUTHENTICATION"
+echo "Mode: $(ghe-config core.auth-mode)"
+
+case "$(ghe-config core.auth-mode)" in
+  ldap)
+    sub_banner "LDAP"
+    echo "             Host: $(ghe-config ldap.host)"
+    echo "             Port: $(ghe-config ldap.port)"
+    echo "             Base: $(ghe-config ldap.base)"
+    echo "              UID: $(ghe-config ldap.uid)"
+    echo "          Bind DN: $(ghe-config ldap.bind-dn)"
+    echo "         Password: [FILTERED]"
+    echo "           Method: $(ghe-config ldap.method)"
+    echo "      User groups: $(ghe-config ldap.user-groups)"
+    echo "      Admin group: $(ghe-config ldap.admin-group)"
+    echo "LDAP sync enabled: $(ghe-config ldap.sync-enabled)"
+    if [ $(ghe-config ldap.sync-enabled) == "true" ]; then
+      echo "    User sync int: $(ghe-config ldap.user-sync-interval) hours"
+      echo "    Team sync int: $(ghe-config ldap.team-sync-interval) hours"
+      echo "  User email sync: $(ghe-config ldap.user-sync-emails)"
+      echo "    User SSH sync: $(ghe-config ldap.user-sync-keys)"
+    fi
+    ;;
+  cas)
+    sub_banner "CAS"
+    echo "Url: $(ghe-config cas.url)"
+    ;;
+  github_oauth)
+    sub_banner "GITHUB OAUTH"
+    echo "        Client ID: $(ghe-config github-oauth.client-id)"
+    echo "    Client Secret: [FILTERED]"
+    echo "Organization name: $(ghe-config github-oauth.organization-name)"
+    if [ -n "$(ghe-config github-oauth.organization-team)" ]; then
+      echo "Organization team: $(ghe-config github-oauth.organization-team)"
+    fi
+    ;;
+  saml)
+    sub_banner "SAML"
+    echo "        SSO Url: $(ghe-config saml.sso-url)"
+    echo "   Profile Name: $(ghe-config saml.profile-name)"
+    echo "   Profile Mail: $(ghe-config saml.profile-mail)"
+    echo "Profile SSH Key: $(ghe-config saml.profile-key)"
+    echo "Profile GPG Key: $(ghe-config saml.profile-gpg-key)"
+    echo "    Certificate: $(ghe-config saml.certificate-path)"
+    ;;
+  *)
+    echo "* No additional settings."
+    ;;
+esac
+
+if ! is_replica; then
+  echo
+  echo "Running hot with:"
+  get '127.0.0.1:1337/api/v3/enterprise/settings/auth' || echo '* Settings not available.'
+fi
+
+sub_banner "ACTIONS"
+echo "  Actions is $(actions_enabled)."
+echo "  Actions cache service is $(artifactcache_enabled)."
+echo "  Storage Provider: $(ghe-config secrets.actions.storage.blob-provider)"
+echo "  Storage Provider Authentication: $(ghe-config secrets.actions.storage.auth-type)"
+
+sub_banner "PACKAGES"
+echo "  Packages is $(packages_enabled)."
+echo "  Storage Provider: $(ghe-config secrets.packages.blob-storage-type)"
+
+sub_banner "CODE SCANNING"
+echo "  Code Scanning is $(code_scanning_enabled)."
+
+sub_banner "CHAT INTEGRATION"
+echo "  Chat Integration is $(ghe-config app.chatops.enabled)"
+echo "  App type is $(ghe-config secrets.chatops.app-type)"
+
+case "$(ghe-config secrets.chatops.app-type)" in
+  slack)
+    sub_banner "Slack"
+    echo "  App ID is $(ghe-config secrets.chatops.slack.app-id)"
+    ;;
+  msteams)
+    sub_banner "MS Teams"
+    echo "  App ID is $(ghe-config secrets.chatops.msteams.app-id)"
+    ;;
+  slacksocket)
+    sub_banner "Slack Socket"
+    echo "  App ID is $(ghe-config secrets.chatops.slack.app-id)"
+    echo "  Socket Mode is $(ghe-config secrets.chatops.slack.socket-mode)"
+    ;;
+  *)
+    echo "* No additional settings."
+    ;;
+esac
+echo
+echo
+
+banner "USER INFORMATION"
+
+sub_banner "LAST LOGINS"
+
+last --limit 20 --system --fulltimes --nohostname
+
+sub_banner "ACCOUNTS WITH SHELLS"
+
+awk -F: '($7 !~ /nologin$/) && ($7 !~ /false$/) {print}' < /etc/passwd
+
+sub_banner "CONTENTS OF ~admin/.gnupg"
+echo
+ls -la ~admin/.gnupg || echo "Info: 'ls -la' command failed. Exit status: $?"
+
+sub_banner "LIST OF GPG KEYS"
+echo
+gpg --list-keys < /dev/null || echo "Info: gpg exited with non-zero status: $?"
+
+echo
+echo
+
+banner "PRIVACY"
+echo "  Private Mode: $(private_mode_enabled)"
+echo "  Public Pages: $(public_pages_enabled)"
+
+echo
+echo
+
+banner "MAINTENANCE"
+echo "Maintenance mode: $(maintenance_mode_enabled)"
+
+echo
+echo
+
+if is_service_external "mysql"; then
+  banner "External MySQL"
+  echo "Enabled"
+fi
+
+banner "BACKUP STATUS"
+sub_banner "RECENT BACKUPS"
+completed_backups=$(journalctl SYSLOG_IDENTIFIER=backup-utils -r | grep -m 10 "backup from")
+if [ -n "$completed_backups" ]; then
+  echo "$completed_backups"
+else
+  echo "No recently logged backup attempts."
+fi
+sub_banner "BACKUP UTILITIES VERSION"
+cat /data/user/common/backup-utils-version 2>/dev/null || echo "Not available."
+sub_banner "BACKUP OR RESTORE IN PROGRESS"
+if [ -f "$SYNC_IN_PROGRESS_FILE" ]; then
+  echo "Yes - started at $(stat -c'%z' "$SYNC_IN_PROGRESS_FILE")."
+else
+  echo "No."
+fi
+if [ -f "/data/user/common/ghe-restore-status" ]; then
+  restore_status=$(cat /data/user/common/ghe-restore-status)
+else
+  echo "No ghe-restore-status file found"
+fi
+attempted_restores=$(journalctl SYSLOG_IDENTIFIER=backup-utils -r | grep -m 10 "restore from")
+if [ -n "$attempted_restores" ] || [ -n "$restore_status" ]; then
+	sub_banner "RECENT RESTORES"
+	if [ -n "$attempted_restores" ]; then
+	  echo "$attempted_restores"
+	else
+	  echo "No recently logged restore attempts."
+	fi
+	sub_banner "LATEST RESTORE STATUS"
+	if [ -n "$restore_status" ]; then
+  		echo "$restore_status"
+	else
+		echo "No restore status available."
+	fi
+fi
+
+echo
+echo
+
+banner "SSL"
+echo "Enabled: $(ssl_enabled)"
+echo
+
+echo "HAProxy SSL files:"
+ls -l /etc/haproxy/ssl.*
+echo
+echo "MD5 of Modulus values:"
+typeset -A allhashes=()
+for file in /etc/haproxy/ssl.*
+do
+  case "$file" in
+    *.crt*)
+        # NB: stderr is deliberately not redirected to /dev/null, so errors will be visible to the GHES admins.
+        hash=$( tmpdata=$( openssl x509 -noout -modulus -in "$file" ) && echo "$tmpdata" | md5sum | cut -d" " -f1 )
+        echo "- $file: 	cert:  ${hash:-Error calculating modulus.}"
+        allhashes["${hash:-error_$file}"]="${hash:-unknown}"
+	;;
+  esac
+
+  case "$file" in
+    *key)
+        hash=$( tmpdata=$( openssl rsa -noout -modulus -in "$file" ) && echo "$tmpdata" | md5sum | cut -d" " -f1 )
+        echo "- $file: 	key:   ${hash:-Error calculating modulus.}"
+        allhashes["${hash:-error_$file}"]="${hash:-unknown}"
+	;;
+  esac
+done
+
+if [[ "${#allhashes[@]}" -gt 1 ]]; then
+  echo
+  echo "Warning: Found ${#allhashes[@]} different hashes. Are the Key and Cert paired?"
+  echo "  Does the Cert bundle start with the certificate for GHES itself?"
+fi
+echo
+
+if [ "$(ssl_enabled)" = "true" ]; then
+  echo "Certificate:"
+  sed -e '/BEGIN PRIVATE KEY/,/END PRIVATE KEY/c \\n%% WARNING: The certificate bundle should contain only certificates,\n   but it contains a private key.\n%% The key was redacted here to avoid external exposure.\n' < /etc/haproxy/ssl.crt 2>/dev/null || echo 'No file found.'
+  echo
+  echo
+  echo "Text Form:"
+  openssl x509 -in /etc/haproxy/ssl.crt -text -noout 2>/dev/null
+  echo
+  echo
+fi
+
+sub_banner "Custom CA certificates"
+ca_certs=$(ghe-ssl-ca-certificate-install -l)
+if [ -n "$ca_certs" ]; then
+  for ca_cert in $ca_certs; do
+    echo
+    echo "$ca_cert:"
+    openssl x509 -noout -subject -subject_hash -issuer -dates -checkend 86400 -ext subjectAltName,subjectKeyIdentifier,authorityKeyIdentifier -in "/usr/local/share/ca-certificates/${ca_cert}" | sed -e 's/^/  /'
+    cat "/usr/local/share/ca-certificates/${ca_cert}"
+  done
+else
+  echo "* No custom CA certificates installed."
+fi
+
+echo
+
+if "$(ssl_enabled)"; then
+  sub_banner "TLS Self-Check"
+  echo
+  echo "Negotiating connexion to $HOSTNAME on localhost:443:"
+  echo
+  echo | openssl s_client -quiet -no_ign_eof -connect localhost:443 -servername $HOSTNAME 2>&1 | sed -e 's/^/  /'
+fi
+echo
+
+banner "MONITORING"
+
+sub_banner "SNMP"
+if systemctl is-active snmpd >/dev/null 2>&1; then
+  echo "Enabled: true"
+else
+  echo "Enabled: false"
+fi
+
+sub_banner "LOG FORWARDING"
+echo "Enabled: $(ghe-config syslog.enabled)"
+if [ "$(ghe-config syslog.enabled)" = "true" ]; then
+  echo "Server: $(ghe-config syslog.server)"
+  echo "Protocol: $(ghe-config syslog.protocol-name)"
+fi
+
+sub_banner "COLLECTD FORWARDING"
+if [[ -z $(ghe-config collectd.server) ]]; then
+  echo "Enabled: false"
+else
+  echo " Enabled: true"
+  echo "  Server: $(ghe-config collectd.server)"
+  echo "    Port: $(ghe-config collectd.port)"
+  if [[ -z $(ghe-config collectd.encryption) ]]; then
+    echo "  Crypto: none"
+  else
+    echo "  Crypto: $(ghe-config collectd.encryption)"
+    echo "    User: $(ghe-config collectd.username)"
+    echo "Password: [FILTERED]"
+  fi
+fi
+
+echo
+echo
+
+banner "RATE LIMITING"
+
+sub_banner "HTTP API RATE LIMITING"
+
+echo "Enabled: $(ghe-config api-rate-limiting.enabled)"
+if [ "$(ghe-config api-rate-limiting.enabled)" = "true" ]; then
+  echo "API Requests (per hour)"
+  echo "Authenticated: $(ghe-config api-rate-limiting.default-rate-limit)"
+  echo "Unauthenticated: $(ghe-config api-rate-limiting.unauthenticated-rate-limit)"
+  echo
+  echo "Search API Requests (per minute)"
+  echo "Authenticated: $(ghe-config api-rate-limiting.search-default-rate-limit)"
+  echo "Unauthenticated: $(ghe-config api-rate-limiting.search-unauthenticated-rate-limit)"
+  echo
+  echo "LFS API Requests (per minute)"
+  echo "Authenticated: $(ghe-config api-rate-limiting.lfs-default-rate-limit)"
+  echo "Unauthenticated: $(ghe-config api-rate-limiting.lfs-unauthenticated-rate-limit)"
+  echo
+  echo "GraphQL API Requests (per hour)"
+  echo "Authenticated: $(ghe-config api-rate-limiting.graphql-default-rate-limit)"
+  echo "Unauthenticated: $(ghe-config api-rate-limiting.graphql-unauthenticated-rate-limit)"
+fi
+
+sub_banner "ABUSE RATE LIMITING"
+
+echo "Enabled: $(ghe-config abuse-rate-limiting.enabled)"
+if [ "$(ghe-config abuse-rate-limiting.enabled)" = "true" ]; then
+  echo "Total Requests (per minute): $(ghe-config abuse-rate-limiting.requests-per-minute)"
+  echo "CPU Limit (ms per minute): $(ghe-config abuse-rate-limiting.cpu-millis-per-minute)"
+  echo "CPU Limit for Searching (ms per minute): $(ghe-config abuse-rate-limiting.search-cpu-millis-per-minute)"
+  echo "CPU Limit for GraphQL API (ms per minute): $(ghe-config abuse-rate-limiting.graphql-cpu-millis-per-minute)"
+fi
+
+sub_banner "GIT RATE LIMITING"
+
+echo "Enabled: $(ghe-config governor.quotas-enabled)"
+if [ "$(ghe-config governor.quotas-enabled)" = "true" ]; then
+  echo "Repository Network Limit: $(ghe-config governor.limit-network)"
+  echo "User ID Limit: $(ghe-config governor.limit-user)"
+fi
+
+echo
+echo
+
+banner "CONNECTIVITY TESTS"
+
+sub_banner "AUTHENTICATION"
+echo
+
+case "$(ghe-config core.auth-mode)" in
+  ldap)
+    echo "LDAP"
+    echo "----"
+
+    if [ -n "$(ghe-config ldap.host)" ]; then
+      if ! timeout 120s enterprise-manage-env "bundle exec ruby -W0 -Ilib /usr/local/share/enterprise/ghe_ldap_settings_validation.rb"; then
+        echo "* LDAP settings validation timed out."
+      fi
+    else
+      echo "* No LDAP host configured."
+    fi
+    ;;
+  default)
+    echo "DEFAULT"
+    echo "-------"
+    echo "* No checks to perform."
+    ;;
+  cas)
+    echo "CAS"
+    echo "---"
+    if [ -n "$(ghe-config cas.url)" ]; then
+      cas_host=$( echo "$(ghe-config cas.url)" | ruby -ruri -e 'puts URI.parse(gets.chomp).host')
+      echo " URL: $(ghe-config cas.url)"
+      check_connectivity "CAS" "${cas_host}"
+    else
+      echo "* No CAS url configured."
+    fi
+    ;;
+  github_oauth)
+    echo "GITHUB OAUTH"
+    echo "------------"
+    echo "* No checks to perform."
+    ;;
+  saml)
+    echo "SAML"
+    echo "----"
+    if [ -n "$(ghe-config saml.sso-url)" ]; then
+      saml_host=$( echo "$(ghe-config saml.sso-url)" | ruby -ruri -e 'puts URI.parse(gets.chomp).host')
+      echo " URL: $(ghe-config saml.sso-url)"
+      check_connectivity "SAML" "${saml_host}"
+    else
+      echo "* No SAML url configured."
+    fi
+    ;;
+  *)
+    echo "UNKNOWN"
+    echo "-------"
+    echo "* Unknown authentication type: '$(ghe-config core.auth-mode)'"
+    ;;
+esac
+
+sub_banner "SMTP"
+if [ -n "$(ghe-config smtp.address)" ]; then
+  check_connectivity "SMTP" "$(ghe-config smtp.address)"
+else
+  echo "* No SMTP host configured."
+fi
+
+sub_banner "DNS"
+nameservers="$(cat /etc/resolv.conf | grep ^nameserver | awk '{ print $2 }')"
+for nameserver in ${nameservers}; do
+  if ! [ ${nameserver} == "127.0.0.1" ]; then
+    check_connectivity "nameserver" $nameserver
+  fi
+done
+
+if [ -f /etc/github/cluster ]; then
+  sub_banner "INTER-NODE CONNECTIVITY"
+  fping -t 1000 -B 1 -c 5 -i 500 -q `ghe-cluster-nodes -x` 2>&1
+fi
+
+echo
+echo
+
+banner "LOAD"
+echo
+uptime
+
+echo
+echo
+
+banner "TIMING"
+
+sub_banner "SYSTEM BOOT TIME"
+systemd-analyze time
+
+sub_banner "LAST REBOOTS"
+journalctl --list-boots
+
+sub_banner "SERVICES STARTUP TIME"
+systemd-analyze blame | head -n20
+
+if [ -f /var/run/reboot-required ] || [ -f /var/run/reboot-required.pkgs ]; then
+sub_banner "REBOOT REQUIRED"
+  if [ -f /var/run/reboot-required ]; then
+    cat /var/run/reboot-required
+  else
+    echo "No reboot required due to package updates."
+  fi
+sub_banner "REBOOT NEEDED BY PACKAGES"
+  if [ -f /var/run/reboot-required.pkgs ]; then
+    cat /var/run/reboot-required.pkgs
+  else
+    echo "No packages requesting a reboot."
+  fi
+fi
+
+echo
+echo
+
+banner "SERVICES"
+echo
+ghe-service-list -s
+echo
+systemctl list-units --no-legend --state=activating,failed
+
+echo
+
+banner "NOMAD INFO"
+
+sub_banner "NOMAD NODE STATUS"
+nomad node status -self -verbose
+
+sub_banner "NOMAD JOB STATUS"
+nomad job status
+
+sub_banner "NOMAD SERVICE HEALTH"
+curl --silent --fail "http://127.0.0.1:8500/v1/health/state/any" \
+  | jq  --raw-output 'sort_by(.ServiceName) | map(select(.ServiceID | test("nomad-task")) | { ServiceName, ServiceID, Status }) | (.[0] | to_entries | map(.key | ascii_upcase)), (.[] | [.[]]) | "\(.[0]),\(.[1]),\(.[2])"' \
+  | column -ts,
+
+echo
+echo
+
+banner "PROCESS UTILIZATION"
+pidstat -lduht 1 5
+
+echo
+echo
+
+banner "IO UTILIZATION"
+iostat -x 1 4
+
+echo
+echo
+
+if [ "$RELEASE_PLATFORM" != "docker" ]; then
+  banner "IO THROUGHPUT"
+  IONICE=$([ -n "$ENTERPRISE_MY_TEST_VAR" ] && echo "ionice -c 0 nice -n -19")
+  $IONICE hdparm -tT $(findfs LABEL=ghe_user_data) 2>/dev/null
+  if mountpoint -q /data/db; then
+    $IONICE hdparm -tT $(findfs LABEL=ghe_db_data) 2>/dev/null
+  fi
+
+  echo
+  echo
+fi
+
+banner "RUNNING PROCESSES"
+echo
+COLUMNS=1000 ps auxf | sed 's/[ \t]*$//'
+
+echo
+echo
+
+banner "JOB QUEUES"
+
+sub_banner "RESQUE"
+if is_replica; then
+  echo "* These jobs will not be running on this replica, just present in Redis."
+fi
+echo
+ghe-resque-info
+
+echo
+echo
+
+sub_banner "AQUEDUCT"
+ghe-aqueduct-info --pretty
+
+echo
+echo
+
+banner "CONFIGURATION RUN"
+sub_banner "CONFIGURATION RUN STATUS"
+if [ -f /data/user/config-apply/status.json ]; then
+  cat /data/user/config-apply/status.json
+else
+  echo "No status file found at /data/user/config-apply/status.json"
+fi
+
+sub_banner "CONFIGURATION RUN IN PROGRESS"
+if /usr/local/share/enterprise/ghe-config-in-progress; then
+   echo Yes. Started at $(grep -m 1 "Preparing storage" /data/user/common/ghe-config.log | cut -d " " -f 1-3)
+   echo
+   sub_banner "LATEST MESSAGES FROM THE CONFIGURATION RUN"
+   tail -20 /data/user/common/ghe-config.log
+else
+   echo No.
+fi
+
+echo
+echo
+
+banner "MYSQL INFO"
+if is_service_external "mysql" ; then
+  sub_banner "External MySQL configuration"
+
+  echo "Primary"
+  echo "Host: $(ghe-config mysql.external.address)"
+  echo "Port: $(ghe-config mysql.external.port)"
+  echo "Username: $(ghe-config mysql.external.username)"
+  echo
+
+  if [ -f /etc/github/cluster ]; then
+    external_mysql_replicas=$(ghe-config --get-regexp 'cluster-external-mysql.*' | grep -oP 'cluster-external-mysql\.\K[^\.]+' | sort | uniq || true)
+    for node in $external_mysql_replicas; do
+      echo "Replica $node:"
+      echo "Host: $(ghe-config "cluster-external-mysql.$node.address")"
+      echo "Port: $(ghe-config "cluster-external-mysql.$node.port")"
+      echo "Datacenter: $(ghe-config "cluster-external-mysql.$node.datacenter")"
+      echo
+    done
+  fi
+else
+  echo
+  mysqladmin status || echo "Warning: 'mysqladmin status' exited unexpectedly with status $?."
+  echo
+  echo "Process List:"
+  mysqladmin processlist 2>&1 | mysql_processlist_filter_sleeping || echo "Warning: awk script exited unexpectedly with status $?. The MySQL Process List data that is shown may be incomplete."
+  echo
+fi
+
+sub_banner "APP MIGRATION VERSIONS"
+
+echo "show tables like '%_migrations' ;" |
+  ghe-dbconsole -y 2>/dev/null |
+  while read tablename junk; do
+    case "$tablename" in
+      Tables_in_github_enterprise)
+        continue # Ignore header line
+        ;;
+      migrations|pages_migrations|project_migrations)
+        echo "SELECT '- Table $tablename' AS ''; "
+        echo "SELECT '' AS '', MAX(id) FROM $tablename; "
+        ;;
+      *migrations)
+        echo "SELECT '- Table $tablename' AS ''; "
+        echo "SELECT '' AS '', MAX( CAST(version AS unsigned)) AS 'MAX(version)' FROM $tablename; "
+        ;;
+    esac
+  done |
+  ghe-dbconsole -y 2>/dev/null
+echo
+
+if [ -f /etc/github/cluster ] && ! ghe-config --true cluster.ha; then
+  if ! is_service_external "mysql" ; then
+    sub_banner "ORCHESTRATOR"
+    echo
+    status=$(/usr/local/share/enterprise/ghe-orchestrator-client -c api -path status | jq -r '[.Code,.Message] | join(" - ")' || echo "Unknown")
+    echo "Status: $status"
+    /usr/local/share/enterprise/ghe-orchestrator-client -c topology -alias ghe 2>/dev/null || echo "* Could not connect to Orchestrator"
+    echo
+    echo
+  fi
+fi
+
+banner "REDIS INFO"
+sub_banner "REDIS INFO ALL"
+echo
+ghe-redis-cli info all 2>/dev/null || echo "* Could not connect to Redis."
+
+sub_banner "REDIS USAGE STATS"
+sedarg='s@^\(.\+\)$@\1*@g'
+echo
+echo "# Database 0 size"
+ghe-redis-usage -n 0 -s -H resque:* timer:* rate_limiter:* Repair* | sort -h
+echo
+echo "# Database 1 count"
+ghe-redis-usage -n 1 -c `redis-cli -n 1 keys '*' | cut -d: -f 1-2 | sort | uniq | sed ${sedarg}` | sort -n
+echo
+echo "# Database 2 count"
+ghe-redis-usage -n 2 -c `redis-cli -n 2 keys '*' | cut -d: -f 1-4 | sort | uniq | sed ${sedarg}` | sort -n
+echo
+echo "# Database 3 count"
+ghe-redis-usage -n 3 -c `redis-cli -n 3 keys '*' | cut -d: -f 1-2 | sort | uniq | sed ${sedarg}` | sort -n
+echo
+echo "# Database 4 count"
+ghe-redis-usage -n 4 -c `redis-cli -n 4 keys '*' | cut -d: -f 1-2 | sort | uniq | sed ${sedarg}` | sort -n
+echo
+echo "# Database 5 size"
+ghe-redis-usage -n 5 -s -H s:* i:* presence-keys | sort -h
+echo
+echo "# Database 6 count"
+ghe-redis-usage -n 6 -c `redis-cli -n 6 keys '*' | cut -d: -f 1-2 | sort | uniq | sed ${sedarg}` | sort -n
+
+echo
+echo
+
+if ! is_replica; then
+  banner "MEMCACHED STATS"
+  echo
+  echo stats | nc -q 1 localhost 11211 2>/dev/null || echo "* Could not connect to Memcached."
+fi
+
+echo
+echo
+
+banner "ELASTICSEARCH INFO"
+
+sub_banner "ELASTICSEARCH UPGRADE SERVICE"
+es_upgrade=$(sudo ps faux | grep 'ghe[-]es-upgrade\|es[:]enterprise:upgrade')
+[ -n "$es_upgrade" ] && echo "$es_upgrade" || echo "* es:enterprise:upgrade is not running."
+
+# Only called on regular (non-HA) cluster DR
+if [ -f /etc/github/cluster ] && ! ghe-config --true cluster.ha && ghe-config --present cluster.mysql-master-replica; then
+  sub_banner "ELASTICSEARCH SETUP SERVICE"
+  es_setup=$(sudo ps faux | grep 'ghe[-]es-setup\|es[:]enterprise:setup')
+  [ -n "$es_setup" ] && echo "$es_setup" || echo "* es:enterprise:setup is not running."
+fi
+
+sub_banner "ELASTICSEARCH SOURCE"
+es_port=9200
+if timeout 5 curl --silent localhost:$es_port -o /dev/null; then
+  echo "* Querying Elasticsearch local node on port $es_port"
+else
+  if [ -f /etc/github/cluster ]; then
+    es_port=9201
+    echo "* Querying Elasticsearch master node on port $es_port"
+  else
+    echo "* Elasticsearch API not responding on local node and node is not cluster configured"
+  fi
+fi
+
+sub_banner "ELASTICSEARCH NODE"
+curl --silent -XGET "http://127.0.0.1:$es_port/" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH ALL NODES"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cat/nodes?v&h=name,ip,port,http_address,master,node.role,version,build,jdk,uptime&s=ip" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH CLUSTER HEALTH"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cluster/health?pretty" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH CLUSTER SETTINGS"
+es_output=$(curl --silent -XGET "http://127.0.0.1:$es_port/_cluster/settings?flat_settings=true" || echo '* Could not connect to Elasticsearch.')
+echo "$es_output" | jq -rR '. as $line | try fromjson catch $line'
+
+sub_banner "ELASTICSEARCH CLUSTER STATS"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cluster/stats?human&pretty" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH INDICES"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cat/indices?v&s=index" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH SHARDS"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cat/shards?v&h=index,shard,prirep,state,docs,store,ip,node,unassigned.reason,unassigned.details,unassigned.at,unassigned.for&s=index,shard,prirep,ip" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH RECOVERY"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cat/recovery?v&s=index,target_host" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "ELASTICSEARCH ALIASES"
+curl --silent -XGET "http://127.0.0.1:$es_port/_cat/aliases?v&h=index,alias,*&s=index,alias" || echo '* Could not connect to Elasticsearch.'
+
+sub_banner "FIRST UNASSIGNED SHARD EXPLANATION"
+get "127.0.0.1:$es_port/_cluster/allocation/explain?pretty" || echo '* No unassigned shards to explain'
+
+echo
+echo
+
+banner "INSTALLATION INFO"
+
+if should_node_call_stats_api ; then
+  get '127.0.0.1:1337/api/v3/enterprise/stats/all' || echo '* No info available.'
+else
+  echo "* Management console API call skipped on this node (Not a MySQL Primary or delegate)"
+fi
+
+echo
+echo
+
+banner "SECURITY PRODUCTS"
+if ! is_replica; then
+  get '127.0.0.1:1337/api/v3/enterprise/stats/security-products' || echo '* No info available.'
+else
+  echo "* Management console API not available on running replicas."
+fi
+
+echo
+echo
+
+banner "SPOKES INFO"
+echo
+ghe-spokes status
+ghe-spokesctl server show
+( time ghe-spokesctl status --live --specs ) 2>&1
+
+sub_banner "Entity counts"
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT TABLE_NAME, TABLE_ROWS FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ("repositories", "gists", "repository_networks");
+EOF
+
+sub_banner "Per-node replicas counts"
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT count(*) as replicas,host FROM repository_replicas GROUP BY host;
+EOF
+
+sub_banner "Per-node Gist replicas counts"
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT count(*) as replicas,host FROM gist_replicas GROUP BY host;
+EOF
+
+echo
+echo
+
+banner "Repositories"
+sub_banner "Repository networks over maintenance threshold"
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT id, root_id, disk_usage, pushed_at, maintenance_status, last_maintenance_attempted_at, last_maintenance_at, pushed_count, pushed_count_since_maintenance, unpacked_size_in_mb
+FROM repository_networks
+WHERE pushed_count_since_maintenance > 50 OR unpacked_size_in_mb > 40
+ORDER BY pushed_count_since_maintenance DESC, unpacked_size_in_mb DESC
+LIMIT 20;
+EOF
+
+echo
+echo
+
+banner "DPAGES INFO"
+echo
+ghe-dpages status
+ghe-dpages replication-status
+
+echo
+echo
+
+banner "STORAGE REPLICATION"
+echo
+ghe-storage replication-status
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT * FROM storage_file_servers;
+EOF
+
+sub_banner "Per-node object counts"
+
+ghe-dbconsole -y <<EOF 2>/dev/null | column -t -s $'\t'
+SELECT count(*) as replicas,host FROM storage_replicas GROUP BY host;
+EOF
+
+echo
+echo
+
+# skip git stats without gitmon data
+[ ! -d /data/user/gitmon ] && exit 0
+
+banner "GIT ACTIVITY SUMMARY"
+ghe-governor-summary
+
+banner "GIT STATS"
+
+sub_banner "HEALTH"
+ghe-governor health
+
+sub_banner "CPU TOP"
+ghe-governor top cpu
+
+sub_banner "CPU AGGREGATE"
+ghe-governor aggregate repo cpu
+
+sub_banner "DISK TOP"
+ghe-governor top disk
+
+sub_banner "DISK AGGREGATE"
+ghe-governor aggregate repo disk
+
+sub_banner "TOP FETCHED REPOSITORIES"
+ghe-governor aggregate repo count -P upload-pack
+
+sub_banner "TOP PUSHED REPOSITORIES"
+ghe-governor aggregate repo count -P spokes-receive-pack
+
+finishtime=$( date +%s )
+runtime=$(( finishtime - starttime ))
+echo
+if [[ "$runtime" -gt "60"  &&  "$runtime" -le "200" ]]; then
+  echo "Diagnostics generation complete: Time taken: $runtime second(s)."
+else
+  echo "Diagnostics generation complete: Warning: Time taken to generate was: $runtime second(s)."
+fi
+
+trap "" EXIT
+
+update_status "complete"

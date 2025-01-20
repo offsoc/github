@@ -1,0 +1,484 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info(
+  title: "Your profile",
+  class: "page-account"
+) %>
+
+<% if flash[:profile_updated] %>
+  <% flash_rendered! %>
+  <%= render layout: "shared/flash_container" do %>
+      Profile updated successfully
+      &mdash;
+      <a class="Link--inTextBlock" href="<%= user_path(current_user) %>">view your profile.</a>
+  <% end %>
+<% end %>
+
+<%= render layout: "settings/settings" do %>
+  <!-- Public Profile -->
+  <%= render Primer::Beta::Subhead.new(mt: 0, mb: 0) do |component| %>
+    <% component.with_heading(tag: :h2, id: "public-profile-heading") do %><%= profile_heading_text %><% end %>
+  <% end %>
+  <div class="clearfix gutter d-flex flex-shrink-0 <% if responsive? %>flex-column-reverse flex-md-row<% end %>">
+    <div class="<% if responsive? %>col-12 col-md-8<% else %>col-8<% end %>">
+      <waiting-form>
+        <%= form_for(
+          current_user,
+          url: real_user_path(current_user),
+          method: :put,
+          html: {
+            "aria-labelledby": "public-profile-heading",
+            "data-target": "waiting-form.form",
+          },
+        ) do |f| %>
+          <div>
+            <% if !current_user&.change_profile_name_enabled? && current_user.is_enterprise_managed? %>
+              <strong class="d-inline-block mt-2"><%= current_user.profile_name %></strong>
+              <p class="note">
+                Your GitHub account is synced with your identity provider. Please contact your IDP administrator to request any changes.
+              </p>
+            <% else %>
+              <dl class="form-group">
+                <dt><%= f.label :profile_name, "Name" %></dt>
+                <dd>
+                  <%= f.text_field :profile_name %>
+                  <div class="note">
+                    Your name may appear around GitHub where you contribute or are mentioned.
+                    You can remove it at any time.
+                  </div>
+                </dd>
+              </dl>
+            <% end %>
+            <dl class="form-group">
+              <dt><%= f.label :profile_email, profile_email_label_text %></dt>
+              <dd class="d-inline-block">
+                <div>
+                  <% verified = GitHub.email_verification_enabled? ? "a verified" : "an" %>
+                  <% blank_message = @emails.empty? ? "Please add #{verified} email address" : "Select #{verified} email to display" %>
+                  <% if current_user&.is_enterprise_managed? %>
+                    <div <%= test_selector("email-in-a-text-field") %>>
+                      <%= f.text_field :profile_email, readonly: true, data: current_user.emails.any? ? @emails.first : blank_message %>
+                    </div>
+                  <% elsif current_user.emails.any? && current_user.primary_user_email_role&.public? %>
+                    <div <%= test_selector("email-in-a-select") %>>
+                      <%= f.select(:profile_email, @emails, { include_blank: blank_message }, class: "form-select") %>
+                      <% if current_user.profile_email.present? %>
+                        <button type="submit" class="btn-link color-fg-muted text-small ml-2" form="unset_profile_email">
+                          <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+                          Remove
+                        </button>
+                      <% end %>
+                      <p class="note">You can manage <%= GitHub.email_verification_enabled? ? "verified " : "" %>
+                        email addresses in your
+                        <%= render(Primer::Beta::Link.new(href: settings_email_preferences_path, classes: "Link--inTextBlock")) { "email settings" } %>
+                      </p>
+                    </div>
+                  <% elsif current_user.emails.any? %>
+                    <%= f.select(:profile_email, [], { include_blank: blank_message }, { class: "form-select color-fg-muted", disabled: "disabled" }) %>
+                    <p class="note">
+                      You have set your email address to private. To toggle email privacy,
+                      go to <%= render(Primer::Beta::Link.new(href: settings_email_preferences_path, classes: "Link--inTextBlock")) { "email settings" } %> and uncheck "Keep my email address private."
+                    </p>
+                  <% end %>
+                </div>
+              </dd>
+            </dl>
+
+            <% unless current_user&.is_enterprise_managed? %>
+              <dl class="form-group" <%= test_selector("bio-is-rendered") %>>
+                <dt><%= f.label :profile_bio, "Bio" %></dt>
+                <dd class="user-profile-bio-field-container js-length-limited-input-container">
+                  <text-expander keys=": @" data-emoji-url="<%= emoji_suggestions_path %>" data-mention-url="<%= user_suggestions_path %>">
+                    <%= f.text_area :profile_bio,
+                      class: "form-control user-profile-bio-field js-length-limited-input",
+                      placeholder: "Tell us a little bit about yourself",
+                      "data-input-max-length": Profile::BIO_MAX_LENGTH,
+                      "data-warning-text": "{{remaining}} remaining"
+                    %>
+                  </text-expander>
+                  <p class="note">
+                    You can <strong>@mention</strong> other users and
+                    organizations to link to them.
+                  </p>
+                  <p class="js-length-limited-input-warning user-profile-bio-message d-none"></p>
+                </dd>
+              </dl>
+
+              <% if user_pronouns_enabled? %>
+                <dl class="form-group" <%= test_selector("pronouns-is-rendered") %>>
+                  <dt><label for="user_profile_pronouns_select">Pronouns</label></dt>
+                  <dd class="user-profile-bio-field-container js-length-limited-input-container">
+                    <% selected = if current_user.profile_pronouns.present?
+                                    Profile::PRONOUNS_OPTIONS.include?(current_user.profile_pronouns) ? current_user.profile_pronouns : "Custom"
+                                  else
+                                    ""
+                                  end
+                    %>
+                    <%= select_tag nil, options_for_select([
+                        [_("Don't specify"), ""],
+                        *Profile::PRONOUNS_OPTIONS,
+                        "Custom"
+                      ], selected: selected),
+                      id: "user_profile_pronouns_select",
+                      class: "js-profile-editable-pronouns-select form-select form-control" %>
+
+                    <%= f.text_field :profile_pronouns,
+                      placeholder: "Pronouns",
+                      "aria-label": "Pronouns",
+                      value: current_user.profile_pronouns,
+                      "data-initial-value": current_user.profile_pronouns,
+                      hidden: current_user.profile_pronouns.blank? || Profile::PRONOUNS_OPTIONS.include?(current_user.profile_pronouns),
+                      class: "js-profile-editable-pronouns-custom form-control mt-1" %>
+                  </dd>
+                </dl>
+              <% end %>
+
+              <dl class="form-group" <%= test_selector("blog-url-is-rendered") %>>
+                <dt><%= f.label :profile_blog, "URL" %></dt>
+                <dd><%= f.text_field :profile_blog %></dd>
+              </dl>
+
+              <% if show_orcid_controls? %>
+                <dl class="form-group" <%= test_selector("orcid-is-rendered") %>>
+                  <dt><%= f.label :orcid, "ORCID iD" %></dt>
+                  <dd>
+                    <%= render(Profiles::User::OrcidEditComponent.new) %>
+                  </dd>
+                </dl>
+              <% end %>
+
+              <div class="form-group" <%= test_selector("social-accounts-are-rendered") %>>
+                <label>Social accounts</label>
+                <%= render(Profiles::SocialAccountsEditComponent.new(this_user: current_user)) %>
+              </div>
+
+              <% if !enterprise? %>
+                  <dl class="form-group" <%= test_selector("company-is-rendered") %>>
+                    <dt><%= f.label :profile_company, "Company" %></dt>
+                    <dd class="user-profile-company-field-container">
+                      <text-expander keys=": @" data-emoji-url="<%= emoji_suggestions_path %>" data-mention-url="<%= organization_suggestions_path %>">
+                        <%if !current_user.change_company_enabled? && current_user.is_enterprise_managed? %>
+                          <strong><%= current_user.profile_company %></strong>
+                          <p class="note">
+                            Your GitHub account is synced with your identity provider. Please contact your IDP administrator to request any changes.
+                            <%= contact_support_snippet %> if you have questions.
+                          </p>
+                        <% else %>
+                          <%= f.text_field :profile_company, autocomplete: "off" %>
+                        <% end %>
+                      </text-expander>
+                      <p class="note">
+                        You can <strong>@mention</strong> your company’s GitHub
+                        organization to link it.
+                      </p>
+                      <% if current_user.employee? && !GitHub.hidden_teamster?(current_user) %>
+                        <p class="note">
+                          This field will not be displayed on your profile because you’re <%= render(Primer::Beta::Label.new(scheme: :info, text_transform: :uppercase)) { "Staff" } %>.
+                        </p>
+                      <% end %>
+                    </dd>
+                  </dl>
+                <% end %>
+              <hr>
+              <dl class="form-group" <%= test_selector("location-is-rendered") %>>
+                <dt><%= f.label :profile_location, "Location" %></dt>
+                <dd><%= f.text_field :profile_location %></dd>
+              </dl>
+
+              <div class="form-group form-checkbox" <%= test_selector("display-local-time-is-rendered") %>>
+                <%= check_box_tag "user[profile_display_local_time_zone]", "1", current_user.profile_local_time_zone_name.present?, class: "form-checkbox-details-trigger" %>
+                <%= f.label :profile_display_local_time_zone, "Display current local time" %>
+                <p class="note">
+                  Other users will see the time difference from their local time.
+                </p>
+                <div class="form-checkbox-details">
+                  <dl>
+                    <dt><%= f.label :profile_local_time_zone_name, "Time zone" %></dt>
+                    <dd>
+                      <%= f.time_zone_select :profile_local_time_zone_name, nil, {}, class: "form-select" %>
+                    </dd>
+                  </dl>
+                </div>
+              </div>
+
+              <%= spamurai_form_signals %>
+
+              <% unless GitHub.enterprise? %>
+                <p class="note mb-2">
+                  All of the fields on this page are optional and can be deleted at any
+                  time, and by filling them out, you're giving us consent to share this
+                  data wherever your user profile appears. Please see our
+                  <%= render(Primer::Beta::Link.new(href: site_privacy_url(:host => GitHub.urls.host_name), classes: "Link--inTextBlock")) { "privacy statement" }%>
+                  to learn more about how we use this information.
+                </p>
+              <% end %>
+
+              <p>
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  scheme: :primary,
+                  "data-target": "waiting-form.submit",
+                  "data-action": "click:waiting-form#submitPolitely"
+                ).with_content("Update profile") %>
+              </p>
+            <% end %>
+          </div>
+        <% end %>
+      </waiting-form>
+
+      <% unless current_user&.is_enterprise_managed? %>
+        <% if current_user.profile_email.present? %>
+          <%= form_tag(
+            settings_profile_email_path,
+            method: :delete,
+            id: "unset_profile_email",
+          ) do %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if show_orcid_controls? %>
+        <%= form_tag(
+          settings_orcid_connection_url,
+          method: :delete,
+          id: "orcid_disconnect_form",
+        ) %>
+      <% end %>
+    </div>
+
+    <div class="<% if responsive? %>col-12 col-md-4<% else %>col-4<% end %>">
+      <%= render partial: "settings/avatar", locals: { owner: current_user } %>
+    </div>
+  </div>
+
+  <%
+    private_profile_enabled = GitHub.flipper[:private_profile_setting].enabled?(current_user)
+    remove_beta_label = user_feature_enabled?(:remove_private_profile_beta)
+  %>
+
+  <% if private_profile_enabled %>
+    <div class="d-inline-block" <%= test_selector("contributions-dev-program-profile-rendered") %>>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h2, id: "contributions-activity-heading") do %>Contributions & activity<% end %>
+      <% end %>
+      <%= form_for current_user, :url => set_private_contributions_preference_user_path(current_user), :html => { :method => :put, :id => "user_profile_contributions_#{current_user.id}", :"aria-labelledby" => "contributions-activity-heading" } do |f| %>
+        <div class="form-checkbox mt-0">
+            <input type="hidden" name="user[private_profile]" value="0">
+            <input type="checkbox" name="user[private_profile]" value="1" id="user_private" <%= "checked" if current_user.private_profile %>>
+            <label for="user_private">Make profile private and hide activity</label> <% if !remove_beta_label %> <%= render GitHub::BetaFlagComponent.new(ml: 1) %> <% end %>
+            <span class="note">Enabling this will hide your contributions and activity from your GitHub profile and from social features like
+            followers, stars, feeds, leaderboards and releases.</span>
+        </div>
+        <div class="form-checkbox mt-0">
+          <input type="hidden" name="user[show_private_contribution_count]" value="0">
+          <input type="checkbox" name="user[show_private_contribution_count]" value="1" id="user_show_private_contribution_count"<% if show_private_contribution_count? %> checked<% end %>>
+          <label for="user_show_private_contribution_count">Include private contributions on my profile</label>
+          <% if GitHub.achievements_enabled? %>
+            <span class="note">Your contribution graph, achievements, and activity overview will show your private contributions without revealing any repository or
+              organization information. <%= render(Primer::Beta::Link.new(href: docs_url("account-and-profile/contributions-on-profile"), classes: "Link--inTextBlock")) { "Read more" }%>.
+            </span>
+          <% else %>
+            <span class="note">Get credit for all your work by showing the number of contributions to private repositories on your profile without any repository or
+              organization information. <%= render(Primer::Beta::Link.new(href: docs_url("account-and-profile/contributions-on-profile"), classes: "Link--inTextBlock")) { "Learn how we count contributions" }%>.
+            </span>
+          <% end %>
+        </div>
+        <%= render Primer::ButtonComponent.new(type: :submit) do %>Update preferences<% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% show_acv_badge_setting = current_user.can_have_acv_badge? %>
+  <% show_nasa_badge_setting = current_user.can_have_nasa_badge? %>
+
+  <% if current_user.can_have_pro_badge? ||
+      show_acv_badge_setting ||
+      show_nasa_badge_setting ||
+      GitHub.achievements_enabled?
+  %>
+    <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+      <% heading_text = private_profile_enabled ? "Profile Badges" : "Profile Settings" %>
+      <% component.with_heading(tag: :h2, id: "profile-settings-heading") do %>Profile settings<% end %>
+    <% end %>
+    <%= form_for current_user, url: set_profile_badges_preference_user_path(current_user), method: :put, html: {id: "", "aria-labelledby": "profile-settings-heading"} do |f| %>
+      <% if current_user.can_have_pro_badge? %>
+        <div class="form-checkbox mt-0">
+          <input type="hidden" name="user[pro_badge_enabled]" value="0">
+          <input type="checkbox" name="user[pro_badge_enabled]" value="1" id="user_pro_badge_enabled"<% if pro_badge_enabled? %> checked<% end %>>
+          <label for="user_pro_badge_enabled">Display PRO badge</label>
+          <span class="note">
+            This will display the
+            <%= render partial: "users/pro_badge", locals: { show_octicon: false } %>
+            badge on your public profile page.
+          </span>
+        </div>
+      <% end %>
+      <% if GitHub.achievements_enabled? %>
+          <div class="form-checkbox mt-0">
+            <input type="hidden" name="user[achievements_enabled]" value="0">
+            <input
+              type="checkbox"
+              name="user[achievements_enabled]"
+              value="1"
+              id="user_achievements_enabled"
+              <% if achievements_enabled? %>checked<% end %>
+            >
+            <label for="user_achievements_enabled">Show Achievements on my profile</label>
+            <span class="note">Your achievements will be shown on your profile.</span>
+          </div>
+
+          <% if feature_enabled_globally_or_for_current_user?(:achievements_opt_out_private_tracking) %>
+            <div class="form-checkbox mt-0">
+              <input type="hidden" name="user[achievements_projects_opt_out]" value="0">
+              <input
+                type="checkbox"
+                name="user[achievements_projects_opt_out]"
+                value="1"
+                id="user_achievements_projects_opt_out"
+                <% if all_private_projects_opted_out_of_achievements_tracking? %>checked<% end %>
+              >
+              <label for="user_achievements_projects_opt_out">
+                Do not track my private repositories for achievements
+              </label>
+              <span class="note">
+                None of the contributions or events that occur in your private
+                repositories will count towards the progress of any achievements
+                for any user. This will only affect future contributions and
+                events. Any progress, or awarded achievements, that any user has
+                already earned will not be affected.
+              </span>
+            </div>
+          <% end %>
+      <% else %>
+        <% if show_acv_badge_setting %>
+          <div class="form-checkbox mt-0">
+            <input type="hidden" name="user[acv_badge_enabled]" value="0">
+            <input type="checkbox" name="user[acv_badge_enabled]" value="1" id="user_acv_badge_enabled" <% if acv_badge_enabled? %>checked<% end %>>
+            <label for="user_acv_badge_enabled">Display Arctic Code Vault badge</label>
+            <span class="note">
+              This will display the
+              <span class="label color-fg-muted"><%= primer_octicon(:"north-star") %>Arctic Code Vault Contributor</span>
+              badge on your public profile page.
+            </span>
+          </div>
+        <% end %>
+        <% if show_nasa_badge_setting %>
+          <div class="form-checkbox mt-0">
+            <input type="hidden" name="user[nasa_badge_enabled]" value="0">
+            <input type="checkbox" name="user[nasa_badge_enabled]" value="1" id="user_nasa_badge_enabled" <% if nasa_badge_enabled? %>checked<% end %>>
+            <label for="user_nasa_badge_enabled">Display Mars 2020 Helicopter Contributor badge</label>
+            <span class="note">
+              This will display the
+              <span class="label color-fg-muted">Mars 2020 Helicopter Contributor</span>
+              badge on your public profile page.
+            </span>
+          </div>
+        <% end %>
+      <% end %>
+      <%= render Primer::ButtonComponent.new(type: :submit) do %>Update preferences<% end %>
+    <% end %>
+  <% end %>
+
+  <% if current_user.employee? %>
+    <div class="d-inline-block">
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h2, id: "staff-profile-settings-heading") do %>Staff profile settings<% end %>
+      <% end %>
+      <%= form_for current_user, :url => real_user_path(current_user), :html => { :method => :put, :id => "staff_badge_#{current_user.id}", :"aria-labelledby" => "staff-profile-settings-heading" } do |f| %>
+        <div class="form-checkbox mt-0">
+          <%= f.check_box :profile_display_staff_badge %>
+          <%= f.label :profile_display_staff_badge, "Display staff badge" %>
+          <span class="note">Uncheck this box to hide the <%= render(Primer::Beta::Label.new(scheme: :info, text_transform: :uppercase)) { "Staff" } %> badge on your public profile page.
+          Other employees can always see your badge, and users may still be able to determine that you're an employee via the API.</span>
+        </div>
+        <%= render Primer::ButtonComponent.new(type: :submit) do %>Update staff preferences<% end %>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% unless current_user&.is_enterprise_managed? %>
+    <div class="d-inline-block" <%= test_selector("contributions-dev-program-profile-rendered") %>>
+      <% unless private_profile_enabled %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2, id: "contributions-heading") do %>Contributions<% end %>
+        <% end %>
+        <%= form_for current_user, :url => set_private_contributions_preference_user_path(current_user), :html => { :method => :put, :id => "user_profile_contributions_#{current_user.id}", :"aria-labelledby" => "contributions-heading" } do |f| %>
+          <div class="form-checkbox mt-0">
+            <input type="hidden" name="user[show_private_contribution_count]" value="0">
+            <input type="checkbox" name="user[show_private_contribution_count]" value="1" id="user_show_private_contribution_count"<% if show_private_contribution_count? %> checked<% end %>>
+            <label for="user_show_private_contribution_count">Include private contributions on my profile</label>
+            <% if GitHub.achievements_enabled? %>
+              <span class="note">Your contribution graph, achievements, and activity overview will show your private contributions without revealing any repository or
+                organization information. <%= render(Primer::Beta::Link.new(href: docs_url("account-and-profile/contributions-on-profile"), classes: "Link--inTextBlock")) { "Read more" }%>.
+              </span>
+            <% else %>
+              <span class="note"> Get credit for all your work by showing the number of contributions to private repositories on your profile without any repository or
+                organization information.  <%= render(Primer::Beta::Link.new(href: docs_url("account-and-profile/contributions-on-profile"), classes: "Link--inTextBlock")) { "Read more" }%>.
+              </span>
+            <% end %>
+          </div>
+          <%= render Primer::ButtonComponent.new(type: :submit) do %>Update contributions<% end %>
+        <% end %>
+      <% end %>
+      <%= render :partial => "settings/developer_program", :locals => { :current_context => current_user } %>
+      <% if !GitHub.enterprise? %>
+        <!-- Jobs Profile -->
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2, id: "jobs-profile-heading") do %>Jobs profile<% end %>
+        <% end %>
+        <%= form_for current_user, :url => real_user_path(current_user), :html => { :method => :put, :id => "jobs_profile_#{current_user.id}", :"aria-labelledby" => "jobs-profile-heading" } do |f| %>
+          <p>
+            <%= f.check_box :profile_hireable %>
+            <label for="user_profile_hireable">Available for hire</label>
+          </p>
+          <span class="success" style="display: none"><%= render(Primer::Beta::Octicon.new(icon: "check")) %> Saved</span>
+          <%= render Primer::ButtonComponent.new(type: :submit) do %>Save jobs profile<% end %>
+        <% end %>
+      <% end %>
+
+      <% if !GitHub.enterprise? %>
+        <!-- Trending Settings -->
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2, id: "trending-settings-heading") do %>Trending settings<% end %>
+        <% end %>
+
+        <%= form_for(
+          current_user,
+          url: real_user_path(current_user),
+          html: {
+            method: :put,
+            id: "trending_settings_#{current_user.id}",
+            "aria-labelledby": "trending-settings-heading",
+          },
+        ) do |f| %>
+          <dl class="form-group">
+            <dt>
+              <label for="user_profile_spoken_language_preference_code">
+                <%= render Primer::Beta::Text.new(font_weight: :bold) do %>
+                  Preferred spoken language
+                <% end %>
+              </label>
+            </dt>
+
+            <dd>
+              <%= f.select(
+                :profile_spoken_language_preference_code,
+                Trending::SpokenLanguageFinder.preference_selections,
+                class: "form form-select",
+              ) %>
+            </dd>
+          </dl>
+
+          <p class="note">
+            We'll use this language preference to filter the trending repository lists on
+            <%= render(Primer::Beta::Link.new(href: explore_path, classes: "Link--inTextBlock")) { "Explore" }%>
+            our <%= render(Primer::Beta::Link.new(href: trending_index_path, classes: "Link--inTextBlock")) { "Trending Repositories" }%> page.
+          </p>
+
+          <%= f.submit "Save Trending settings", class: "btn" %>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

@@ -1,0 +1,89 @@
+#!/bin/bash
+
+export ALAMBIC_ADDR=127.0.0.1:3003
+export ALAMBIC_HMAC_KEY=octocat
+export AVATARS_HMAC_KEY=octocat
+export AVATARS_HMAC_STAMP_TAG=multi-tenant-development
+export LOCALCDN_PROXY_BASE=http://127.0.0.1:3003/origin
+export CDN_ENDPOINT=http://127.0.0.1:3003/origin/cdn
+export CDN_TOKEN=github.localhost # see GitHub.alambic_cdn_token
+export CDN_FASTLY_TOKEN=github.localhost
+export ENTERPRISE_ALAMBIC_AVATARS_ENABLED=1
+export GIT_SHA=$(cat config/alambic-version)
+export ALAMBIC_DB_FETCH_ENABLED=100
+export AVATARS_MEDIA_URL_TYPE=ghe
+export MYSQL_PRODUCTION_READONLY_HOST=127.0.0.1:3306
+export MYSQL_PRODUCTION_READONLY_DB=github_development
+export MYSQL_PRODUCTION_READONLY_USER=root
+export MYSQL_PRODUCTION_READONLY_PASSWORD=
+export MYSQL_PRODUCTION_READONLY_LOC=US/Pacific
+
+if [ "$GH_CLUSTER" = "0" ]; then
+  export STORAGE_PATH_PREFIX=assets
+else
+  export ALAMBIC_USE_STORAGE_ADAPTER="1"
+  export ALAMBIC_REPLICATOR=alambic
+  export ALAMBIC_NODE_NAME=localhost:3003
+  export REPLICATION_TOKEN=octocat
+fi
+
+if [ "$MULTI_TENANT_ENTERPRISE" = "1" ]; then
+  export ALAMBIC_MULTI_TENANT_ENTERPRISE=1
+  export AUTHENTICATED_AVATARS=1
+fi
+
+SKIP_ALAMBIC="${SKIP_ALAMBIC:-false}"
+
+if [ "$SKIP_ALAMBIC" = "true" ] || [ "$SKIP_ALAMBIC" = "1" ]; then
+  echo "alambic has been disabled"
+  sleep infinity
+elif [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  source $SCRIPT_DIR/dx/lib/subproject-containers
+
+  SUBPROJECT_VERSION=$(subproject_version "alambic")
+  echo "alambic version $SUBPROJECT_VERSION"
+  IMAGE=ghcr.io/github/alambic/alambic
+
+  pushd $SCRIPT_DIR/..
+  mkdir -p ./tmp/alambic/uploads
+
+  # Ensure we clean up any existing containers
+  cleanup_docker() {
+    echo "Stopping alambic..."
+    docker stop alambic || true
+    exit 0
+  }
+  trap cleanup_docker EXIT INT QUIT TERM HUP
+
+  # Make sure we don't have something leftover
+  docker stop alambic &> /dev/null || true
+  docker rm alambic &> /dev/null || true
+
+  # Quite a bit of config, capture and propagate the full env rather than sorting through it
+  env | sort | grep -viE "shell|prompt" > /tmp/alambic.env
+
+  # Run the service, mounting /tmp to keep state across runs
+  docker run -d --rm --name alambic \
+    --env-file /tmp/alambic.env \
+    --volume $(pwd)/tmp/alambic:/tmp/ \
+    --network host "$IMAGE:$SUBPROJECT_VERSION"
+
+  docker logs --follow alambic&
+  # for trap to work, we can't foreground "docker logs"; need to wait
+  wait
+else
+  script/build-subproject alambic || exit 1
+
+  ALAMBIC_BIN="vendor/alambic/bin/alambic"
+  until [ -x $ALAMBIC_BIN ]; do
+    # keeps this process alive, which keeps overmind alive.
+    # we can remove this if we're sure _all_ GitHub devs can build Alambic
+    # successfully.
+    sleep 60
+  done
+
+  export LOCALCDN_DIR="$(pwd)/vendor/alambic/cache"
+
+  exec $ALAMBIC_BIN
+fi

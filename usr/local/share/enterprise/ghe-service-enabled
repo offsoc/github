@@ -1,0 +1,37 @@
+#!/bin/bash
+
+service=$1
+
+if [ -f /etc/github/cluster ]; then
+  declare -A services_map
+
+  eval "services_map=($(
+    cat /usr/local/share/enterprise/services_map.json | jq '. as $in| keys[] | [.] + $in[.] | "[\"\(.[0])\"]=\"\(.[1:] | join(" " ))\""' -r
+  ))"
+
+  if [ -z "$2" ]; then
+    hostname=$(cat /etc/github/cluster)
+  else
+    hostname="$2"
+  fi
+  for role in ${services_map[$service]}; do
+    # Stop any service if node is marked offline
+    if [ "$(ghe-config cluster.$hostname.offline)" = true ]; then
+      exit 1
+    fi
+    if [ "${role:0:1}" = "!" ]; then
+      role=$(echo "$role" | sed 's/!//')
+      if [ "$(ghe-config cluster.$hostname.$role)" != true ]; then
+        exit 0
+      fi
+    else
+      if [ "$(ghe-config cluster.$hostname.$role)" = true ]; then
+        exit 0
+      fi
+    fi
+  done
+  exit 1
+else
+  # Only service not running in a single VM instance is ernicorn (unless app.ernicorn.single_node_enabled is set to true)
+  [ "$service" != "github-ernicorn" ] || [ $(ghe-config --true app.ernicorn.single_node_enabled) ]
+fi

@@ -1,0 +1,269 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+if $0 == __FILE__
+  # Rails will complain about being unable to load the production log on an
+  # ops-shell host, and then it will promptly spew all of the logs to STDERR.
+  # We don't care that the log can't be opened and don't want to see the log
+  # messages, so just silence them.  We don't use STDOUT or STDERR below, so we
+  # don't reset them, since Ruby will warn about that.
+  begin
+    old_stderr = $stderr
+    old_stdout = $stdout
+    ::STDOUT = ::STDERR = $stdout = $stderr = File.open("/dev/null", "w")
+    require File.expand_path("../../config/environment", __FILE__)
+  ensure
+    $stderr = old_stderr
+    $stdout = old_stdout
+  end
+
+  Failbot.disable    # suppress failbot reporting of unhandled exceptions
+end
+require "github/config/mysql"
+require "optparse"
+
+GitHub.load_activerecord
+
+class LFSUsageExtractor
+  def initialize(stdout: $stdout, stderr: $stderr)
+    @stdout = stdout
+    @stderr = stderr
+  end
+
+  def parse_args(args)
+    options = {
+      header: true,
+      by: :owner,
+      to: Time.now.utc,
+    }
+    success = true
+    opts = OptionParser.new do |opts|
+      opts.banner = <<~EOM
+      Usage: lfs-extract-usage --bandwidth {--owner OWNER | --owners OWNERS} --from RFC3339 [OPTIONS]
+             lfs-extract-usage --storage {--owner OWNER | --owners OWNERS} [OPTIONS]
+
+      Extract LFS usage data and print it out in a CSV format.
+
+      For bandwidth, extract the data for the specified time range (ending now, if
+      not specified), bucketed by hour UTC.  For storage, extract the storage data for the owner.
+
+      The --by argument defaults to breakdowns by owner only ("owner").  Also
+      available are "actor" (only by actor) and "repo" (actor and repo) for
+      bandwidth and "repo-network" for storage.
+
+      The position of the --numeric option is important; it affects only subsequent arguments.
+
+      EOM
+
+      opts.on("--by BREAKDOWN", "Read inputs as IDs instead of names") do |type|
+        options[:by] = case type
+        when "owner"
+          :owner
+        when "actor"
+          :actor
+        when "repo", "repository"
+          :repo
+        when "repo-network", "repository-network"
+          :repo_network
+        else
+          raise OptionParser::InvalidArgument
+        end
+      end
+
+      opts.on("--[no-]header", "Print a header") do |header|
+        options[:header] = header
+      end
+
+      opts.on("--numeric", "Read inputs as IDs instead of names") do
+        options[:numeric] = true
+      end
+
+      opts.on("--user USER", "--users USERS", "Comma-separated value of user actors to extract data for") do |users|
+        options[:user] = if options[:numeric]
+          ::User.where(id: users.split(",").map { |x| Integer(x) }).to_a.compact
+        else
+          ::User.with_logins(users.split(",")).to_a.compact
+        end
+      end
+
+      opts.on("--key KEY", "--keys KEYS", "Comma-separated value of deploy key actors to extract data for") do |keys|
+        options[:key] = if options[:numeric]
+          ::PublicKey.where(id: keys.split(",").map { |x| Integer(x) }).to_a.compact
+        else
+          ::PublicKey.where(fingerprint_sha256: keys.split(",")).to_a.compact
+        end
+      end
+
+      opts.on("--from FROM", "Start timestamp, RFC 3339") do |from|
+        options[:from] = Time.iso8601(from)
+      end
+
+      opts.on("--to TO", "End timestamp, RFC 3339 (default now)") do |to|
+        options[:to] = Time.iso8601(to)
+      end
+
+      opts.on("--owner OWNER", "--owners OWNERS", "Comma-separated value of owners") do |owner|
+        options[:owner] = if options[:numeric]
+          ::User.where(id: owner.split(",").map { |x| Integer(x) }).to_a.compact
+        else
+          ::User.with_logins(owner.split(",")).to_a.compact
+        end
+      end
+
+      opts.on("--storage", "Extract storage usage") do
+        options[:mode] = :storage
+      end
+
+      opts.on("--bandwidth", "Extract bandwidth useage") do
+        options[:mode] = :bandwidth
+      end
+
+      opts.on("--help", "Prints this help") do
+        @stdout.puts opts
+        options[:mode] = :help
+      end
+    end
+    opts.parse!(args)
+    if options[:mode].nil?
+      @stderr.puts opts
+      success = false
+    elsif options[:mode] == :storage && (options[:user] || options[:key] || options[:from])
+      @stderr.puts "--user, --key, and --from cannot be used with --storage"
+      success = false
+    elsif options[:mode] == :bandwidth && !options[:from]
+      @stderr.puts "--from is required with --bandwidth"
+      success = false
+    elsif options[:mode] == :bandwidth && (options[:user] && options[:key])
+      @stderr.puts "--user and --key are mutually exclusive"
+      success = false
+    end
+    [options, success]
+  end
+
+  # As specified in RFC 4180.
+  def format_csv(line)
+    line.map do |x|
+      s = x.to_s
+      # We don't expect to hit this case, but it exists here in case we should
+      # in the future.
+      if s =~ /[",\n]/
+        "\"#{s.gsub('"', '""')}\""
+      else
+        x
+      end
+    end.join(",")
+  end
+
+  def compute_storage(opts)
+    all_network_ids = opts[:owner].flat_map do |user|
+      Media::Blob.possible_lfs_network_ids(user)
+    end
+    usage = []
+    all_network_ids.each do |id|
+      next if id.nil?
+      # We only consume verified blobs since users are only charged for verified
+      # blobs.
+      total = Media::Blob.where(repository_network_id: id, state: Media::Blob.states[:verified]).sum(:size)
+      if total > 0
+        root = RepositoryNetwork.find_by_id(id)&.root
+        if root
+          usage << { owner: root.owner&.name || "deleted user", root: root.nwo, storage: total }
+        end
+      end
+    end
+    if opts[:by] == :owner
+      by_owner = usage.reduce({}) { |memo, x| memo[x[:owner]] ||= 0; memo[x[:owner]] += x[:storage]; memo }
+      output = by_owner.sort_by { |(k, _v)| k }.map { |items| format_csv(items) }.join("\n")
+      @stdout.puts "owner,storage (B)\n#{output}"
+      0
+    elsif opts[:by] == :repo_network
+      output = usage.sort_by { |x| x[:root] }.map do |items|
+        format_csv(items.fetch_values(:owner, :root, :storage))
+      end.join("\n")
+      @stdout.puts "owner,repository root,storage (B)\n#{output}"
+      0
+    else
+      @stderr.puts "I don't know how to aggregate that way."
+      2
+    end
+  end
+
+  def compute_bandwidth(opts)
+    act = Asset::ActorActivity.where(asset_type: Asset::ActorActivity.asset_types[:lfs], owner: opts[:owner]).
+      where("activity_started_at >= ? AND activity_started_at < ?", opts[:from], opts[:to])
+    if opts[:user]
+      act = act.where(actor: opts[:user])
+    elsif opts[:key]
+      act = act.where(key: opts[:key])
+    end
+    usage = act.map do |r|
+      {
+        hour: r.activity_started_at.utc.iso8601,
+        owner: r.owner&.name || "deleted user",
+        repository: r.repository&.nwo || "unknown repository",
+        actor: r.actor&.name || r.key&.fingerprint_sha256 || "anonymous user",
+        bandwidth_down: r.bandwidth_down,
+        bandwidth_up: r.bandwidth_up,
+      }
+    end
+    case opts[:by]
+    when :owner
+      by_owner = usage.reduce({}) do |memo, x|
+        key = [x[:owner], x[:hour]]
+        memo[key] ||= [0.0, 0.0]
+        memo[key] = [memo[key][0] + x[:bandwidth_down], memo[key][1] + x[:bandwidth_up]]
+        memo
+      end
+      output = by_owner.sort_by { |(k, _)| k }.map do |((owner, hour), (bw_down, bw_up))|
+        format_csv([owner, hour, bw_down, bw_up])
+      end.join("\n")
+      @stdout.puts "owner,hour (UTC),bandwidth down (GB),bandwidth up (GB)\n#{output}"
+      0
+    when :actor
+      by_actor = usage.reduce({}) do |memo, x|
+        key = [x[:owner], x[:hour], x[:actor]]
+        memo[key] ||= [0.0, 0.0]
+        memo[key] = [memo[key][0] + x[:bandwidth_down], memo[key][1] + x[:bandwidth_up]]
+        memo
+      end
+      output = by_actor.sort_by { |(k, _)| k }.map do |((owner, hour, actor), (bw_down, bw_up))|
+        format_csv([owner, hour, actor, bw_down, bw_up])
+      end.join("\n")
+      @stdout.puts "owner,hour (UTC),actor,bandwidth down (GB),bandwidth up (GB)\n#{output}"
+      0
+    when :repo
+      output = usage.sort_by { |x| [x[:owner], x[:hour], x[:repository], x[:actor]] }.map do |data|
+        format_csv(data.fetch_values(:owner, :hour, :repository, :actor, :bandwidth_down, :bandwidth_up))
+      end.join("\n")
+      @stdout.puts "owner,hour (UTC),repository,actor,bandwidth down (GB),bandwidth up (GB)\n#{output}"
+      0
+    else
+      @stderr.puts "I don't know how to aggregate that way."
+      2
+    end
+  end
+
+  def main(args)
+    # We're not writing anything here, so let's only connect to the slow read
+    # replicas to minimize our impact on real user traffic.
+    ActiveRecord::Base.connected_to(role: :reading_slow) do
+      begin
+        opts, success = parse_args(args)
+        return 2 unless success
+        case opts[:mode]
+        when :help
+          0
+        when :storage
+          compute_storage(opts)
+        when :bandwidth
+          compute_bandwidth(opts)
+        end
+      rescue OptionParser::InvalidOption => e
+        @stderr.puts e
+        3
+      end
+    end
+  end
+end
+
+exit LFSUsageExtractor.new.main(ARGV) if $0 == __FILE__

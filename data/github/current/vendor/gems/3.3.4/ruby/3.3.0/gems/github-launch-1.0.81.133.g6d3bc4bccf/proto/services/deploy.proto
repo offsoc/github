@@ -1,0 +1,308 @@
+syntax = "proto3";
+package git_hub.launch.services.deploy;
+
+option go_package = "github.com/github/launch/services/pb/deploy";
+
+import "pbtypes/github.proto";
+import "pbtypes/deploy.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// LaunchDeploymentService is the internal interface for the execution
+// side of launch.
+//
+// These methods should only be called service-to-service style, in a
+// context where we've already authorized that the action is allowed.
+service LaunchDeploymentService {
+    // SetupRepository will do the work required to setup a repository for Actions, such as creating tenants on the actions platform.
+    // It will simply return quickly if that work has already been done, so should be no harm in calling it multiple times.
+    rpc SetupRepository (SetupRepositoryRequest) returns (SetupRepositoryResponse);
+
+    // SetupRepository will do the work required to setup a single tenant for Actions, such as for an organization or enterprise
+    // It will simply return quickly if that work has already been done, so should be no harm in calling it multiple times.
+    rpc SetupTenant (SetupTenantRequest) returns (SetupTenantResponse);
+
+    // NotifyRepository handles repository events from GitHub so we can update schedules in response to repo delete/default branch change
+    rpc NotifyRepository (pbtypes.deploy.NotifyRepositoryEvent) returns (google.protobuf.Empty);
+
+    // GetWorkflowBillingDetails gets information about a workflows billing usage limits.
+    rpc GetWorkflowBillingDetails (GetWorkflowBillingDetailsRequest) returns (WorkflowBillingDetailsResponse);
+
+    // GetWorkflowSecurityDetails indicates if secrets should be sent down to a runner for a given workflow execution.
+    rpc GetWorkflowSecurityDetails (GetWorkflowSecurityDetailsRequest) returns (GetWorkflowSecurityDetailsResponse);
+
+    // WorkflowCancel cancels/stops a Workflow and any Actions it contains.
+    rpc WorkflowCancel (WorkflowCancelRequest) returns (google.protobuf.Empty);
+
+    // WorkflowCancelAll cancels/stops all workflows for the passed in repository.
+    rpc WorkflowCancelAll (WorkflowCancelAllRequest) returns (WorkflowCancelAllResponse);
+
+    // WorkflowCancelAllForNonOwnerRepos cancels/stops all workflows for all the repos invoked by given actor but not an owner.
+    rpc WorkflowCancelAllForNonOwnerRepos (WorkflowCancelAllForNonOwnerReposRequest) returns (WorkflowCancelAllForNonOwnerReposResponse);
+
+    rpc GetAZForGlobalIDChatops (GetAZForGlobalIDChatopsRequest) returns (GetAZForGlobalIDChatopsResponse);
+
+    rpc RepoByAZPTenant (RepoByAZPTenantRequest) returns (RepoByAZPTenantResponse);
+
+    // DeleteSchedules deletes all scheduled workflows for the given repository in the given environment
+    rpc DeleteSchedules (pbtypes.deploy.DeleteSchedulesRequest) returns (pbtypes.deploy.DeleteSchedulesResponse);
+
+    // ListSchedules lists all scheduled workflows for the given repository in the given environment
+    rpc ListSchedules (pbtypes.deploy.ListSchedulesRequest) returns (pbtypes.deploy.ListSchedulesResponse);
+
+    // SynchronizeSchedulesWorkflows handles enabling scheduled workflows without a push/commit to the repository or workflow
+    // Responsible for scenarios such as running scheduled workflows when a repository is first forked or when a previously disabled workflow is enabled
+    rpc SynchronizeScheduledWorkflows (pbtypes.deploy.SynchronizeScheduledWorkflowsRequest) returns (google.protobuf.Empty);
+
+    rpc DisableScheduledWorkflow (pbtypes.deploy.DisableScheduledWorkflowRequest) returns (google.protobuf.Empty);
+
+    // AbuseStatus handles an Abuse Status payload which is passed on from the Receiver Service
+    rpc AbuseStatus (AbuseStatusRequest) returns (AbuseStatusResponse);
+
+    //AbuseDetectionStatus receives a payload from Actions containing information on new accounts (created in the last 7 days) that are exhibiting anomalous usage
+    rpc AbuseDetectionStatus (AbuseStatusRequest) returns (AbuseStatusResponse);
+
+    rpc ResolveActions (ResolveActionsRequest) returns (ResolveActionsResponse);
+
+    // ReportAdminEventForOwnerRepos let actions service know that a certain admin event happened to all repositories of an owner along with some metadata, ex: the user is marked as spammy.
+    rpc ReportAdminEventForOwnerRepos (ReportAdminEventForOwnerReposRequest) returns (google.protobuf.Empty);
+
+    // GetTenantIds returns the tenant IDs for a given owner (i.e. user/org)
+    rpc GetTenantIds(GetTenantIDsRequest) returns (GetTenantIDsResponse);
+
+    // ReportAdminEventForBillingOwner let actions service know that a certain admin event happened to an billing owner along with some metadata, ex: the user is deleted.
+    // This is a temporary solution for fixing urgent abuse issue https://github.com/github/c2c-actions-experience/issues/4646
+    // This should be removed after https://github.com/github/coding/issues/881 is fixed.
+    // If you want to use this RPC endpoint for whatever reason, get sign-off from both actions-runtime and actions-launch teams.
+    rpc ReportAdminEventForBillingOwner (ReportAdminEventForBillingOwnerRequest) returns (google.protobuf.Empty);
+
+    // RunDynamicWorkflow bypasses the standard webhook event-based workflow
+    // triggers, and instead allows a workflow YAML itself to be run against a
+    // repository without that workflow existing in the repo's git data.
+    rpc RunDynamicWorkflow(RunDynamicWorkflowRequest) returns (RunDynamicWorkflowResponse);
+}
+
+message ActionReference {
+    string name = 1;
+    string version = 2;
+    string path = 3;
+}
+
+message ResolvedActionAuthentication {
+    string token = 1;
+    google.protobuf.Timestamp expires_at = 2;
+}
+
+message ResolvedAction {
+    ActionReference action = 1;
+    string resolved_name = 2;
+    string resolved_sha = 3;
+    string tar_url = 4;
+    string zip_url = 5;
+    ResolvedActionAuthentication authentication = 6;
+}
+
+message ResolveActionsRequest {
+    string workflow_id = 1;
+    string job_id = 2;
+    repeated ActionReference actions = 3;
+    reserved "repository_id"; reserved 4;
+}
+
+message ResolveActionsResponse {
+    repeated ResolvedAction actions = 1;
+    repeated ResolvedActionError errors = 2;
+}
+
+message ResolvedActionError {
+    ActionReference action = 1;
+    string message = 2;
+}
+
+message SetupRepositoryRequest {
+    pbtypes.git_hub.Identity repository_id = 1;
+    pbtypes.git_hub.Identity owner_id = 2;
+    pbtypes.git_hub.Identity plan_owner_id = 3;
+    string owner = 4;
+    string name = 5;
+}
+
+message SetupRepositoryResponse {
+    string status = 1;
+    string error = 2;
+}
+
+message SetupTenantRequest {
+    pbtypes.git_hub.Identity global_relay_id = 1;
+    // Set to zero for immediate async return, otherwise pass in a timeout in milliseconds
+    int64 timeout_ms = 2;
+    pbtypes.git_hub.Identity owner_global_relay_id = 3;
+}
+
+message SetupTenantResponse {
+    string status = 1;
+    string error = 2;
+}
+
+enum RepositoryChangeType {
+    DefaultBranch = 0;
+}
+
+message WorkSlowResponse {
+    string job_id = 1;
+    string hostname = 2;
+}
+
+message ActionBuildStepStatus {
+    string identifier = 1;
+
+    string external_id = 2;
+    string external_status = 3;
+}
+
+message WorkflowCancelRequest {
+    pbtypes.git_hub.Identity check_suite_id = 1;
+    int64 canceled_by_id = 2;
+    string canceled_by_name = 3;
+    pbtypes.git_hub.Identity canceled_by_global_id = 4;
+    bool force = 5;
+}
+
+message WorkflowCancelAllRequest {
+    string owner = 1;
+    string name = 2;
+    pbtypes.git_hub.Identity repository_id = 3;
+    string event_type = 4;
+}
+
+message WorkflowCancelAllResponse {}
+
+message WorkflowCancelAllForNonOwnerReposRequest {
+    int64  actor_id = 1;
+    string actor_name = 2;
+    pbtypes.git_hub.Identity actor_global_id = 3;
+    string data = 4;
+}
+
+message WorkflowCancelAllForNonOwnerReposResponse {
+    int64 workflow_count = 1;
+}
+
+message GetAZForGlobalIDChatopsRequest {
+    string global_relay_id = 1;
+    string env = 2;
+}
+
+message GetAZForGlobalIDChatopsResponse {
+    string AzTenantName = 1;
+    string AzTenantID = 2;
+    string GlobalID = 3;
+}
+
+message GetWorkflowBillingDetailsRequest {
+    string WorkflowID = 1;
+    string JobID = 2;
+    string ProductSku = 3;
+    bool IsHostedRunner = 4;
+}
+
+message WorkflowBillingDetailsResponse {
+    bool IsStorageAllowed = 1;
+    bool IsUsageAllowed = 2;
+    bool IsOwnerSpammy = 3;
+    pbtypes.git_hub.Identity repository_id = 4;
+    bool IsBillingChecked = 5;
+}
+
+message GetWorkflowSecurityDetailsRequest {
+    string WorkflowID = 1;
+}
+
+message GetWorkflowSecurityDetailsResponse {
+    bool AreActionsSecretsAllowed = 1;
+    bool AreActionsEnvironmentSecretsAllowed = 2;
+    bool IsIDTokenGenerationAllowed = 3;
+    bool AreActionsEnvironmentVariablesAllowed = 4;
+}
+
+message WorkflowWithBuild {
+    string BuildURL = 1;
+    string WorkflowFilePath = 2;
+    google.protobuf.Timestamp QueuedAt = 3;
+    string WorkflowBuildID = 4;
+}
+
+message AbuseStatusRequest {
+    // status is the payload body of the abuse status request from Actions Service
+    bytes status = 1;
+    string requestURI = 2;
+    bytes signature = 3;
+}
+
+message AbuseStatusResponse {
+    bool validSignature = 1;
+}
+
+message RepoByAZPTenantRequest {
+    string name = 1;
+}
+
+message RepoByAZPTenantResponse {
+    string repository_id = 1;
+    string nwo = 2;
+    string env = 3;
+}
+
+message ReportAdminEventForOwnerReposRequest {
+    int64  owner_id = 1;
+    string owner_name = 2;
+    string owner_global_id = 3;
+    string admin_event = 4;
+    string data = 5;
+}
+
+message GetTenantIDsRequest {
+    repeated pbtypes.git_hub.Identity owner_ids = 1;
+}
+
+message GetTenantIDsResponse {
+    repeated string tenant_ids = 1;
+}
+
+message ReportAdminEventForBillingOwnerRequest {
+    int64  owner_id = 1;
+    string owner_name = 2;
+    string owner_global_id = 3;
+    string admin_event = 4;
+    string data = 5;
+}
+
+message RunDynamicWorkflowRequest {
+    pbtypes.git_hub.Identity repository_id = 1; // Repo to run the workflow in
+    int64  installation_id = 2;
+    pbtypes.git_hub.Identity actor_id = 3;      // Identity of the actor
+    string actor_login = 4;
+    string workflow = 5;                        // The workflow YAML
+    string ref = 6;                             // Ref to run workflow against, defaults to default branch of the repository
+    map<string, string> inputs = 7;             // Optional `inputs` for the workflow
+    string integration_name = 8;                // Name of the integration, used as part of the workflow path
+    string slug = 9;                            // The slug, used at the end of the workflow path
+    string workflow_name = 10;                  // Name of the workflow, shown in the UI
+    Visibility visibility = 11;                 // Visibility on the check suite to be shown in the UI
+    reserved "secrets"; reserved 12;
+    reserved "secret_scope"; reserved 13;
+    int64 owner_id = 14;                       // The ID of the owner of the repository associated with the workflow
+    google.protobuf.Timestamp installation_valid_after = 15; // Indicates the time after which the installation is valid
+}
+
+enum Visibility {
+    DEFAULT = 0;
+    VISIBLE = 1;
+    HIDDEN = 2;
+}
+
+message RunDynamicWorkflowResponse {
+    string execution_id = 1; // external_id for the workflow run (a uuidv4)
+
+    int64 workflow_run_id = 2;
+}

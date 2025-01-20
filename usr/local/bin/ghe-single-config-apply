@@ -1,0 +1,294 @@
+#!/bin/bash
+#/ Usage: ghe-single-config-apply [-h]
+#/
+#/ This utility applies Management Console settings, reloads system services,
+#/ prepares a storage device, reloads application services, and runs any pending
+#/ database migrations. It only runs on this specific node in a multi node environment.
+#/ It is equivalent to clicking Save settings in the / Management Console's web UI
+#/
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/   --phase-1      Run phase 1 (System Services).
+#/   --phase-2      Run phase 2 (Migrations).
+#/   --phase-3      Run phase 3 (App Services).
+#/   --phase-4      Run phase 4 (Services Validation).
+#/
+set -e
+
+usage () {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+export GHE_CONFIG_APPLY_RUN_ID=${GHE_CONFIG_APPLY_RUN_ID:-$(echo $RANDOM | md5sum | head -c 16)}
+export GHE_CMD_RUN_ID=${GHE_CMD_RUN_ID:-"$(basename "$0")-$(echo $RANDOM | md5sum | head -c 16)"}
+
+TS_FORMAT='%Y-%m-%dT%H:%M:%S%z'
+
+[ "$(whoami)" = "root" ] || {
+  # FIXME This is a pretty nasty way to achieve this outcome, but probably better than a `-E`.
+  # Perhaps this should be a flag rather than ENV var, but that has issues with how
+  # `ghe-cluster-each` works. Ideally we wouldn't be switching to root at all here.
+  exec sudo -u root env GHE_CMD_RUN_ID="$GHE_CMD_RUN_ID" GHE_CONFIG_APPLY_RUN_ID="$GHE_CONFIG_APPLY_RUN_ID" GHE_CLUSTER_LOCAL_HOST="$GHE_CLUSTER_LOCAL_HOST" GHE_CONFIG_APPLY_FORCE="$GHE_CONFIG_APPLY_FORCE" "$0" "$@"
+  exit 1
+}
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+[ -n "$LOCKED_GHE_CONFIG" ] || {
+  export LOCKED_GHE_CONFIG=1
+  exec lockrun --lockfile=/var/run/ghe-config.pid -- "$0" "$@"
+}
+
+phase=""
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    --phase-1)
+      if [ -z "$phase" ]; then
+        phase=1
+      else
+        usage
+        exit 2
+      fi
+      ;;
+    --phase-2)
+      if [ -z "$phase" ]; then
+        phase=2
+      else
+        usage
+        exit 2
+      fi
+      ;;
+    --phase-3)
+      if [ -z "$phase" ]; then
+        phase=3
+      else
+        usage
+        exit 2
+      fi
+      ;;
+    --phase-4)
+      if [ -z "$phase" ]; then
+        phase=4
+      else
+        usage
+        exit 2
+      fi
+      ;;
+    *)
+      echo "Unknown argument: $1. Use -h or --help for details on available arguments." 1>&2
+      exit 2
+  esac
+done
+
+if ghe-config --true config-apply.lightweight.enabled; then
+  export GHE_CONFIG_APPLY_FORCE=${GHE_CONFIG_APPLY_FORCE:-""}
+else
+  export GHE_CONFIG_APPLY_FORCE=${GHE_CONFIG_APPLY_FORCE:-"1"}
+fi
+
+log_error() {
+  echo "$*" >&2
+  if [ -f $LOGFILE ]; then
+    echo "$*" | ts "$TS_FORMAT" >> $LOGFILE
+  fi
+}
+
+export LOGFILE=/data/user/common/ghe-config.log
+# ISO 8601 timestamp
+TS_REGEX="(\d{4})(-(0[1-9]|1[0-2])(-([12]\d|0[1-9]|3[01]))([T\s]((([01]\d|2[0-3])((:)[0-5]\d))([\:]\d+)?)?(:[0-5]\d([\.]\d+)?)?([zZ]|([\+-])([01]\d|2[0-3]):?([0-5]\d)?)?)?)"
+
+# Rotate the previous config-apply's ghe-config.log
+if [ -f $LOGFILE ]; then
+  if [ -z "$PREV_GHE_CONFIG_APPLY_RUN_ID" ]; then
+    # Grep our config apply run id from the logfile
+    # using a regex on the timestamp to exclude entries with "Previous Config Apply Run ID"
+    export PREV_GHE_CONFIG_APPLY_RUN_ID=$(grep -a -oP "^$TS_REGEX Config Apply Run ID: \K[a-z0-9]{16}$" "$LOGFILE")
+  fi
+  /usr/local/share/enterprise/ghe-config-apply-logs rotate-config-log | ts "$TS_FORMAT" >> $LOGFILE
+fi
+
+# Log Run ID's + Timestamp at the top of ghe-config.log
+echo "Command Run ID: $GHE_CMD_RUN_ID" | ts "$TS_FORMAT" >> $LOGFILE
+echo "Config Apply Run ID: $GHE_CONFIG_APPLY_RUN_ID" | ts "$TS_FORMAT" >> $LOGFILE
+echo "Timestamp: $(date +%FT%H:%M:%S%z)" | ts "$TS_FORMAT" >> $LOGFILE
+
+# Rotate the previous config-apply's traces + events logs
+if ghe-config --true config-apply.instrumentation.enabled; then
+  /usr/local/share/enterprise/ghe-config-apply-logs rotate-traces-log | ts "$TS_FORMAT" >> $LOGFILE
+  /usr/local/share/enterprise/ghe-config-apply-logs rotate-events-log | ts "$TS_FORMAT" >> $LOGFILE
+fi
+
+# Configure + cleanup centralized events + logs
+if ! ghe-config --true config-apply.centralized-logs.disabled; then
+  /usr/local/share/enterprise/ghe-fluent-bit-configure | ts "$TS_FORMAT" >> $LOGFILE
+  /usr/local/share/enterprise/ghe-config-apply-logs rotate-centralized-events | ts "$TS_FORMAT" >> $LOGFILE
+  /usr/local/share/enterprise/ghe-config-apply-logs rotate-centralized-logs | ts "$TS_FORMAT" >> $LOGFILE
+fi
+
+# Cleanup config-apply logs older than config-apply.logs.days-to-keep or 30 days
+/usr/local/share/enterprise/ghe-config-apply-logs cleanup-logs | ts "$TS_FORMAT" >> $LOGFILE
+
+# Wait a bit for all the services to be active to prevent race conditions
+for i in $(seq 60); do
+  # The regex down below will filter out services and devices from being checked during the config apply phase.
+  # If we don't exclude these devices and services, the warning
+  # `Timed out waiting for all the services to be active...` will be logged
+  # which will fail certain tests and suggest that something went wrong to customers.
+  #
+  # When running in Podman a new device type `dev-nvmexxx` that seemed to be in a perpetual state of "activating" showed up.
+  # It's currently unclear why this is different in Podman but we followed the existing pattern of dev-mapper- that already existed.
+  if ! systemctl | grep -E -v "(dev-mapper-|dev-nvme|enterprise-manage|ghe-user-disk|ghe_user_data)" | grep -q activating; then
+    break
+  fi
+  if [ "$i" = "1" ]; then
+    echo "Waiting for services to be active..." | ts "$TS_FORMAT"
+  fi
+
+  if [ "$i" = "60" ]; then
+    echo "Timed out waiting for all the services to be active..." | ts "$TS_FORMAT"
+  fi
+  sleep 1
+done
+
+cleanup() {
+  set +e
+  if ! rm -f /var/run/ghe-config.pid; then
+    log_error "Error: Failed to remove PID file /var/run/ghe-config.pid"
+  fi
+  # Make sure we are rendering the failed preflights check page after every config-apply if necessary or clean it up.
+  if ! /usr/local/share/enterprise/ghe-preflight-check; then
+    /usr/share/rbenv/versions/current/bin/erb /usr/local/share/enterprise/preflight.html.erb > /data/enterprise-manage/current/public/index.html
+    chown enterprise-manage:enterprise-manage /data/enterprise-manage/current/public/index.html
+  elif [ -f "/data/enterprise-manage/current/public/index.html" ]; then
+    if grep -q "Preflight checks failed." "/data/enterprise-manage/current/public/index.html"; then
+      rm "/data/enterprise-manage/current/public/index.html"
+    fi
+  fi
+}
+
+trap cleanup EXIT
+
+if [ ! -f /etc/github/cluster ]; then
+  # Don't allow ghe-config-apply to be run on a running configured replica
+  if [ -f /etc/github/repl-running ] || [ "$(cat /etc/github/repl-state 2>/dev/null)" = "replica" ]; then
+    log_error "Error: Configuration can't be applied on a replica. If you want to stop replication, please run ghe-repl-stop and ghe-repl-teardown before running ghe-config-apply."
+    exit 1
+  fi
+fi
+
+if ! mountpoint -q /data/user; then
+  log_error "Error: /data/user is not mounted."
+  exit 1
+fi
+
+# Save the version information to the beginning of the log file
+echo "Current version information:" | ts "$TS_FORMAT" >> $LOGFILE
+cat /etc/github/enterprise-release | ts "$TS_FORMAT" >> $LOGFILE
+
+if [ ! -f /data/user/common/enterprise.ghl ]; then
+  log_error "Error: no license file found (/data/user/common/enterprise.ghl)"
+  exit 1
+fi
+
+if [ ! -f /data/user/common/github.conf ]; then
+  log_error "Error: no settings file found (/data/user/common/github.conf)"
+  exit 1
+fi
+
+if ghe-config --blank core.github-hostname; then
+  log_error "Error: initial configuration not completed"
+  exit 1
+fi
+
+if [ -f /etc/github/enterprise-release ]; then
+  #shellcheck disable=SC1091
+  source /etc/github/enterprise-release
+  ghe-config core.package-version "$RELEASE_VERSION"
+fi
+
+mkdir -p /var/log/ghe-configuration
+rm -f /var/log/ghe-configuration/enterprise*.log
+
+/usr/local/share/enterprise/ghe-fix-permissions
+
+if [ -z "$phase" ] || [ "$phase" = 1 ]; then
+  # First, synchronously run ghe-config-check on just the most important checks on which we want to fail fast. Errors in this phase would block continuation of ghe-single-config-apply.
+  ghe-config-check --no-stdin-check --error-checks-only /data/user/common/github.conf 2> >(ts "$TS_FORMAT" | tee -a $LOGFILE) 1> >(ts "$TS_FORMAT" >> $LOGFILE)
+  # Then, asynchronously run ghe-config-check on everything else. This will spit out a list of warnings at the end.
+  bash -c "ghe-config-check --warning-checks-only /data/user/common/github.conf json >>/var/log/ghe-configuration/ghe-config-check.debug.log 2>&1 || true" &
+  check_pid=$!
+fi
+
+set -o pipefail
+export GHE_CONFIG_PHASE=$phase
+
+EVENTS_DIR=/data/user/config-apply/events
+export EVENTS_LOGFILE="${EVENTS_DIR}"/config-apply."$HOSTNAME"."$GHE_CONFIG_APPLY_RUN_ID".log
+if [ ! -e "$EVENTS_LOGFILE" ]; then
+  touch $EVENTS_LOGFILE
+  chown fluent-bit:fluent-bit $EVENTS_LOGFILE
+fi
+
+#shellcheck disable=SC2094
+/usr/local/share/enterprise/update-system-config || {
+  touch /var/log/ghe-configuration/enterprise_exception.log
+  exit 1
+}
+
+/usr/local/share/enterprise/ghe-fix-permissions
+
+if [ ! -f /etc/github/cluster ]; then
+  if [ -z "$phase" ]; then
+    # Copy license and settings to replica if part of an HA pair
+    /usr/local/share/enterprise/ghe-repl-sync-settings
+  fi
+fi
+
+# Make sure Elasticsearch templates and indices have auto_expand_replicas
+# set to the right value. Required for ES 5.X (Fixes hookshot#897).
+if [ -f /etc/github/repl-state ]; then # HA Cluster
+  auto_expand_opts=("-v" "0-all")
+elif [ -f /etc/github/cluster ]; then # Cluster
+  auto_expand_opts=("-v" "0-1")
+else # Single VM
+  auto_expand_opts=("-l" "-v" "0-1")
+fi
+
+if ! /usr/local/share/enterprise/ghe-es-auto-expand -q -c "${auto_expand_opts[@]}" 2> >(ts "$TS_FORMAT" | tee -a $LOGFILE) 1> >(ts "$TS_FORMAT" >> $LOGFILE); then
+  echo "Running ghe-es-auto-expand ${auto_expand_opts[*]}" | ts "$TS_FORMAT" >> $LOGFILE
+  /usr/local/share/enterprise/ghe-es-auto-expand -q "${auto_expand_opts[@]}" | ts "$TS_FORMAT" >> $LOGFILE|| {
+    echo "WARNING: Setting ES auto_expand_replicas failed" | ts "$TS_FORMAT" >> $LOGFILE
+  }
+
+  echo "Done running ghe-es-auto-expand ${auto_expand_opts[*]}" | ts "$TS_FORMAT" >> $LOGFILE
+fi
+
+if [ -z "$phase" ] || [ "$phase" = 3 ]; then
+  #shellcheck disable=SC2005
+  echo "$(md5sum /data/user/common/github.conf)" >/etc/github/configured
+  (head -n1 /proc/meminfo ; grep 'model name' /proc/cpuinfo) | md5sum > /etc/github/hostinfo
+fi
+
+if [ -z "$phase" ] || [ "$phase" = 1 ]; then
+  if [ -n "$check_pid" ]; then
+    # ghe-config-check can take a bit longer. Give it at max 10 sec to finish
+    retry=10
+    while kill -0 "$check_pid" 2>/dev/null && [ $retry -gt 0 ]; do
+      sleep 1
+      retry=$((retry-1))
+    done
+    pkill -P $check_pid "" 2>/dev/null || true
+    kill $check_pid 2>/dev/null || true
+  fi
+fi
+
+if [ -z "$phase" ] || [ "$phase" = 3 ] && [ -f /data/user/common/ghe-upgrade-occurred ]; then
+  # Clean up by removing the upgrade file
+  rm -f /data/user/common/ghe-upgrade-occurred
+fi

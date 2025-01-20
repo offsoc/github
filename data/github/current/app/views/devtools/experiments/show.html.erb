@@ -1,0 +1,139 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% page_info(title: experiment.name, selected_link: :features) %>
+
+<% content_for :pagehead_path do %>
+  / <a href="<%= devtools_experiments_path %>">Experiments</a>
+  / <strong><%= experiment.name %></strong>
+<% end %>
+
+<div class="Box Box--condensed mb-5">
+  <div class="Box-header d-flex flex-items-center">
+    <h3 class="Box-title flex-auto">
+      <%= experiment.name %>
+      <% if experiment.running_too_long? %>
+        <%= render Primer::Beta::Label.new(scheme: :danger, ml: 1, title: "Label: Running Too Long") do %>
+          Running Too Long
+        <% end %>
+      <% end %>
+    </h3>
+  </div>
+
+  <% if experiment.inactive? %>
+    <%= render Primer::Beta::Flash.new(full: true, scheme: :warning, mb: 2, icon: :alert) do %>
+      <span>This experiment is inactive. Most likely you won't find any metrics associated to it in Datadog</span>
+    <% end %>
+  <% end %>
+
+  <div class="Box-body">
+    <h3 class="mb-2">Performance & Accuracy</h3>
+
+    <p>This experiment runs approximately <strong><%= experiment.activity_rate %> times/min</strong> and sees mismatches at <strong><%= experiment.mismatch_rate %>/min</strong>. For more details, see the <%= datadog_dashboard_link %> for this experiment.</p>
+
+    <% if experiment.mismatches? %>
+      <p>
+        There are <%= experiment.total_mismatches %> recorded mismatches. View them <%= link_to "here", devtools_experiment_mismatches_path(experiment), class: "Link--inTextBlock" %><%# erblint:disable GitHub::Accessibility::AvoidGenericLinkText %>
+      </p>
+    <% else %>
+      <p>There are no recorded mismatches.</p>
+    <% end %>
+  </div>
+</div>
+
+<div class="Box Box--condensed mb-5">
+  <div class="Box-header d-flex flex-items-center">
+    <h3 class="Box-title flex-auto">Participation</h3>
+  </div>
+  <div class="Box-body">
+    <p><strong <%= test_selector "participation-percent" %>><%= experiment.percent %>%</strong> of calls will run the experiment. This value was last updated <strong class="updated-at"><%= time_ago_in_words(experiment.updated_at) %></strong> ago.
+    </p>
+    <%= form_for :experiment, url: devtools_experiment_path(experiment), :method => :put do |f| %>
+      <p class="clearfix">
+        <span class="BtnGroup">
+          <% ::Experiment::PERCENTAGES.each do |n| %>
+            <button type="submit" name="experiment[percent]" value="<%= n %>" class="btn <% if experiment.percent == n %>selected<% end %> BtnGroup-item"><%= n %>%</button>
+          <% end %>
+        </span>
+      </p>
+    <% end %>
+  </div>
+</div>
+
+<div class="Box Box--condensed mb-5">
+  <div class="Box-header d-flex flex-items-center">
+    <h3 class="Box-title flex-auto">Related Errors</h3>
+  </div>
+  <div class="Box-body">
+    <p>See errors generated while executing this experiment in the <%= sentry_link %> and <%= sentry_timeout_link %> projects in Sentry.</p>
+  </div>
+</div>
+
+<div class="Box Box--condensed mb-5">
+  <div class="Box-header d-flex flex-items-center">
+    <h3 class="Box-title flex-auto">Performance-based sampling</h3>
+  </div>
+  <div class="Box-body">
+    <p>Samples will only be collected in one datacenter at random.</p>
+    <% if experiment.currently_sampling? %>
+      <p>
+      This experiment is collecting samples for alternatives taking longer than <strong><%= experiment.sample_threshold %></strong>, milliseconds, and will stop collection in <strong><%= time_ago_in_words(experiment.sample_ends_at) %></strong>.
+      </p>
+      <% if experiment.total_samples.positive? %>
+        <%= link_to "View samples", devtools_experiment_samples_path(experiment)%>
+      <% end %>
+      <%= form_tag disable_sample_devtools_experiment_path(experiment), method: :patch do %>
+        <%= render Primer::ButtonComponent.new(type: :submit, "data-confirm": "Are you sure you want to disable sampling?", scheme: :danger) do %>Disable<% end %>
+      <% end %>
+    <% else %>
+      <p>This experiment is not currently collecting samples.</p>
+      <% if experiment.total_samples.positive? %>
+        <%= link_to "View previously collected samples", devtools_experiment_samples_path(experiment)%>
+      <% end %>
+      <%= form_for :sample, url: update_sample_devtools_experiment_path(experiment), method: :patch do |f| %>
+        <div class="form-group">
+          <div class="form-group-header">
+            <%= f.label :threshold %>
+          </div>
+          <div class="form-group-body">
+            <%= f.text_field :threshold %>
+          </div>
+          <p class="note">Collect data for experiment runs where any alternative takes longer than this amount of milliseconds</p>
+        </div>
+        <div class="form-group">
+          <div class="form-group-header">
+            <%= f.label :duration %>
+          </div>
+          <div class="form-group-body">
+            <%= f.select :duration, options_for_select([
+              ["15 seconds", 15],
+              ["30 seconds", 30],
+              ["1 minute", 60],
+              ["2 minutes", 120],
+              ["5 minutes", 300],
+            ]) %>
+          </div>
+          <p class="note">The time period over which the samples will be collected</p>
+        </div>
+        <div class="form-group">
+          <%= f.submit "Begin collection", :class => "btn btn-primary" %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+</div>
+
+<%= render(Devtools::CodeUsageComponent.new(experiment.code_usage)) %>
+
+<div class="Box Box--condensed mb-5">
+  <div class="Box-header d-flex flex-items-center">
+    <h3 class="Box-title flex-auto color-fg-danger">Danger Zone</h3>
+  </div>
+  <div class="Box-body">
+    <%= form_tag devtools_experiment_path(experiment), method: :delete, style: "display: inline" do %>
+      <%= render Primer::ButtonComponent.new(type: :submit, "data-confirm": "Are you sure you want to delete #{ experiment.name }?", scheme: :danger) do %>Delete<% end %>
+    <% end %>
+    <%= form_tag clear_devtools_experiment_path(experiment), method: :patch, style: "display: inline" do %>
+      <%= render Primer::ButtonComponent.new(type: :submit, "data-confirm": "Are you sure you want to clear mismatches?", scheme: :danger) do %>Clear mismatches<% end %>
+    <% end %>
+  </div>
+</div>

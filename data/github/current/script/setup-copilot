@@ -1,0 +1,1592 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "#{Rails.root}/config/environment"
+require_relative "#{Rails.root}/script/seeds/objects"
+require "#{Rails.root}/test/test_helpers/user_test_helpers"
+require "faker"
+require_relative "seeds/factory_bot_loader"
+require "logger"
+
+LOGGER = Logger.new(STDERR)
+FREE_TRIAL_LENGTH = 30.days
+PRODUCT_TYPE = "github.copilot"
+PRODUCT_KEY = "v0"
+PRODUCT_HASH = { product_type: PRODUCT_TYPE, product_key: PRODUCT_KEY }
+EDUCATIONAL_COUPON_CODE = "student-partner".freeze
+FACULTY_COUPON_CODE = "faculty-#{DateTime.now.year}".freeze
+MVP_COUPON_CODE = "MVP-07a2132".freeze
+WORKSHOP_COUPON_CODE = "CFF-07a2132".freeze
+
+TMP_PAT_FILE = "/tmp/copilot_user_pats.txt"
+
+unless Rails.env.development?
+  raise "This is a dev-only script"
+end
+
+class SetupCopilot
+  include GitHub::UserTestHelpers
+
+  def call(options)
+    yellow("Starting Copilot setup")
+    log("")
+    LOGGER.info("Options: #{options.inspect}")
+    @monalisa = User.find_by_login("monalisa")
+    @tokens = Hash.new
+
+    create_feature_flags
+    if options[:clean]
+      clean_db
+      log("")
+    else
+      yellow("Skipping DB cleanup")
+      log("")
+    end
+
+    create_copilot_subscription_items
+    log("")
+
+    if options[:orgs_only]
+      create_cfb_orgs_and_businesses
+      create_copilot_no_biz_org
+      LOGGER.info(colorize("Copilot setup complete!", "green"))
+      return
+    end
+
+    if options[:standalone_only]
+      yellow("Only setting up standalone enterprise")
+      update_billable_standalone_enterprise(options)
+      create_non_emu_basic_enterprises
+      return
+    end
+
+    if options[:first_run_only]
+      yellow("Only creating first run orgs and enterprises")
+      create_signup_first_experience
+      return
+    end
+
+    if options[:enterprise_only]
+      yellow("Only creating Copilot Enterprise business")
+      create_enterprise_business
+      LOGGER.info(colorize("Copilot setup complete!", "green"))
+      return
+    end
+
+    if options[:cfi_users]
+      yellow("Creating coupons for CFI Users")
+      create_coupons
+
+      yellow("Creating CFI Users")
+      create_cfi_users
+    end
+
+    if options[:create_copilot_for_enterprise]
+      yellow("Creating Copilot Enterprise")
+      create_copilot_for_enterprise
+    end
+
+    if options[:skip_cfb_creation]
+      yellow("Skipping CFB creation")
+    else
+      create_cfb_trial_organization
+      create_no_payment_biz
+      create_copilot_no_biz_org
+      create_signup_first_experience
+      update_billable_standalone_enterprise(options)
+      create_non_emu_basic_enterprises
+      create_cfb_orgs_and_businesses
+    end
+
+    log("")
+    LOGGER.info(colorize("Copilot setup complete!", "green"))
+  end
+
+  private
+
+  def create_feature_flags
+    title("Creating feature flags")
+    log("-> Creating but not enabling all flags in Copilot::FeatureFlags::ALL_FLAGS")
+    Copilot::FeatureFlags::ALL_FLAGS.each do |flag|
+      ::FlipperFeature.create(name: flag)
+    end
+    log("-> Enabling flags in Copilot::FeatureFlags::DEV_ENABLED")
+    Copilot::FeatureFlags::DEV_ENABLED.each do |flag|
+      GitHub.flipper[flag].enable
+    end
+    log("")
+  end
+
+  def clean_db
+    log("Cleaning DB")
+    %w(copilot_aggregate_usage_details
+       copilot_business_trials
+       copilot_complimentary_users
+       copilot_configurations
+       copilot_engaged_oss_repositories
+       copilot_engaged_oss_users
+       copilot_ide_notifications
+       copilot_organization_events
+       copilot_seat_assignments
+       copilot_seat_emissions
+       copilot_seat_histories
+       copilot_seats
+       copilot_tech_preview_users
+      ).each do |table|
+        ApplicationRecord::Copilot.connection.truncate(table)
+      end
+  end
+
+  def create_copilot_subscription_items
+    title("Creating Copilot subscription items")
+    @copilot_monthly_product_uuid = ::Billing::ProductUUID.where(product_type: "github.copilot", product_key: "v0", billing_cycle: "month").first
+    @copilot_monthly_product_uuid ||= FactoryBot.create(:billing_product_uuid, :copilot, billing_cycle: :month)
+    log("-> Created Copilot monthly product uuid")
+    @copilot_yearly_product_uuid = ::Billing::ProductUUID.where(product_type: "github.copilot", product_key: "v0", billing_cycle: "year").first
+    @copilot_yearly_product_uuid ||= FactoryBot.create(:billing_product_uuid, :copilot, billing_cycle: :year)
+    log("-> Created Copilot yearly product uuid")
+    log("-> Checking db for products")
+    raise StandardError, "Mismatch in product uuids" unless Billing::ProductUUID.where(product_type: "github.copilot", product_key: "v0").count == 2
+  end
+
+  def create_coupons
+    title("Creating coupons")
+    log("-> Creating educational coupon")
+    @educational_coupon = Coupon.find_by_code(EDUCATIONAL_COUPON_CODE) || Coupon.create(
+      code: EDUCATIONAL_COUPON_CODE,
+      discount: 0,
+      limit: 9999,
+      note: "note",
+      group: "education-org",
+      duration: 29970,
+    )
+    log("-> Created educational coupon")
+    @educational_coupon.update(limit: 9999)
+    raise StandardError, "Mismatch in coupon" unless Coupon.where(code: EDUCATIONAL_COUPON_CODE).count == 1
+
+    log("-> Creating faculty coupon")
+    @faculty_coupon = Coupon.find_by_code(FACULTY_COUPON_CODE) || Coupon.create(
+      code: FACULTY_COUPON_CODE,
+      discount: 0,
+      limit: 9999,
+      note: "note",
+      group: "education-org",
+      duration: 29970,
+    )
+    log("-> Created faculty coupon")
+    @faculty_coupon.update(limit: 9999)
+    raise StandardError, "Mismatch in coupon" unless Coupon.where(code: FACULTY_COUPON_CODE).count == 1
+
+    log("-> Creating MVP coupon")
+    @mvp_coupon = Coupon.find_by_code(MVP_COUPON_CODE) || Coupon.create(
+      code: MVP_COUPON_CODE,
+      discount: 7,
+      limit: 9999,
+      note: "unique use coupons for MSFT MVP program",
+      group: "microsoft",
+      duration: 29970,
+    )
+    log("-> Created MVP coupon")
+    @mvp_coupon.update(limit: 9999)
+    raise StandardError, "Mismatch in coupon" unless Coupon.where(code: MVP_COUPON_CODE).count == 1
+
+    log("-> Creating Workshop coupon")
+    @workshop_coupon = Coupon.find_by_code(WORKSHOP_COUPON_CODE) || Coupon.create(
+      code: WORKSHOP_COUPON_CODE,
+      discount: 10,
+      limit: 9999,
+      note: "unique use coupons for MSFT MVP program",
+      group: "microsoft",
+      duration: 29970,
+    )
+    log("-> Created Workshop coupon")
+    @workshop_coupon.update(limit: 9999)
+    raise StandardError, "Mismatch in coupon" unless Coupon.where(code: WORKSHOP_COUPON_CODE).count == 1
+  end
+
+  def create_cfi_users
+    title("Creating CFI users")
+
+    Copilot::FreeUser::FREE_USER_TYPES.map do |type|
+      [
+        { login: type.name.downcase.gsub(" ", "-"), free_user_type: type.name, free_user_subscribed: false, public_code_allowed: false },
+        { login: type.name.downcase.gsub(" ", "-") + "-subscribed", free_user_type: type.name, public_code_allowed: true },
+      ]
+    end.flatten.concat(%w(monthly monthly-cancelled yearly yearly-cancelled).inject([]) do |acc, subscription_type|
+      acc << { login: "#{subscription_type}-snippy", subscription_type: subscription_type, public_code_allowed: true }
+      acc << { login: "#{subscription_type}", subscription_type: subscription_type, public_code_allowed: false }
+      acc << { login: "#{subscription_type}-trial-snippy", subscription_type: subscription_type, trial_period: FREE_TRIAL_LENGTH, public_code_allowed: true }
+      acc << { login: "#{subscription_type}-trial", subscription_type: subscription_type, trial_period: FREE_TRIAL_LENGTH, public_code_allowed: false }
+      acc
+    end).each do |user_hash|
+      create_user(**user_hash)
+    end
+    user = create_user(login: "cfbadmin")
+    org = Organization.where(login: "CFBBusinessOrg").first || FactoryBot.create(:copilot_for_business_enabled_organization, name: "CFBBusinessOrg", admin: user)
+    org.add_member(user)
+
+    user = create_user(login: "ff-blocked", public_code_allowed: true, subscription_type: "monthly")
+    Copilot::User.new(user).administrative_block!(@monalisa, "Script setup")
+
+    create_user(login: "generic")
+  end
+
+  def create_copilot_for_enterprise
+    green("Creating Copilot Enterprise businesses")
+
+    ### Create a CFE Business that is compliant with single org
+    bold_white("-> Creating CFE business with organization")
+    find_or_create_cfe(business_slug: "cfeorgbiz")
+
+    ### Create a CFE Business that is compliant with single org and azure sub
+    bold_white("-> Creating CFE business with organization and azure sub")
+    find_or_create_cfe(business_slug: "cfeorgbizazure", azure_subscription: true)
+
+    ### Create a CFE Business that is not compliant for repository
+    bold_white("-> Creating CFE business with organization and repo violation")
+    find_or_create_cfe(business_slug: "cfeorgrepobiz", repository: true)
+
+    ### Create a CFE Business that is not compliant for repository and azure sub
+    bold_white("-> Creating CFE business with azure sub and organization and repo violation")
+    find_or_create_cfe(business_slug: "cfeorgrepobizazure", repository: true, azure_subscription: true)
+
+    ### Create a CFE Business that is not compliant for commit (which requires repository)
+    bold_white("-> Creating CFE business with organization and commit violation")
+    find_or_create_cfe(business_slug: "cfeorgrepocommitbiz", repository: true, commit: true)
+
+    ### Create a CFE Business that is not compliant for commit (which requires repository) and azure sub
+    bold_white("-> Creating CFE business with azure sub, organization and commit violation")
+    find_or_create_cfe(business_slug: "cfeorgrepocommitbizazure", repository: true, commit: true, azure_subscription: true)
+
+    ### Create a CFE Business that is not compliant for issue (which requires repository)
+    bold_white("-> Creating CFE business with organization and issue violation")
+    find_or_create_cfe(business_slug: "cfeorgrepoissuebiz", repository: true, commit: true, issue: true)
+
+    ### Create a CFE Business that is not compliant for issue (which requires repository) and azure sub
+    bold_white("-> Creating CFE business with azure sub, organization and issue violation")
+    find_or_create_cfe(business_slug: "cfeorgrepoissuebizazure", repository: true, commit: true, issue: true, azure_subscription: true)
+
+    ### Create a CFE Business that is not compliant for pull request (which requires repository)
+    bold_white("-> Creating CFE business with organization and pull request violation")
+    find_or_create_cfe(business_slug: "cfeorgrepoprbiz", repository: true, commit: true, pull_request: true)
+
+    ### Create a CFE Business that is not compliant for pull request (which requires repository) and azure sub
+    bold_white("-> Creating CFE business with azure sub, organization and pull request violation")
+    find_or_create_cfe(business_slug: "cfeorgrepoprbizazure", repository: true, commit: true, pull_request: true, azure_subscription: true)
+
+    ### Create a CFE Business that is not compliant for all of the things
+    bold_white("-> Creating CFE business with organization and all violations")
+    find_or_create_cfe(business_slug: "cfeorgallbiz", repository: true, commit: true, issue: true, pull_request: true)
+
+    ### Create a CFE Business that is not compliant for all of the things and azure sub
+    bold_white("-> Creating CFE business with azure sub, organization and all violations")
+    find_or_create_cfe(business_slug: "cfeorgallbizazure", repository: true, commit: true, issue: true, pull_request: true, azure_subscription: true)
+  end
+
+  def find_or_create_cfe(business_slug:, azure_subscription: false, repository: false, commit: false, issue: false, pull_request: false)
+    log("-> Creating CFE business #{business_slug}")
+    business = Business.find_by(slug: business_slug)
+
+    if business.present?
+      log("  -> Found existing business #{business_slug}")
+      # check if azure
+      if azure_subscription && business.customer.azure_subscription_id.blank?
+        log("  -> Setting up Azure Sub")
+        business.customer.update!(azure_subscription_id: SecureRandom.uuid)
+      else
+        log("  -> Removing Azure Sub")
+        business.customer.update!(azure_subscription_id: nil)
+      end
+    else
+      if azure_subscription
+        log("  -> Creating business #{business_slug} with Azure Sub")
+        business = FactoryBot.create(:copilot_for_enterprise_business, :with_azure_subscription, slug: business_slug)
+      else
+        log("  -> Creating business #{business_slug} without Azure Sub")
+        business = FactoryBot.create(:copilot_for_enterprise_business, slug: business_slug)
+      end
+    end
+
+    raise "No business created" unless business.reload.present?
+
+    copilot_business = Copilot::Business.new(business)
+    copilot_business.enable_copilot_for_all_organizations!
+
+    log("-> Creating CFE users for #{business_slug}")
+    users = FactoryBot.create_list(:user, 50)
+    business.add_user_accounts(users)
+
+    organization_slug = "#{business_slug}org"
+
+    log("   -> Creating CFE organization #{organization_slug}")
+    organization = Organization.find_by(login: organization_slug) || FactoryBot.create(
+      :enterprise_linked_organization,
+      login: organization_slug,
+      business: business,
+    )
+    organization.update!(business: business)
+    organization.bulk_add_members(users)
+
+    copilot_org = Copilot::Organization.new(organization)
+
+    log("-> Allowing public code suggestions for #{organization.login}")
+    copilot_org.allow_public_code_suggestions!
+
+    seat_assignment = FactoryBot.create(:copilot_seat_assignment, assignable: organization, organization: organization, assigning_user: organization.admins.first)
+    seat_assignment.convert_to_seats
+    seat_assignment.seats.each do |seat|
+      log("---> Creating aggregate usage detail for seat #{seat.id}")
+      FactoryBot.create(:copilot_aggregate_usage_detail, user: seat.assigned_user)
+    end
+    log("")
+    create_seat_emission(organization)
+
+    if repository
+      log("   -> Creating CFE repository (SDLC violation)")
+      repo = Repository.handle_creation(
+        organization.admins.first.id,
+        organization,
+        {
+          name: "#{Faker::Hipster.word}",
+          description: Faker::Hipster.sentence,
+        },
+        synchronous: true
+      ).repository
+
+      created_commit = if commit
+        log("   -> Creating CFE commit (SDLC violation)")
+        Seeds::Objects::Commit.create(
+          repo: repo,
+          message: Faker::Hipster.sentence,
+          committer: organization.admins.first,
+          branch_name: "main",
+          files: { "#{Faker::Hipster.word}.md" => Faker::Hipster.paragraph },
+        )
+      end
+
+      created_issue = if issue
+        log("   -> Creating CFE issue (SDLC violation)")
+        Seeds::Objects::Issue.create(
+          repo: repo,
+          actor: organization.admins.first,
+          title: Faker::Book.title,
+          body: Faker::Hipster.paragraph,
+        )
+      end
+
+      if pull_request
+        log("   -> Creating CFE pull request (SDLC violation)")
+        Seeds::Objects::PullRequest.create(
+          repo: repo,
+          committer: organization.admins.first,
+          title: Faker::Book.title,
+          commit: created_commit,
+          issue: created_issue,
+        )
+      end
+    end
+    true
+  end
+
+  def create_copilot_enterprise_teams(standalone_biz, options)
+    log("-> Creating CFE enterprise teams for #{org_style(standalone_biz.name)}")
+
+    if options[:standalone_full]
+      76.times do |n|
+        member_count = n % 2 == 0 ? 10 : rand(2..14)
+        ent_team = create_standalone_enterprise_team(biz: standalone_biz, member_count: member_count)
+      end
+    else
+      3.times do |n|
+        member_count = n % 2 == 0 ? 10 : rand(2..14)
+        ent_team = create_standalone_enterprise_team(biz: standalone_biz, member_count: member_count)
+      end
+
+      create_standalone_enterprise_team(biz: standalone_biz, member_count: 0)
+    end
+
+    2.times do
+      assignment = FactoryBot.create(
+        :copilot_seat_assignment,
+        :enterprise_team,
+        member_count: 10,
+        supplied_business: standalone_biz,
+        team_name: "copilot-licensees-#{SecureRandom.hex(8)}"
+      )
+      ent_team = assignment.assignable
+      assignment.convert_to_seats
+
+      log("-> Assignment and seats created for enterprise team #{user_style(ent_team.name)}")
+
+      EnterpriseTeamAssignment.find_or_create_by!(enterprise_team: ent_team, assignment_type: :copilot)
+
+      create_usage_metrics(business: standalone_biz, enterprise_team: ent_team)
+      create_biz_total_users_row(standalone_biz, biz_members: 20)
+      log("-> Usage metrics created for enterprise team #{user_style(ent_team.name)}")
+    end
+  end
+
+  def create_standalone_enterprise_team(biz: standalone_biz, member_count: 10, name: nil)
+    name = Faker::Company.unique.name if name.nil?
+    log("-> Creating enterprise team #{org_style(name)}")
+
+    FactoryBot.create(
+      :copilot_enterprise_team,
+      member_count: member_count,
+      supplied_business: biz,
+      name: name
+    )
+  end
+
+  def create_cfb_trial_organization
+    log("")
+    title("Creating CFB trial organization #{org_style("cfbtrialorg")}")
+    organization = find_or_create_org("cfbtrialorg", type: :enterprise_linked_organization)
+    find_or_create_copilot_business_trial(organization)
+
+    # let's add a lot of users
+    bold_white("-> Adding 50 users to #{org_style("cfbtrialorg")}")
+    50.times do
+      organization.add_member(FactoryBot.create(:user))
+    end
+  end
+
+  def create_signup_first_experience
+    log("")
+    title("Creating organizations for first run signup flow")
+
+    [
+      { label: "paypal", login: "paypal", org: :paypal_organization },
+      { label: "no payment", login: "na", org: :no_credit_card_organization },
+      { label: "credit card", login: "credit-card", org: :credit_card_organization },
+      { label: "invoiced", login: "invoiced", org: :invoiced_org },
+      { label: "free", login: "free", org: :free_org },
+      { label: "paypal enterprise", login: "paypal-ent", ent: :with_paypal },
+      { label: "credit card enterprise", login: "credit-card-ent", ent: :with_credit_card },
+      { label: "no payment enterprise", login: "na-ent", ent: :with_self_serve_payment },
+      { label: "azure enterprise", login: "azure-ent", ent: :with_azure_subscription },
+    ].each do |item|
+      create_org_enterprise(**item)
+    end
+  end
+
+  def create_org_enterprise(label:, login:, org: nil, ent: nil)
+    org_name = "cfb-#{login}-org"
+    bold_white("-> Creating #{label} organization #{org_style(org_name)} with #{user_style("cfb-#{login}-admin")} and #{user_style("cfb-#{login}-user")}")
+
+    admin = ensure_user("cfb-#{login}-admin")
+    user = ensure_user("cfb-#{login}-user")
+
+    Organization.where("login like '#{org_name}%'").destroy_all
+    ReservedLogin.destroy_all
+    org = if ent.nil?
+      FactoryBot.create(org, admin: admin, name: org_name)
+    else
+      FactoryBot.create(:organization, admin: admin, name: org_name)
+    end
+
+    org.add_member(user)
+
+    if ent.present?
+      ent_name = "cfb-#{login}"
+      Business.where("slug like '#{ent_name}%'").destroy_all
+      bold_white("-> Creating #{label} business #{enterprise_style(ent_name)} with #{user_style("cfb-#{login}-admin")} and #{user_style("cfb-#{login}-user")}")
+      ent = FactoryBot.create(:business, ent, name: ent_name)
+      if ent.billable_owner.self_serve_payment?
+        FactoryBot.create(:billing_plan_subscription, :zuora, :business_owned, customer: ent.customer)
+      else
+        FactoryBot.create(:billing_sales_serve_plan_subscription, customer: ent.customer)
+      end
+      ent.add_owner(admin, actor: admin)
+      ent.add_organization(org, actor: admin)
+    end
+  end
+
+  def ensure_user(login)
+    user = User.find_by(login: login)
+    return user if user.present?
+    FactoryBot.create(:user, :verified, login: login)
+  end
+
+  def create_cfb_orgs_and_businesses
+    log("")
+    title("Creating organizations and seats")
+
+    # clean up businesses and organizations first
+    log("-> Cleaning up existing cfbbiz businesses and organizations")
+    log("")
+    Business.where("slug like 'cfbbiz%'").destroy_all
+    Organization.where("login like 'cfbbiz%'").destroy_all
+    Copilot::UsageMetric.destroy_all
+    User.where("login like 'cfbbiz%'").destroy_all
+    ReservedLogin.destroy_all
+
+    6.times do |i|
+      slug = "cfbbiz#{i}"
+      log("Creating enterprise with slug #{enterprise_style(slug)}")
+
+      business = FactoryBot.create(:business, :with_github_subscription, slug: slug)
+      if business.billable_owner.self_serve_payment?
+        FactoryBot.create(:billing_plan_subscription, :zuora, :business_owned, customer: business.customer)
+      else
+        FactoryBot.create(:billing_sales_serve_plan_subscription, customer: business.customer)
+      end
+
+      biz_owner_login = "#{slug}-admin"
+      biz_owner = FactoryBot.create(:user, login: biz_owner_login)
+      business.add_owner(biz_owner, actor: business.admins.first)
+      biz_owner_login2 = "#{slug}-admin2"
+      biz_owner2 = FactoryBot.create(:user, login: biz_owner_login2)
+      business.add_owner(biz_owner2, actor: business.admins.second)
+
+      raise "Business #{slug} not created" unless business.persisted?
+      log("--> Business owners are #{user_style(biz_owner.login)} (id: #{biz_owner.id}) and #{user_style(biz_owner2.login)} (id: #{biz_owner2.id})")
+      create_user_token(biz_owner, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log", "manage_billing:enterprise",])
+      create_user_token(biz_owner2, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log", "manage_billing:enterprise",])
+
+      Copilot::Business.new(business).telemetry_aggregation_enabled!
+
+      org1_login = "cfbbiz#{i}org1"
+      org1_admin_login = "#{org1_login}-admin"
+      org1_admin2_login = "#{org1_login}-admin2"
+      admin = FactoryBot.create(:user, login: org1_admin_login)
+      admin2 = FactoryBot.create(:user, login: org1_admin2_login)
+      log("Creating enterprise linked org #{org_style(org1_login)} for business #{enterprise_style(business.slug)}")
+      org = FactoryBot.create(:copilot_for_business_enabled_organization, business: business, login: org1_login, admins: [admin, admin2])
+
+      log("--> #{user_style(admin.login)} (id: #{org.admins.first.id}) and  #{user_style(admin2.login)} (id: #{org.admins.second.id}) are the admins for #{org_style(org1_login)}")
+      create_user_token(org.admins.first, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log"])
+      raise "Organization #{org1_login} not created" unless org.persisted?
+
+      copilot_org = Copilot::Organization.new(org)
+      copilot_org.telemetry_aggregation_enabled!
+      log("-> Enabling Copilot for #{org_style(org1_login)}") && copilot_org.enable_copilot! unless i == 5
+
+      if [0, 1].include?(i)
+        log("--> Setting org to purchase for selected teams and members")
+        copilot_org.seat_management_selected_teams_and_users!
+
+        log("--> Allowing public code suggestions for #{org_style(org1_login)}")
+        copilot_org.allow_public_code_suggestions!
+        create_seat_assignment(assignable_type: :user, create_seat: true, create_aggregate_usage_detail: true, organization: org)
+        org1_team_seat_assignment = create_seat_assignment(assignable_type: :team, create_seat: true, create_aggregate_usage_detail: true, organization: org, team_name: "#{org1_login}-team")
+        create_seat_assignment(assignable_type: :invitation, create_seat: true, create_aggregate_usage_detail: true, organization: org)
+
+        log("")
+        org2_login = "cfbbiz#{i}org2"
+        org2_admin_login = "cfbbiz#{i}org2-admin"
+        admin2 = FactoryBot.create(:user, login: org2_admin_login) unless User.find_by(login: org2_admin_login)
+        log("Creating additional enterprise linked org #{org_style(org2_login)} for business #{enterprise_style(business.slug)}")
+        org2 = FactoryBot.create(:copilot_for_business_enabled_organization, business: business, login: org2_login, admin: admin2)
+
+        copilot_org2 = Copilot::Organization.new(org2)
+        log("--> Enabling Copilot for #{org2_login}") && copilot_org2.enable_copilot! unless i == 9
+        log("--> Allowing public code suggestions for #{org2_login}\n")
+        copilot_org2.allow_public_code_suggestions!
+
+        create_seat_assignment(assignable_type: :user, create_seat: true, create_aggregate_usage_detail: true, organization: org2)
+        org2_team_seat_assignment = create_seat_assignment(assignable_type: :team, create_seat: true, create_aggregate_usage_detail: true, organization: org2, team_name: "#{org2_login}-team1")
+        create_seat_assignment(assignable_type: :child_team, create_seat: true, create_aggregate_usage_detail: true, organization: org2, team_name: "#{org2_login}-team2")
+        create_seat_assignment(assignable_type: :invitation, create_seat: true, create_aggregate_usage_detail: true, organization: org2)
+
+        create_seat_emission(org)
+        create_usage_metrics(business: business, org: org, team: org1_team_seat_assignment.assignable)
+        create_usage_metrics(business: business, org: org2, team: org2_team_seat_assignment.assignable)
+      elsif [2, 3].include?(i)
+        log("--> Setting org to purchase for all members")
+        copilot_org.seat_management_allow_all!
+
+        log("--> Blocking public code suggestions for #{org_style(org1_login)}\n")
+        copilot_org.block_public_code_suggestions!
+        create_seat_assignment(assignable_type: :organization, create_seat: true, create_aggregate_usage_detail: true, organization: org)
+
+        create_seat_emission(org)
+        create_usage_metrics(business: business, org: org)
+
+        # Create some content exclusions documents
+        FactoryBot.create(:copilot_content_exclusion_configuration, :organization, resource: org, document: create_exclusions_document("fake-repo", 100**i))
+
+        # let's block some of them
+        blocked_user = FactoryBot.create(:user, login: "#{org.login}-member-blocked")
+        log("---> Adding #{user_style(blocked_user.login)} (id: #{blocked_user.id}) to org #{org_style(org.login)}")
+        org.add_member(blocked_user)
+        Copilot::User.new(blocked_user).administrative_block!(@monalisa, "Just because")
+
+        warned_user = FactoryBot.create(:user, login: "#{org.login}-member-warned")
+        log("---> Adding #{user_style(warned_user.login)} (id: #{warned_user.id}) to org #{org_style(org.login)}")
+        org.add_member(warned_user)
+        Copilot::User.new(warned_user).warn_user!(@monalisa, SecureRandom.uuid, "Just because")
+      else
+        log("--> Keeping copilot disabled and not configuring code suggestions for #{org_style(org1_login)}\n")
+
+        create_organization_members(org, false)
+        create_team(org)
+      end
+
+      create_biz_total_users_row(business)
+
+      log("\n\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+    end
+  end
+
+  def create_enterprise_business
+    Business.where("slug like 'cfbbizent%'").destroy_all
+    Organization.where("login like 'cfbbizent%'").destroy_all
+    User.where("login like 'cfbbizent%'").destroy_all
+    ReservedLogin.destroy_all
+    slug = "cfbbizent"
+
+    log("Creating enterprise with slug #{enterprise_style(slug)}")
+    business = FactoryBot.create(:business, :with_github_subscription, slug: slug)
+    raise "Business #{slug} not created" unless business.persisted?
+
+    biz_admin = business.owners.first
+    biz_admin.update!(login: "#{slug}admin") unless biz_admin.login == "#{slug}admin"
+    log("--> Business admin is #{user_style(biz_admin.login)} (id: #{biz_admin.id})")
+    create_user_token(biz_admin, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log", "manage_billing:enterprise"])
+
+    login = "#{slug}org"
+    log("Creating enterprise linked org #{org_style(login)} for business #{enterprise_style(business.slug)}")
+    org = FactoryBot.create(:copilot_for_business_enabled_organization, business: business, login: login)
+    raise "Organization #{login} not created" unless org.persisted?
+
+    org_admin = org.admins.first
+    org_admin.update!(login: "#{login}admin") unless org_admin.login == "#{login}admin"
+    log("--> #{user_style(org.admins.first.login)} (id: #{org.admins.first.id}) is the admin for #{org_style(login)}")
+    create_user_token(org.admins.first, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log"])
+
+    copilot_org = Copilot::Organization.new(org)
+    log("-> Enabling Copilot for #{org_style(org.login)}") && copilot_org.enable_copilot!
+    log("--> Setting org to purchase for all members")
+    copilot_org.seat_management_allow_all!
+
+    log("--> Blocking public code suggestions for #{org_style(org.login)}\n")
+    copilot_org.block_public_code_suggestions!
+    create_seat_assignment(assignable_type: :organization, create_seat: true, create_aggregate_usage_detail: true, organization: org)
+    create_seat_emission(org)
+    create_usage_metrics(business: business, org: org)
+
+    copilot_business = Copilot::Business.new(business)
+    log("--> Enabling Copilot Enterprise features for #{enterprise_style(business.slug)}\n")
+    log("-> Enabling dotcom chat for #{enterprise_style(business.slug)}") && copilot_business.dotcom_chat_enabled!
+    log("-> Enabling fine-tuning for #{enterprise_style(business.slug)}") && copilot_business.custom_models_enabled!
+    log("-> Enabling copilot for dotcom for #{enterprise_style(business.slug)}") && copilot_business.copilot_for_dotcom_enabled!
+    log("-> Enabling cli for #{enterprise_style(business.slug)}") && copilot_business.cli_enabled!
+  end
+
+  def create_seat_assignment(assignable_type: :user, create_seat: false, create_aggregate_usage_detail: false, create_emission: false, organization: nil, team_name: nil)
+    bold_white("-> Creating seat assignment for #{assignable_type} / create_seat: #{create_seat} / create_aggregate_usage_detail: #{create_aggregate_usage_detail} / organization: #{org_style(organization)}")
+    organization = FactoryBot.create(:copilot_for_business_enabled_organization) unless organization.present?
+
+    organization.reload
+
+    seat_assignment =
+      case assignable_type
+      when :user
+        create_user_seat_assignment(organization)
+      when :child_team
+        create_team_seat_assignment(organization, child_team: true, name: team_name)
+      when :team
+        create_team_seat_assignment(organization, name: team_name)
+      when :invitation
+        create_invitation_seat_assignment(organization)
+      when :organization
+        create_organization_members(organization)
+      end
+
+    if create_seat && assignable_type != :invitation
+      seat_assignment.convert_to_seats
+
+      seat_ids = []
+      if create_aggregate_usage_detail
+        seat_assignment.seats.each do |seat|
+          seat_ids.append(seat.id)
+          FactoryBot.create(:copilot_aggregate_usage_detail, user: seat.assigned_user)
+        end
+      end
+
+      create_seat_emission(organization) if create_emission
+    end
+
+    seat_assignment
+  end
+
+  def create_user_seat_assignment(organization)
+    user = FactoryBot.create(:user)
+    log("--> Adding seat for #{user_style(user.login)} (id: #{user.id}) to org #{org_style(organization.login)}")
+    organization.add_member(user)
+    FactoryBot.create(:copilot_seat_assignment, assignable: user, organization: organization, assigning_user: organization.admins.first)
+  end
+
+  def create_invitation_seat_assignment(organization)
+    invitation = FactoryBot.create(:organization_invitation, organization: organization, inviter: organization.admins.first, invitee: FactoryBot.create(:user, login: "#{organization.display_login}-invitee"))
+    log("--> Invited #{user_style(invitation.invitee.login)} (id: #{invitation.invitee.id}) to org #{org_style(organization.login)}")
+    FactoryBot.create(:copilot_seat_assignment, assignable: invitation, organization: organization, assigning_user: organization.admins.first)
+  end
+
+  def create_team_seat_assignment(organization, child_team: false, name: nil)
+    team = create_team(organization, child_team, name)
+    log("--> Creating SeatAssignment for team #{team_style(team.name)}")
+    FactoryBot.create(:copilot_seat_assignment, assignable: team, organization: organization, assigning_user: organization.admins.first)
+  end
+
+  def create_team(organization, child_team = false, name = nil)
+    team = FactoryBot.create(:team, organization: organization, privacy: :closed, name: name || "#{organization.login}-team")
+    rand_num = rand(1..10)
+
+    log("--> Adding team #{team_style(team.name)} (id: #{team.id}) to org #{org_style(organization.login)} (#{rand_num} members)")
+    rand_num.times do |i|
+      user = FactoryBot.create(:user, login: "#{team.name}-member-#{i + 1}")
+      log("---> Adding #{user_style(user.login)} (id: #{user.id}) to #{team_style(team.name)}")
+      organization.add_member(user)
+      team.add_member(user)
+    end
+
+    if child_team
+      child_team = FactoryBot.create(:team, organization: organization, parent_team_id: team.id, privacy: :closed, name: "#{team.name}-child")
+      rand_num = rand(1..10)
+      log("---> Adding child team #{team_style(child_team.name)} (id: #{child_team.id}) to team #{team_style(team.name)} (#{rand_num} members)")
+      rand_num.times do |i|
+        user = FactoryBot.create(:user, login: "#{child_team.name}-member-#{i + 1}")
+        organization.add_member(user)
+        log("----> Adding #{user_style(user.login)} (id: #{user.id}) to #{team_style(child_team.name)}")
+        child_team.add_member(user)
+      end
+    end
+
+    team
+  end
+
+  def create_organization_members(organization, with_assignment = true)
+    rand_num = rand(5..15)
+    log("--> Adding #{rand_num} members to org #{organization.login}")
+    rand_num.times do |i|
+      user = FactoryBot.create(:user, login: "#{organization.login}-member-#{i + 1}")
+      log("---> Adding #{user_style(user.login)} (id: #{user.id}) to org #{org_style(organization.login)}")
+      organization.add_member(user)
+    end
+    log("")
+    FactoryBot.create(
+      :copilot_seat_assignment,
+      assignable: organization, organization: organization, assigning_user: organization.admins.first) if with_assignment
+  end
+
+  def create_seat_emission(organization)
+    seat_count = Copilot::Seat.for_organization(organization).where.not(assigned_user_id: []).count.to_f
+    log("--> Creating seat emissions for #{seat_count} seats")
+
+    emittable_details = Copilot::Billing::Emittable.new(organization)
+    payload = emittable_details.meuse_emission_payload
+    emission_payload = {
+      current_metered_billing_cycle_starts_at: organization.current_metered_billing_cycle_starts_at.to_date,
+      meuse_payload: payload,
+      next_metered_billing_cycle_starts_at: organization.next_metered_billing_cycle_starts_at.to_date,
+      number_of_days_in_billing_cycle: emittable_details.number_of_days_in_billing_cycle,
+      organization_id: organization.id,
+      per_seat_rate: emittable_details.per_seat_rate,
+      seat_count: emittable_details.seat_count,
+    }
+
+    Copilot::SeatEmission.create!(
+      emission: emission_payload,
+      occurred_at: payload[:usage_at],
+      owner: organization,
+      quantity: payload[:quantity],
+      unique_id: payload[:usage_uuid]
+    )
+    emission = Copilot::SeatEmission.for_owner(organization).last
+    return unless emission
+
+    previous = Copilot::SeatEmission.new(
+      emission: emission.emission,
+      occurred_at: emission.occurred_at - 1.day,
+      owner: organization,
+      quantity: emission.quantity,
+      unique_id: SecureRandom.uuid,
+    )
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+
+    previous.occurred_at = previous.occurred_at - 1.day
+    previous.save(validate: false)
+  end
+
+  def create_user(login: nil, copilot_org: false, public_code_allowed: nil, technical_preview_user: false, free_user_type: nil, free_user_subscribed: true, subscription_type: nil, trial_period: 0, spammy: nil)
+    return nil unless login
+
+    log("-> Creating #{colorize(login, "cyan", background: true, style: "bold")}")
+    user = create_user_for_subscription(login: login, subscription_type: subscription_type)
+
+    user.update!(login: login, require_email_verification: false)
+    user.emails.map(&:verify!)
+    user.update(spammy: false)
+
+    create_user_token(user)
+    create_copilot_settings(user, public_code_allowed)
+    create_free_user(user, free_user_type, free_user_subscribed) if free_user_type.present?
+    create_subscription_user(user, subscription_type, trial_period)
+    create_aggregate_usage_details(user)
+
+    if spammy
+      log("-> Marking #{user_style(login)} as spammy")
+      user.update(spammy: true)
+    end
+    user
+  end
+
+  def create_user_for_subscription(login: nil, subscription_type: nil)
+    if subscription_type.present?
+      user = User.find_by_login(login)
+      return user if user.present? && user.plan_subscription.present?
+
+      log("-> Creating #{user_style(user)} for subscription")
+      plan_subscription = FactoryBot.create(:billing_plan_subscription, :zuora)
+      plan_subscription.user
+    else
+      Seeds::Objects::User.create(login: login)
+    end
+  end
+
+  def create_user_token(user, extra_scopes = [])
+    user.oauth_accesses.delete_all
+
+    personal_access_token, _ = Seeds::Objects::User.create_pat(user: user, scopes: ["user:read", "copilot"] + extra_scopes)
+    personal_access_token = personal_access_token.first
+    @tokens[user.login] = personal_access_token
+
+    # Append to PAT file
+    File.open(TMP_PAT_FILE, "a") do |f|
+      f.puts("#{user.login}: #{personal_access_token}")
+    end
+    log("--> Created personal access token for #{user_style(user.login)}: '#{colorize(personal_access_token, "magenta", style: :italic)}'")
+    log("")
+  end
+
+  def create_no_payment_biz
+    log("")
+    biz_name = "cfb-biz-no-payment"
+    org_name = "cfb-org-no-payment"
+    Business.where("name like '#{biz_name}%'").destroy_all
+    Organization.where("login like '#{org_name}%'").destroy_all
+    User.where("login like '#{biz_name}%'").destroy_all
+    ReservedLogin.destroy_all
+
+    yellow("-> Creating biz with no payment #{enterprise_style(biz_name)}")
+    no_payment_biz_owner = create_user(login: "cfb-no-payment-admin")
+    raise "Biz owner cfb-no-payment-admin not created" unless no_payment_biz_owner.present?
+
+    log("--> #{user_style(no_payment_biz_owner.login)} (id: #{no_payment_biz_owner.id}) is the admin for #{enterprise_style(biz_name)}")
+
+    no_payment_business = FactoryBot.create(:business, name: biz_name, owners: [no_payment_biz_owner])
+    no_payment_business.customer.update(billing_type: nil)
+
+    no_payment_org = FactoryBot.create(:organization, login: org_name, business: no_payment_business, admin: no_payment_biz_owner)
+    log("Adding 5 users to #{org_style(no_payment_org.login)}")
+    5.times do
+      user = FactoryBot.create(:user)
+      no_payment_org.add_member(user)
+    end
+  end
+
+  def create_copilot_no_biz_org
+    no_biz_org_name = "cfb-no-biz-org"
+    no_biz_admin_login = "cfb-no-biz-admin"
+
+    Organization.where("login like 'cfb-no-biz%'").destroy_all
+    User.where("login like 'cfb-no-biz%'").destroy_all
+    ReservedLogin.destroy_all
+
+    title("Creating copilot enabled organization with no associated enterprise #{org_style(no_biz_org_name)}")
+
+    org_owner = FactoryBot.create(:user, :verified, login: no_biz_admin_login)
+    log("--> #{user_style(org_owner.login)} (id: #{org_owner.id}) is the admin for #{org_style(no_biz_org_name)}")
+    create_user_token(org_owner, extra_scopes = ["copilot", "manage_billing:copilot", "audit_log"])
+    raise "Org owner not created" unless org_owner.present?
+
+    no_biz_org = FactoryBot.create(:credit_card_organization, login: no_biz_org_name, plan: GitHub::Plan.business_plus, admin: org_owner)
+    raise "Org not created" unless no_biz_org.present?
+
+    log("--> Enabling copilot")
+    copilot_org = Copilot::Organization.new(no_biz_org)
+    copilot_org.enable_copilot!
+
+    log("--> Setting org to purchase for selected members")
+    copilot_org.seat_management_selected_teams_and_users!
+
+    log("--> Blocking public code suggestions")
+    copilot_org.block_public_code_suggestions!
+
+    log("Adding 5 users to #{org_style(no_biz_org_name)}")
+    5.times do
+      user = FactoryBot.create(:user)
+      no_biz_org.add_member(user)
+    end
+
+    team_assignment = create_team_seat_assignment(no_biz_org, child_team: true)
+    create_usage_metrics(business: nil, org: no_biz_org, team: team_assignment.assignable)
+  end
+
+  def create_copilot_settings(user, public_code_allowed)
+    bold_white("--> Configuring settings for #{user_style(user.login)} (public_code_allowed: #{public_code_allowed || "nil"})")
+
+    if public_code_allowed.nil?
+      log("---> No public code allowed, deleting user settings")
+      Copilot::Configuration.where(configurable: user).delete_all
+    end
+
+    if public_code_allowed.present? && public_code_allowed
+      log("---> Setting public code allowed for #{user_style(user.login)}")
+      Copilot::User.new(user).allow_public_code_suggestions!
+    end
+    if public_code_allowed.present? && !public_code_allowed
+      log("---> Setting public code not allowed for #{user_style(user.login)}")
+      Copilot::User.new(user).block_public_code_suggestions!
+    end
+  end
+
+  def create_free_user(user, free_user_type, free_user_subscribed)
+    return unless free_user_type.present?
+
+    log("-> Creating free user for #{user_style(user.login)}")
+
+    case free_user_type
+    when Copilot::FreeUser::COMPLIMENTARY_ACCESS.name
+      log("--> Setting Complimentary Access free user type")
+      create_complimentary_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::EDUCATIONAL.name
+      log("--> Setting Educational free user type")
+      create_educational_free_user(user, free_user_subscribed)
+
+    # Note: This step involves repo creation, which requires bin/server to be running
+    when Copilot::FreeUser::ENGAGED_OSS.name
+      log("--> Setting EngagedOSS free user type")
+      create_engaged_oss_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::FACULTY.name
+      log("--> Setting Faculty free user type")
+      create_faculty_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::GITHUB_STAR.name
+      log("--> Setting GitHub Star free user type")
+      create_github_star_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::MS_MVP.name
+      log("--> Setting MVP free user type")
+      create_mvp_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::TECHNICAL_PREVIEW_EXTENSION.name
+      log("--> Setting Technical Preview Extension free user type")
+      create_technical_preview_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::WORKSHOP.name
+      log("--> Setting Workshop free user type")
+      create_workshop_free_user(user, free_user_subscribed)
+
+    when Copilot::FreeUser::Y_COMBINATOR.name
+      log("--> Setting YCombinator free user type")
+      create_ycombinator_free_user(user, free_user_subscribed)
+    end
+  end
+
+  def create_complimentary_free_user(user, free_user_subscribed)
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::COMPLIMENTARY_ACCESS.name,
+      last_checked_date: Date.new(9999, 12, 31),
+      subscribed: true,
+      subscribed_at: Time.now,
+    )
+  end
+
+  def create_educational_free_user(user, free_user_subscribed)
+    CouponRedemption.for_user(user.id).delete_all
+    user.redeem_coupon(@educational_coupon)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating educational free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::EDUCATIONAL.name,
+      last_checked_date: user.coupon_redemption.expires_at.to_date,
+      subscribed: true,
+      subscribed_at: Time.now,
+    ) if free_user_subscribed
+  end
+
+  def create_engaged_oss_free_user(user, free_user_subscribed)
+    Copilot::EngagedOssUser.where(user_id: user.id).delete_all
+
+    ruby = LanguageName.find_by(name: "Ruby") || FactoryBot.create(:language_name, name: "Ruby", linguist_id: 326)
+    license = License.find("mit")
+
+    log("-> Creating repository ")
+    repo = Seeds::Objects::Repository.create(owner_name: user.login, setup_master: true, is_public: true, description: "fun repo")
+
+    log("-> Updating repository details ")
+    repo.update_attribute(:primary_language, ruby)
+    repo.update_columns(public_fork_count: 26, watcher_count: 5002, created_at: 3.months.ago)
+
+    log("-> Creating repository license ")
+    RepositoryLicense.find_by(repository: repo) || FactoryBot.create(:repository_license, repository: repo, license_id: license.id)
+
+    log("-> Creating EngagedOSSRepository record for #{repo.full_name}")
+    engaged_repo = Copilot::EngagedOssRepository.from_repository(repo)
+    engaged_repo.save!
+
+    log("-> Creating EngagedOSSUser for #{user_style(user.login)} and #{repo.nwo}")
+    Copilot::EngagedOssUser.create(user_id: user.id, repository_id: engaged_repo.id, role: Copilot::EngagedOssUser::VALID_ROLES.sample)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating engaged oss free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::ENGAGED_OSS.name,
+      last_checked_date: 1.year.from_now.to_date,
+      subscribed: true,
+      subscribed_at: Time.now,
+    ) if free_user_subscribed
+  end
+
+  def create_faculty_free_user(user, free_user_subscribed)
+    CouponRedemption.for_user(user.id).delete_all
+
+    user.redeem_coupon(@faculty_coupon)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating faculty free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::FACULTY.name,
+      last_checked_date: user.coupon_redemption.expires_at.to_date,
+      subscribed: true,
+      subscribed_at: Time.now,
+    ) if free_user_subscribed
+  end
+
+  def create_github_star_free_user(user, free_user_subscribed)
+    log("-> Creating GitHub-Stars organization")
+    @github_stars = Organization.where(login: "GitHub-Stars").first || FactoryBot.create(:organization, name: "GitHub-Stars")
+
+    log("-> Creating Stars team")
+    @stars_team = @github_stars.teams.find_by(name: "Stars") || FactoryBot.create(:team, organization: @github_stars, name: "Stars")
+
+    log("-> Adding #{user_style(user.login)} to GitHub-Stars/Stars team")
+    @stars_team.add_member(user)
+
+    user.build_user_metadata(is_github_star: true)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating GitHub Star free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::GITHUB_STAR.name,
+      last_checked_date: 1.year.from_now.to_date,
+      subscribed: free_user_subscribed,
+      subscribed_at: free_user_subscribed ? Time.now : nil,
+    )
+  end
+
+  def create_mvp_free_user(user, free_user_subscribed)
+    CouponRedemption.for_user(user.id).delete_all
+
+    user.redeem_coupon(@mvp_coupon)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating MVP free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::MS_MVP.name,
+      last_checked_date: user.coupon_redemption.expires_at.to_date,
+      subscribed: free_user_subscribed,
+      subscribed_at: free_user_subscribed ? Time.now : nil,
+    )
+  end
+
+  def create_workshop_free_user(user, free_user_subscribed)
+    CouponRedemption.for_user(user.id).delete_all
+
+    user.redeem_coupon(@workshop_coupon)
+
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating Workshop free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::WORKSHOP.name,
+      last_checked_date: user.coupon_redemption.expires_at.to_date,
+      subscribed: free_user_subscribed,
+      subscribed_at: free_user_subscribed ? Time.now : nil,
+    )
+  end
+
+  def create_technical_preview_free_user(user, free_user_subscribed)
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating technical preview extension free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::TECHNICAL_PREVIEW_EXTENSION.name,
+      last_checked_date: 60.days.from_now.to_date,
+      subscribed: true,
+      subscribed_at: Time.now,
+    )
+  end
+
+  def create_ycombinator_free_user(user, free_user_subscribed)
+    Copilot::FreeUser.where(user_id: user.id).delete_all
+
+    log("-> Creating Ycombinator free user for #{user_style(user.login)}")
+    Copilot::FreeUser.create!(
+      user: user,
+      free_user_type: Copilot::FreeUser::Y_COMBINATOR.name,
+      last_checked_date: 1.year.from_now.to_date,
+      subscribed: free_user_subscribed,
+      subscribed_at: free_user_subscribed ? Time.now : nil,
+    )
+  end
+
+  def create_subscription_user(user, incoming_subscription_type, trial_period)
+    return unless incoming_subscription_type
+
+    subscription_type, cancelled, forced = incoming_subscription_type.split("-")
+    cancelled = cancelled.present?
+    forced = forced.present?
+
+    log("-> Creating subscription user for #{user_style(user.login)} #{subscription_type} / cancelled: #{cancelled} / forced: #{forced} / #{trial_period}")
+
+    if !user.customer_account
+      log("--> Creating customer account for #{user_style(user.login)}")
+      user.update!(billing_type: "card", customer_account: FactoryBot.create(:credit_card_customer_account, user: user))
+    end
+    user.update!(billed_on: 3.days.from_now.to_date)
+
+    free_trial_period = trial_period > 0 ? trial_period : 0.days
+
+    product = subscription_type == "monthly" ? @copilot_monthly_product_uuid : @copilot_yearly_product_uuid
+    raise "Invalid subscription type: #{subscription_type}" unless product
+    result = Billing::Public::SubscriptionItem.create(
+      product: product,
+      account: user,
+      actor: user,
+      free_trial_length: free_trial_period
+    )
+    unless result.ok?
+      raise "Failed to create subscription item: #{result.error.message}" unless result.error.message.include?("already has an active subscription for GitHub Copilot")
+    end
+
+    if cancelled
+      log("--> Cancelling subscription for #{user_style(user.login)}")
+
+      user.reload
+      user.subscription_items.first.present? ? user.subscription_items.first.cancel!(force: forced) : raise("No subscription item found")
+    end
+
+    if trial_period < 0
+      user.subscription_items.first.present? ? user.subscription_items.first.update(free_trial_ends_on: GitHub::Billing.today) : raise("No subscription item found")
+    end
+  end
+
+  def create_aggregate_usage_details(user)
+    bold_white("--> Creating aggregate usage details for #{user_style(user.login)}")
+    Copilot::User.new(user)
+
+    Copilot::AggregateUsageDetail.create_for_user_id(
+      user.id,
+      "copilot/#{Faker::App.semantic_version}" + "/" + %w[vscode JetBrains-IE JetBrains-IU neovim].sample + "/" + Faker::App.semantic_version
+    )
+  end
+
+  def create_biz_total_users_row(business, days_for_metrics: 28, biz_members: nil)
+    biz_members_count = biz_members || business.admin_and_organization_member_ids.count
+
+    random_total_suggestions_count = rand(1..3000)
+    random_total_acceptances_count = rand(1..random_total_suggestions_count)
+    random_total_lines_suggested = rand(1..3000)
+    random_total_lines_accepted = rand(1..random_total_lines_suggested)
+
+    # rows for enterprise totals
+    days_for_metrics.times do |i|
+      Copilot::UsageMetric.create!(
+        business: business,
+        organization: nil,
+        language_name_id: nil,
+        date: i.days.ago,
+        editor: 0,
+        suggestions_count: random_total_suggestions_count,
+        acceptances_count: random_total_acceptances_count,
+        lines_suggested: random_total_lines_suggested,
+        lines_accepted: random_total_lines_accepted,
+        active_users: biz_members_count,
+        chat_messages: random_total_lines_accepted,
+        chat_active_users: biz_members_count,
+        chat_acceptances: random_total_lines_accepted,
+        language: "all",
+        metadata: {}
+      )
+    end
+  end
+
+  def create_usage_metrics(business: nil, org: nil, team: nil, enterprise_team: nil, days_for_metrics: 28)
+    if org.present?
+      log_msg = "--> Creating usage metrics for #{org_style(org.login)}"
+      log_msg += "in business #{enterprise_style(business.slug)}" if business.present?
+      bold_white(log_msg)
+    end
+
+    members_count = org.present? ? org.members.count : enterprise_team.member_user_ids.count
+    create_language_names
+    lang_names = LanguageName.all.to_a
+
+    random_total_suggestions_count = rand(1..2000)
+    random_total_acceptances_count = rand(1..random_total_suggestions_count)
+    random_total_lines_suggested = rand(1..2000)
+    random_total_lines_accepted = rand(1..random_total_lines_suggested)
+
+    # rows for org totals
+    if org
+      days_for_metrics.times do |i|
+        Copilot::UsageMetric.create!(
+          business: business,
+          organization: org,
+          team: team,
+          language_name_id: nil,
+          date: i.days.ago,
+          editor: 0,
+          suggestions_count: random_total_suggestions_count,
+          acceptances_count: random_total_acceptances_count,
+          lines_suggested: random_total_lines_suggested,
+          lines_accepted: random_total_lines_accepted,
+          active_users: members_count,
+          chat_messages: random_total_lines_suggested,
+          chat_active_users: members_count,
+          chat_acceptances: random_total_lines_accepted,
+          language: "all",
+          metadata: {}
+        )
+      end
+    end
+
+    # rows for team totals
+    if team || enterprise_team
+      active_users = enterprise_team.present? ? enterprise_team.member_user_ids.count : team.members.count
+      days_for_metrics.times do |i|
+        Copilot::UsageMetric.create!(
+          business: nil,
+          organization: nil,
+          team: team,
+          enterprise_team: enterprise_team,
+          language_name_id: nil,
+          date: i.days.ago,
+          editor: 0,
+          suggestions_count: random_total_suggestions_count,
+          acceptances_count: random_total_acceptances_count,
+          lines_suggested: random_total_lines_suggested,
+          lines_accepted: random_total_lines_accepted,
+          active_users: active_users,
+          chat_messages: random_total_lines_suggested,
+          chat_active_users: rand(1..active_users),
+          chat_acceptances: random_total_lines_accepted,
+          language: "all",
+          metadata: {}
+        )
+      end
+    end
+
+    days_for_metrics.times do |i|
+      lang_names.each do |lang_name|
+        5.times do |editor|
+          random_suggestions_count = rand(1..1000)
+          random_acceptances_count = rand(1..random_suggestions_count)
+          random_lines_suggested = rand(1..1000)
+          random_lines_accepted = rand(1..random_lines_suggested)
+
+          Copilot::UsageMetric.create!(
+            business: business,
+            organization: org,
+            team: team,
+            enterprise_team: enterprise_team,
+            language_name_id: lang_name.id,
+            date: i.days.ago,
+            editor: editor,
+            suggestions_count: random_suggestions_count,
+            acceptances_count: random_acceptances_count,
+            lines_suggested: random_lines_suggested,
+            lines_accepted: random_lines_accepted,
+            chat_messages: random_lines_suggested,
+            active_users: rand(1..members_count),
+            chat_active_users: members_count,
+            chat_acceptances: random_lines_accepted,
+            metadata: {}
+          )
+        end
+      end
+    end
+  end
+
+  def update_billable_standalone_enterprise(options)
+    yellow("-> Updating standalone enterprise #{enterprise_style("Basic Inc")}")
+
+    basic = Business.find_by(slug: "basic-inc")
+    customer = basic.customer
+
+    owner = basic.owners.first
+    log("--> #{user_style(owner.login)} is the owner of #{enterprise_style("Basic Inc")}")
+    create_user_token(owner, extra_scopes = ["copilot"])
+
+    if basic.enterprise_agreements.active.any? && customer.azure_subscription_id.present?
+      log("--> #{enterprise_style("Basic Inc")} already has an active enterprise agreement with an Azure subscription")
+    else
+      log("--> Adding billable support to #{enterprise_style("Basic Inc")}")
+      FactoryBot.create(:enterprise_agreement, :visual_studio_bundle, business: basic)
+      customer.update(azure_subscription_id: SecureRandom.uuid)
+    end
+
+    Copilot::SeatAssignment.where(owner: basic).destroy_all
+    basic.enterprise_teams.destroy_all
+
+    create_copilot_enterprise_teams(basic, options)
+
+    log("--> Enabling copilot for standalone enterprise #{enterprise_style("Basic Inc")}")
+    Copilot::Business.new(basic).enable_copilot!
+  end
+
+  def create_non_emu_basic_enterprises
+    log("")
+    log("")
+    title("Creating non-EMU basic enterprises")
+
+    log("---> Cleaning up existing non-EMU basic enterprises, teams, and users")
+    to_clean = Business.where(slug: %w(no-emu-basic-biz1 no-emu-basic-biz2))
+    to_clean.each do |b|
+      b.enterprise_teams.destroy_all
+      b.destroy
+    end
+
+    User.where(login: "shared-basic-user").destroy_all
+    ReservedLogin.destroy_all
+
+    log("---> Creating no-emu-basic-biz1 and no-emu-basic-biz2")
+    business1 = FactoryBot.create(:business, :default_managed, seats_plan_type: :basic, slug: "no-emu-basic-biz1")
+    business2 = FactoryBot.create(:business, :default_managed, seats_plan_type: :basic, slug: "no-emu-basic-biz2")
+
+    biz1_admin = business1.admins.first
+    biz2_admin = business2.admins.first
+
+    log("--> #{user_style(biz1_admin.login)} is the admin for #{enterprise_style(business1.slug)}")
+    create_user_token(biz1_admin, extra_scopes = ["copilot"])
+
+    business1.add_user_accounts([biz1_admin.id], business_roles_bitfield: BusinessUserAccount::Roles::BUSINESS_ROLES[:billing_manager])
+    business1.billing.add_manager(biz1_admin, actor: biz1_admin)
+    business2.add_user_accounts([biz2_admin.id], business_roles_bitfield: BusinessUserAccount::Roles::BUSINESS_ROLES[:billing_manager])
+    business2.billing.add_manager(biz2_admin, actor: biz2_admin)
+
+    log("--> #{user_style(business1.owners.first.display_login)} is the owner for #{enterprise_style(business1.slug)}")
+    log("--> #{user_style(business2.owners.first.display_login)} is the owner for #{enterprise_style(business2.slug)}")
+
+    log("--> Creating enterprise team for non-emu basic enterprises")
+    enterprise_team1 = FactoryBot.create(:enterprise_team, business: business1)
+    enterprise_team2 = FactoryBot.create(:enterprise_team, business: business2)
+
+    shared_user = FactoryBot.create(:user, login: "shared-basic-user")
+
+    log("--> Adding #{user_style(shared_user.display_login)} to both enterprise teams")
+    business1.add_user_accounts([shared_user.id], business_roles_bitfield: 0)
+    business2.add_user_accounts([shared_user.id], business_roles_bitfield: 0)
+    enterprise_team1.enterprise_team_memberships.create!(user_id: shared_user.id)
+    enterprise_team2.enterprise_team_memberships.create!(user_id: shared_user.id)
+
+    log("--> Enabling copilot, snippy, chat, and mobile chat")
+    [business1, business2].each do |biz|
+      cp_biz = Copilot::Business.new(biz)
+      cp_biz.enable_copilot!
+      cp_biz.enable_chat!
+      cp_biz.allow_public_code_suggestions!
+      cp_biz.enable_mobile_chat!
+    end
+
+    log("--> Creating copilot seat assignments for non-emu basic enterprise teams")
+    [enterprise_team1, enterprise_team2].each do |et|
+      assignment = Copilot::SeatAssignment.new(
+        owner_id: et.business_id,
+        owner_type: "Business",
+        assignable_type: "EnterpriseTeam",
+        assignable_id: et.id,
+        assigning_user: et.business.owners.first,
+      )
+      assignment.save!
+      assignment.convert_to_seats
+    end
+    log("\n\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n")
+  end
+
+  def create_language_names
+    langs = %w[ruby python javascript go typescript]
+
+    langs.each do |name|
+      language_name = LanguageName.find_by(name: name)
+
+      unless language_name.present?
+        language_name = LanguageName.create(name: name)
+      end
+    end
+  end
+
+  def find_or_create_org(login, type: :copilot_for_business_enabled_organization, plan: nil, admin: nil)
+    log("-> Creating org #{org_style(login)}")
+    org = Organization.find_by(login: login)
+
+    unless org.present?
+      org = FactoryBot.create(type, login: login, plan: plan, admin: admin || FactoryBot.create(:user))
+    end
+
+    if admin.present? && !org.admins.include?(admin)
+      log("--> Adding admin user #{user_style(admin.login)} (id: #{admin.id})")
+      org.add_admin(admin)
+    end
+
+    org.admins.each do |admin|
+      admin.emails.map(&:verify!)
+    end
+
+    if plan.present? && org.plan != plan
+      log("--> Setting plan to #{plan}")
+      org.plan = plan
+    end
+    org.save!
+    org
+  end
+
+  def find_or_create_copilot_business_trial(organization)
+    trial = Copilot::BusinessTrial.for_organization(organization)
+
+    unless trial.present?
+      log("---> Creating BusinessTrial for #{org_style(organization.login)}")
+      FactoryBot.create(:copilot_business_trial, :organization, trialable: organization, state: :pending)
+    end
+  end
+
+  def create_exclusions_document(repo_name, maximum_characters)
+    document = <<~DOC
+      "*": ["/env/*"]
+
+      #{repo_name}: ["/repo-specific-content/*"]
+    DOC
+
+    scope_id = 1
+    while document.length < maximum_characters
+      new_scope = "scope-#{scope_id}: [#{(0..9).map { |rule_id| "/scope-#{scope_id}-rule-#{rule_id}/*" }.join(", ")}]\n"
+
+      break if document.length + new_scope.length > maximum_characters
+
+      document << new_scope
+      scope_id += 1
+    end
+
+    document
+  end
+
+  def title(string)
+    LOGGER.info colorize(string, "yellow", style: :underline)
+  end
+
+  def yellow(string)
+    LOGGER.info colorize(string, "yellow")
+  end
+
+  def bold_white(string)
+    LOGGER.info colorize(string, "white", style: :bold)
+  end
+
+  def org_style(login)
+    colorize(login, "green", style: :underline)
+  end
+
+  def user_style(login)
+    colorize(login, "cyan", style: :underline)
+  end
+
+  def enterprise_style(slug)
+    colorize(slug, "red", style: :underline)
+  end
+
+  def team_style(name)
+    colorize(name, "yellow")
+  end
+
+  def log(string)
+    LOGGER.info string
+  end
+
+  def colorize(string, color, options = {})
+    background = options[:background] || options[:bg] || false
+    style = options[:style]
+    offsets = %w[gray red green yellow blue magenta cyan white]
+    styles = %w[normal bold dark italic underline xx xx underline xx strikethrough]
+    start = background ? 40 : 30
+    color_code = start + (offsets.index(color) || 8)
+    style_code = styles.index(style) || 0
+    "\e[#{style_code};#{color_code}m#{string}\e[0m"
+  end
+end
+
+require "optparse"
+
+options = {
+  clean: false,
+  cfi_users: false,
+  skip_cfb_creation: false,
+  create_copilot_for_enterprise: false,
+  first_run_only: false,
+  orgs_only: false,
+  coupons: false,
+  standalone_only: false,
+  standalone_full: false
+}
+opt = OptionParser.new
+
+opt.banner = "Usage: setup-copilot"
+opt.separator ""
+
+opt.on("-b", "--skip-cfb", "Skip generating CFB stuff") { |_v| options[:skip_cfb_creation] = true }
+opt.on("-c", "--clean", "Clean Copilot Database") { |_v| options[:clean] = true }
+opt.on("-e", "--copilot-for-enterprise", "Create Copilot Enterprise (deprecated)") { |_v| options[:create_copilot_for_enterprise] = true }
+opt.on("-E", "--enterprise", "Create Copilot Enterprise Business with all features enabled") { |_v| options[:enterprise_only] = true }
+opt.on("-u", "--cfi-users", "Generate CFI users") { |_v| options[:cfi_users] = true }
+opt.on("-o", "--orgs-only", "Only generate cfb orgs and stuff") { |_v| options[:orgs_only] = true }
+opt.on("-f", "--first-run-only", "Only generates orgs and enterprises for first run flow") { |_v| options[:first_run_only] = true }
+opt.on("-t", "--standalone-only", "Only sets up the Basic Inc enterprise with standalone billable suport") { |_v| options[:standalone_only] = true }
+opt.on("-T", "--standalone-full", "Adds 76 additional enterprise teams for standalone") { |_v| options[:standalone_full] = true }
+
+opt.on_tail("-h", "--help", "Show this message") do
+  puts opt
+  exit
+end
+
+opt.parse!(ARGV)
+
+$stdout.reopen(File.new("/dev/null", "w")) # ONLY LOGGER EXISTS!
+$VERBOSE = nil
+
+SetupCopilot.new.call(options)

@@ -1,0 +1,83 @@
+<%
+  page_info(
+    title: "Projects · #{this_repository.name}",
+    container_xl: true,
+    selected_link: :repo_projects,
+    breadcrumb: "Projects",
+    breadcrumb_owner: project_owner
+  )
+
+  is_templates_selected = show_templates_index && params[:query]&.include?("is:template")
+  selected_item_id = if is_templates_selected
+    Memex::UIIndexSearch::Categories::Templates
+  elsif params[:type] == "classic"
+    Memex::UIIndexSearch::Categories::Classic
+  else
+    Memex::UIIndexSearch::Categories::Projects
+  end
+
+  org_projects_disabled = project_owner.is_a?(Organization) && !project_owner.organization_projects_enabled?
+  repo_projects_disabled = !this_repository.repository_memex_projects_enabled?
+%>
+<%= render layout: "layouts/projects", locals: { project_owner: this_repository } do %>
+  <%
+    index_navigation_component_options = {
+      selected_item_id: selected_item_id.serialize,
+      beta_path: repo_projects_beta_path,
+      classic_path: disable_classic_projects ? nil : repo_projects_beta_path(type: "classic"),
+      template_path: show_templates_index ? repo_projects_beta_path(query: "is:open is:template") : nil,
+      owner_type: :repo,
+    }
+  %>
+  <%= render Memex::IndexHeadingComponent.new(
+      repo: current_repository,
+      search_category: selected_item_id
+    )
+  %>
+  <%= render Memex::ProjectListContainerComponent.new(
+    project_owner: project_owner,
+    index_navigation_component_options: index_navigation_component_options,
+  ) do %>
+    <%= render Memex::ProjectListComponent.new(
+      context: Repository,
+      projects: org_projects_disabled || repo_projects_disabled ? [] : memexes,
+      owner: project_owner,
+      is_recent_selected: false,
+      has_next_page: has_next_page,
+      cursor: cursor,
+      sort_query_cursor: sort_query_cursor,
+      parsed_query: parsed_query,
+      open_memex_count: open_memex_count,
+      closed_memex_count: closed_memex_count,
+      load_more_path: repo_projects_beta_path,
+      write_accessible_project_ids: write_accessible_project_ids,
+    ) do |list| %>
+      <% unless org_projects_disabled || repo_projects_disabled %>
+        <%= list.with_controls do %>
+          <%= render Primer::Box.new(ml: 0, flex: :auto) do %>
+            <%= primer_form_with(method: :get) do |f| %>
+              <%= render(Memex::ProjectList::SearchForm.new(f, parsed_query: parsed_query, context: Repository)) %>
+            <% end %>
+          <% end %>
+          <% if current_user_can_push? %>
+            <%= render Memex::ProjectList::AddOrLinkProjectButtonContainerComponent.new(
+              context: Repository,
+              owner: project_owner,
+              tooltip: "Only projects that you are an admin of can be searched for and added to a repository",
+              is_template: is_templates_selected,
+              ui: MemexStats::UIValues::RepoIndex,
+            ) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "projects-splash-dialog" %>
+<% end %>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle "projects" %>
+<% end %>

@@ -1,0 +1,471 @@
+#!/bin/bash
+#
+# Common functions used by GitHub Actions scripts.
+# Usage: . ghe-actions-lib
+#
+
+# NOTE: To add a new service, modify the action-services and action-port
+# functions below.
+
+# action-services
+#   Returns a list of all enabled services in the order the services should start.
+action-services() {
+    if artifactcache-enabled; then
+        echo "mps token actions artifactcache"
+    else
+        echo "mps token actions"
+    fi
+}
+# Minimum service needed to validate the Storage Provider configuration with OIDC auth.
+token-services() {
+    echo "mps token"
+}
+# actions-dbs
+# returns a list of database prefixes in data dependency order (most critical first)
+actions-db-prefixes() {
+    if artifactcache-enabled; then
+        echo "Token Mps Pipelines ArtifactCache"
+    else
+        echo "Token Mps Pipelines"
+    fi
+}
+
+# action-port <service>
+#   Returns the port used by the given service.
+action-port() {
+    if [ "$1" = "mps" ]; then
+        echo "10001"
+    elif [ "$1" = "token" ]; then
+        echo "10002"
+    elif [ "$1" = "actions" ]; then
+        echo "10003"
+    elif [ "$1" = "artifactcache" ]; then
+        echo "10007"
+    fi
+}
+
+# action-db-prefix <service>
+#   Returns the database name prefix used by the given service. The prefix
+#   usually matches the service name, but can differ as is the case for
+#   Actions => Pipelines.
+action-db-prefix() {
+    if [ "$1" = "actions" ]; then
+        echo "pipelines"
+    else
+        echo "$1"
+    fi
+}
+
+# action-images
+#   Returns a list of all Docker images required by GitHub Actions.
+action-images() {
+    echo "actions"
+    echo "actions-console"
+}
+
+# actions-ever-enabled
+#   Checks if actions is enabled or was previously enabled
+actions-ever-enabled() {
+    ghe-config --true app.actions.enabled || test -f /data/user/actions/states/actions_state;
+}
+
+# artifactcache-enabled
+#   Checks if artifactcache service is enabled
+artifactcache-enabled() {
+    ghe-config --true app.actions.artifactcache.enabled || ghe-config --blank app.actions.artifactcache.enabled
+}
+
+# check-service-name <service>
+#   Validates the given service name.
+check-service-name() {
+    for service in $(action-services); do
+        if [ "$service" = "$1" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# reverse <str>
+#   Reverse all words in the given string.
+reverse() {
+    echo "$@" | awk '{for(i=NF;i>0;--i)printf "%s%s",$i,(i>1?OFS:ORS)}'
+}
+
+# to-lower <str>
+#   Converts a string to lower-case characters.
+to-lower() {
+    tr '[:upper:]' '[:lower:]' <<< "$1"
+}
+
+# capitalize <str>
+#   Capitalizes the service name.
+capitalize() {
+    if [ "$1" = "artifactcache" ]; then
+        echo "ArtifactCache"
+    else
+        echo "$(tr '[:lower:]' '[:upper:]' <<< "${1:0:1}")${1:1}"
+    fi
+}
+
+# check-mssql
+#   Validates that MSSQL is running and functional. Usually targets the primary MSSQL instance, but you can supply
+#   --force-on-replica to target the local MSSQL instance.
+check-mssql() {
+    force_on_replica=$1
+
+    if [ -n "$force_on_replica" ]; then
+      ghe-mssql-console -y -q "print 'Alive (local)'"
+    else
+      ghe-mssql-console -y -p -q "print 'Alive'"
+    fi
+}
+
+# check-mssql-shutdown
+#   Validates that MSSQL is not running
+check-mssql-shutdown() {
+  check-mssql
+  test $? -eq 1
+}
+
+# check-mssql-actions [service]
+#   Validates a service's (or all if omitting the service parameter) databases are accessible
+check-mssql-actions() {
+    if [ -z "$1" ]; then
+        for service in $(action-services); do check-mssql-actions "$service"; done
+        return 0
+    fi
+    ensure-service-name "$1"
+    # query partition dbs
+    dbs=$(get-partition-dbs "$1")
+
+    # Check that at least one db was found
+    if [[ ${#dbs} -eq 0 ]]; then
+        echo "Error: no partition database found for $config_db"
+        return 1
+    fi
+
+    # Ensure all partition dbs are reachable
+    for db in $dbs; do
+        if ! echo "$db" | grep -q "$config_db"; then
+            partition_db=$(echo "$db" | cut -d \; -f 2)
+            ghe-mssql-console -y -n -p -q "USE [$partition_db]"
+        fi
+    done
+
+    # Check if any partition dbs are not ready
+    prefix=$(action-db-prefix "$1")
+    config_db=$(capitalize "${prefix}_Configuration")
+    query="SET NOCOUNT ON;
+        SELECT d.DatabaseName, d.Status, d.StatusReason, d.StatusChangedDate
+        FROM [${config_db}].dbo.tbl_Database d
+        JOIN [${config_db}].dbo.tbl_DatabasePool p
+        ON d.PoolId = p.PoolId
+        WHERE p.PoolName = 'DefaultPartitionPool'
+            AND d.Status NOT IN (2, 4)"
+    unready_dbs=$(ghe-mssql-console -y -n -p -r -q "$query")
+
+    if [[ ${#unready_dbs} -gt 0 ]]; then
+        echo "Error: partition database is found not healthy for $config_db"
+        echo "$unready_dbs"
+        return 1
+    fi
+
+    return 0
+}
+
+# check-url <url>
+#   Validates the given url returns HTTP 200 OK.
+check-url() {
+    [ "$(curl -s -o /dev/null -w "%{http_code}" "$1")" -eq "200" ]
+}
+
+# check-nomad-job <service>
+#   Validates that the nomad job and its tasks/allocs are running the expected image
+check-nomad-job() {
+    local image
+    image="actions:$(tag-for-image "actions")"
+    ghe-nomad-check-job --node "$1" -j "$2" "frontend:$image" "backend:$image"
+}
+
+# ensure-service-name <service>
+#   Prints a warning and exits if the given service is not valid.
+ensure-service-name() {
+    if ! check-service-name "$1"; then
+        >&2 echo "$1 is not a valid GitHub Actions service"
+        exit 1
+    fi
+}
+
+# ensure-storage-valid
+#   Prints an error and exits if the given storage connection settings are not valid.
+ensure-storage-valid() {
+    # Capture the output of the lightRail command
+    out=$(ghe-check-blob-connection -s actions 2>&1) || ret=$?
+    echo "Storage tests finished, output is below:"
+    printf '==%.0s' {1..30}
+    echo
+    echo "$out"
+    printf '==%.0s' {1..30}
+    echo
+
+    # Test the return code for all tests passing.
+    if [[ $ret -gt 0 ]]; then
+        >&2 echo "Storage tests failed!"
+        >&2 echo "Please run \"ghe-actions-check -s blob\" to get the full error message."
+        exit 1
+    else
+        echo "Blob Storage is healthy!"
+    fi
+}
+
+# ensure-image <image>
+#   Prints a warning and exits if the given Docker image does not exist.
+ensure-image() {
+    if [ "$(docker image ls "$1" --format "{{ .Repository }}" | wc -l)" -lt 1 ]; then
+        >&2 echo "Unable to find Docker image $1"
+        exit 1
+    fi
+}
+
+# ensure-images
+#   Prints a warning and exits if any of the Docker images do not exist.
+ensure-images() {
+    for image in $(action-images); do
+        ensure-image "$image:$(tag-for-image "$image")"
+    done
+}
+
+# ensure-int <name> <value>
+#   Prints a warning and exits if the given argument is not an integer.
+ensure-int() {
+    if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+        >&2 echo "$1 is not a valid integer (value: $2)"
+        exit 1
+    fi
+}
+
+# ensure-int-range <name> <value> <min> <max>
+#   Prints a warning and exits if the given argument is not within the given
+#   range (inclusive).
+ensure-int-range() {
+    ensure-int "$1" "$2"
+
+    if [[ "$2" -lt "$3" ]] || [[ "$2" -gt "$4" ]]; then
+        >&2 echo "$1 is out of range (min: $3, max: $4, actual: $2)"
+        exit 1
+    fi
+}
+
+# get-dbs <service>
+#   Gets the list of configuration and partition dbs belonging to a service
+get-dbs() {
+    local partition_dbs
+    prefix=$(action-db-prefix "$1")
+    config_db=$(capitalize "${prefix}_Configuration")
+    partition_dbs=$(get-partition-dbs "$1")
+    echo "$config_db $partition_dbs"
+}
+
+# get-partition-dbs <service>
+#   Gets the list of partition dbs belonging to a service
+get-partition-dbs() {
+    local prefix
+    local config_db
+    local query
+    local exit_code=0
+    local output
+
+    prefix=$(action-db-prefix "$1")
+    config_db=$(capitalize "${prefix}_Configuration")
+    query="SET NOCOUNT ON;
+        SELECT RIGHT(d.DatabaseName, LEN(d.DatabaseName) - CHARINDEX(';', d.DatabaseName)) FROM [${config_db}].dbo.tbl_Database d
+        JOIN [${config_db}].dbo.tbl_DatabasePool p
+        ON d.PoolId = p.PoolId
+        WHERE p.PoolName = 'DefaultPartitionPool'"
+
+    output=$(ghe-mssql-console -y -n -p -r -q "$query") || exit_code=$?
+
+    if [ "$exit_code" -ne "0" ]; then
+        >&2 echo "ERROR: Unable to query partition databases for $1."
+        >&2 echo "ghe-mssql-console exit code: $exit_code"
+        >&2 echo "ghe-mssql-console output: $output"
+
+        return $exit_code
+    fi
+
+    # return the output on stdout
+    echo "$output"
+}
+
+# launch-services
+#   Returns a list of all launch services
+launch-services() {
+    echo "launch-deployer launch-receiver launch-worker launch-heal-workflows launch-hydro-consumer"
+}
+
+# tag-for-image <image>
+#   Outputs the tag for the given Docker image.
+tag-for-image() {
+    local filename
+    filename="/data/docker-image-tags/$(echo "$1" | sed -r 's/-/_/g')_image_tag"
+    sudo cat "$filename"
+}
+
+# load-image <image>
+#   Loads a Docker image given its 'name:tag' if it is not already loaded.
+load-image() {
+    local image
+    if [ "$(docker image ls "$1" --format "{{ .Repository }}" | wc -l)" -lt 1 ]; then
+        image="$(find /data/docker-images -name "$1#*" | head -n 1)"
+
+        if [ -n "$image" ]; then
+            echo "Loading image $image"
+            sudo docker load -i "$image"
+        else
+            >&2 echo "Could not find image $1"
+            return 1
+        fi
+    fi
+}
+
+# wait-for <attempts> <name> <command...>
+#   Wait for the given service to become healthy.  The given command is used
+#   to check the service health.  Will retry every 10 seconds up to the given
+#   number of attempts before failing.
+wait-for() {
+    local attempts="$1"
+    local interval=10
+
+    for i in $(seq 1 "$attempts"); do
+        # Capture but hide output until all attempts exhausted
+        cmd="${*:3}"
+        ret=0
+        out=$($cmd 2>&1) || ret=$?
+        if [ $ret -eq 0 ]; then
+            echo "$2 is healthy!"
+            break
+        fi
+
+        if [ "$i" -eq "$attempts" ]; then
+            if [ "$attempts" -eq 1 ]; then
+                >&2 echo "$2 is not healthy"
+            else
+                >&2 echo "$2 failed to become healthy after $attempts attempts (with wait interval $interval seconds)"
+            fi
+
+            >&2 echo "Final attempt's output for '$cmd' was:"
+            >&2 echo "$out"
+
+            exit 1
+        else
+            echo "$2 is not yet healthy (attempt $i of $attempts), trying again in $interval seconds..."
+            sleep $interval
+        fi
+    done
+}
+
+# Runs Repair-DatabaseLogins if needed
+repair-actions-sql-logins() {
+    # Query which users have VIEW SERVER STATE permissions. We expect output like below but have seen
+    # cases where the DBO users lose this access
+    # Principal       Name    Principal       Type    Principal       Is      Disabled        Permission      State   Permission      Name
+    # actionsDBO-1a08763e571d432eae7a98840fa57692     SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # actionsDBO-67aa35bbfe3542218e965baf4cededae     SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # actionsDBO-c7ba048baf6a4e0980922da4c0c2cbee     SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # ActionsDT       SQL_LOGIN       0       GRANT_WITH_GRANT_OPTION VIEW    SERVER  STATE
+    # MpsDBO-b04c0e3a503f4d259c1de1f4a6a6bcd9 SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # MpsDT   SQL_LOGIN       0       GRANT_WITH_GRANT_OPTION VIEW    SERVER  STATE
+    # NT      AUTHORITY\SYSTEM        WINDOWS_LOGIN   0       GRANT   VIEW    SERVER  STATE
+    # PipelinesDBO-4a6ae8dc6c5b457d964c938effab849e   SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # TokenDBO-6860931be4eb4c1a91661bf6451c3055       SQL_LOGIN       0       GRANT   VIEW    SERVER  STATE
+    # TokenDT SQL_LOGIN       0       GRANT_WITH_GRANT_OPTION VIEW    SERVER  STATE
+    # (10     rows    affected)
+    permsOutput=$(ghe-mssql-console -y -p -q "
+SELECT
+who.name AS [Principal Name],
+who.type_desc AS [Principal Type],
+who.is_disabled AS [Principal Is Disabled],
+what.state_desc AS [Permission State],
+what.permission_name AS [Permission Name]
+FROM
+sys.server_permissions what
+INNER JOIN sys.server_principals who
+ON who.principal_id = what.grantee_principal_id
+WHERE
+what.permission_name = 'View server state'
+AND who.name NOT LIKE '##MS%##'
+AND who.type_desc <> 'SERVER_ROLE'
+ORDER BY
+who.name
+;
+GO")
+
+    # We expect 2 DBO entries per service (one <Service>DBO and one actionsDBO)
+    DBOcount=$(echo "$permsOutput" | grep -ic DBO) || true
+    services=$(action-services)
+    serviceCount=$(echo "$services" | wc -w)
+    expectedDBOcount=$((2*serviceCount))
+
+    # If either total count does not match expected or MPS entry is missing, run Repair-Databaselogins on all services
+    if ! (echo "$permsOutput" | grep -q -i MpsDBO && test "$DBOcount" == "$expectedDBOcount"); then
+        for service in $services ; do
+            ensure-service-name "$service"
+            ghe-actions-console -s "$service" -c "Repair-DatabaseLogins"
+        done
+    fi
+}
+
+#  update-runners-on-appliance
+#  Upload runners to GHES instance's Actions Service via ghe-actions-console
+#  This allows us to run air gap runners in GHES
+update-runners-on-appliance() {
+    # upload all latest version runners to the service
+    runner_path="/data/ghes-actions/current/runners"
+    out=$(ghe-actions-console -s actions -c 'Get-DistributedTaskPackages | Format-List -Property DownloadUrl | Out-String -Width 999' 2>&1) || ret=$?
+    jq -c -r '.[]' "$runner_path/runners.json" | while read -r i; do
+        name="$(echo "$i" | jq .name --raw-output)"
+        sha="$(echo "$i" | jq .sha --raw-output)"
+        platform="$(echo "$i" | jq .platform --raw-output)"
+        version="$(echo "$i" | jq .version --raw-output)"
+        if echo "$out" | grep -q "distributedtask/packagedownload/agent/$platform/$version"; then
+            echo "$platform runner version $version is already uploaded, skipping"
+        else
+            echo "Uploading Runner $name to Actions Service"
+            # copy to actions folder so it gets mapped into Lightrail.
+            fileLocation=/data/user/actions/$name
+            # attempt to delete if it exists
+            sudo -u actions rm -f "$fileLocation"
+            sudo -u actions cp "$runner_path/$name" "$fileLocation"
+            sudo -u actions chmod 644 "$fileLocation"
+            runner_command="
+                Remove-DistributedTaskPackage -PackageType agent -Platform $platform -Version $version
+                Add-DistributedTaskPackage -PackageType agent -Platform $platform -Version $version -InfoUrl https://github.com/actions/runner -Filename $name -FilePath /home/actions/.actions-dev/$name -HashValue $sha
+            "
+            ghe-actions-console -s "actions" -c "$runner_command"
+            sudo -u actions rm "$fileLocation"
+        fi
+    done
+
+    # remove all existing old version runner packages from the service
+    ghe-actions-console -s "actions" -c "Remove-OutdatedDistributedTaskPackages"
+}
+
+ensure_mssql_primary() {
+    local hostname
+    local mssql_master_hostname
+    
+    if [ ! -f /etc/github/cluster ];then
+        return 0
+    fi 
+
+    hostname=$(cat /etc/github/cluster) 
+    mssql_master_hostname=$(ghe-config cluster.mssql-master)
+
+    if [ "$hostname" != "$mssql_master_hostname" ]; then
+        echo "Error: This command can only be run on the primary mssql node."
+        exit 1
+    fi
+}
+

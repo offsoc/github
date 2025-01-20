@@ -1,0 +1,141 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% page_info \
+  title: "#{view.organization.login} - #{view.user}’s external identity",
+  selected_link: :stafftools_user_security %>
+
+<% if view.external_identity %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>
+      <a href="<%= stafftools_user_external_identities_path(view.organization) %>" data-pjax="true">External identities</a>
+      / <%= view.user %>
+    <% end %>
+  <% end %>
+
+  <%= render(Primer::Beta::BorderBox.new(classes: "summary")) do |component| %>
+    <% component.with_row do %>
+      <div <%= test_selector "identity-details" %>>
+        <dl>
+          <dt>SAML user data</dt>
+          <dd><pre><%= view.pretty(view.saml_user_data) %></pre></dd>
+        </dl>
+
+        <dl>
+          <dt>SCIM user data</dt>
+          <dd><pre><%= view.pretty(view.scim_user_data) %></pre></dd>
+        </dl>
+
+        <dl>
+          <dt>SCIM User ID</dt>
+          <dd><%= view.external_identity.guid %></dd>
+        </dl>
+
+        <dl>
+          <dt>Created at</dt>
+          <dd><%= time_ago_in_words_js view.external_identity.created_at %></dd>
+        </dl>
+        <dl>
+          <dt>Updated at</dt>
+          <dd><%= time_ago_in_words_js view.external_identity.updated_at %></dd>
+        </dl>
+      </div>
+    <% end %>
+    <% unless GitHub.enterprise? %>
+      <% component.with_row do %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Unlink identity for #{view.user}",
+            button_class: "btn btn-danger",
+            details_class: "float-right ml-1",
+            title: "Unlink external identity for #{view.user}",
+        } do %>
+          <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+            <p>Be careful &mdash; this will unlink the user's external identity and invalidate their active SAML sessions.</p>
+            <% if view.external_identity.scim_user_data.any? %>
+              <p><strong>Warning</strong> &mdash; this user's external identity contains SCIM metadata. The identity provider will no longer be able to synchronize or deprovision this user if SCIM data is removed. To change an existing external identity or user association, an admin may need to remove and re-assign the user to the GitHub application in the Identity Provider.</p>
+            <% end %>
+          <% end %>
+          <div class="Box-body overflow-auto">
+            <p>
+              They will not be removed from the organization, their credentials will remain authorized, and they will be able to link
+              their external identity again next time they authenticate with the Identity Provider.
+              Unlink the external identity if it has been linked to the wrong GitHub account, or if another problem has occurred.
+            </p>
+            <%= form_tag stafftools_user_external_identity_path(view.organization, view.user), method: "delete" do %>
+              <div class="Box-footer">
+                <%= render Primer::ButtonComponent.new(type: :submit, scheme: :danger, block: true) do %>
+                  Unlink external identity
+                <% end %>
+              </div>
+            <% end %>
+            </div>
+        <% end %>
+
+        <div class="listgroup-item-title">Unlink external identity</div>
+        <div class="listgroup-item-body">
+          Be careful &mdash; this will not remove the user from the organization.
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <%= render "stafftools/external_identity_sessions/sessions", external_identity: view.external_identity %>
+<% else %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Linked SSO identity<% end %>
+  <% end %>
+  <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+    <% c.with_visual_icon(icon: "shield-lock") %>
+
+    <% c.with_heading(tag: :h2) do %>
+      No linked identity
+    <% end %>
+
+    <% c.with_description do %>
+      <%= view.user.login %> has not linked their GitHub account to the identity provider.
+    <% end %>
+  <% end %>
+<% end %>
+
+<%= render Primer::Beta::Subhead.new(spacious: true, hide_border: view.authorized_tokens.any?) do |component| %>
+  <% component.with_heading(tag: :h2) do %>Authorized credentials<% end %>
+<% end %>
+
+<% if view.authorized_tokens.any? %>
+  <div class="listgroup">
+    <% view.authorized_tokens.each do |token| %>
+      <div id="access-token-<%= token.id %>" class="access-token">
+        <div class="listgroup-item">
+          <small class="last-used float-right"><%= last_access_description(token) %></small>
+          <span class="token-description">
+              <% if token.is_a?(PublicKey) %>
+                <strong>
+                  <code><%= token.fingerprint %></code><br>
+                </strong>
+                <span class="color-fg-muted">
+                  &mdash;	SSH Key
+                  <%= view.ssh_permissions_text(token) %>
+                </span>
+              <% else %>
+                <strong><code><%= "#{ "*" * 5 }#{ token.token_last_eight }" %></code></strong>
+                <span class="color-fg-muted">
+                  &mdash;	Personal Access Token
+                  <%= scopes_description_tooltip_list(token.scopes) %>
+                </span>
+              <% end %>
+            </span>
+        </div>
+      </div>
+    <% end %>
+  </div>
+<% else %>
+  <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+    <% c.with_visual_icon(icon: "key") %>
+
+    <% c.with_heading(tag: :h2) do %>
+      No authorized credentials
+    <% end %>
+
+    <% c.with_description do %>
+      <%= view.user.login %> has not authorized any credentials for API and Git access to this organization.
+    <% end %>
+  <% end %>
+<% end %>

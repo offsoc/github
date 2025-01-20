@@ -1,0 +1,213 @@
+#!/bin/bash
+#/ Usage: [environtment-variable] ghe-license [command] [--additional-params]
+#/
+#/ This tool is used to handle all the operations related to the enterprise license.
+#/ You can specify which license to operate on before having to import it via GHE_LICENSE_FILE environment variable,
+#/ or via the --pipe flag.
+#/ If none are provided, the script falls back to the current active license file located under /data/user/common/enterprise.ghl,
+#/ except for the import command, which enforces a license path.
+#/
+#/ Environment variables:
+#/   GHE_LICENSE_FILE       Provide a license via env var.
+#/
+#/ Commands and additional params/environment variables:
+#/   -h | --help            Show the help message.
+#/   --pipe                 Pipe the license to the script.
+#/
+#/   import                 Run a license check and import the license. Import via pipeline or specify a path.
+#/     --apply                After importing, you still need to apply the license.
+#/                            Providing the --apply flag will consecutively run the script ghe-github-restart which restarts the github application with the new license.
+#/     --skip-checks          Skip checks and import license.
+#/
+#/   sync                   Synchronize the license to other nodes if existing. This command must be executed from the node with the latest license. 
+#/
+#/   check                  Check license.
+#/
+#/   info                   Display license information.
+#/     -j | --json            Output in json format.
+#/
+#/   usage                  Display license usage.
+#/     -y                     Proceed without confirmation.
+#/     -o                     Output on stdout.
+#/
+#/ Examples:
+#/ $ cat license.ghl | ssh -p 122 admin@[hostname] -- ghe-license import --pipe
+#/
+#/ $ GHE_LICENSE_FILE=/path/to/file ghe-license import --pipe --apply --skip-checks
+#/
+#/ $ ghe-license info
+#/
+#/ $ ghe-license info -j
+#/
+#/ $ GHE_LICENSE_FILE=/path/to/file ghe-license info
+#/
+#/ $ cat license.ghl | ghe-license check 
+#/
+#/ $ ghe-license usage
+#/
+set -e
+
+# Functions
+helper () {
+  grep '^#/' <"$0" | cut -c 4-
+  exit 2
+}
+
+cleanup() {
+    rm -f "$temp_file"
+}
+
+# Parse flags
+cmd=""
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      helper
+      ;;
+    --pipe)
+      PIPE=1
+      ;;
+    import)
+      cmd="import"
+      ;;
+    --apply)
+      apply=1
+      ;;
+    --skip-checks)
+      SKIP_CHECKS=1
+      ;;
+    sync)
+      cmd="sync"
+      ;;
+    usage)
+      cmd="usage"
+      ;;
+    check)
+      cmd="check"
+      ;;
+    info)
+      cmd="info"
+      ;;
+    -j)
+      output_json=1
+      ;;
+    --json)
+      output_json=1
+      ;;
+  esac
+done
+
+info () {
+  output=$(gpg --skip-verify --no-permission-warning --decrypt "$GHE_LICENSE_FILE" 2>/dev/null |
+    tar xO metadata.json |
+    jq -c 'del(.customer_public_key,.customer_private_key)')
+
+  if [ -n "$output_json" ]; then
+    echo "$output"
+  else
+    echo "$output" |
+      jq -r 'to_entries | sort[] | "\(.key | tojson) : \(.value | tojson)"'
+  fi
+}
+
+usage () {
+  shift
+  github-env bin/ghe-license-usage "$@"
+}
+
+check () {
+  output_json=1
+  expire_at=$(info | jq -r .expire_at)
+  expire_at_utc=$(ruby -rtime -e 'puts Time.iso8601(ARGV[0]).utc.iso8601' "$expire_at" 2>/dev/null) || {
+    expire_at_utc=''
+  }
+  if [ -n "${expire_at_utc}" ]; then
+    now_utc=$(ruby -rtime -e 'puts Time.now.utc.iso8601')
+    earlier_date=$(echo -e "$now_utc\n$expire_at_utc" | sort | head -n 1)
+    if [ "$expire_at_utc" = "$earlier_date" ]; then
+      echo "License has expired." >&2
+      exit 1
+    fi
+  else
+    echo "Invalid license file." >&2
+    exit 2
+  fi
+
+  if /usr/local/share/enterprise/ghe-call-configrb cluster_regular_enabled?; then
+    info | grep -q '"cluster_support":true' || {
+      echo "Please contact your GitHub account manager to discuss the scaling options for GitHub Enterprise. Clustering is not currently supported for your license." >&2
+      exit 1
+    }
+  fi
+  echo "License is valid."
+}
+
+import () {
+  if [ "$GHE_LICENSE_FILE" = "/data/user/common/enterprise.ghl" ]; then
+    echo "Please provide a license. See ghe-license --help for further instructions." >&2
+    exit 1
+  fi
+  if ! [ -v SKIP_CHECKS ]; then
+    check
+  fi
+  dd if="$GHE_LICENSE_FILE" of=/data/user/common/enterprise.ghl 2>/dev/null
+  chmod 664 /data/user/common/enterprise.ghl
+  chown admin:admin /data/user/common/enterprise.ghl
+  setfacl -m u:git:r /data/user/common/enterprise.ghl
+  echo "License imported at /data/user/common/enterprise.ghl."
+
+  sync
+  if  [ -v apply ]; then
+    echo "Restarting github nomad jobs, activating license changes..."
+    ghe-github-restart
+  fi
+}
+
+sync () {
+  if [ -f /etc/github/cluster ] && [ "$(ghe-config "cluster.ha")" = "true" ]; then
+    export HA_CLUSTER=1
+  fi
+  if [ -f /etc/github/cluster ]; then
+      sudo env HA_CLUSTER=$HA_CLUSTER ghe-cluster-config-update > /dev/null
+      ghe-cluster-each -o -- "/usr/local/share/enterprise/ghe-fix-permissions > /dev/null"
+  else
+      /usr/local/share/enterprise/ghe-fix-permissions > /dev/null
+      /usr/local/share/enterprise/ghe-repl-sync-settings > /dev/null
+  fi
+  echo "License synchronized."
+}
+
+# Prechecks
+if [ "$cmd" == "" ]; then
+  echo -e "ghe-license requires a command.\nReview the possible commands via: ghe-license --help" >&2
+  exit 2
+fi
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root GHE_LICENSE_FILE=$GHE_LICENSE_FILE "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+GHE_LICENSE_FILE=${GHE_LICENSE_FILE:-/data/user/common/enterprise.ghl}
+# We need to specify a pipe and wait, due to network latency we cannot simply check the stdin and move on
+if [ -v PIPE ]; then
+  temp_file=$(mktemp)
+  timeout 15s dd of="$temp_file" 2>/dev/null
+  GHE_LICENSE_FILE="$temp_file"
+  trap cleanup EXIT
+fi
+
+if ! [ -f "$GHE_LICENSE_FILE" ]; then
+  echo "Error: '$GHE_LICENSE_FILE' does not exist."
+  exit 1
+fi
+
+# Execute at least one command
+[ "$cmd" == "import" ] && import
+[ "$cmd" == "sync" ] && sync
+[ "$cmd" == "info" ] && info
+[ "$cmd" == "usage" ] && usage "$@"
+[ "$cmd" == "check" ] && check
+
+exit 0

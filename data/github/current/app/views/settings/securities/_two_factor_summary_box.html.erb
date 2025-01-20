@@ -1,0 +1,197 @@
+<%
+  warning_style = "text-italic"
+  show_fallback_section = current_user.two_factor_backup_sms_registration?
+  can_enable_sms = GitHub.two_factor_sms_enabled? && current_user.two_factor_sms_permitted?
+  can_disable_factor = current_user.totp_app_registration.present? && current_user.two_factor_primary_sms_registration?
+  enabled_row_badge = [{scheme: :success, text: "Configured"}]
+  unconfigured_row_badge = [{scheme: :secondary, text: "Not configured"}]
+  configuring_type ||= nil
+  mashed_secret ||= ""
+  qr_code_image_src ||= ""
+  dev_otp ||= ""
+  # consolidating some logic about preference heirarchy here, needs to be accessible in multiple cases
+  num_security_keys = current_user.num_registered_security_keys
+
+  configured_methods = {}
+  configured_methods[:app] = current_user.two_factor_configured_with?(:app)
+  configured_methods[:sms] = current_user.two_factor_configured_with?(:sms)
+  configured_methods[:security_keys] = current_user.has_registered_security_key?
+  configured_methods[:passkeys] = current_user.has_registered_passkey?
+  configured_methods[:gh_mobile] = current_user.gh_mobile_auth_available?
+
+  render_security_inline_banner = !GitHub.single_or_multi_tenant_enterprise?
+%>
+
+<div id="two-factor-summary" class="Box">
+  <div class="Box-header">
+    <h3 class="Box-title">Two-factor methods</h3>
+  </div>
+
+  <% if render_security_inline_banner %>
+    <%= render partial: "/settings/securities/inline_security_checkup_notice", locals: {
+      section: "two-factor-methods",
+      notice_within_box: true,
+      from: "settings-securities"
+    } %>
+  <% end %>
+
+  <%
+    app_note = "Use an authentication app or browser extension to generate one-time codes."
+    if configured_methods[:app]
+      app_row_badges = enabled_row_badge
+      app_note = "Use an authentication app or browser extension to get two-factor authentication codes when prompted."
+    end
+    app_edit_label = "Add" unless configured_methods[:app]
+  %>
+  <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+      note: app_note,
+      title: "Authenticator app",
+      factor_type: "app",
+      is_configured: configured_methods[:app],
+      row_icon: :"device-mobile",
+      row_badges: app_row_badges,
+      data_test_selector: "two-factor-summary-authenticator-app",
+      configuring: configuring_type == :app,
+      edit_method: :post,
+      edit_path: settings_user_two_factor_authentication_configure_factor_path(type: "app", :anchor => "two-factor-summary"),
+      edit_sudo_required: true,
+      mashed_secret: mashed_secret,
+      qr_code_image_src: qr_code_image_src,
+      dev_otp: dev_otp,
+      edit_label: app_edit_label,
+      can_disable_factor: can_disable_factor,
+  } %>
+
+  <% if configured_methods[:sms] || can_enable_sms %>
+    <%
+      sms_note_redacted = nil
+      sms_note = "Get one-time codes sent to your phone via SMS to complete authentication requests."
+      if configured_methods[:sms]
+        sms_row_badges = enabled_row_badge
+        sms_note = "You will receive one-time codes at this phone number: #{current_user.two_factor_sms_number}"
+        sms_note_redacted = "You will receive one-time codes at this phone number: #{current_user.two_factor_sms_number_redacted}"
+      end
+      sms_edit_label = "Add" unless configured_methods[:sms]
+    %>
+    <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+        note: sms_note,
+        note_redacted: sms_note_redacted,
+        title: "SMS/Text message",
+        factor_type: "sms",
+        is_configured: configured_methods[:sms],
+        row_icon: :comment,
+        row_badges: sms_row_badges,
+        configuring: configuring_type == :sms,
+        data_test_selector: "two-factor-summary-primary-sms",
+        edit_method: :post,
+        edit_path: settings_user_two_factor_authentication_configure_factor_path(type: "sms", :anchor => "two-factor-summary"),
+        edit_sudo_required: true,
+        edit_label: sms_edit_label,
+        can_disable_factor: can_disable_factor,
+    } %>
+  <% end %>
+
+  <%
+    if configured_methods[:security_keys]
+      security_keys_row_badges = enabled_row_badge + [{scheme: :secondary, text: pluralize(num_security_keys, "key")}]
+    end
+    security_keys_note = "Security keys are webauthn credentials that can only be used as a second factor of authentication."
+  %>
+  <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+    title: "Security keys",
+    factor_type: "webauthn",
+    is_configured: configured_methods[:security_keys],
+    note: security_keys_note,
+    edit_method: :get, # JS should prevent edit form from being submitted, but if user does not have JS
+    edit_path: settings_security_path, # form destination should just be settings/security page
+    row_badges: security_keys_row_badges,
+    data_test_selector: "two-factor-summary-security-keys",
+    inline_content_selector: "webauthn-box",
+    expand_with_anchor: "webauthn"
+  } %>
+  <% if current_user.gh_mobile_auth_enabled? %>
+    <%
+      num_mobile_devices = current_user.display_mobile_device_auth_keys.size
+      gh_mobile_button_label = "Add"
+      if num_mobile_devices > 0
+        gh_mobile_button_label = "Show"
+        gh_mobile_row_badges = enabled_row_badge + [{scheme: :secondary, text: pluralize(num_mobile_devices, "device")}]
+      end
+    %>
+    <% mobile_path = settings_sessions_path(anchor: "mobile_sessions") %>
+    <% gh_mobile_note = "GitHub Mobile can be used for two-factor authentication by installing the GitHub Mobile app and signing in to your account." %>
+    <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+      title: "GitHub Mobile",
+      factor_type: "gh_mobile",
+      is_configured: configured_methods[:gh_mobile],
+      note: gh_mobile_note,
+      row_icon: :"mark-github",
+      row_badges: gh_mobile_row_badges,
+      edit_label: gh_mobile_button_label,
+      edit_path: mobile_path,
+      data_test_selector: "two-factor-summary-github-mobile"
+    } %>
+  <% end %>
+
+  <div class="Box-row Box-row--gray">
+    <h3 class="Box-title">Recovery options</h3>
+  </div>
+
+  <%
+    if current_user.two_factor_credential.recovery_codes_viewed?
+      recovery_codes_row_badges = [{scheme: :success, text: "Viewed"}]
+    else
+      recovery_codes_row_badges = [{scheme: :danger, text: "Not viewed"}]
+    end
+  %>
+
+  <% if render_security_inline_banner %>
+    <%= render partial: "/settings/securities/inline_security_checkup_notice", locals: {
+      section: "recovery-codes",
+      notice_within_box: true,
+      from: "settings-securities"
+    } %>
+  <% end %>
+
+  <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+    title: "Recovery codes",
+    edit_label: "View",
+    edit_path: settings_auth_recovery_codes_path,
+    note: "Recovery codes can be used to access your account in the event you lose access to your device and cannot receive two-factor authentication codes.",
+    row_icon: :key,
+    row_badges: recovery_codes_row_badges,
+    data_test_selector: "two-factor-summary-recovery-codes"
+  } %>
+
+<%# users grandfathered in to still have fallback SMS, should still have the ability to update/clear their fallback %>
+  <% if GitHub.two_factor_sms_enabled? && current_user.two_factor_sms_permitted? && show_fallback_section %>
+    <%
+      fallback_sms_note_redacted = nil
+      fallback_enabled = current_user.two_factor_sms_fallback_enabled?
+      if fallback_enabled
+        fallback_sms_note = "You can receive authentication codes to this phone number if you lose your primary device: #{current_user.two_factor_backup_sms_number}"
+        fallback_sms_note_redacted = "You can receive authentication codes to this phone number if you lose your primary device: #{current_user.two_factor_backup_sms_number_redacted}"
+        fallback_sms_row_badges = enabled_row_badge
+      else
+        fallback_label = "Add"
+        fallback_sms_note = "Providing a fallback SMS number will allow GitHub to send your two-factor authentication codes to an alternate device if you lose your primary device."
+      end
+    %>
+    <%= render partial: "/settings/securities/two_factor_summary_row", locals: {
+      title: "Fallback SMS number",
+      factor_type: "fallback_sms",
+      is_configured: fallback_enabled,
+      note: fallback_sms_note,
+      note_redacted: fallback_sms_note_redacted,
+      edit_label: fallback_label,
+      edit_sudo_required: true,
+      row_icon: :comment,
+      row_badges: fallback_sms_row_badges,
+      can_disable_factor: true,
+      disable_label: "Remove",
+      data_test_selector: "two-factor-summary-sms-fallback"
+    } %>
+  <% end %>
+
+  <%= yield if block_given? %>
+</div>

@@ -1,0 +1,153 @@
+#!/usr/bin/env safe-ruby
+whoami = `whoami`.rstrip
+
+require_relative "../config/environment"
+Rails.application.config.active_job.queue_adapter = :inline
+GitHub.storage_cluster_enabled = false
+unless Rails.env.development?
+  abort "This can only be run in development"
+end
+
+module StorageDeletionOverrideMonkeypatch
+  # Monkey patch file deletion so we don't try to delete
+  # a non-existent S3 file
+  def storage_delete_object
+    true
+  end
+end
+Registry::File.send(:include, StorageDeletionOverrideMonkeypatch)
+
+def create_org(org_name, org_admin)
+  org = Organization.find_by_login(org_name)
+  org = Organization.new if !org
+  org.login = org_name
+  org.billing_email = "#{org_name}@none.org"
+  org.admins = [org_admin]
+  org.save!
+
+  org.add_admin(org_admin)
+  org.save!
+
+  org
+end
+
+def create_repo(owner, actor, repo_name, tag_name)
+  repo = owner.repositories.find_by_name(repo_name)
+  repo.destroy if repo
+
+  repo = owner.repositories.create!(
+    name: repo_name,
+    user: actor,
+    created_by_user_id: actor.id,
+  )
+  repo.setup_git_repository
+
+  commit = repo.commits.create({ message: "First commit", committer: actor }) do |files|
+    files.add "README", "The #{repo_name.capitalize} Repository"
+  end
+  repo.refs.create("refs/heads/master", commit, actor)
+  repo.tags.create(tag_name, commit, actor)
+
+  repo
+end
+
+def create_packages(owner, actor, repo, version, names)
+  release = Releases::Public::Helper.load_or_build_by_tag(repo, version)
+  release.save!
+
+  names.each do |name|
+    package = repo.packages.build(
+      name: name,
+      package_type: :npm,
+    )
+    package_version = package.package_versions.build(
+      version: version,
+      release: release,
+      author: actor,
+    )
+    package_version.files.build(
+      name: "#{name}-#{version}.npm.tgz",
+      state: 1,
+      size: 1,
+      version: version,
+    )
+    package_version.metadata.build(name: "Summary", value: "This is the summary for #{version}")
+    package.save!
+  end
+
+
+  names.each do |name|
+    package = repo.packages.build(
+      name: "nuget-#{name}",
+      package_type: :nuget,
+    )
+    package_version = package.package_versions.build(
+      version: version,
+      release: release,
+      author: actor,
+    )
+    package_version.files.build(
+      filename: "#{name}.#{version}.nupkg",
+      state: 1,
+      size: 1,
+      version: version,
+    )
+    package_version.metadata.build(name: "Summary", value: "This is the summary for #{version}")
+    package.save!
+  end
+
+  names.each do |name|
+    package = repo.packages.build(
+      name: "com.#{owner.login}.#{name}",
+      package_type: :maven,
+    )
+    package_version = package.package_versions.build(
+      version: version,
+      release: release,
+      author: actor,
+    )
+    package_version.files.build(
+      filename: "com.#{owner.login}.#{name}.jar",
+      state: 1,
+      size: 1,
+    )
+    package_version.files.build(
+      filename: "com.#{owner.login}.#{name}.pom",
+      state: 1,
+      size: 1,
+    )
+    package_version.metadata.build(name: "Summary", value: "This is the summary for #{version}")
+    package.save!
+  end
+end
+
+me = User.find_by_login("monalisa")
+GitHub.flipper["registry"].enable
+
+if me.nil?
+  raise "Unable to find user \"monalisa\""
+end
+
+me.packages.where(name: %W(whap com.#{me}.whap)).destroy_all
+
+org = create_org("packages-org", me)
+
+if org.nil?
+  raise "Unable to create org \"packages-org\""
+end
+
+puts "1. successfully created org."
+org.packages.destroy_all
+actor = me
+
+bar = create_repo(org, actor, "bar", "1.0")
+
+beep = create_repo(org, actor, "beep", "2.1.0")
+whap = create_repo(me, me, "whap", "2.1.0")
+puts "2. successfully created test repos."
+
+create_packages(org, actor, bar, "1.0", %w[bar-api bar-mvp])
+create_packages(org, actor, beep, "2.1.0", ["beep"])
+create_packages(me, me, whap, "2.1.0", ["whap"])
+
+puts "3. successfully created test packages."

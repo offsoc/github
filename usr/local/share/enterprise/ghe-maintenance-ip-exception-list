@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+#/ There is no need to call this script directly. 
+#/ It is normally called by `ghe-maintenance` when managing the IP exception list functionality.
+#/ It will overwrite the ACL in haproxy to only allow access for the provided IP addresses.
+#/
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo "Run this script as the root user." >&2
+  exit 1
+}
+
+HAPROXY_CFG="/etc/haproxy/haproxy-frontend.cfg"
+ACL_LIST="/etc/haproxy/maintenance-ip-exception-list.acl"
+ACL_LIST_BACKUP="/etc/haproxy/maintenance-ip-exception-list.acl.previous"
+DEFAULT_IP4_EXCEPTION="0.0.0.0/0"
+DEFAULT_IP6_EXCEPTION="::/0"
+CONNECTIVITY_FORCE_EXCEPTIONS="127.0.0.1 ::1 169.254.0.0/16 fe80::0"
+
+# used for enabling the IP exception list, expects IP addresses as arguments
+set_ip_exception_list() {
+  if [[ $# -lt 2 ]]; then
+    echo "At least one valid IP address or CIDR needs to be provided to the exception list, like: ghe-maintenance -e 1.1.1.1 192.168.0.0/16"
+    exit 1
+  fi
+
+  # only allow valid IPv4 / IPv6 addresses and CIDR blocks
+  for ip in "${@:2}"; do
+    if ! [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(\/[0-9]{1,2})?$ || $ip =~ ^[A-Fa-f0-9:]+(\/[0-9]{1,2})?$ ]]; then
+      echo "${ip} is not a valid IPv4/IPv6 address or CIDR block"
+      exit 1
+    fi
+    ip_addresses+=("$ip")
+  done
+
+  # backup the current acl list, to revert back to it in case new arguments fail
+  cp -p $ACL_LIST $ACL_LIST_BACKUP
+
+  # re-create ACL list to make sure it's empty
+  if [[ -f "$ACL_LIST" ]]; then
+    rm -f "$ACL_LIST"
+  fi
+  touch "$ACL_LIST"
+
+  # make sure localhost and link-local addresses (see ipv4: rfc3927 and ipv6: rfc2462)
+  # are always in ACL list to allow inter-service communication
+  printf "%s\n" $CONNECTIVITY_FORCE_EXCEPTIONS >> $ACL_LIST
+
+  # write IP addresses to ACL list
+  for ip in "${ip_addresses[@]}"; do
+    printf "%s\n" "$ip" >> $ACL_LIST
+  done
+
+  # first validate the new config file
+  local node_id=$(/usr/bin/nomad node status -self | grep -E 'ID.*=' | awk '{ print $3 }')
+  local alloc_id=$(ghe-nomad-api allocations | jq -r ".[] | select(.JobID == \"haproxy-frontend\" and (.NodeID | startswith(\"$node_id\")) and .ClientStatus == \"running\") | .ID")
+  test -z "$alloc_id" && {
+    echo "Failed to enable IP exception list: haproxy-frontend is not running"
+    exit 1
+  }
+  HAPROXY_CHECK=$(/usr/bin/nomad alloc exec "$alloc_id" bash -c "haproxy -q -c -f /etc/haproxy/haproxy-frontend.cfg 2>&1")
+  if [[ "$?" -ne 0 ]]; then
+    echo "Failed to enable IP exception list with provided IP addresses."
+    echo "$HAPROXY_CHECK"
+
+    # revert back to previous ACL list
+    cp -p $ACL_LIST_BACKUP $ACL_LIST
+    exit 1
+  fi
+
+  # since the generated config is valid signal for an haproxy re-exec
+  /usr/local/share/enterprise/ghe-nomad-signal haproxy-frontend SIGHUP
+
+  echo "The IP exception list with the following IP addresses allowed to access the GHES appliance has been enabled:"
+  for ip in "${ip_addresses[@]}"; do
+    echo "  \"${ip}\""
+  done
+  echo "In order to permit unrestricted user access again 'ghe-maintenance --unset' needs to be run."
+}
+
+# disables the current ACL by resetting it to the default of allowing all IP addresses
+unset_ip_exception_list() {
+  # only do this if the default IP exception list got modified
+  if ! is_default_exception_list; then
+    printf "%s\n%s" $DEFAULT_IP4_EXCEPTION $DEFAULT_IP6_EXCEPTION | tee $ACL_LIST 1>/dev/null
+
+    # given usage for setting and unsetting the original maintenance mode
+    # opting for reload instead of restart to ensure the connections to the app don't get closed prematurely
+    /usr/local/share/enterprise/ghe-nomad-signal -l haproxy-frontend SIGHUP
+  fi
+}
+
+# returns a boolean indicateing whether the ACL is default; returns false if it's been modified
+is_default_exception_list() {
+  [[ -z "$(grep -v -e $DEFAULT_IP4_EXCEPTION -e $DEFAULT_IP6_EXCEPTION $ACL_LIST )" ]] && return
+  false
+}
+
+# returns a list of IP addresses in exception list, excluding the forced exceptions required for service
+# connectivity; exits with an error if the default ACL is set; used by enterprise-manage
+get_provided_ip_exception_list() {
+  if is_default_exception_list; then
+    exit 1
+  fi
+  
+  # converts list of IP addresses into a format usable in extended regex with grep
+  force_allowed_exclusion_list="${CONNECTIVITY_FORCE_EXCEPTIONS// /|}"
+
+  # returns list of IP addresses that were provided by user
+  grep -v -E "$force_allowed_exclusion_list" $ACL_LIST
+}
+
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --is-non-default)
+        if ! is_default_exception_list; then
+          exit 0
+        else
+          exit 1
+        fi
+        ;;
+    --get)
+        get_provided_ip_exception_list
+        ;;
+    --set)
+        set_ip_exception_list "${@:2}"
+        ;;
+    --unset)
+        unset_ip_exception_list
+        ;;
+    --)
+      shift; break ;;
+    esac
+    shift
+done

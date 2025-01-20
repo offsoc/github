@@ -1,0 +1,96 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unicorn-api
+  annotations:
+    moda.github.net/canary-v2: null
+    moda.github.net/canary-replicas: null
+    moda.github.net/canary-label: null
+    moda.github.net/canary-maxunavailable: null
+    moda.github.net/allow-missing-ready-pods: null
+    moda.github.net/cluster-preferences: |
+      {
+        "dotcom-1-ash1-iad":  {
+          "spec": {
+            "template": {
+              "spec": {
+                "affinity": {
+                  "nodeAffinity": {
+                    "preferredDuringSchedulingIgnoredDuringExecution": [
+                      { "weight": 1,
+                        "preference": {
+                          "matchExpressions": [
+                            { "key": "kubernetes.github.com/pool",
+                              "operator": "In",
+                              "values": ["performance-testing"]
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+spec:
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      service: unicorn-api-graphql-performance
+  template:
+    metadata:
+      labels:
+        service: unicorn-api-graphql-performance
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: gpanel.githubapp.com/machine_type
+                operator: In
+                values:
+                - general5.m.large
+      containers:
+        - name: nginx
+          env:
+            - name: NGINX_ENVSUBST_OUTPUT_DIR
+              value: /etc/nginx/
+            - name: NGINX_ENVSUBST_FILTER
+              value: GRAPHQL_MIRROR_
+            - name: GRAPHQL_MIRROR_REQUESTS
+              valueFrom:
+                secretKeyRef:
+                  name: vault-secrets
+                  key: GRAPHQL_MIRROR_REQUESTS
+          volumeMounts:
+            - mountPath: /etc/nginx/conf.d/
+              name: nginx-conf
+            - mountPath: /etc/nginx/
+              name: nginx-conf
+              $patch: delete
+            - mountPath: /etc/nginx/templates/
+              name: nginx-mirror-conf
+        - name: unicorn
+          env:
+            - name: KUBE_DEPLOYMENT_NAME
+              value: unicorn-api-graphql-performance
+          resources:
+            requests:
+              cpu: 10
+      volumes:
+        - configMap:
+            name: unicorn-api-graphql-mirror-conf-graphql-performance
+          name: nginx-mirror-conf
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: performance-testing

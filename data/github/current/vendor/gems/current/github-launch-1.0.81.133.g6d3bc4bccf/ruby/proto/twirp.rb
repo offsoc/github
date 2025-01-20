@@ -1,0 +1,12 @@
+$: << File.expand_path(File.dirname(__FILE__))
+require "services/artifactcache_twirp"
+require "services/artifacts_exchange_twirp"
+require "services/checks_twirp"
+require "services/deploy_twirp"
+require "services/environment_twirp"
+require "services/largerrunners_twirp"
+require "services/runnergroups_twirp"
+require "services/runnerscalesets_twirp"
+require "services/selfhostedrunners_twirp"
+require "services/status_twirp"
+require "services/token_twirp"

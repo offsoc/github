@@ -1,0 +1,146 @@
+<%
+  comment = issue_or_pr.comment
+  if issue_or_pr.respond_to?(:review_comment) && issue_or_pr.review_comment
+    comment = issue_or_pr.review_comment
+  elsif issue_or_pr.respond_to?(:review) && issue_or_pr.review
+    comment = issue_or_pr.review
+  end
+
+  # Limit how many labels we show
+  label_show_limit = 3
+
+  labels = issue_or_pr.labels
+  number_tracked_issues = issue_or_pr.tracked_in_issues&.count || 0
+  is_pr = issue_or_pr.is_pull_request?
+
+  labels_to_show = labels.first(label_show_limit)
+  show_labels = labels.any?
+
+  show_more_labels_label = label_show_limit < labels.size
+%>
+
+<div class="p-3" <%= test_selector("issue-hovercard") %>>
+  <%= content_tag :div, "", data: hydro_view_tracking_attributes(
+                                    "#{is_pr ? "pull-request" : "issue"}-hovercard-hover",
+                                    pullRequestOrIssueId: issue_or_pr.database_id,
+                                    subject: params[:subject]) %>
+
+  <div class="f6 color-fg-muted mb-1">
+    <a title="<%= issue_or_pr.repository.name_with_display_owner %>" class="d-inline-block text-underline Link--secondary" href="<%= issue_or_pr.repository.resource_path %>"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+      <%= issue_or_pr.repository.name_with_display_owner.truncate(32) %>
+    </a>
+    on
+    <span <%= test_selector("created-at") %>>
+      <%= full_month_date(issue_or_pr.created_at, omit_current_year: true) %>
+    </span>
+  </div>
+
+  <div class="d-flex mt-2">
+    <span class="lh-condensed py-1 pr-2">
+      <%
+        state_reason = is_pr ? nil : issue_or_pr.state_reason
+      %>
+      <%= issue_pr_state_octicon(issue_or_pr, issue_or_pr.state, state_reason) %>
+    </span>
+
+    <div class="d-flex flex-column f5 lh-condensed mt-1">
+      <a href="<%= issue_or_pr.resource_path %>" class="no-underline Link--primary d-block">
+        <h5 class="d-inline dashboard-break-word markdown-title"><%= content_tag :bdi, title_markdown(issue_or_pr.title) %></h5>
+        <span class="color-fg-muted">#<%= issue_or_pr.number %></span>
+      </a>
+
+      <% if GitHub.flipper[:show_author_hovercard].enabled?(current_user) %>
+        <div class="d-flex mt-1 text-small color-fg-muted">
+        By&nbsp
+          <%= profile_link issue_or_pr.author %>
+        </div>
+      <% end %>
+
+      <% if issue_or_pr.body.present? %>
+        <div class="lh-condensed color-fg-muted mt-1 mb-0 dashboard-break-word"><%= issue_or_pr.short_body_html %></div>
+      <% end %>
+
+      <% if is_pr %>
+        <div class="d-flex flex-items-center">
+          <% if issue_or_pr.base_ref_name.present? && issue_or_pr.head_ref_name.present? %>
+            <div class="lh-condensed-ultra color-fg-muted mt-1 mr-3 d-flex flex-items-center">
+              <span title="<%= issue_or_pr.base_ref_name %>" class="commit-ref css-truncate css-truncate-target user-select-contain base-ref" style="max-width: 140px"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                <% if issue_or_pr.is_cross_repository? && (owner = issue_or_pr.repository.owner) %><span class="user"><%= owner.display_login %></span>:<% end %><%= issue_or_pr.base_ref_name %>
+              </span>
+              <span class="mx-1">&larr;</span>
+              <span title="<%= issue_or_pr.head_ref_name %>" class="commit-ref css-truncate css-truncate-target user-select-contain" style="max-width: 140px"><%# erblint:disable GitHub::Accessibility::NoTitleAttribute %>
+                <% if issue_or_pr.is_cross_repository? && (owner = issue_or_pr.head_repository_owner) %><span class="user"><%= owner.display_login %></span>:<% end %><%= issue_or_pr.head_ref_name %>
+              </span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% if !is_pr %>
+        <% if number_tracked_issues > 0 %>
+          <% tracked_in_issues = issue_or_pr.tracked_in_issues %>
+          <% track_render_partial("issues/tracked_in_component") do %>
+            <%= render Issues::TrackedInComponent.new(tracked_in_issues: tracked_in_issues, current_issue_owner: issue_or_pr.repository.owner.display_login, current_issue_repository: issue_or_pr.repository.name) %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if show_labels %>
+        <div class="d-inline-flex flex-justify-start flex-items-center mt-1">
+          <div>
+            <% labels_to_show.each do |label| %>
+              <%= render "hovercards/issues_and_pull_requests/label", label: label %>
+            <% end %>
+            <% if show_more_labels_label %>
+              <%= render(Primer::Beta::Text.new(tag: :span, color: :muted, display: :inline_block, font_size: :small, mt: 1, vertical_align: :middle)) { " + more" } %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+
+    </div>
+  </div>
+
+  <% if comment %>
+    <div class="border-top mr-n3 ml-n3 mt-3 pt-3" <%= test_selector("hovercard-comment") %>>
+      <div class="mx-3">
+        <div class="f6 d-flex">
+          <div class="hovercard-icon mr-2 mb-1">
+            <%= avatar_for(comment.author, 16, class: "avatar") %>
+          </div>
+          <div>
+            <span class="text-bold"><%= comment.author&.display_login || "ghost" %></span>
+            <span class="color-fg-muted">
+              <% if comment.is_a?(PlatformTypes::PullRequestReview) %>
+                reviewed
+              <% else %>
+                commented
+              <% end %>
+            </span>
+          </div>
+        </div>
+        <% if (html = comment.short_body_html).present? %>
+          <div class="f6 markdown-body lh-condensed color-fg-muted"><%= html %></div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if tracked_by_title.present? %>
+    <div class="border-top mr-n3 ml-n3 mt-3 pt-3">
+      <div class="d-flex flex-items-start f6 color-fg-muted px-3">
+        <div class="mr-2 flex-shrink-0 hovercard-icon text-center">
+          <%= primer_octicon(:"issue-tracked-by", display: :inline_block, vertical_align: :top) %>
+        </div>
+
+        <span class="lh-condensed" <%= test_selector("issue-tracking-hovercard-title") %>>
+          Tracks this issue in <%= tracked_by_title %>
+        </span>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="sr-only">
+    Press escape to close this hovercard
+  </div>
+</div>

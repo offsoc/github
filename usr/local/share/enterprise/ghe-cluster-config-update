@@ -1,0 +1,239 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-config-update [options]
+#/
+#/ Places configuration files on all cluster hosts
+#/
+#/ OPTIONS:
+#/   -s                 Only update SSH keys
+#/   -p                 Only update password (secrets.conf)
+#/   -r                 Update all files needed for replication
+#/   -u                 Only update uuids, wireguard pubkeys
+#/                      and sync cluster.conf
+#/   -a                 Update files needed for mssql replication immediately after turning on Actions
+#/   -x                 Update all configuration files excluding topology configuration in cluster.conf
+#/   -h                 Show this message
+#/   -v                 Run with verbose output
+
+set -e
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+files="/data/user/common/github.conf /data/user/common/secrets.conf \
+                 /data/user/common/cluster.conf \
+                 /data/user/common/saml-sp.p12 \
+                 /data/user/common/authorized_keys /data/user/common/ssh_host_* \
+                 /data/user/common/enterprise.ghl"
+
+# Actions files are tracked separately because if they don't exist on the primary they need to be deleted first on the replicas.
+actions_state_files="/data/user/actions/states/* \
+                     /data/user/actions/certificates/*"
+
+files="$files $actions_state_files"
+
+while getopts "spruaxhv" OPTION; do
+  case $OPTION in
+    s)
+      files="/data/user/common/authorized_keys /home/admin/.ssh/authorized_keys /data/user/common/ssh_host_*"
+      skip_cluster_config_check=1
+      ;;
+    p)
+      files="/data/user/common/secrets.conf"
+      skip_cluster_config_check=1
+      ;;
+    r)
+      files="$files /home/admin/.ssh/authorized_keys /etc/resolvconf/resolv.conf.d/head /etc/chrony/chrony.conf /etc/snmp/snmpd.conf"
+      skip_cluster_config_check=1
+      ;;
+    u)
+      files="/data/user/common/cluster.conf"
+      skip_cluster_config_check=1
+      ;;
+    a)
+      files="/data/user/common/github.conf /data/user/common/secrets.conf $actions_state_files"
+      skip_cluster_config_check=1
+      ;;
+    x)
+      delete="/data/user/common/cluster.conf"
+      files="${files[@]/$delete}"
+      skip_cluster_config_check=1
+      ;;
+    h)
+      usage
+      exit 2
+      ;;
+    v)
+      set -x
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+local_host=$(cat /etc/github/cluster)
+
+if [ "$(ghe-config "cluster.ha")" = true ]; then
+  export HA_CLUSTER=1
+fi
+
+if [ -z "$skip_cluster_config_check" ]; then
+  echo "Validating configuration"
+
+  ghe-cluster-config-check /data/user/common/cluster.conf || {
+    echo "Configuration errors must be fixed before running ghe-cluster-config-apply." >&2
+    ghe-cluster-config-check /data/user/common/cluster.conf >&2
+    exit 1
+  }
+fi
+
+sync_hosts=''
+next_vpn_ip=1
+
+process_hosts() {
+  local hostname=$1
+  local files=$2
+  local ip=
+  if [ -n "$(ghe-config cluster.$hostname.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv6")
+  elif [ -n "$(ghe-config cluster.$hostname.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$hostname.ipv4")
+  fi
+
+  local uuid=''
+  if [ -n "$(ghe-config cluster.$hostname.uuid || true)" ]; then
+    uuid=$(ghe-config "cluster.$hostname.uuid")
+  fi
+
+  local wireguard_pubkey
+  if ghe-config --present cluster.$hostname.wireguard-pubkey; then
+    wireguard_pubkey=$(ghe-config "cluster.$hostname.wireguard-pubkey")
+  fi
+
+  # We only want to set vpn if cluster.ha is true, per ghes#4900
+  if ghe-config --true cluster.ha && ghe-config --blank cluster.$hostname.vpn; then
+    if ghe-config --blank cluster.$hostname.replica; then
+      ghe-config cluster.$hostname.vpn "169.254.179.1"
+    else
+      for i in `seq $next_vpn_ip 254`; do
+        if [ $next_vpn_ip -eq 254 ]; then
+          echo "No VPN IP available"
+          exit 1
+        fi
+        if ! grep -q 169.254.179.$next_vpn_ip /data/user/common/cluster.conf; then
+          break
+        fi
+        next_vpn_ip=$(($next_vpn_ip + 1))
+      done
+
+      ghe-config cluster.$hostname.vpn "169.254.179.$next_vpn_ip"
+      next_vpn_ip=$(( $next_vpn_ip + 1 ))
+    fi
+  fi
+
+  if [ "$hostname" != "$local_host" ]; then
+    set +e
+    unset configured_values
+    # Batch ssh calls to save time.
+    configured_values=$(ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$ip" -- "echo \"configured_hostname=\$(sudo cat /etc/github/cluster)\"; echo \"configured_uuid=\$(sudo cat /data/user/common/uuid)\"; echo \"configured_wireguard_pubkey=\$(sudo cat /data/user/common/wireguard.key 2>/dev/null | wg pubkey 2>/dev/null)\";")
+    ssh_exit_status=$?
+
+    configured_hostname=$(echo "$configured_values" | grep -oP 'configured_hostname=\K[^ ]+')
+    configured_uuid=$(echo "$configured_values" | grep -oP 'configured_uuid=\K[^ ]+')
+    configured_wireguard_pubkey=$(echo "$configured_values" | grep -oP 'configured_wireguard_pubkey=\K[^ ]+')
+
+    set -e
+    if [ "$(ghe-config "cluster.$hostname.offline")" != true ]; then
+      if [ "$ssh_exit_status" != "0" ]; then
+        echo "Cluster node $hostname ($ip) cannot be reached over SSH and is not marked offline"
+        exit 2
+      fi
+
+      if [ -z "$uuid" ]; then
+        if [ -n "$configured_uuid" ]; then
+          ghe-config "cluster.$hostname.uuid" "$configured_uuid"
+        fi
+      elif [ "$uuid" != "$configured_uuid" ]; then
+        echo "Cluster node $hostname ($ip): expected UUID \"$uuid\", found UUID \"$configured_uuid\""
+        exit 3
+      fi
+
+      # We only want to set wireguard pubkey if cluster.ha is true, per ghes#4900
+      if ghe-config --true cluster.ha; then
+        if { [ -z "$wireguard_pubkey" ] || [ "$wireguard_pubkey" != "$configured_wireguard_pubkey" ]; } && [ -n "$configured_wireguard_pubkey" ]; then
+            ghe-config "cluster.$hostname.wireguard-pubkey" "$configured_wireguard_pubkey"
+        fi
+      fi
+    else
+      if [ "$ssh_exit_status" != "0" ]; then
+        echo "Cluster node $hostname ($ip) is offline and cannot be reached over SSH"
+        return
+      fi
+    fi
+
+    if [ "$configured_hostname" != "$hostname" ]; then
+      echo "Cluster not configured on $hostname ($ip)"
+      exit 1
+    fi
+
+    # We always add $ip to the list of hosts to sync
+    sync_hosts+="$ip "
+    echo "Updating configuration for $hostname ($ip)"
+
+  else
+    configured_uuid=$(sudo cat /data/user/common/uuid)
+    if [ -z "$uuid" ]; then
+      if [ -n "$configured_uuid" ]; then
+        ghe-config "cluster.$hostname.uuid" "$configured_uuid"
+      fi
+    elif [ "$uuid" != "$configured_uuid" ]; then
+      echo "Cluster node $hostname ($ip): expected UUID \"$uuid\", found UUID \"$configured_uuid\""
+      exit 3
+    fi
+    # We only want to set wireguard pubkey if cluster.ha is true, per ghes#4900
+    if ghe-config --true cluster.ha; then
+      configured_wireguard_pubkey=$(sudo cat /data/user/common/wireguard.key | wg pubkey)
+      if { [ -z "$wireguard_pubkey" ] || [ "$wireguard_pubkey" != "$configured_wireguard_pubkey" ]; } && [ -n "$configured_wireguard_pubkey" ]; then
+          ghe-config "cluster.$hostname.wireguard-pubkey" "$configured_wireguard_pubkey"
+      fi
+    fi
+  fi
+}
+
+hosts=$(ghe-cluster-nodes -o)
+for hostname in ${hosts}; do
+  if [ "$(ghe-config cluster."${hostname}".replica)" == "disabled" ]; then
+    # Best attempt at syncing to disabled replica; Will fail if replica is inaccessible
+    process_hosts "$hostname" "$files" || echo "Skipping $hostname due to error processing files"
+  else
+    process_hosts "$hostname" "$files"
+  fi
+done
+
+ssh_sync_files() {
+  remote_machine="$1"
+  files_to_transfer="$2"
+  actions_files="$3"
+
+  if grep "/data/user/actions/states" <<< "$files_to_transfer"; then
+    ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$remote_machine" "sudo rm -f $actions_files 2>/dev/null"
+  fi
+
+  # Use tar to create a compressed archive of the specified file with its absolute path
+  sudo tar --acls -cpPJf - $(ls $files_to_transfer 2>/dev/null) |
+    ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$remote_machine" "sudo tar --acls -xpPJf - 2>/dev/null"
+}
+
+export -f ssh_sync_files
+set -o pipefail
+parallel ssh_sync_files {} ::: ${sync_hosts[@]} :::: <(echo "$files") :::: <(echo "$actions_state_files")
+unset ssh_sync_files
+
+echo "Configuration Updated"

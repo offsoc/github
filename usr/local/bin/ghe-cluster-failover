@@ -1,0 +1,292 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-failover [-h]
+#/
+#/ Back up the current cluster configuration and perform a graceful failover to the secondary cluster
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -y                 Do not show the warning prompt
+#/
+set -euo pipefail
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-repl-lib
+source /usr/local/share/enterprise/ghe-cluster-repl-lib
+
+############################################################################################################
+# CAUTION - Do not change/set any of the following values unless directed to by GitHub Enterprise support. #
+############################################################################################################
+SKIP_ENABLE_MAINTENANCE_MODE=${SKIP_ENABLE_MAINTENANCE_MODE:-"false"}
+SKIP_REMOVE_PLACEHOLDER_PAGE=${SKIP_REMOVE_PLACEHOLDER_PAGE:-"false"}
+SKIP_CLEANUP_CONSUL=${SKIP_CLEANUP_CONSUL:-"false"}
+SKIP_CONFIGURE_CONSUL=${SKIP_CONFIGURE_CONSUL:-"false"}
+SKIP_CONFIG_CHECK=${SKIP_CONFIG_CHECK:-"false"}
+SKIP_CONFIG_APPLY=${SKIP_CONFIG_APPLY:-"false"}
+SKIP_PLACE_SEMAPHORE=${SKIP_PLACE_SEMAPHORE:-"false"}
+SKIP_DATACENTER_CHECK=${SKIP_DATACENTER_CHECK:-"false"}
+SKIP_CLEANUP=${SKIP_CLEANUP:-"false"}
+SKIP_BLOCKING_FORMER_PRIMARY_NODES=${SKIP_BLOCKING_FORMER_PRIMARY_NODES:-"false"}
+CMD_NAME="ghe-cluster-failover"
+PROCEED_PROMPT_MESSAGE_WARNING="Warning: You are about to promote this replica cluster."
+PROCEED_PROMPT_MESSAGE_DESC="Promoting this replica cluster will tear down replication and enable maintenance mode on the current primary cluster."
+PROCEED_PROMPT_MESSAGE="${PROCEED_PROMPT_MESSAGE_WARNING} ${PROCEED_PROMPT_MESSAGE_DESC}"
+skip_prompt="false"
+FAILOVER_CLUSTER_CONF=${FAILOVER_CLUSTER_CONF:-$(mktemp -t failover-cluster.conf.XXXXXX)}
+############################################################################################################
+
+## Exit codes
+# 2  - usage
+# 20 - sanity check failed
+# 21 - block list file missing
+
+usage() {
+  usage_core
+}
+
+get_opts() {
+  while getopts "hy" OPTION; do
+    case $OPTION in
+      h)
+        usage
+        exit 0
+        ;;
+      y)
+        skip_prompt="true"
+        ;;
+      \?)
+        usage
+        exit 2
+        ;;
+    esac
+  done
+}
+
+sanity_check() {
+  echo "Started sanity check"
+
+  sanity_check_core
+  core_exit_code=$?
+  if [ "$core_exit_code" -ne 0 ]; then
+    exit "$core_exit_code"
+  fi
+
+  # Check if datacenter of node is not the same as cluster.primary-datacenter
+  if [ "$SKIP_DATACENTER_CHECK" != "true" ]; then
+    local this_host
+    this_host="$(hostname)"
+
+    local current_host_dc
+    current_host_dc="$(ghe-config "cluster.${this_host}.datacenter")"
+
+    # Check if datacenter of node is the not the same as cluster.primary-datacenter
+    if [ "$current_host_dc" == "$(ghe-config cluster.primary-datacenter)" ]; then
+      echo "[ Error ] Cannot perform cluster failover on primary, please run on replica cluster." >&2
+      exit 20
+    fi
+  fi
+  echo "Finished sanity check"
+}
+
+create_failover_cluster_conf() {
+  echo "Started creating failover cluster.conf"
+
+  cp /data/user/common/cluster.conf "$FAILOVER_CLUSTER_CONF"
+
+  # Identify the original primary datacenter.
+  original_dc="$(get_primary_datacenter)"
+
+  # Identify the datacenter to promote.
+  failover_dc=$(get_failover_datacenter)
+  failover_consul_dc=$(get_failover_consul_datacenter)
+
+  # Update cluster.primary-datacenter to the promoted datacenter
+  ghe-config -f "$FAILOVER_CLUSTER_CONF" cluster.primary-datacenter "$failover_consul_dc"
+
+  # Identify the mysql-master-replica.
+  mysql_master_replica_host="$(ghe-config cluster.mysql-master-replica)"
+
+  # Update mysql-master to point to the mysql-master-replica host.
+  ghe-config -f "$FAILOVER_CLUSTER_CONF" cluster.mysql-master "$mysql_master_replica_host"
+
+  # Identify the current redis-master-replica
+  redis_master_replica_host="$(ghe-config cluster.redis-master-replica)"
+
+  # Update redis-master to point to the redis-master-replica host.
+  ghe-config -f "$FAILOVER_CLUSTER_CONF" cluster.redis-master "$redis_master_replica_host"
+
+  # Get all of the hosts in the promoted dc and unconfigure unset the replica key.
+  promoted_dc_hosts="$(ghe-cluster-nodes -d "$failover_dc")"
+  for promoted_host in $promoted_dc_hosts; do
+    if ghe-config "cluster.${promoted_host}.replica" >/dev/null 2>&1; then
+      ghe-config -f "$FAILOVER_CLUSTER_CONF" --unset "cluster.${promoted_host}.replica"
+    fi
+  done
+
+  unconfigure_nodes_in_datacenter "$original_dc" "$FAILOVER_CLUSTER_CONF"
+
+  # In the top level cluster section:
+  # delete the redis-master-replica and mysql-master-replica key value pairs
+  ghe-config -f "$FAILOVER_CLUSTER_CONF" --unset cluster.redis-master-replica
+  ghe-config -f "$FAILOVER_CLUSTER_CONF" --unset cluster.mysql-master-replica
+
+  echo "Finished creating failover cluster.conf"
+}
+
+# Check the temporary failover configuration is valid before promoting.
+check_initial_cluster_configuration() {
+  check_cluster_configuration_core "$FAILOVER_CLUSTER_CONF"
+}
+
+proceed_check() {
+  if [ "$skip_prompt" != "true" ]; then
+    proceed_check_core "$PROCEED_PROMPT_MESSAGE"
+  fi
+}
+
+# Enable maintenance mode in primary cluster nodes
+enable_maintenance_mode(){
+  if [ "$SKIP_ENABLE_MAINTENANCE_MODE" != "true" ]; then
+    echo "Enabling maintenance mode in primary cluster"
+    local primary
+    primary=$(get_primary_datacenter)
+
+    local warnings=0
+
+    if ! ghe-cluster-each -d "$primary" -- CLUSTER_CLI=1 ghe-maintenance -s; then
+      echo "[ Warning ] Failed to enable maintenance mode in primary cluster" >&2
+      warnings=$((warnings + 1))
+    fi
+
+    echo "Enabling maintenance mode in primary cluster - $warnings warnings"
+  fi
+}
+
+backup_cluster_configuration() {
+  backup_cluster_configuration_core "$CMD_NAME"
+}
+
+# Updates the cluster configuration to promote the replica cluster
+# and unconfigure nodes in the former primary datacenter.
+update_cluster_configuration() {
+  echo "Started failover configuration updates"
+
+  # Identify the original primary datacenter before updating cluster.conf
+  original_dc="$(get_primary_datacenter)"
+
+  reconfigure_consul_kv "$original_dc"
+
+  remove_placeholder_page
+
+  # we have to copy this into place as the last step because the above
+  # functions need to identify the mysql master replica host from the
+  # cluster.conf
+  cp "$FAILOVER_CLUSTER_CONF" /data/user/common/cluster.conf
+
+  echo "Finished failover configuration updates"
+}
+
+# Remove the placeholder page
+remove_placeholder_page() {
+  if [ "$SKIP_REMOVE_PLACEHOLDER_PAGE" != "true" ]; then
+    local failover_dc
+    failover_dc=$(get_failover_datacenter)
+
+    if ! ghe-cluster-each -d "$failover_dc" -- sudo rm -f /data/github/current/public/index.html 2>/dev/null; then
+      echo "[ Warning ] Failed to remove placeholder page" >&2
+    fi
+  fi
+}
+
+# Force remove Consul's Serf WAN entries — the Consul server nodes that were on the original primary cluster.
+# This must be called after the config apply run has applied the firewall changes in order to prevent the Consul
+# server nodes from the previous primary cluster being able to communicate with the nodes of the promoted cluster.
+cleanup_consul() {
+  if [ "$SKIP_CLEANUP_CONSUL" = "true" ]; then
+    return
+  fi
+
+  echo "Started cleaning up Consul"
+
+  # "consul members -wan" only executes on a consul server node so SSH into the
+  # consul server leader node to run the relevant Consul commands
+  consul_id=$(consul operator raft list-peers | grep leader | awk -F' ' '{print $2}')
+  consul_leader_host=$(curl -s localhost:8500/v1/catalog/nodes | jq -r '.[] | select(.ID=="'"$consul_id"'") | .Meta.hostname')
+
+  current_consul_dc=$(ghe-config cluster."$consul_leader_host".consul-datacenter)
+  # exclude nodes that are in the Consul datacenter of the cluster we're failing over to
+  consul_members=$(ssh "$consul_leader_host" -- "consul members -wan" | grep -v Node | awk -F' ' '{print $1 " " $7}' | grep -v "$current_consul_dc" | cut -d' ' -f1)
+
+  for node in $consul_members; do
+    echo "Removing Consul server node $node from Serf WAN pool"
+    ssh "$consul_leader_host" -- "consul force-leave -prune -wan $node"
+  done
+
+  check_updated_consul_servers "$consul_leader_host"
+
+  echo "Finished cleaning up Consul"
+}
+
+check_updated_cluster_configuration() {
+  check_cluster_configuration_core
+}
+
+apply_cluster_configuration() {
+  place_failover_semaphore
+  apply_cluster_configuration_core
+}
+
+# This needs to be run before the original configuration gets modified
+generate_former_primary_nodes_block_list() {
+  if [ "$SKIP_BLOCKING_FORMER_PRIMARY_NODES" != "true" ]; then
+    primary_hosts="$(ghe-cluster-nodes --primary)"
+    cluster_ip_blocklist="/data/user/common/cluster-ip-blocklist"
+
+    # Delete the blocklist file if it already exists
+    if [[ -f "$cluster_ip_blocklist" ]]; then
+      echo "[ Warning ] '$cluster_ip_blocklist' already exists. File contents: " >&2
+      cat "$cluster_ip_blocklist" >&2
+      echo "[ Warning ] Deleting existing file at '$cluster_ip_blocklist'" >&2
+      rm -f "$cluster_ip_blocklist"
+    fi
+
+    for host in $primary_hosts; do
+      git config -f "/data/user/common/cluster.conf" "cluster.$host.ipv4" >> "$cluster_ip_blocklist"
+    done
+  fi
+}
+
+block_former_primary_nodes() {
+  if [ "$SKIP_BLOCKING_FORMER_PRIMARY_NODES" != "true" ]; then
+    echo "Blocking former primary nodes"
+    ghe-cluster-block-ips
+  fi
+}
+
+cleanup() {
+  if [ "$SKIP_CLEANUP" = "true" ]; then
+    return
+  fi
+  rm "$FAILOVER_CLUSTER_CONF"
+}
+
+trap cleanup EXIT SIGINT SIGTERM
+
+main(){
+  get_opts "$@"
+
+  sanity_check
+  create_failover_cluster_conf
+  # this check is done against the temporary failover cluster.conf
+  check_initial_cluster_configuration
+  proceed_check
+  enable_maintenance_mode
+  backup_cluster_configuration
+  generate_former_primary_nodes_block_list
+  update_cluster_configuration
+  check_updated_cluster_configuration
+  apply_cluster_configuration
+  cleanup_consul
+  echo "ghe-cluster-failover complete"
+  block_former_primary_nodes
+}
+
+main "$@"

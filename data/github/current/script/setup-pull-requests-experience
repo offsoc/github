@@ -1,0 +1,290 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require "optparse"
+
+class SetupPullRequestExperience
+  attr_accessor :opts
+
+  def initialize(opts = {})
+    @opts = opts
+  end
+
+  def startup  = log colorize("\n\n✨ Preparing Pull Requests Experience ✨\n", "yellow", style: :bold)
+  def shutdown = log colorize("\nPull Requests Experience is setup!\n", "yellow", style: :bold)
+
+  def run
+    startup
+    @logger = StringIO.new if opts[:silent_mode]
+
+    validate
+    load_dependencies
+    enable_feature_flags
+    seed_pull_requests
+
+    if opts[:seed_annotations]
+      create_check_annotations
+    end
+
+    repair_elastomer_indexes
+
+    @logger = STDOUT if opts[:silent_mode]
+    shutdown
+  end
+
+  def validate
+    opts.map do |(name, v)|
+      log help_text "✔️ #{name} = #{v}" if v
+    end
+
+    unless File.exist?("tmp/pids/ernicorn1.pid")
+      log_and_raise_error "This script requires that the dev server is running. Are you sure it's turned on? (script/server)", "Server is not running"
+    end
+
+    unless Rails.env.development?
+      log_and_raise_error "This is a dev-only script", "Environment is not :development"
+    end
+  end
+
+  def load_dependencies
+    section "Loading Dependencies" do
+      load_and_log_time("Seeds::PullRequests", "../script/seeds/runners/pull_requests")
+      load_and_log_time("Seeds::PullRequestReviews", "../script/seeds/runners/pull_request_reviews")
+      load_and_log_time("Seeds::PullRequestMetadata", "../script/seeds/runners/pull_request_metadata")
+
+      if opts[:seed_annotations]
+        load_and_log_time("Seeds::PullRequestAnnotations", "../script/seeds/runners/pull_request_annotations")
+      end
+
+      load_and_log_time("Rails Environment", "../config/environment")
+    end
+  end
+
+  def enable_feature_flags
+    section("Toggling on Feature Flags") do
+      monalisa = Seeds::Objects::User.monalisa
+
+      steal_output do
+        prx_flag = Seeds::Objects::FeatureFlag.toggle(feature_flag: "prx", action: "enable")
+        if !Feature.find_by(slug: :prx)
+          Feature.create(
+            public_name: "React pull request experience",
+            slug: "prx",
+            flipper_feature: prx_flag,
+            feedback_link: "https://github.com"
+          )
+        end
+        monalisa.enable_feature_preview(:prx)
+      end
+      log success_text ":prx"
+      log help_text "Allows you to view a pull request with the new react experience"
+
+      steal_output do
+        mergebox_flag = Seeds::Objects::FeatureFlag.toggle(feature_flag: "mergebox_react_partial", action: "enable")
+        if !Feature.find_by(slug: :mergebox_react_partial)
+          Feature.create(
+            public_name: "New merge experience",
+            slug: "mergebox_react_partial",
+            flipper_feature: mergebox_flag,
+            feedback_link: "https://github.com"
+          )
+        end
+        monalisa.enable_feature_preview(:mergebox_react_partial)
+      end
+      log success_text ":mergebox_react_partial"
+      log help_text "Allows you to use the new react mergebox from the classic pull request experience"
+
+      steal_output do
+        status_checks_json_flag = Seeds::Objects::FeatureFlag.toggle(feature_flag: "status_checks_json", action: "enable")
+      end
+      log success_text ":status_checks_json"
+      log help_text "Allows you to receive data from the Status Checks JSON endpoint"
+
+      steal_output do
+        Seeds::Objects::FeatureFlag.toggle(feature_flag: "api_insights_rest", action: "enable")
+      end
+      log success_text ":api_insights_rest"
+      log help_text "Allows you to see dotcom API insights in the performance pane"
+
+      if opts[:prx_commits]
+        steal_output do
+          commits_flag = Seeds::Objects::FeatureFlag.toggle(feature_flag: "prx_commits", action: "enable")
+          if !Feature.find_by(slug: :prx_commits)
+            Feature.create(
+              public_name: "New PR Commits Experience",
+              slug: "prx_commits",
+              flipper_feature: commits_flag,
+              feedback_link: "https://github.com"
+            )
+          end
+          monalisa.enable_feature_preview(:prx_commits)
+        end
+        log success_text ":prx_commits"
+        log help_text "Allows you to view pull request Commits tab with new SSR React experience"
+      end
+    end
+  end
+
+  def seed_pull_requests
+    # Creates 5 pull requests under monalisa/smile and github/github (10 PRs total)
+    section "Seeding Pull Requests" do |logger|
+      begin
+        stolen_output = steal_output do
+          Seeds::Runner::PullRequests.run({
+            num_comments: opts[:num_comments],
+            num_commits: opts[:num_commits],
+          })
+        end
+      rescue => e # rubocop:disable Lint/GenericRescue
+        log_and_raise_error "Failed to seed PullRequests: #{e.message}", e.class.name
+      ensure
+        logger.call(stolen_output)
+      end
+    end
+
+    # Creates 3 pull requests with reviews under monalisa/smile and github/github (6 PRs total)
+    section "Seeding Pull Requests with Reviews" do |logger|
+      begin
+        stolen_output = steal_output do
+          Seeds::Runner::PullRequestReviews.run
+        end
+      rescue => e # rubocop:disable Lint/GenericRescue
+        log_and_raise_error "Failed to seed PullRequest Reviews: #{e.message}", e.class.name
+      ensure
+        logger.call(stolen_output)
+      end
+    end
+
+    # Creates 2 memex projects
+    section "Seeding Pull Request Metadata" do |logger|
+      begin
+        stolen_output = steal_output do
+          Seeds::Runner::PullRequestMetadata.run
+        end
+      rescue => e # rubocop:disable Lint/GenericRescue
+        log_and_raise_error "Failed to seed PullRequest Metadata: #{e.message}", e.class.name
+      ensure
+        logger.call(stolen_output)
+      end
+    end
+  end
+
+  def create_check_annotations
+    return unless opts[:seed_annotations]
+    section "Seeding Check Annotations" do |logger|
+      begin
+        stolen_output = steal_output do
+          Seeds::Runner::PullRequestAnnotations.run
+        end
+      rescue => e # rubocop:disable Lint/GenericRescue
+        log_and_raise_error "Failed to seed Check Annotations: #{e.message}", e.class.name
+      ensure
+        logger.call(stolen_output)
+      end
+    end
+  end
+
+  def repair_elastomer_indexes
+    log colorize("\nRepairing Elastomer indexes:", "white", style: :underline)
+    elastomer_output = `bin/elastomer repair`
+    log colorize(elastomer_output.split("\n").map { |msg| "\t#{msg}" }.join("\n"), "gray", style: :italic)
+  end
+
+  # All helper methods from here on, mostly for formatting output
+
+  def steal_output
+    old_stdout = $stdout
+    old_stderr = $stderr
+    $stdout = StringIO.new
+    $stderr = StringIO.new
+    yield
+    [$stdout.string, $stderr.string].flat_map { |s| s.split("\n") }
+  ensure
+    $stdout = old_stdout
+    $stderr = old_stderr
+  end
+
+  def load_and_log_time(name, path)
+    now = Time.now
+    logger.print "\n" + help_text("⟳ Loading #{name}...", indent: 1)
+    require_relative path
+    time = "(#{(((Time.now - now) * 10_000).round(4) / 10).round(1)}ms)"
+    replace_line(success_text("#{name} loaded in #{time}\n"))
+  end
+
+  def replace_line(msg)
+    logger.print "\e[2K\r#{msg}"
+  end
+
+  def success_text(msg, indent: 1)
+    colorize("\n" + ("\t" * indent) + "✔️ " + msg, "green", style: :bold)
+  end
+
+  def help_text(msg, indent: 2)
+    colorize(("\t" * indent) + msg, "gray", style: :italic)
+  end
+
+  def section(title, &block)
+    log colorize("\n#{title}:", "white", style: :underline)
+    block.call(-> (out) {
+      log colorize(out&.map { |msg| "\t#{msg}" }&.join("\n"), "gray", style: :italic)
+    })
+  end
+
+  def colorize(string, color, options = {})
+    background = options[:background] || options[:bg] || false
+    style = options[:style].to_s
+    offsets = %w[gray red green yellow blue magenta cyan white]
+    styles = %w[normal bold dark italic underline xx xx invert xx strikethrough]
+    start = background ? 40 : 30
+    color_code = start + (offsets.index(color.to_s) || 8)
+    style_code = styles.index(style) || 0
+    "\e[#{style_code};#{color_code}m#{string}\e[0m"
+  end
+
+  def logger
+    @logger ||= STDOUT
+  end
+
+  def log(msg)
+    logger.puts(msg)
+  end
+
+  def log_error(msg)
+    STDERR.puts(colorize(msg, "red", style: :bold))
+  end
+
+  def log_and_raise_error(msg, failure = "Failure")
+    log_error(msg)
+    fail failure
+  end
+end
+
+# Default settings for options that can be passed via command line flags
+options = {
+  silent_mode: false,
+  num_comments: 5,
+  num_commits: 20,
+  seed_annotations: false,
+  prx_commits: false,
+}
+
+OptionParser.new do |opt|
+  opt.on("-s", "--silent", "Reduce output") do
+    options[:silent_mode] = true
+  end
+  opt.on("-a", "--seed-annotations", "Seed Annotations data") do
+    options[:seed_annotations] = true
+  end
+  opt.on("-c", "--num-comments [COUNT]", Integer, "Number of comments to generate for generic PRs") do |num_comments|
+    options[:num_comments] = num_comments
+  end
+  opt.on("-m", "--num-commits [COUNT]", Integer, "Number of commits to generate for commit history PR") do |num_commits|
+    options[:num_commits] = num_commits
+  end
+  opt.on("-p", "--prx-commits", "Enable the :prx_commits feature") do
+    options[:prx_commits] = true
+  end
+end.parse!
+
+SetupPullRequestExperience.new(options).run if $PROGRAM_NAME == __FILE__

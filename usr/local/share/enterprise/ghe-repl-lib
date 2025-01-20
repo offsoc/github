@@ -1,0 +1,577 @@
+#!/bin/bash
+#
+# Common functions used by ghe-repl-setup and ghe-repl-start-* scripts
+# Usage: . ghe-repl-lib
+#
+
+set -e
+
+LOG_PATH=/tmp/ghe-repl-lib
+LOG_NAME=`date +%Y_%m_%d_%H`.log
+mkdir -p "$LOG_PATH"
+
+get_node_ip() {
+  local node_name="$1"
+  if [ -n "$(ghe-config cluster.$node_name.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv6")
+  elif [ -n "$(ghe-config cluster.$node_name.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv4")
+  fi
+  echo $ip
+}
+
+ssh_cmd() {
+  ssh_retry_count=${GHE_REPL_SSH_RETRY_COUNT:-0}
+  if [ $ssh_retry_count -ne 0 ]; then
+    set +e #prevent this function from bailing early so we can run the retry loop
+  fi
+  ip=$1
+  shift
+  if ghe-config --present 'secrets.admin-ssh-key' && [ -z "$USE_ADMIN_SSH_KEY" ]; then
+    identity_file="-o IdentityFile=/home/admin/.ssh/id_ed25519"
+  else
+    identity_file="-o IdentityFile=/home/admin/.ssh/id_rsa"
+  fi
+  ssh \
+   -p 122 \
+   -o PasswordAuthentication=no \
+   -o ConnectTimeout=5 \
+   -o ConnectionAttempts=1 \
+   -o ServerAliveInterval=30 \
+   -o UserKnownHostsFile=/dev/null \
+   -o StrictHostKeyChecking=no \
+   -o LogLevel=error ${identity_file:-} \
+   admin@$ip "$@"
+   ec=$?
+   if [ $ec -ne 0 ] && [ "$ssh_retry_count" -gt 0 ]; then
+      # retry the ssh command for 60s incase of network issues
+      for ((i=1; i<=$ssh_retry_count; i++)); do
+        ssh \
+          -p 122 \
+          -o PasswordAuthentication=no \
+          -o ConnectTimeout=5 \
+          -o ConnectionAttempts=1 \
+          -o ServerAliveInterval=30 \
+          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=no \
+          -o LogLevel=error ${identity_file:-} \
+          admin@$ip "$@"
+          ec=$?
+          if [ $ec -eq 0 ]; then
+            break
+          fi
+          sleep 1
+      done
+      set -e
+      return $ec
+   fi
+   if [ "$ssh_retry_count" -gt 0 ]; then
+     set -e
+   fi
+   return $ec
+}
+
+ssh_cmd_via() {
+  ssh_retry_count=${GHE_REPL_SSH_RETRY_COUNT:-0}
+  if [ $ssh_retry_count -ne 0 ]; then
+    set +e #prevent this function from bailing early so we can run the retry loop
+  fi
+  via_host=$1
+  dest_host=$2
+  shift 2
+  if ghe-config --present 'secrets.admin-ssh-key' && [ -z "$USE_ADMIN_SSH_KEY" ]; then
+    identity_file="-o IdentityFile=/home/admin/.ssh/id_ed25519"
+  else
+    identity_file="-o IdentityFile=/home/admin/.ssh/id_rsa"
+  fi
+  ssh -A \
+   -p 122 \
+   -o PasswordAuthentication=no \
+   -o ConnectTimeout=5 \
+   -o ConnectionAttempts=1 \
+   -o UserKnownHostsFile=/dev/null \
+   -o StrictHostKeyChecking=no \
+   -o LogLevel=error "${identity_file:-}" \
+   "admin@$via_host" ssh -A -p 122 -o StrictHostKeyChecking=no "admin@$dest_host" "$@"
+  ec=$?
+  if [ $ec -ne 0 ] && [ "$ssh_retry_count" -gt 0 ]; then
+    # retry the ssh command for 60s incase of network issues
+    for i in {1..60}; do
+      ssh -A \
+        -p 122 \
+        -o PasswordAuthentication=no \
+        -o ConnectTimeout=5 \
+        -o ConnectionAttempts=1 \
+        -o UserKnownHostsFile=/dev/null \
+        -o StrictHostKeyChecking=no \
+        -o LogLevel=error "${identity_file:-}" \
+        "admin@$via_host" ssh -A -p 122 -o StrictHostKeyChecking=no "admin@$dest_host" "$@"
+      ec=$?
+      if [ $ec -eq 0 ]; then
+        break
+      fi
+      sleep 1
+    done
+    set -e
+    return $ec
+  fi
+  if [ "$ssh_retry_count" -gt 0 ]; then
+    set -e
+  fi
+  return $ec
+}
+
+ssh_check() {
+  echo "Verifying ssh connectivity with $1 ..."
+  retry_count=${GHE_REPL_SSH_RETRY_COUNT:-60}
+  GHE_REPL_SSH_RETRY_COUNT=$retry_count ssh_cmd $1 /bin/true
+}
+
+ssh_check_via() {
+  (
+  echo "Verifying ssh connectivity between $1 and $2 ..."
+  retry_count=${GHE_REPL_SSH_RETRY_COUNT:-60}
+  GHE_REPL_SSH_RETRY_COUNT=$retry_count ssh_cmd_via "$1" "$2" /bin/true
+  )2>&1 | ts "%Y-%m-%d %H_%M_%S" | sudo tee -a "$LOG_PATH/$LOG_NAME"
+  return ${PIPESTATUS[0]}
+}
+
+ssh_check_ha_replicas(){
+  current_node_ip=$1
+  replicas=$(primary_ssh -- "ghe-cluster-nodes --replica --ip | cut -f 2")
+  for replica in $replicas; do
+    if [[ "$current_node_ip" != "$replica" ]]; then
+      ssh_check_via "$replica" "$current_node_ip"
+    fi
+  done
+}
+
+primary_ssh() {
+  if [[ -z $PRIMARY_IP ]]; then
+    echo "PRIMARY_IP must be set"
+    exit 1
+  fi
+  ssh_cmd "$PRIMARY_IP" "$@"
+}
+
+replica_ssh() {
+  if [[ -z $REPLICA_IP ]]; then
+    echo "REPLICA_IP must be set"
+    exit 1
+  fi
+  ssh_cmd $REPLICA_IP "$@"
+}
+
+repl_role() {
+  echo ${REPL_STATE:-standalone}
+}
+
+ensure_primary() {
+  if [ "$REPL_STATE" != "primary" ]; then
+    echo "Error: This command can only be run on the primary node. $PRIMARY_IP is the current primary." >&2
+    exit 1
+  fi
+}
+
+# Explicitly check primary to see if a service is managed externally
+is_service_external_on_primary()
+{
+  service=$1
+  case $service in
+    "mysql")
+      primary_ssh ghe-config --true "mysql.external.enabled"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ensure_replica() {
+  if [ "$REPL_STATE" = "primary" ]; then
+    echo "Error: This command can only be run on a replica. $REPLICA_IP is the current replica." >&2
+    exit 1
+  elif [ "$REPL_STATE" != "replica" ]; then
+    echo "Error: Replication is not configured. Please run 'ghe-repl-setup' first." >&2
+    exit 1
+  fi
+}
+
+ensure_replica_running() {
+  ensure_replica
+  if [ -f /tmp/repl-starting ]; then
+    echo "Warning: Replication is still starting. Please wait."
+    exit
+  elif [ ! -f /etc/github/repl-running ]; then
+    echo "Error: Replication is not running. Please run 'ghe-repl-start' first."
+    exit 1
+  fi
+}
+
+ensure_replica_stopped() {
+  ensure_replica
+  if [ -f /etc/github/repl-running ]; then
+    echo "Error: Replication is still running. Please run 'ghe-repl-stop' first."
+    exit 1
+  fi
+}
+
+is_cache_replica() {
+  node=$(cat /etc/github/cluster 2>/dev/null)
+  ghe-config --true "cluster.$node.cache-server"
+}
+
+ensure_replica_capacity() {
+  query="select round(blocks * blocks_size / power(2,30), 2) from mounts where path = '/';"
+  primary_capacity=$(primary_ssh sudo osqueryi --list --noheader <<< "$query")
+  replica_capacity=$(sudo osqueryi --list --noheader <<< "$query")
+  if ! awk '{ ratio=$1/$2 } ratio < 0.95 { exit 1 }' <<< "$replica_capacity $primary_capacity"; then
+    echo "Error: replication cannot proceed because the root volume disk capacity of the replica is smaller than the primary by more than 5%. This replica ($HOSTNAME) has $replica_capacity G which is less than $primary_capacity G on the primary."
+    exit 1
+  fi
+}
+
+ensure_primary_and_replica_compatible () {
+  # verify replica is same release
+  replica_version=$(. /etc/github/enterprise-release; echo $RELEASE_VERSION)
+  primary_version=$(primary_ssh '. /etc/github/enterprise-release; echo $RELEASE_VERSION')
+  if [ "$primary_version" != "$replica_version" ]; then
+    if dpkg --compare-versions "$primary_version" gt "$replica_version"; then state="older"; else state="newer"; fi
+    echo "Error: replication cannot proceed because the primary and replica versions don't match. This replica ($HOSTNAME) is running version $replica_version which is $state than version $primary_version running on the primary."
+    exit 1
+  fi
+}
+
+REPL_LOCK_FILE=/var/run/ghe-repl.lock
+REPL_LOCK_FD=
+
+acquire_repl_lock() {
+  # Make sure lock file exists
+  sudo touch $REPL_LOCK_FILE
+
+  # Open lock file and store fd
+  exec {REPL_LOCK_FD}<$REPL_LOCK_FILE
+
+  # Try to acquire lock by passing the lock fd to
+  # flock.
+  flock -w 1 -n 0 <&$REPL_LOCK_FD || {
+    echo "Error: Unable to acquire lock ($REPL_LOCK_FILE)" >&2
+
+    lock_process=$(sudo ps -p $(cat $REPL_LOCK_FILE) 2>/dev/null || true)
+    if [ -n "$lock_process" ]; then
+      echo "Lock is held by existing process: $lock_process" >&2
+    fi
+
+    exit 1
+  }
+
+  echo $$ | sudo tee $REPL_LOCK_FILE  >/dev/null
+}
+
+es_listening() {
+  ss -lt 'sport = :9200' | tail -n+2 | grep -q :9200
+}
+
+primary_ip() {
+  /usr/local/share/enterprise/ghe-call-configrb cluster_ha_primary_ip
+}
+
+mssql_primary_ip(){
+  /usr/local/share/enterprise/ghe-call-configrb mssql_master_ip
+}
+
+cleanup() {
+  ec=$?
+  [ "$ec" -ne "0" ] && restore_cluster_configs
+
+  # If lock fd exists, close it to release it
+  if [ -n "$REPL_LOCK_FD" ]; then
+    echo -n | sudo tee $REPL_LOCK_FILE
+    exec {REPL_LOCK_FD}<&-
+  fi
+
+  sudo rm -f /tmp/repl-starting
+  exit $ec
+}
+
+report_legacy_status() {
+  local diff=
+  [[ $PRIMARY_LAST_SYNC =~ ^-?[0-9]+$ ]] && [[ $REPLICA_LAST_SYNC =~ ^-?[0-9]+$ ]] && diff=$[PRIMARY_LAST_SYNC - REPLICA_LAST_SYNC]
+
+  if [ "$1" = "-v" ]; then
+    echo "Primary ($PRIMARY_IP) last sync time: $PRIMARY_LAST_SYNC"
+    echo "Replica last sync time: $REPLICA_LAST_SYNC"
+    return 0
+  elif [ $# -eq 0 ]; then
+    if [ -z "$diff" ]; then
+      echo "$REPL_STATUS_TYPE sync is in progress and did not finish within 60 seconds"
+      return 1
+    elif [ $diff -eq 0 ]; then
+      echo "$REPL_STATUS_TYPE replication is in sync"
+      return 0
+    else
+      echo "$REPL_STATUS_TYPE replication is not in sync, off by ${diff}s"
+      return 1
+    fi
+  elif [ "$1" = "--check" ]; then
+    if [ -z "$diff" ]; then
+      echo "WARNING: $REPL_STATUS_TYPE sync is in progress and did not finish within 60 seconds"
+    elif [ $diff -gt 120 ]; then
+      echo "CRITICAL: $REPL_STATUS_TYPE replication is behind the primary by ${diff}s"
+      return 2
+    elif [ $diff -lt 120 -a $diff -gt 0 ]; then
+      echo "WARNING: $REPL_STATUS_TYPE replication is behind the primary by ${diff}s"
+      return 1
+    elif [ $diff -eq 0 ]; then
+      echo "OK: $REPL_STATUS_TYPE replication is in sync"
+      return 0
+    else
+      echo "UNKNOWN: $REPL_STATUS_TYPE replication is not in sync"
+      return 3
+    fi
+  fi
+}
+
+# Get a count for a given label from the output provided in the first argument
+# usage:
+#   extract_count_ha ghe-spokes-output label
+# example:
+#   extract_count_ha "$(ghe-spokes status)" "FAILED network replicas total"
+extract_count_ha() {
+  local status="$1"
+  local count_label="$2"
+  local count="$(echo "$status" | grep -m  1 "$count_label total:" | tr -d ' ' | cut -d : -f2)"
+  echo "${count:-0}"
+}
+
+# Get the total counts from the output provided in the first argument
+# usage:
+#   total_counts_ha ghe-spokes-output label [other labels here]
+# example:
+#   total_counts_ha "$(ghe-spokes status)" "FAILED network replicas" "FAILED gist replicas"
+total_counts_ha() {
+  local status="$1"; shift
+  local total_count=0
+  for count_label in "$@"; do
+    total_count=$(($total_count + $(extract_count_ha "$status" "$count_label")))
+  done
+  echo $total_count
+}
+
+es_set_local_auto_expand(){
+  local auto_expand=$1
+
+  /usr/local/share/enterprise/ghe-es-auto-expand -q -l -v $auto_expand || true
+}
+
+es_set_primary_auto_expand(){
+  local auto_expand=$1
+
+  primary_ssh /usr/local/share/enterprise/ghe-es-auto-expand -q -v $auto_expand || true
+}
+
+es_detect_id_clash(){
+  local local_id=$(/usr/local/share/enterprise/ghe-es-node-ids)
+
+  if [ -z "$local_id" ]; then
+    return 1
+  fi
+
+  if [ $(echo $local_id | wc -w) -gt 1 ]; then
+    return 1
+  fi
+
+  primary_ssh /usr/local/share/enterprise/ghe-es-node-ids | grep -q "$local_id"
+}
+
+es_ensure_no_id_clash(){
+  local delete_es=$1
+
+  if ! es_detect_id_clash; then
+    return
+  fi
+
+  if $delete_es; then
+    echo "Warning: deleting local Elasticsearch data as its node ID already exists" >&2
+    sudo /usr/local/share/enterprise/ghe-nomad-local-alloc-stop elasticsearch
+
+    # waits until haproxy marks Elasticsearch as down and returns a 503
+    until [ "$(curl -s -w "%{http_code}" -o /dev/null "http://localhost:9201/_cluster/health")" -eq 503 ]; do
+      echo "Waiting for Elasticsearch to stop"
+      sleep 5
+    done
+
+    /usr/local/share/enterprise/ghe-repl-es-teardown
+
+    return
+  fi
+
+  echo "Error: the local Elasticsearch instance is configured with a node ID that already exists" >&2
+  echo "       in the cluster. Use --force to remove the local Elasticsearch directory." >&2
+  return 1
+}
+
+backup_cluster_configs () {
+  if [ -f /etc/github/cluster ] ; then
+    CLUSTER_RESET=true
+    export CLUSTER_BACKUP=$(mktemp /tmp/cluster_backup.XXXXXX)
+    sudo mv /etc/github/cluster $CLUSTER_BACKUP
+  fi
+  if [ -f /data/user/common/cluster.conf ] ; then
+    CLUSTER_RESET=true
+    export CLUSTER_CONF_BACKUP=$(mktemp /tmp/cluster_conf_backup.XXXXXX)
+    sudo mv /data/user/common/cluster.conf $CLUSTER_CONF_BACKUP
+  fi
+}
+
+restore_cluster_configs () {
+  # restore deleted files
+  if [ -n "$CLUSTER_BACKUP" ]; then
+    sudo mv $CLUSTER_BACKUP /etc/github/cluster
+  fi
+  if [ -n "$CLUSTER_CONF_BACKUP" ]; then
+    sudo mv $CLUSTER_CONF_BACKUP /data/user/common/cluster.conf
+  fi
+}
+
+check_for_config_run() {
+  # Abort if a config run is currently on-going
+  if /usr/local/share/enterprise/ghe-config-in-progress > /dev/null; then
+    echo "Error: A configuration run is currently in progress. Please try again after it is finished." >&2
+    exit 1
+  fi
+}
+
+query() {
+  local query=$1
+  retries=10
+  while [ $retries -gt 0 ]; do
+    ec=0
+    result=$(sudo mysql -u root -e "$query" 2>/dev/null) || ec=$?
+    if [ "$ec" -eq 0 ]; then
+      break
+    fi
+    retries=$((retries-1))
+    sleep 1
+  done
+
+  echo "$result"
+}
+
+# Standalone
+is_standalone() {
+  # If GHE_CLUSTER_FILE is set, we are using temp cluster file for tests so assume cluster
+  if [ -n "${GHE_CLUSTER_FILE:-}" ]; then
+    return 1
+  fi
+
+  # If GHE_CLUSTER_FILE is not set, use canonical files to check if cluster
+  [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ] || [ ! -f "/data/user/common/cluster.conf" ]
+}
+
+# Cluster and Cluster HA
+is_cluster() {
+  if ! is_standalone && [ "$(ghe-config cluster.ha)" != "true" ]; then
+    return 0
+  fi
+  return 1
+}
+
+is_standalone_ha() {
+  if ! is_standalone && [ "$(ghe-config cluster.ha)" = "true" ]; then
+    return 0
+  fi
+  return 1
+}
+
+is_cluster_ha() {
+  if is_cluster; then
+    # Cluster HA mode checks for the presence of cluster.mysql-master-replica and cluster.redis-master-replica
+    # And that cluster.ha is absent
+    return $(ghe-config --present cluster.mysql-master-replica && ghe-config --present cluster.redis-master-replica && ghe-config --absent cluster.ha)
+  fi
+  return 1
+}
+
+# Returns 2 if it's not possible to determine if a node is a primary or replica node
+is_cluster_ha_primary_node() {
+  primary_dc=$(ghe-config cluster.primary-datacenter)
+  if [ -z "$primary_dc" ]; then
+    return 2
+  fi
+  node_hostname=$(cat /etc/github/cluster)
+  if [ -z "$node_hostname" ]; then
+    return 2
+  fi
+  node_dc=$(ghe-config cluster.$node_hostname.datacenter)
+  if [ -z "$node_dc" ]; then
+    return 2
+  fi
+  if [ "$node_dc" = "$primary_dc" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Detects if the current node is setup for replication (e.g. after running repl-setup or repl-stop, but before running repl-start)
+is_replication_setup_on_current_node() {
+  node_hostname=$(cat /etc/github/cluster 2>/dev/null || true)
+  if [ -z "$node_hostname" ]; then
+    return 1
+  fi
+  is_standalone_ha && [ "$REPL_STATE" = "replica" ] && { [ "$(ghe-config cluster."$node_hostname".replica)" == "enabled" ] || [ "$(ghe-config cluster."$node_hostname".replica)" == "disabled" ]; }
+}
+
+# Detects if the current node is setup for replication and replication is running (e.g. repl-start has been run successfully)
+is_replication_running_on_current_node() {
+  is_replication_setup_on_current_node && [ -f /etc/github/repl-running ]
+}
+
+# Detects if the current node is an HA primary
+is_ha_primary() {
+  is_standalone_ha && [ "$REPL_STATE" = "primary" ]
+}
+
+# Detects if the primary node is reachable
+primary_reachable() {
+  if primary_ssh /bin/true; then
+    return 0
+  fi
+  echo "Error: Primary node $PRIMARY_IP is unreachable." >&2
+  return 1
+}
+
+
+REPL_STATE=$(cat /etc/github/repl-state 2>/dev/null || true)
+
+case $REPL_STATE in
+  primary)
+    REPLICA_IP=$(ghe-cluster-nodes --replica --ip | cut -f 2)
+    REPLICA_URL_HOST=$REPLICA_IP
+    if grep -q ":" <<< $REPLICA_IP; then
+      REPLICA_URL_HOST="[$REPLICA_IP]"
+    fi
+    ;;
+  replica)
+    PRIMARY_IP=$(ghe-cluster-nodes --primary --ip | cut -f 2)
+    PRIMARY_URL_HOST=$PRIMARY_IP
+    if grep -q ":" <<< $PRIMARY_IP; then
+      PRIMARY_URL_HOST="[$PRIMARY_IP]"
+    fi
+    ;;
+esac
+
+# Enable set -x debug logging if GHE_REPL_VERBOSE set true. We also configure fd
+# 3 to go to stderr instead of /dev/null so this can be used to add extra debug
+# output.
+: ${GHE_REPL_VERBOSE:=false}
+if $GHE_REPL_VERBOSE; then
+  exec 3>&2
+  set -x
+else
+  exec 3>/dev/null
+fi
+
+# Don't accidentally exit non-zero
+true

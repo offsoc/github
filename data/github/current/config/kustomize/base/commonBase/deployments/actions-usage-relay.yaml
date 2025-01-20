@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: actions-usage-relay
+    annotations:
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "actions-usage-relay"
+        heaven.githubapp.com/image-placeholder: "github"
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        moda.github.net/inject-otel-env-vars-into-containers: "actions-usage-relay"
+spec:
+    replicas: 1
+    template:
+        metadata:
+            labels:
+                service: actions-usage-relay
+            annotations:
+                fluentbit.io/parser: logfmt_sloppy
+        spec:
+            restartPolicy: Always
+            volumes:
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            containers:
+                - name: actions-usage-relay
+                  image: github
+                  imagePullPolicy: IfNotPresent
+                  args: ["bin/actions-usage-relay"]
+                  resources:
+                    requests:
+                        cpu: 1.0
+                        memory: "2G"
+                    limits:
+                        cpu: 1.0
+                        memory: "4G"
+                  volumeMounts:
+                    - name: github-metadata
+                      mountPath: /etc/github/metadata.json
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                    - name: syslog
+                      mountPath: /dev/log
+                      readOnly: true
+                  env:
+                    - name: RAILS_ENV
+                      value: production
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_HOSTNAME
+                      value: github.com
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: OTEL_SERVICE_NAME
+                      value: "github-stream-processor"
+                  envFrom:
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+    selector:
+        matchLabels:
+            service: actions-usage-relay

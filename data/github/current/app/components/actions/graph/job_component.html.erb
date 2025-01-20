@@ -1,0 +1,140 @@
+<%
+  repository_id = workflow_run.repository.id
+  session_id = GitHub.context[:actor_session].to_s
+  hydro_event = "actions.execution_graph_click"
+  hydro_setup_job = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "job" })
+  streaming_job_steps = workflow_run.repository ||  workflow_run.repository.owner
+ %>
+<streaming-graph-job
+  class="js-socket-channel WorkflowJob position-relative rounded-2 width-full"
+  <% if viewing_current? %>
+    data-should-stream="<%= streaming_job_steps %>"
+    <% alive_channels = "" %>
+    <% if check_run %>
+      data-external-id="<%= check_run.external_id %>"
+      data-concluded="<%= check_run.conclusion? %>"
+      <% if check_run.streaming_log_url.present? && logged_in? %>data-streaming-url="<%= check_run_live_logs_path(user_id: workflow_run.repository.owner_display_login, repository: workflow_run.repository, ref: check_run.head_sha, id: check_run.id) %>"<% end %>
+      <% if check_run.steps_via_results_service? && logged_in? %>
+        data-steps-from-results
+        <% alive_channels = "#{live_update_view_channel(check_run.workflow_job_run&.actions_results_channel)} "%>
+      <% end %>
+    <% end %>
+    <% if !is_matrix %>
+      data-url="<%= actions_graph_job_path(user_id: workflow_run.repository.owner_display_login, repository: workflow_run.repository, workflow_run_id: workflow_run.id, job_id: job.id) %>"
+      <% alive_channels += "#{live_update_view_channel(channel)}" %>
+      data-action="socket:message:action-graph#updateJob"
+    <% end %>
+    <% if !alive_channels.empty? %>
+      data-channel="<%= alive_channels %>"
+    <% end %>
+  <% end %>
+  style="font-size: 0" <%# Remove white-space after the last inline element in the container %>
+  data-targets="action-graph.jobs"
+  data-job-id="<%= job.id %>"
+  data-group-id="<%= @parent_group %>"
+>
+  <a class="WorkflowJob-title d-flex flex-items-center no-underline f5 " id="<%= job_title_id %>"
+    <% if check_run %>
+      href="<%= actions_job_path(host: GitHub.url, user_id: workflow_run.repository.owner_display_login, repository: workflow_run.repository, workflow_run_id: workflow_run.id, job_id: check_run.id, pr: @pull_request_number) %>"
+    <% end %>
+    tabindex="0"
+    <%# Prevent dragging this card, we want to use the custom pan-behavior %>
+    draggable="false"
+    data-action="dragstart:action-graph#cancelEvent"
+    data-hydro-click="<%= hydro_setup_job["hydro-click"] %>"
+    data-hydro-click-hmac="<%= hydro_setup_job["hydro-click-hmac"] %>"
+    data-turbo="false"
+    >
+    <div class="width-full">
+      <div class="d-flex flex-auto flex-items-center no-wrap width-full">
+        <% if check_run %>
+          <%= render Actions::WorkflowRuns::StatusComponent.new(conclusion: check_run.conclusion, status: check_run.status, size: 16) %>
+        <% else %>
+          <%= render Primer::Beta::Octicon.new(icon: "circle", color: :muted) %>
+        <% end %>
+        <%= render Actions::WorkflowRuns::WorkflowJobRunNameComponent.new(name: display_name, can_split_name: can_split_name?, font_weight: :semibold, color: check_run ? :default : :muted, pl: 2, flex: 1) %>
+        <% if show_timing? %>
+          <div class="flex-self-baseline text-small color-fg-muted flex-shrink-0 pl-1">
+            <% if check_run.seconds_to_completion %>
+              <%= precise_duration(check_run.seconds_to_completion, simplified: true) %>
+            <% elsif check_run.started_at %>
+              <relative-time format="elapsed" datetime="<%= check_run.started_at.iso8601 %>"></relative-time>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </a>
+
+  <%= render(Primer::Alpha::Tooltip.new(for_id: job_title_id, type: :label, text: display_name, direction: :ne, classes: "jobName-truncation-tooltip", "data-target": "streaming-graph-job.tooltip" )) %>
+
+  <% if check_run&.waiting? %>
+    <% if check_run.manual_approval_gate_request&.closed? %>
+      <div class="text-small color-fg-muted position-relative mt-2" <%= test_selector("approval-gate-blocked-ui") %> >
+        <span class="text-semibold"><%= deployment&.environment %></span>
+        <span>waiting for review</span>
+      </div>
+    <% end %>
+
+    <% if check_run.wait_gate_request&.closed? %>
+      <div class="text-small color-fg-muted position-relative mt-2" <%= test_selector("wait-gate-blocked-ui") %> >
+        <span class="text-semibold"><%= deployment&.environment %></span>
+        <span>waiting <relative-time format="elapsed" datetime="<%= (check_run.wait_gate_request.created_at + (check_run.wait_gate_request.gate.timeout).minutes).iso8601 %>"></relative-time></span>
+      </div>
+    <% end %>
+
+    <% if custom_gate_requests[:size] > 0 %>
+      <%
+        first_integration_name = custom_gate_requests[:first_integration_name]
+        number_of_other_integrations = custom_gate_requests[:size] - 1
+      %>
+
+      <div class="text-small color-fg-muted position-relative mt-2" <%= test_selector("custom-gate-blocked-ui") %> >
+        <span class="text-semibold"><%= deployment&.environment %></span>
+        <span>waiting for <%= first_integration_name %></span>
+        <% if number_of_other_integrations > 0 %>
+          <span>and <%= number_of_other_integrations %> more</span>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if check_run&.manual_approval_gate_request&.expired? %>
+    <div class="text-small color-fg-muted position-relative mt-2" <%= test_selector("approval-gate-blocked-ui") %> >
+      <span class="text-semibold"><%= deployment&.environment %></span>
+      <span>review time expired</span>
+    </div>
+  <% end %>
+
+  <% if deployment&.latest_status&.environment_url %>
+    <%
+      hydro_setup_deployment_url = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "deployment_url" })
+    %>
+    <div class="d-inline-flex flex-items-center text-small mt-2 position-relative width-fit" <%= test_selector("deployment-url") %> >
+      <span class="d-block css-truncate css-truncate-overflow">
+        <a href="<%= deployment.latest_status.environment_url %>" target="_blank" rel="noreferrer"
+          <%# Prevent dragging this card, we want to use the custom pan-behavior %>
+          draggable="false"
+          data-action="dragstart:action-graph#cancelEvent"
+          data-hydro-click="<%= hydro_setup_deployment_url["hydro-click"] %>"
+          data-hydro-click-hmac="<%= hydro_setup_deployment_url["hydro-click-hmac"] %>">
+          <%= deployment.latest_status.environment_url %>
+        </a>
+      </span>
+    </div>
+  <% end %>
+
+  <% if show_deployment_progress? %>
+    <div class="color-fg-muted text-small my-2 width-fit" <%= test_selector("deployment-url") %> >
+      <span>Deploying to</span>
+      <span class="text-semibold"><%= deployment.environment %></span>
+    </div>
+
+    <div class="WorkflowJob-deployment-progress">
+      <%= render(Primer::Beta::ProgressBar.new(size: :small)) do |component| %>
+        <% complete_deployment_steps.each { component.with_item(percentage: (100.0 / deployment_steps_count).round(2), classes: "WorkflowJob-deployment-progress-complete") } %>
+        <% incomplete_deployment_steps.each { component.with_item(percentage: (100.0 / deployment_steps_count).round(2), classes: "WorkflowJob-deployment-progress-incomplete") } %>
+      <% end %>
+    </div>
+  <% end %>
+</streaming-graph-job>

@@ -1,0 +1,600 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedInPrimerCounter 6 %>
+<%# erblint:counter ButtonComponentMigrationCounter 6 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%# view is an instance of Diff::FileView %>
+<%
+  file_list_view.increment_notebook_diffs!(view)
+  view.prepare_for_rendering!
+
+  diff = view.diff
+
+  text_only          = local_assigns.fetch(:text_only, false)
+  short_path         = params[:short_path]
+  diff_blob          = view.diff_blob
+  diff_short_path    = diff_short_path(diff)
+  file_type          = get_file_type(diff.path)
+  source_toggle_selected = local_assigns.fetch(:source_toggle_selected, false)
+  diff_entry_index   = defined?(diff_entry_index) ? diff_entry_index : nil
+
+  skip_dependency_review = defined?(skip_dependency_review) ? skip_dependency_review : false
+  skip_dependency_review_for_file = view.dependency_review_diff? && skip_dependency_review
+
+  match_path = short_path && short_path == diff_short_path
+  can_view_hadron_editor = !GitHub.enterprise? && current_user&.hadron_editor_preview_enabled?
+  blob_view_edit_path = @pull && diff_blob_branch_path(diff, :edit, {pr: gh_show_pull_request_path(@pull)})
+  edit_file_path_from_pulls = blob_view_edit_path
+  if can_view_hadron_editor
+    edit_file_path_from_pulls = current_repository && @pull && repo_copilot_task_edit_path(user_id: current_repository.owner, repository: current_repository, id: file_list_view.pull.number, path: diff.path)
+  end
+
+  if diff.deleted? || source_toggle_selected
+    can_display_rich_diff = false
+    default_to_rich_diff = false
+  elsif view.code_rendering_service.supports_view?
+    can_display_rich_diff = true
+    default_to_rich_diff = view.code_rendering_service.default_to_rich_diff_view?
+  else # legacy render check and prose diff (Markdown type views)
+    can_display_rich_diff = true
+    default_to_rich_diff = ((diff.binary? || file_type == '.svg') && view.supports_rich_diff?)
+  end
+
+  should_display_rich_diff = (
+    !skip_dependency_review_for_file && match_path || default_to_rich_diff
+  )
+
+  # If we can display a rich diff and it is the default, we should show the rich diff
+  display_rich_diff = can_display_rich_diff && should_display_rich_diff
+
+  loadable           = !display_rich_diff && diff.text.blank? && diff.changes > 0
+
+  # New Code Rendering Service to replace render
+  use_code_rendering_service = if !view.code_rendering_service.supports_view?
+                    # if we do not support the view then don't use the service
+                    false
+                  elsif view.code_rendering_service.rich_view_toggleable?
+                    # if we are in the toogeable rich diff view, we want to check that the
+                    # code rendering service supports the view and that we want to display the rich diff
+                    display_rich_diff
+                  else
+                    true
+                  end
+
+  codeowners = if file_list_view.pull.present?
+                 codeowner = file_list_view.pull.codeowners.owners_for_path(diff.path)
+                 codeowner += [current_user] if file_list_view.pull.codeowners.owned_by?(owner: current_user, path: diff.path)
+               end
+  filter_owner = logged_in? && (params["owned-by"] || []).include?(current_user.display_login) && !codeowners
+  viewed = view.reviewed?(@pull) && params[:tab] != "commits"
+
+  filtered = file_filtered?(path: diff.path, deleted: diff.deleted?, valid_file_types: file_list_view.valid_file_types, codeowners: filter_owner, viewed: viewed)
+  annotations = file_list_view.annotations.path(diff.path)
+
+  load_dependency_review_rich_diff = view.dependency_review_diff? && display_rich_diff
+
+%>
+<% unless text_only %>
+<copilot-diff-entry
+  data-file-path="<%= view.diff.path %>"
+  <% if disable_copilot_diff_entry?(diff, current_repository)%>
+    data-disabled
+  <% end %>
+>
+  <div id="<%= view.anchor %>"
+      data-details-container-group="file"
+      class="file js-file js-details-container js-targetable-element show-inline-notes Details
+              <%= ' Details--on open' if !viewed %>
+              <%= ' soft-wrap' if soft_wrap?(diff_blob.name) %>
+              <%= ' file-type-prose' if view.prose_diff? %>
+              <%= ' display-rich-diff' if display_rich_diff %>
+              <% if file_list_view.has_comments?(diff) %>has-inline-notes<% end %>
+              <% if loadable %>hide-file-notes-toggle<% end %>
+              js-tagsearch-file"
+            <% if file_list_view.pull.present? && codeowners %>
+              data-codeowners="<%= codeowners.join(",") %>"
+            <% end %>
+            <% if viewed %>
+              data-file-user-viewed
+            <% end %>
+            data-file-type="<%= file_type %>"
+            data-file-deleted="<%= diff.deleted? %>"
+            data-tagsearch-path="<%= scrubbed_utf8(diff_blob.path) %>"
+            data-tagsearch-lang="<%= diff_blob.language&.name %>"
+            <% if DependencyManifestFile.recognized_path?(path: diff.path) %>
+              data-file-manifest
+            <% end %>
+            <% if filtered %>
+              hidden
+            <% end %>
+            data-targets="diff-file-filter.diffEntries"
+        >
+    <%
+      # NOTE: Unfortunately the file-header div relies heavily on server side string truncation to ensure the path name doesn't overflow.
+      # If you are adding child elements to this div make sure to update DiffHelper#diff_file_label to account for the width of the new children.
+    %>
+    <div class="file-header d-flex flex-md-row flex-column flex-md-items-center file-header--expandable js-file-header js-skip-tagsearch <%= ' sticky-file-header js-position-sticky js-position-sticky-stacked' if local_assigns.fetch(:sticky, false) %>"
+      <%= test_selector "add_file_comment_file" %>
+      <%# This z-index override is in place to amend the visual placement of the file-level commenting popover and should be removed as soon as possible %>
+      <% if current_repository&.feature_enabled?(:file_level_commenting) && diff_entry_index == 0 %>
+        style="z-index: 3"
+      <% end %>
+      data-path="<%=h diff.path %>"
+      data-short-path="<%= diff_short_path %>"
+      data-anchor="<%= view.anchor %>"
+      data-file-type="<%= file_type %>"
+      data-file-deleted="<%= diff.deleted? %>"
+      >
+      <div class="file-info flex-auto min-width-0 mb-md-0 mb-2">
+        <%= render partial: "diff/diff_entry_contents_toggler" %>
+
+        <% if view.show_expand_full_blob?(file_list_view) %>
+          <div class="js-expand-full-wrapper d-inline-block">
+            <button
+              type="button"
+              class="btn-link color-fg-muted no-underline js-expand-full directional-expander tooltipped tooltipped-se"
+              aria-label="Expand all"
+              data-url="<%= diff_blob_expand_url(diff_blob&.sha, diff.path, diff_blob&.mode, { diff: diff_view, direction: :full, pull_request_context: file_list_view.pull&.id, anchor: diff_path_anchor(diff.path) }) %>"
+            ><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              <%= render Primer::Beta::Octicon.new(icon: "unfold", aria: { label: "Expand all", hidden: false }) %>
+            </button>
+            <button
+              type="button"
+              class="btn-link color-fg-muted no-underline js-collapse-diff tooltipped tooltipped-se"
+              aria-label="Collapse expanded lines"
+              hidden
+            ><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              <%= render Primer::Beta::Octicon.new(icon: "fold", aria: { label: "Collapse added diff lines", hidden: false }) %>
+            </button>
+          </div>
+        <% end %>
+
+        <% if @pull.present? %>
+          <%= render partial: "codeowners/codeowners", locals: { codeowners: @pull.codeowners, path: diff.path } %>
+        <% end %>
+
+        <% if view.show_full_diff_bar? %>
+          <%# Possible TODO - this message used to be available to sighted users through a tooltip but that is not a11y compliant as this is not an interractive element %>
+          <%# It was not keyboard, screen reader, or touch device accessible and probably not used much %>
+          <%# If we hear customer feedback that they want it back, we will need to figure out a different, accessible way to handle it %>
+          <span class="sr-only"><%= diff_file_type(diff) %> file <%= diff.status_label %></span>
+          <span class="diffstat" aria-hidden="true">
+            <%= diff_label(diff) %>
+            <% if view.display_diff_size? %>
+              <% diff_size = view.binary_diff_size %>
+              <span class="<%= diff_size < 0 ? "color-fg-danger" : "color-fg-success" %>">
+                <%= diff_size >= 0 ? "+" : "-" %><%= number_to_human_size(diff_size.abs) %>
+
+                <% if view.display_diff_size_percentage?  %>
+                  (<%= number_to_percentage(view.binary_diff_percentage, precision: 2, significant: true) %>)
+                <% end %>
+              </span>
+            <% else %>
+              <% diffstat_block_class = diff.deleted? ? "diffstat-block-deleted" : "diffstat-block-added" %>
+              <span class="<%= diffstat_block_class %>"></span><span class="<%= diffstat_block_class %>"></span><span class="<%= diffstat_block_class %>"></span><span class="<%= diffstat_block_class %>"></span><span class="<%= diffstat_block_class %>"></span>
+            <% end %>
+          </span>
+        <% elsif view.simple_rename? %>
+          <span class="diffstat">
+            <%= diff_label(diff) %>
+            <span class="diffstat-block-neutral"></span><span class="diffstat-block-neutral"></span><span class="diffstat-block-neutral"></span><span class="diffstat-block-neutral"></span><span class="diffstat-block-neutral"></span>
+          </span>
+        <% else %>
+          <span class="sr-only">
+            <%= pluralize(number_with_delimiter(diff.changes), 'change') %>: <%= pluralize(number_with_delimiter(diff.additions), 'addition') %> &amp; <%= pluralize(number_with_delimiter(diff.deletions), 'deletion') %>
+          </span>
+          <span class="diffstat" aria-hidden="true"><%= number_with_delimiter diff.changes %> <%= view.formatted_diffstat %></span>
+        <% end %>
+
+        <%=
+          render partial: "diff/diff_entry_path", locals: {
+            full_path_string: diff_file_label(diff, false),
+            clipboard_path_string: diff.path,
+            truncated_path_string: diff_file_label(diff, true, toggleable: view.toggleable?, review_dismissed: view.dismissed?(@pull)),
+            path_link_target: "##{diff_file_anchor(diff.path)}",
+            test_selector_name: "diff-entry-copy-path",
+          }
+        %>
+
+        <%= diff_mode_label diff %>
+      </div>
+
+      <div class="file-actions pt-0 mb-md-0 mb-2 ml-md-2 flex-shrink-0 flex-md-justify-end">
+        <div class="d-flex flex-justify-end">
+          <% show_comments = capture do %>
+            <label role="menuitemradio" class="dropdown-item btn-link text-normal d-block pl-5" tabindex="0" aria-checked="true">
+              <span class="position-absolute ml-n4"><%= render(Primer::Beta::Octicon.new(icon: "check")) %></span>
+              <input type="checkbox" checked class="d-none js-toggle-file-notes">
+              Show comments
+            </label>
+          <% end %>
+
+          <% show_check_annotations = capture do %>
+            <% if !display_rich_diff && annotations.any? %>
+              <%= render partial: "diff/entry_actions/show_annotations", locals: { non_diff: false, pull_request: @pull, repository: current_repository || file_list_view.repository } %>
+            <% end %>
+          <% end %>
+
+          <% view_file = capture do %>
+            <% if view.display_diff_blob_action_buttons? %>
+              <%=
+                render partial: "diff/entry_actions/view_file", locals: {
+                  view_file_path: @pull&.open? ? diff_blob_path(diff) : view.diff_blob_path(base_repository, head_repository),
+                  test_selector_prefix: "diff-entry",
+                }
+              %>
+            <% end %>
+          <% end %>
+
+          <% if !diff.submodule? %>
+            <% edit_file = capture do %>
+              <% if current_repository %>
+                <%=
+                  render partial: "diff/entry_actions/edit_file", locals: {
+                    edit_file_path: @pull ? edit_file_path_from_pulls : diff_blob_branch_path(diff, :edit),
+                    uneditable_type: diff_uneditable_type(diff),
+                  }
+                %>
+              <% end %>
+            <% end %>
+
+            <% delete_file = capture do %>
+              <% if current_repository %>
+                <%=
+                  render partial: "diff/entry_actions/delete_file", locals: {
+                    delete_file_path: @pull ? diff_blob_branch_path(diff, :delete, {pr: gh_show_pull_request_path(@pull)}) : diff_blob_branch_path(diff, :delete),
+                    uneditable_type: diff_uneditable_type(diff),
+                  }
+                %>
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <% copilot_chat = capture do %>
+            <span data-target="copilot-diff-entry.menuItemsSlot"></span>
+          <% end %>
+          <% open_desktop = @pull && capture do %>
+            <%=
+              render partial: "diff/entry_actions/open_desktop", locals: {
+                path_string: diff.path,
+                pull_request: @pull,
+              }
+            %>
+          <% end %>
+
+          <% divider_tag = capture do %>
+            <div role="none" class="dropdown-divider"></div>
+          <% end %>
+
+          <%
+            button_groups = [
+              [show_comments, show_check_annotations],
+              [view_file, edit_file, delete_file],
+              [copilot_chat, open_desktop],
+            ].filter_map { |group| group.compact.presence }
+
+            dividers = [divider_tag] * [button_groups.length - 1, 0].max
+          %>
+
+          <% if view.toggleable? && !skip_dependency_review_for_file %>
+            <span class="BtnGroup flex-auto min-width-0">
+              <%
+                if display_rich_diff
+                  source_selected = false
+                  rich_selected = true
+                else
+                  source_selected = true
+                  rich_selected = false
+                end
+              %>
+              <% if !file_list_view.display_diff_ajax_enabled? %>
+                <%
+                  if display_rich_diff
+                    source_base = url_with(file_list_view.prose_url_hints.merge(short_path: nil, source: 1))
+                    rich_base = ""
+                  else
+                    source_base = ""
+                    rich_base = url_with(file_list_view.prose_url_hints.merge(short_path: diff_short_path, source: nil))
+                  end
+                %>
+                <a class="btn btn-sm BtnGroup-item tooltipped tooltipped-w source<% if source_selected %> selected<% end %>"
+                  <% if source_selected %>aria-current="true"<% end %>
+                  href="<%= source_base %>#<%= view.anchor %>"
+                  aria-label="Display the source diff"><%= primer_octicon(:code)%></a><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                <% if view.supports_rich_diff? %>
+                  <a class="btn btn-sm BtnGroup-item tooltipped tooltipped-w rendered<% if rich_selected %> selected<% end %>"
+                    <% if rich_selected %>aria-current="true"<% end %>
+                    href="<%= rich_base %>#<%= view.anchor %>"
+                    aria-label="Display the rich diff"><%= primer_octicon(:file) %></a><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                <% end %>
+              <% else %>
+                <%
+                  diffs_paths_options = {
+                    :file_list_view => file_list_view,
+                    :base_repository => base_repository,
+                    :head_repository => head_repository,
+                    :entry => view.diff_number,
+                    :whitespace => file_list_view.ignore_whitespace?,
+                  }
+                %>
+                <%= form_tag diff_path_for(**diffs_paths_options.merge(source: true)), :method => "get", :class => "BtnGroup-parent js-prose-diff-toggle-form" do -%>
+                  <button class="btn btn-sm BtnGroup-item tooltipped tooltipped-w source js-source<% if source_selected %> selected<% end %>"
+                    <% if source_selected %>aria-current="true"<% end %>
+                          aria-label="Display the source diff" type="submit" data-disable-with><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                          <%= primer_octicon(:code)%>
+                  </button>
+                <% end %>
+                <% if view.supports_rich_diff? %>
+                  <%= form_tag diff_path_for(**diffs_paths_options.merge(short_path: diff_short_path)), method: "get", class: "BtnGroup-parent js-prose-diff-toggle-form" do -%>
+                    <button class="btn btn-sm BtnGroup-item tooltipped tooltipped-w rendered js-rendered<% if rich_selected %> selected<% end %>"
+                      <% if rich_selected %>aria-current="true"<% end %>
+                            aria-label="Display the rich diff" type="submit" data-disable-with><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                            <%= primer_octicon(:file)%>
+                    </button>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </span>
+          <% end %>
+
+          <% if @pull && !@pull.new_record? && params[:tab] != "commits" %>
+            <%= render "diff/file_review", view: view.file_review_view(@pull) %>
+          <% end %>
+
+          <% if @pull && file_list_view.commentable? %>
+            <%= render Primer::Beta::IconButton.new(
+              icon: :comment,
+              ml: 0,
+              "aria-label": "Comment on this file",
+              classes: "js-add-file-comment",
+              "data-path": view.path,
+              "data-anchor": view.anchor,
+              "data-subject-type": "file",
+              "data-side": diff.deleted? ? 'left' : 'right',
+              test_selector: :add_file_comment_button,
+              scheme: :invisible)
+            %>
+          <% end%>
+
+          <%= render PullRequests::TryFileLevelCommentingPromptComponent.new(
+            repository: current_repository,
+            pull_request: @pull,
+            commentable: file_list_view.commentable?,
+            diff_entry_index: diff_entry_index) %>
+
+          <details class="js-file-header-dropdown dropdown details-overlay details-reset pr-2 pl-2">
+            <summary class="height-full">
+              <div class="height-full d-flex flex-items-center Link--secondary">
+                <%= primer_octicon(:"kebab-horizontal", "aria-label": "Show options") %>
+              </div>
+            </summary>
+            <details-menu class="dropdown-menu dropdown-menu-sw show-more-popover color-fg-default position-absolute f5" style="width:fit-content; min-width:185px; z-index:99; right: -4px;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <% button_groups.zip(dividers).flatten.each do |menu_item| %>
+                <%= menu_item %>
+              <% end %>
+            </details-menu>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <% if @pull.present? %>
+      <% file_level_threads = file_list_view.file_level_threads_for(diff.path) %>
+      <% if file_level_threads.any? %>
+        <table class="diff-table js-diff-table js-file-level-comments-table<% if split_diff? %>file-diff-split js-file-diff-split<% end %> <% if viewed %>hidden<% end %> Details-content--hidden">
+          <tbody>
+            <tr class="inline-comments js-inline-comments-container js-skip-tagsearch">
+              <% if split_diff? %>
+                <td class="line-comments" colspan="2">
+                  <%= render :partial => "diff/review_threads", object: file_level_threads %>
+                </td>
+
+                <td colspan="2"></td>
+              <% else %>
+                <td class="p-0 p-md-2">
+                  <%= render :partial => "diff/review_threads", object: file_level_threads %>
+                </td>
+              <% end %>
+            </tr>
+          </tbody>
+        </table>
+      <% end %>
+    <% end %>
+
+    <div class="js-file-content Details-content--hidden position-relative"
+      <%= safe_data_attributes(
+        hydro_view_tracking_attributes(
+          "pull_request.select_diff_range",
+          actor_id: current_user&.id,
+          pull_request_id: @pull&.id,
+          repository_id: @pull&.repository_id,
+          diff_type: split_diff? ? "SPLIT" : "UNIFIED",
+          whitespace_ignored: diff.whitespace_ignored
+        )
+      ) %>>
+  <% end %>
+      <% if view.prose_diff? && display_rich_diff %>
+        <%= render 'diff/prose', {
+              diff: diff,
+              diff_blob: diff_blob,
+              timeout: 5,
+              repository: view.repository,
+              prose_url_hints: file_list_view.prose_url_hints
+            } %>
+      <% end %>
+      <% if use_code_rendering_service %>
+        <% if diff.similarity == 100 %>
+          <div class="data highlight empty">
+            <% if diff.renamed? %>
+              File renamed without changes
+            <% elsif diff.copied? %>
+              File copied without changes
+            <% end %>
+          </div>
+        <% elsif diff.deleted? %>
+          <div class="data highlight empty">
+            Deleted file not rendered
+          </div>
+        <% elsif file_list_view.defer_notebook_diff_loading?(view) || view.hidden_render_diff? %>
+          <%= render partial: "diff/diff_entry_load", locals: {
+            file_list_view: file_list_view,
+            view: view,
+            base_repository: base_repository,
+            head_repository: head_repository,
+          } %>
+        <% else %>
+          <%= render view.code_rendering_service.with_content({ view: view, file_list_view: file_list_view }) %> <%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+        <% end %>
+      <% elsif load_dependency_review_rich_diff %>
+        <include-fragment src="<%= dependency_review_rich_diff_path(repository: current_repository, user_id: current_repository.owner_display_login, head_sha: diff.b_sha, base_sha: diff.a_sha, manifest_path: diff.path, pull_id: @pull&.id) %>" <%= test_selector "dependency-review" %>>
+          <div class="text-center py-3">
+            <%= render Primer::Beta::Spinner.new(size: :medium) %>
+            <p class="color-fg-muted my-2">Loading Dependency Review...</p>
+          </div>
+        </include-fragment>
+      <% elsif diff.submodule? %>
+        <%= render "diff/submodule", view: view.submodule_file_view %>
+      <% elsif diff.text && !diff.text.empty? %>
+        <% if diff.binary? %>
+          <div class="data highlight empty">
+            Binary file not shown
+          </div>
+        <% elsif diff.lfs_pointer? %>
+          <div class="data highlight empty">
+            Git LFS file not shown
+          </div>
+        <% else %>
+
+          <% if !diff.deleted? && current_repository.present? && PreferredFile.is_type?(tree_entry: view.diff_blob, type: :codeowners) %>
+            <%= include_cached_fragment(src: codeowners_validity_path(current_repository.owner, current_repository, diff.b_sha, diff.b_path)) do %>
+              <%= render(Primer::Beta::Flash.new(icon: :clock, full: true, display: :flex, align_items: :center)) do |component| %>
+                Validating CODEOWNERS rules …
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <div class="data highlight js-blob-wrapper js-check-bidi
+            <% if display_rich_diff %> Details-content--shown<% end %>
+            <%= "position-absolute width-full height-full" if blob_fullwidth? %>"
+          >
+            <%= render "shared/bidi_alert" %>
+
+            <% partial_view = create_view_model(Diff::CodeLinesPartialView, {
+              :repository => (current_repository || file_list_view.repository),
+              :diff_entry => diff,
+              :blob => diff_blob,
+              :commentable => file_list_view.commentable?,
+              :bottom_expander => file_list_view.expandable?,
+              :expandable => file_list_view.expandable?,
+              :threads => file_list_view.threads.path(diff.path),
+              :annotations => annotations,
+              :in_wiki_context => file_list_view.in_wiki_context,
+              :pull_request => file_list_view.pull,
+            }) %>
+
+            <%= render Diffs::DeferredDiffLinesComponent.new(
+              context_lines: diff.context_lines,
+              highlighting_mode: partial_view.highlighting_mode,
+              url: view.deferred_syntax_url,
+              inputs: view.deferred_syntax_inputs,
+            ) do %>
+              <table class="<%= 'js-comment-outside-the-diff' if current_repository&.feature_enabled?(:comment_outside_the_diff) %> diff-table js-diff-table tab-size <%= 'symlink' if diff.symlink? %> <% if split_diff? %>file-diff-split js-file-diff-split<% end %>" data-tab-size="<%= tab_size(diff.path) %>" data-diff-anchor="<%= view.anchor %>" data-paste-markdown-skip>
+                <thead class="sr-only">
+                  <tr>
+                    <% if split_diff? %>
+                      <th scope="col">Original file line number</th>
+                      <th scope="col">Original file line</th>
+                      <th scope="col">Diff line number</th>
+                      <th scope="col">Diff line change</th>
+                    <% else %>
+                      <th scope="col">Original file line number</th>
+                      <th scope="col">Diff line number</th>
+                      <th scope="col">Diff line change</th>
+                    <% end %>
+                  </tr>
+                </thead>
+                <% if split_diff? %>
+                  <colgroup>
+                    <col width="<%= view.diff.col_width %>">
+                    <col>
+                    <col width="<%= view.diff.col_width %>">
+                    <col>
+                  </colgroup>
+                <% elsif soft_wrap?(diff_blob.name) %>
+                  <colgroup>
+                    <col width="<%= view.diff.col_width %>">
+                    <col width="<%= view.diff.col_width %>">
+                    <col>
+                  </colgroup>
+                <% end %>
+                <% diff_mode = split_diff? ? "sidebyside" : "unified" %>
+                <tbody>
+                  <% GitHub.dogstats.time("diff", tags: ["action:highlight_words.render_lines", "type:#{diff_mode}"]) do %>
+                    <% if split_diff? %>
+                      <%= render 'diff/split_diff_lines', view: partial_view %>
+                    <% else %>
+                      <%= render 'diff/diff_lines', view: partial_view %>
+                    <% end %>
+                  <% end %>
+                </tbody>
+              </table>
+            <% end %>
+          </div>
+        <% end %>
+      <% elsif diff.text.blank? %>
+        <% if view.render_diff? && view.hidden_render_diff? %>
+          <%# Render is disabled or we've exceeded our rendered file limit for this page %>
+          <div class="data highlight empty">
+            Diff not rendered.
+          </div>
+        <% elsif diff.binary? %>
+          <div class="data highlight empty">
+            Binary file not shown.
+          </div>
+        <% elsif diff.renamed? && diff.changes == 0 %>
+          <div class="data highlight empty">
+            File renamed without changes.
+          </div>
+        <% elsif diff.copied? && diff.changes == 0 %>
+          <div class="data highlight empty">
+            File copied without changes.
+          </div>
+        <% elsif diff.changes > 0 %>
+          <% if file_list_view.progressive? %>
+            <%= render partial: "diff/diff_entry_load", locals: {
+              file_list_view: file_list_view,
+              view: view,
+              base_repository: base_repository,
+              head_repository: head_repository,
+            } %>
+          <% else %>
+            <div class="data highlight empty">
+              <%= pluralize(number_with_delimiter(diff.additions), 'addition') %>,
+              <%= pluralize(number_with_delimiter(diff.deletions), 'deletion') %>
+              not shown because the diff is too large. Please use a local Git client to view these changes.
+            </div>
+          <% end %>
+        <% elsif diff.mode_changed? %>
+          <div class="data highlight empty">
+            File mode changed.
+          </div>
+        <% elsif diff.truncated_reason.present? %>
+          <div class="data highlight empty">
+            <%= render :partial => "diff/truncated", :locals => { :diff_entry => diff } %>
+          </div>
+        <% elsif diff.changes == 0 %>
+          <div class="data highlight empty">
+            <% if diff.whitespace_ignored? %>
+              Whitespace-only changes.
+            <% else %>
+              Empty file.
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+  <% unless text_only %>
+
+    </div>
+  </div>
+</copilot-diff-entry>
+<% end %>

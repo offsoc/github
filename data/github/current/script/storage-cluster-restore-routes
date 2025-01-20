@@ -1,0 +1,79 @@
+#!/usr/bin/env ruby
+
+# This script takes on stdin a list of oids and sizes:
+#
+# f86a92f0de1ec1906fb0f07a47e412e94469b77c0da063ba45513c8890d08948 2346346
+# f8d3c82c400117ddce872b0b4a78ef4cb2f322b2f5c49d7711c762faf873634c 92346233
+#
+# It returns on stdout a list of oids and nodes to which the oid should be
+# replicated:
+#
+# f86a92f0de1ec1906fb0f07a47e412e94469b77c0da063ba45513c8890d08948 host1 host2 host3
+# f8d3c82c400117ddce872b0b4a78ef4cb2f322b2f5c49d7711c762faf873634c host2 host4 host1
+#
+# The script queries the online storage nodes for their disk free space stats
+# and will distribute the incoming objects amongst the nodes using the same
+# least loaded hosts algorithm the storage cluster uses in normal operation.
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+require "github/storage"
+
+GitHub.load_activerecord
+
+def main
+  online = GitHub::Storage::Allocator.get_hosts
+  if online.count == GitHub.storage_replica_count
+    send_to_all_nodes(online)
+  else
+    distribute_among_nodes(online)
+  end
+end
+
+def send_to_all_nodes(nodes)
+  all_nodes = nodes.join(" ")
+  while line = $stdin.gets
+    oid, size = line.strip.split
+    puts "#{oid} #{all_nodes}"
+  end
+end
+
+def get_nodes_free_space(nodes)
+  node_list = []
+
+  nodes.each do |node|
+    ok, stats = GitHub::Storage::Client.stats(node, ["0"])
+    if ok
+      node_list << [stats["partitions"]["0"]["disk_free"], node]
+    end
+  end
+
+  node_list
+end
+
+def distribute_among_nodes(nodes)
+  node_list = get_nodes_free_space(nodes)
+
+  while line = $stdin.gets
+    oid, size = line.strip.split
+    size = size.to_i
+
+    # acts_as_least_loaded_hosts
+    # Sort the node list by free disk space, in ascending order.
+    node_list.sort_by!(&:first)
+
+    # Choose the nodes with the most free space.
+    chosen_nodes = node_list.reverse.take(GitHub.storage_replica_count)
+
+    # Subtract the size of the blob from the available free space
+    # on each chosen node.
+    chosen_nodes.each do |n|
+      n[0] -= size
+    end
+
+    send_to = chosen_nodes.map(&:last).join(" ")
+    puts "#{oid} #{send_to}"
+  end
+end
+
+main

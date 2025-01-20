@@ -1,0 +1,73 @@
+#!/bin/bash
+# This script is used to initialize the Packages repositories in a codespace, then run the registry-metadata and container-registry services.
+
+set -e
+
+# Check if github monolith is running. This is required for launching the registry-metadata and container-registry services.
+pids=$(pidof overmind || true)
+if [ -z "$pids" ]; then
+   echo -e "${RED}The github monolith is not running. Please run \`/workspaces/github/script/server\` and try again.${NC}"
+   exit 1
+fi
+
+# Clone and initialize the Packages repositories.
+/workspaces/github/script/setup-codespaces-packages "$@"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+packages_workspace_dir="/workspaces/packages"
+registry_metadata_dir="$packages_workspace_dir/registry-metadata"
+container_registry_dir="$packages_workspace_dir/container-registry"
+
+# Run registry-metadata
+if ps --no-headers -C registry-metadata | grep -v defunct >/dev/null; then
+   echo -e "${GREEN}registry-metadata already running${NC}"
+else
+   echo -e "${BLUE}Running registry-metadata${NC}"
+   (
+      cd $registry_metadata_dir
+      script/server > /dev/null 2>&1 &
+   )
+
+   count=0
+   while ! netstat -an | grep -w "8000"; do
+      # wait for registry-metadata to start
+      echo -e "${ORANGE}Waiting for registry-metadata to start...${NC}"
+      if [ $count -eq 10 ]; then
+         echo -e "\n ${RED}registry-metadata failed to start${NC}"
+         exit 1
+      fi
+      sleep 10
+      count=$((count + 1))
+   done
+   echo -e "\n${GREEN}Successfully started registry-metadata${NC}"
+fi
+
+# Run container-registry
+if ps --no-headers -C container-registry | grep -v defunct >/dev/null; then
+   echo -e "${GREEN}container-registry already running${NC}"
+else
+   echo -e "${BLUE}Running container-registry${NC}"
+   (
+      export DEBUG=true BLOB_STORE=minio GITHUB_URL=http://github.localhost/ ADMIN_USERNAME=registry ADMIN_PASSWORD=t1g3rk1ng! AWS_S3_BUCKET=github-dev-container-registry AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_KEY=minioadmin AWS_ENDPOINT=http://127.0.0.1:9000/ AWS_DISABLE_SSL=true METADATA_SERVICE_ADDR=http://registry-metadata:8000/ BLOB_REDIRECT_ON_PULL=true
+      cd $container_registry_dir
+      script/server --http > /dev/null 2>&1 &
+   )
+
+   count=0
+   while ! netstat -an | grep -w "8001"; do
+      # wait for container-registry to start
+      echo -e "${ORANGE}Waiting for container-registry to start...${NC}"
+      if [ $count -eq 10 ]; then
+         echo -e "\n${RED}container-registry failed to start${NC}"
+         exit 1
+      fi
+      sleep 10
+      count=$((count + 1))
+   done
+   echo -e "\n${GREEN}Successfully started container-registry${NC}"
+fi

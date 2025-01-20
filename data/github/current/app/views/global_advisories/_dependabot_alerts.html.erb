@@ -1,0 +1,165 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter ButtonComponentMigrationCounter 6 %>
+<div class="clearfix">
+  <% if view.repo_limit_exceeded? %>
+    <%= render Primer::Beta::Flash.new(mb: 3, test_selector: "repo-limit-banner") do %>
+      We are unable to display all results due to the large number of repositories. You can use the search filters to narrow down the results.
+    <% end %>
+  <% end %>
+
+  <%= render(ConditionalAccess::UnauthorizedAccountsComponent.new(
+    resource_label: "repositories",
+    classes: "Box Box--condensed mb-1",
+    container_classes: "mb-3",
+    cap_filter: cap_filter
+  ))%>
+
+  <%= form_tag view.dependabot_alerts_path(query: nil), method: :get, class: "d-flex flex-column flex-md-row mb-3", data: { turbo: true } do %>
+    <div class="subnav-search flex-auto d-flex mx-0">
+      <input aria-label="Search by repository or organization&hellip;"
+             placeholder="Search by repository or organization&hellip;"
+             autocapitalize="off"
+             autocomplete="off"
+             class="form-control input-block flex-auto subnav-search-input"
+             spellcheck="false"
+             type="text"
+             name="query"
+             value="<%= view.query.user_query %>">
+      <%= primer_octicon(:search, classes: "subnav-search-icon") %>
+      <% if view.query.user_query.present? %>
+        <a href="<%= view.dependabot_alerts_path(query: nil) %>"
+           class="issues-reset-query position-absolute right-0 mr-1 rounded-2 text-center btn-link Link--muted flex-self-center"
+           aria-label="Clear filters"
+           data-pjax
+        >
+          <%= primer_octicon(:x, classes: "issues-reset-query-icon") %>
+        </a>
+      <% end %>
+    </div>
+
+    <%= render Primer::ButtonComponent.new(ml: [nil, nil, 2], mt: [2, nil, 0], display: [nil, nil, nil, :none], classes: "flex-shrink-0", type: :submit) do %>Search<% end %>
+  <% end %>
+
+  <div class="Box js-navigation-container js-active-navigation-container">
+    <div class="Box-header d-flex">
+      <div class="table-list-header-toggle states flex-auto" aria-live="polite" aria-atomic="true">
+        <a href="<%= view.dependabot_alerts_path(query: view.query.replace_state(closed: false)) %>" class="btn-link <%= view.show_closed_alerts? ? "color-fg-muted text-normal" : "color-fg-default" %>" <%= test_selector("alerts-open-count") %> >
+          <%= primer_octicon(:alert) %>
+          <%= number_with_delimiter(view.open_alerts_count) %> Open
+        </a>
+
+        <a href="<%= view.dependabot_alerts_path(query: view.query.replace_state(closed: true)) %>" class="btn-link <%= view.show_closed_alerts? ?  "color-fg-default" : "color-fg-muted text-normal" %>" <%= test_selector("alerts-closed-count") %> >
+          <%= primer_octicon(:check) %>
+          <%= number_with_delimiter(view.closed_alerts_count) %> Closed
+        </a>
+      </div>
+
+      <details class="details-reset details-overlay select-menu hx_rsm flex-shrink-0 position-relative ml-3">
+        <summary class="btn-link select-menu-button color-fg-muted no-underline" aria-haspopup="menu">
+          Type
+        </summary>
+
+        <details-menu class="select-menu-modal position-absolute right-0" style="z-index: 99" aria-label="Filter by repository type"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <%= render partial: "global_advisories/repository_type_filter", locals: { view: view } %>
+        </details-menu>
+      </details>
+
+      <% if logged_in? %>
+        <details class="details-reset details-overlay select-menu hx_rsm flex-shrink-0 position-relative ml-3">
+          <summary class="btn-link select-menu-button color-fg-muted no-underline" aria-haspopup="menu">
+            Organization
+          </summary>
+
+          <details-menu class="select-menu-modal position-absolute right-0" style="z-index: 99" aria-label="Filter by organization or owner" src="<%= global_advisories_organization_filter_path(query: params[:query]) %>" preload><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+            <include-fragment>
+              <%= render(Primer::Beta::Spinner.new(my: 6, mx: :auto, display: :block)) %>
+            </include-fragment>
+          </details-menu>
+        </details>
+      <% end %>
+
+      <details class="details-reset details-overlay select-menu hx_rsm flex-shrink-0 position-relative ml-3">
+        <summary class="btn-link select-menu-button color-fg-muted no-underline" aria-haspopup="menu">
+          Sort
+        </summary>
+
+        <details-menu class="select-menu-modal position-absolute right-0" style="z-index: 1000;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <div class="select-menu-header">
+            <span class="select-menu-title">Sort by</span>
+          </div>
+
+          <div class="select-menu-list" data-pjax>
+            <% view.sort_directions.each do |sort| %>
+              <a href="<%= sort[:url] %>" aria-checked="<%= sort[:selected] %>" class="select-menu-item" role="menuitemradio">
+                <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                <div class="select-menu-item-text"><%= sort[:label] %></div>
+              </a>
+            <% end %>
+          </div>
+        </details-menu>
+      </details>
+    </div>
+
+    <% if view.repository_alerts.any? %>
+      <% view.repository_alerts.each do |alert| %>
+        <div class="Box-row Box-row--focus-gray p-0 js-navigation-item" <%= test_selector("advisory-repository-list-item") %>>
+          <div class="d-flex position-relative">
+            <div class="flex-shrink-0 pt-2 pl-3 pr-2">
+              <% if alert.repository.template? %>
+                <% if alert.repository.public? %>
+                  <%= primer_octicon(:"repo-template", color: :muted) %>
+                <% else %>
+                  <%= primer_octicon(:lock, color: :muted) %>
+                <% end %>
+              <% else %>
+                <%= primer_octicon(alert.repository.repo_type_icon, color: :muted) %>
+              <% end %>
+            </div>
+
+            <div class="d-flex flex-auto flex-column py-2">
+              <div class="lh-condensed flex-auto wb-break-all">
+                <a href="<%= grouped_repository_alert_path(repository: alert.repository, user_id: alert.repository.owner, manifest_path: alert.vulnerable_manifest_path, package_name: alert.package_name, state: alert.alert_state) %>" class="Link--primary text-bold v-align-middle no-underline js-navigation-open" <%= test_selector("repo-nwo") %> >
+                  <%= alert.repository.name_with_display_owner %>
+                </a>
+                <div class="mt-2 text-small color-fg-muted">
+                  <%= alert.vulnerable_manifest_path %>
+                  &bull;
+                  Created <%= time_ago_in_words_js(alert.created_at) %>
+                </div>
+              </div>
+            </div>
+
+            <% if pull_request = view.pull_request_for_alert(alert) %>
+              <div class="px-3 pt-2 flex-shrink-0" <%= test_selector("advisory-repository-pull-request") %>>
+                <%= link_to pull_request_path(pull_request), class: "Link--muted", data: hovercard_data_attributes_for_issue_or_pr(pull_request) do %>
+                  <%= primer_octicon(:"git-pull-request", mr: 1) %>
+                  <span class="text-small">#<%= pull_request.number %></span>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    <% else %>
+      <%= render Primer::Beta::Blankslate.new(spacious: true, test_selector: "advisory-repository-blank-slate") do |c| %>
+        <% c.with_visual_icon(icon: view.show_closed_alerts? ? "check" : "alert") %>
+
+        <% c.with_heading(tag: :h2) do %>
+          <%= view.show_closed_alerts? ? "No closed alerts for this advisory" : "No open alerts for this advisory" %>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if view.repository_alerts_scope.total_pages > 1 %>
+    <div class="paginate-container">
+      <div class="pagination" data-pjax>
+        <%= will_paginate view.repository_alerts_scope %>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="mt-3 text-center text-small">
+    Give feedback on <%= link_to "Dependabot alerts", view.feedback_url, class: "Link--inTextBlock", target: "_blank" %>
+  </div>
+</div>

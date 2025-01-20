@@ -1,0 +1,187 @@
+<% page_info \
+  container_xl: true,
+  title: "Pages", selected_link: :repo_pages_settings %>
+
+<% organization = current_repository.organization %>
+<% has_pages = current_repository.page.present? %>
+
+<%= render layout: "edit_repositories/edit" do %>
+
+  <%# Heading %>
+  <%= render Primer::Beta::Subhead.new(spacious: false) do |component| %>
+    <% component.with_heading(tag: :h2) do %>GitHub Pages<% end %>
+  <% end %>
+  <p><a class="Link--inTextBlock" href="https://pages.github.com">GitHub Pages</a> is designed to host your personal, organization, or project pages from a GitHub repository.</p>
+
+  <%# Tips %>
+  <%= render partial: "edit_repositories/pages/tip" if params[:show_tip].present? %>
+
+  <%# Archived mention %>
+  <% if current_repository.archived? %>
+      <%= render(Primer::Alpha::Banner.new(icon: :alert, scheme: :warning)) { "This repository has been archived. The associated GitHub Pages site remains published but settings are read-only." } %>
+  <% end %>
+
+  <%# Settings %>
+  <% if !GitHub.multi_tenant_enterprise? &&
+        current_repository.is_enterprise_managed? &&
+        (current_repository.owner.user? ||
+          current_repository.owner.organization? && !current_repository.can_have_private_pages?) %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert, test_selector: "pages-for-emus-disabled-message")) do %>
+      Pages on Enterprise Managed User repositories are disabled. Please contact your administrator.
+    <% end %>
+  <% elsif organization && !organization.members_can_create_public_pages? && !organization.members_can_create_private_pages? && !current_repository.is_enterprise_managed? && current_repository.page.nil? %>
+       <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert)) {
+        "Pages on this repository are disabled. Please contact your organization administrators"
+        } %>
+  <% elsif current_repository.fork? && current_repository.parent&.owner&.organization? && !current_repository.parent&.org_members_can_create_pages? %>
+       <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert)) {
+        "Pages on this forked repository is disabled due to a policy enforced by the owner of the parent repository."
+        } %>
+  <% elsif current_repository.owner.user? && current_repository.fork? && current_repository.parent&.page&.private? %>
+       <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert)) {
+        "The parent repository of this fork limits visibility of Pages sites. Pages are disabled for user accounts."
+        } %>
+  <% elsif !current_repository.can_have_private_pages? && current_repository.fork? && current_repository.parent&.page&.private? %>
+       <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert)) {
+        "This organization does not support Private pages. Please contact your enterprise administrators"
+        } %>
+  <% elsif current_repository.page&.soft_deleted? %>
+    <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert, test_selector: "pages-soft-delete-warning")) do %>
+      <strong>Your <% if current_repository.owner.organization? %>organization's<% end %> billing plan does not support private pages.</strong>
+      <% if current_repository.owner.organization? %>
+        To restore this page, change its visibility to public or contact your organization administrators for assistance.
+      <% else %>
+        To restore this page, change its visibility to public or upgrade your billing plan.
+      <% end %>
+    <% end %>
+    <%= render Pages::VisibilityComponent.new(repository: current_repository) %>
+  <% elsif current_repository.plan_supports_pages? %>
+    <% if (current_repository.page.nil? && !current_repository.org_members_can_create_pages?) ||
+      (current_repository.is_user_pages_repo? && !current_repository.org_members_can_create_public_pages?) ||
+      (current_repository.page.nil? && !current_repository.org_members_can_create_public_pages? && current_repository.public?)
+    %>
+      <%= render(Primer::Alpha::Banner.new(scheme: :warning, icon: :alert)) do %>
+        Pages on this repository are disabled. Please contact your <a class="Link--inTextBlock" href="<%="#{GitHub.url}/orgs/#{organization.name}/people?query=role%3Aowner" %>">organization administrators</a>. <a class="Link--inTextBlock" href="<%="#{GitHub.help_url}/github/setting-up-and-managing-organizations-and-teams/disabling-publication-of-github-pages-sites-for-your-organization" %>">Learn more about disabled GitHub Pages</a>.
+      <% end %>
+    <% else %>
+      <% if GitHub.enterprise? && !GitHub.actions_enabled? %>
+        <%= render partial: "edit_repositories/pages/build/legacy", locals: { is_maintainer: is_maintainer } %>
+      <% else %>
+        <%= render partial: "edit_repositories/pages/build/build_and_deployment", locals: { is_maintainer: is_maintainer } %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <% if organization && current_user.org_in_billing_trouble?(org: organization) %>
+      <%= render Primer::Alpha::Banner.new(scheme: :danger, mb: 4, test_selector: "pages-billing-trouble-org-error") do %>
+        We are having a problem billing the <%= organization %> organization. To enable Pages, Please <%= link_to("update your payment method", settings_org_billing_path(organization), class: "Link--inTextBlock") %>
+        or call your payment provider for details on why the transaction failed. You can always <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+      <% end %>
+    <% elsif organization && current_user.billingless_org?(org: organization) %>
+      <%= render Primer::Alpha::Banner.new(scheme: :danger, mb: 4, test_selector: "pages-billingless-org-error") do %>
+        Please <%= link_to("enter a billing email", settings_org_profile_path(organization), class: "Link--inTextBlock") %> for your <em><%= organization %></em> organization to enable Pages.
+      <% end %>
+    <% elsif organization && current_user.disabled_org?(org: organization) %>
+      <%= render Primer::Alpha::Banner.new(scheme: :danger, mb: 4, test_selector: "pages-disabled-org-error") do %>
+        <% if organization.invoiced? %>
+          We have not received payment for the most recent invoice for <%= organization %>. To enable Pages, please <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> to resolve.
+        <% else %>
+          We are having a problem billing the <%= organization %> organization. To enable Pages, please <%= link_to('update your payment information', settings_org_billing_path(organization), class: "Link--inTextBlock") %> or call your payment provider for details on why the transaction failed. You can <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> with any questions.
+        <% end %>
+      <% end %>
+    <% else %>
+      <article class="d-flex my-3" <%= test_selector("pages-normal-description") %>>
+        <%= image_tag "icons/marketing/blue/pages.svg", height: 60, class: "mr-3", alt: "GitHub Pages" %>
+        <div>
+          <%= render(Primer::Beta::Heading.new(tag: :h2)) { "Upgrade or make this repository public to enable Pages" } %>
+          <p class="color-fg-muted">GitHub Pages is designed to host your personal, organization, or project pages from a GitHub repository.</p>
+
+          <% repository = current_repository %>
+
+          <% if repository.owner == current_user %>
+            <% if repository.fork? %>
+              <p class="color-fg-muted">This repository is a fork, and inherits the features of the parent repository. Contact the owner of the root repository to enable GitHub Pages.</p>
+            <% else %>
+              <div class="d-flex flex-items-center mb-2">
+              <%= render Primer::Beta::Button.new(
+                size: :small,
+                tag: :a,
+                data: feature_gate_upsell_click_attrs(:pages, user: current_user),
+                "data-ga-click": "Change individual, click to upgrade, ref_page:#{request.fullpath};ref_cta:Upgrade;ref_loc:pages",
+                mr: 3,
+                href: plan_upgrade_path) do %> Upgrade <% end %>
+                <a href="<%= GitHub.help_url %>/github/working-with-github-pages/about-github-pages" class="f6" <%= safe_analytics_click_attributes(category: "Upgrade", action: "click", label: "location:protected branches;text:learn more" ) %>>Learn more about GitHub Pages</a>
+              </div>
+              <% if current_repository.unsupported_pages? %>
+                <p class="color-fg-muted">You can also unpublish your existing site.</p>
+                <%= form_tag unpublish_page_path, method: :delete do %>
+                  <%= render Primer::Beta::Button.new(type: :submit, size: :small, test_selector: "pages-unpublish-button") do %>Unpublish GitHub Pages<% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          <% elsif show_free_org_gated_feature_message?(repository, current_user) %>
+            <div class="d-flex flex-items-center mb-2">
+              <%= render Primer::Beta::Button.new(
+                size: :small,
+                tag: :a,
+                data: feature_gate_upsell_click_attrs(:pages, user: current_user),
+                "data-ga-click": "Change organization, click to upgrade, ref_page:#{request.fullpath};ref_cta:Upgrade;ref_loc:pages",
+                mr: 3,
+                href: upgrade_path(org: repository.owner, plan: "business", target: "organization")) do %> Upgrade <% end %>
+              <a href="<%= GitHub.help_url %>/github/working-with-github-pages/about-github-pages" class="f6" <%= safe_analytics_click_attributes(category: "Upgrade", action: "click", label: "location:protected branches;text:learn more" ) %>>Learn more about GitHub Pages</a>
+            </div>
+            <% if current_repository.unsupported_pages? %>
+              <p class="color-fg-muted">You can also unpublish your existing site.</p>
+              <%= form_tag unpublish_page_path, method: :delete do %>
+                <%= render Primer::Beta::Button.new(type: :submit, size: :small, test_selector: "pages-unpublish-button") do %>Unpublish GitHub Pages<% end %>
+              <% end %>
+            <% end %>
+          <% else %>
+            <p class="color-fg-muted">Contact the owner of the repository to enable GitHub Pages.</p>
+          <% end %>
+        </div>
+      </article>
+    <% end %>
+  <% end %>
+
+  <%# Private Pages advertisement %>
+  <% if current_repository.show_private_pages_prompt? %>
+    <div <%= test_selector("private_pages_prompt") %>>
+      <div class="d-flex flex-items-center gap-2 mt-4 mb-1">
+        <%= render(Primer::Beta::Heading.new(tag: :h3, font_weight: :normal)) do %>
+          Visibility
+        <% end %>
+        <%= render(Primer::Beta::Label.new(scheme: :purple, inline: false)) { "GitHub Enterprise" } %>
+      </div>
+      <p>
+        With a GitHub Enterprise account, you can restrict access to your GitHub Pages site by publishing it privately. You can use privately published sites to share your internal documentation or knowledge base with members of your enterprise.
+        <%= render(Primer::Beta::Link.new(
+          target: "_blank",
+          underline: true,
+          data: {
+            **analytics_click_attributes(
+              category: "Suggestion",
+              action: "click to read docs",
+              label: "Learn more about the visibility of your GitHub Pages site",
+            )
+          },
+          href: "#{GitHub.help_url}/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site",
+        )) do %>
+          Learn more about the visibility of your GitHub Pages site.
+        <% end %>
+      </p>
+      <%= render(Primer::Beta::Button.new(
+        tag: :a,
+        data: {
+          **analytics_click_attributes(
+            category: "start_a_free_trial",
+            action: "click_to_set_up_enterprise_trial",
+            label: "ref_page:#{request.fullpath};ref_cta:try_github_enterprise_risk_free_for_30_days;ref_loc:visibility;",
+          )
+        },
+        href: enterprise_trial_accounts_new_path,
+      )) do %>
+        Try GitHub Enterprise risk-free for 30 days
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

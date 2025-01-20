@@ -1,0 +1,51 @@
+#!/usr/bin/env ruby
+
+if ARGV.include? "--help"
+  puts "simulate-network [speed-option] [lossiness-option]"
+  puts ""
+  puts "[speed-option] is one of:"
+  puts "--edge - Simulate an EDGE (GPRS) wireless network"
+  puts "--3g - Simulate a 3G wireless network"
+  puts "--wifi - Simulate an average (but not great) WiFi network"
+  puts ""
+  puts "[lossiness-option] is optionally one of:"
+  puts "--lossy - drop 1% of packets randomly"
+  puts "--hellalossy - drop 33% of packets randomly"
+  exit 1
+end
+
+speed_table_in = {
+  "edge" => "delay 400ms bw 240Kbit/s",
+  "3g" => "delay 100ms bw 780Kbit/s",
+  "wifi" => "delay 10ms bw 40Mbit/s",
+}
+
+speed_table_out = {
+  "edge" => "delay 400ms bw 200Kbit/s",
+  "3g" => "delay 100ms bw 330Kbit/s",
+  "wifi" => "delay 10ms bw 33Mbit/s",
+}
+
+lossy_table = {
+  "lossy" => "plr 0.01",
+  "hellalossy" => "plr 0.3",
+}
+
+speed = ARGV.map { |x| x.gsub(/^--/, "") }.detect { |x| speed_table_in.keys.include? x } || "wifi"
+lossy = ARGV.map { |x| x.gsub(/^--/, "") }.detect { |x| lossy_table.keys.include? x }
+
+puts "Finna gonna slow down your nets to #{speed} speed"
+puts "Lossiness is enabled" if lossy
+
+`sudo ipfw add pipe 1 dst-port 80,443 proto tcp > /dev/null 2>&1`
+`sudo ipfw add pipe 2 src-port 80,443 proto tcp > /dev/null 2>&1`
+
+lossy ||= "__NOTHERE__"
+`sudo ipfw pipe 1 config #{speed_table_in[speed]} #{lossy_table[lossy] || ""}`
+`sudo ipfw pipe 2 config #{speed_table_out[speed]} #{lossy_table[lossy] || ""}`
+
+puts "Your network is now artificially slower - exit this shell via 'exit' to restore it to normal\n"
+system "/usr/bin/login -f -lq $USER"
+
+puts "Now back to full speed"
+`sudo ipfw -q flush`

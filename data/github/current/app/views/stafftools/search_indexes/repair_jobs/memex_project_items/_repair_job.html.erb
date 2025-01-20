@@ -1,0 +1,181 @@
+<%
+  stats = repair_job.stats
+  reconciler = repair_job.reconciler
+  reconciler_batches_count = reconciler.reconciler_batches_count
+  failed_reconciler_batches_count = reconciler.failed_reconciler_batches_count
+  memex_projects_reconciled_count = reconciler.memex_projects_reconciled_count
+  job_exists = repair_job.exists?
+  job_enabled = repair_job.enabled?
+  job_finished = repair_job.finished?
+  job_active = repair_job.active? || reconciler_batches_count > 0
+  sentry_url = "https://github.sentry.io/issues/?project=1885898&query=job%3A#{repair_job.class}"
+  datadog_url = "https://app.datadoghq.com/dashboard/dk4-uth-4dw/memex-repairreconcilation?tpl_var_index%5B0%5D=#{repair_job.index_name}&tpl_var_search_cluster%5B0%5D=#{repair_job.cluster_name}&live=true"
+  splunk_url = "https://splunk.githubapp.com/en-US/app/gh_reference_app/search?q=search%20index%3Dprod-resque%20elasticsearch.index%3D#{repair_job.index_name}&display.page.search.mode=fast&dispatch.sample_ratio=1&workload_pool=Standard&earliest=-24h%40h&latest=now&display.page.search.tab=events&display.general.type=events"
+  successfully_finished = job_exists && job_finished && reconciler_batches_count.zero? && stats[:error].zero?
+  # Refresh this partial if the job is active or if there are still reconciler batches in progress
+  id = job_active ? "js-repair-index" : nil
+
+  # For the VisitedAfter strategy, we need to display the date the user selected and last batch date
+  visited_after = nil
+  last_visited_on = nil
+  visited_after_strategy = repair_job.strategy == RepairMemexProjectItemsIndexJob::Strategy::VisitedAfter
+  if visited_after_strategy
+    visited_after = repair_job.visited_after
+    last_visited_on = repair_job.reconciler.last_visited_on
+  end
+%>
+
+<%= tag.div id:, data: { index_name: repair_job.index_name } do %>
+  <% if job_exists %>
+    <% if job_finished %>
+      <% if successfully_finished %>
+        <%= render Primer::Alpha::Banner.new(test_selector: "repair-successful-banner", icon: :"check-circle-fill", scheme: :success, dismiss_scheme: :none, mb: 3, mt: 3, description: "Successfully completed at #{stats[:finished].iso8601(6)}") do %>
+          <%= number_with_delimiter(memex_projects_reconciled_count) %> <%= "project".pluralize(memex_projects_reconciled_count) %> <%= "has".pluralize(memex_projects_reconciled_count) %> been reconciled
+        <% end %>
+      <% else %>
+        <% if stats[:error] > 0 %>
+          <%= render Primer::Alpha::Banner.new(test_selector: "repair-failed-batches-banner", icon: :"circle-slash", scheme: :danger, dismiss_scheme: :none, mb: 3, mt: 3, description: "Please check Sentry, Splunk, Datadog, and Slack for more details.") do %>
+            <%= number_with_delimiter(stats[:error]) %> <%= "project".pluralize(stats[:error]) %> <%= "was".pluralize(stats[:error]) %> not reconciled
+          <% end %>
+        <% end %>
+
+        <% if reconciler_batches_count > 0 %>
+          <%= render Primer::Alpha::Banner.new(test_selector: "repair-batches-reconciling-banner", icon: :alert, scheme: :warning, dismiss_scheme: :none, mb: 3, mt: 3, description: "All reconciliation batches have been prepared, please wait until all batches have been reconciled.") do %>
+            <%= number_with_delimiter(reconciler_batches_count) %> <%= "batch".pluralize(reconciler_batches_count) %> <%= "is".pluralize(reconciler_batches_count) %> being reconciled
+          <% end %>
+        <% end %>
+      <% end %>
+    <% else %>
+      <%= render Primer::Alpha::Banner.new(test_selector: "repair-in-progress-banner", icon: :sync, dismiss_scheme: :none, mb: 3, mt: 3, description: "#{repair_job.workers} #{"worker".pluralize(repair_job.workers)} preparing batches of projects for reconciliation.") do %>
+        Project reconciliation is in progress
+      <% end %>
+    <% end %>
+
+    <table class="es-index-repair">
+      <% if visited_after_strategy %>
+        <tr>
+          <td class="es-repair-stats-label">Repair strategy:</td>
+          <td class="es-repair-progress">
+            <%= render Primer::Beta::Label.new(test_selector: "repair-strategy") do %>
+              Visited after
+            <% end %>
+          </td>
+        </tr>
+        <tr>
+          <td class="es-repair-stats-label">Visited after:</td>
+          <td class="es-repair-progress"><%= visited_after.iso8601 %></td>
+        </tr>
+        <tr>
+          <td class="es-repair-stats-label">Batch offset:</td>
+          <td class="es-repair-progress"><%= last_visited_on.iso8601 %></td>
+        </tr>
+        <tr>
+          <td colspan="2"><p class="note">All projects that have been visited after the selected date are being reconciled.</p></td>
+        </tr>
+      <% else %>
+        <tr>
+          <td class="es-repair-stats-label">Repair strategy:</td>
+          <td class="es-repair-progress">
+            <%= render Primer::Beta::Label.new(test_selector: "repair-strategy") do %>
+              All projects
+            <% end %>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2"><p class="note">All projects are being reconciled.</p></td>
+        </tr>
+      <% end %>
+    </table>
+
+    <table class="es-index-repair">
+      <tr>
+        <td class="es-repair-stats-label">Batches prepared:</td>
+        <td class="es-repair-progress"><%= progress_bar(repair_job.progress, percentage: true, precision: 1) %></td>
+      </tr>
+      <tr>
+        <td colspan="2"><p class="note">The percentage of how far along the repair job is preparing batches for reconciliation.</p></td>
+      </tr>
+    </table>
+
+    <table class="es-index-repair">
+      <tr><td class="es-repair-stats-label">Number of <code>MemexProject</code> records reconciled:</td><td><%= number_with_delimiter(memex_projects_reconciled_count) %></td></tr>
+      <tr><td class="es-repair-stats-label">Number of <code>MemexProjectItem</code> records read:</td><td><%= number_with_delimiter(stats[:total]) %></td></tr>
+      <tr><td><code>memex-project-items</code> documents added:</td><td><%= number_with_delimiter(stats[:added]) %></td></tr>
+      <tr><td><code>memex-project-items</code> documents updated:</td><td><%= number_with_delimiter(stats[:updated]) %></td></tr>
+      <tr><td><code>memex-project-items</code> documents removed:</td><td><%= number_with_delimiter(stats[:removed]) %></td></tr>
+
+      <tr><td class="es-repair-stats-label pt-3">Active <code>MemexProject</code> reconciler batches:</td><td class="pt-3"><%= number_with_delimiter(reconciler_batches_count) %></td></tr>
+      <tr><td colspan="2"><p class="note">The number of batches that are actively being reconciled.</p></td></tr>
+
+      <tr><td class="es-repair-stats-label pt-3">Failed <code>MemexProject</code> reconciler batches:</td><td class="pt-3"><%= number_with_delimiter(failed_reconciler_batches_count) %></td></tr>
+      <tr><td colspan="2"><p class="note">The number of reconciler batches that encountered an error and exhausted all retry attempts.</p></td></tr>
+
+      <tr><td class="es-repair-stats-label pt-3"><code>MemexProject</code> records that could not be reconciled:</td><td class="pt-3"><%= number_with_delimiter(stats[:error]) %></td></tr>
+      <tr><td colspan="2"><p class="note">The number of records contained within reconciler batches that failed. View exceptions on <a href="<%= sentry_url %>" target="_blank">Sentry</a>.</p></td></tr>
+    </table>
+
+    <%= render(Primer::BaseComponent.new(tag: :div, flex_items: :center, display: :flex)) do %>
+      <%= render(Primer::Beta::Button.new(tag: :a, href: sentry_url)) do %>
+        Sentry
+      <% end %>
+      <%= render(Primer::Beta::Button.new(ml: 2, tag: :a, href: datadog_url)) do %>
+        Datadog
+      <% end %>
+      <%= render(Primer::Beta::Button.new(ml: 2, tag: :a, href: splunk_url)) do %>
+        Splunk
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% unless job_finished %>
+    <div>
+      <div class="mt-4 d-flex flex-justify-between flex-items-center">
+        <% if job_exists %>
+          <%= form_tag(update_workers_stafftools_search_index_path(repair_job.index_name), method: "put", style: "display: flex; align-items: center;") do %>
+            <%= render(Primer::Beta::Text.new(font_weight: :bold, tag: :span)) { "Set number of repair jobs:" } %>
+            <%= render(Primer::Alpha::TextField.new(full_width: false, placeholder: "1", type: :number, name: "worker_count", label: "Set number of repair jobs", visually_hide_label: "true", mx: 2, style: "width: 100px;")) %>
+            <%= render(Primer::Beta::Button.new(type: :submit)) { "Update" } %>
+          <% end %>
+        <% else %>
+          <%= form_tag(repair_stafftools_search_index_path(repair_job.index_name), method: "post") do %>
+            <div class="form-group form-checkbox">
+              <input type="radio" name="repair_strategy" id="repair_strategy_all_projects" value="all_projects" class="form-checkbox-details-trigger" checked>
+              <label for="repair_strategy_all_projects">All projects</label>
+              <p class="note">
+                All MemexProjects opted in to the Projects Without Limits experience will be repaired.
+              </p>
+            </div>
+
+            <div class="form-group form-checkbox">
+              <input type="radio" name="repair_strategy" id="repair_strategy_visited_after" value="visited_after" class="form-checkbox-details-trigger">
+              <label for="repair_strategy_visited_after">Projects last visited since</label>
+              <p class="note">
+                Only repairs MemexProjects in the Projects Without Limits experience that have been visited since the specified date.
+              </p>
+              <div class="form-checkbox-details pt-2">
+                <input type="date" name="visited_after" max="<%= 1.day.ago.to_date.to_formatted_s(:db) %>" class="form-control FormControl-input FormControl-medium">
+              </div>
+            </div>
+
+            <div class="form-group pl-3">
+              <%= render(Primer::Beta::Button.new(type: :submit)) { "Start repair" } %>
+            </div>
+          <% end %>
+        <% end %>
+      </div>
+
+      <% if job_exists %>
+        <div class="mt-4">
+          <%= form_tag(pause_repair_stafftools_search_index_path(repair_job.index_name), method: "put") do %>
+            <%= render(Primer::Beta::Button.new(type: :submit, float: :right, disabled: !job_enabled)) { "Pause" } %>
+          <% end %>
+          <% if job_enabled %>
+            <p>Pause the repair</p>
+          <% else %>
+            <p><strong>The repair is paused</strong></p>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>

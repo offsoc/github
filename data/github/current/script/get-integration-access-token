@@ -1,0 +1,151 @@
+#!/usr/bin/env ruby
+
+# This is a script that acquires an access token that can be used to test as a GitHub Application
+# Run this script with --help for usage instructions
+
+# This script complements this guide for testing as an application:
+# https://thehub.github.com/engineering/development-and-ops/public-apis/graphql/deployment-workflow/github-apps-testing/
+
+# Also, the method is uses for getting an access token is based on our external documentation:
+# https://developer.github.com/apps/building-github-apps/authenticating-with-github-apps/
+
+require "logger"
+require "optparse"
+require "faraday"
+require "jwt"
+require "json"
+
+Log = Logger.new(STDOUT)
+Log.level = Logger::INFO
+
+Options = {
+  host: "https://api.github.com",
+  installation_id: nil,
+}
+
+OptionParser.new do |opts|
+  opts.banner = <<BANNER
+
+Usage: #{$0} -k <key file> -a <app id> [options]
+
+More documentation: https://thehub.github.com/engineering/development-and-ops/public-apis/graphql/deployment-workflow/github-apps-testing/
+
+BANNER
+
+  opts.on("-k", "--key FILE", "path to app private key") do |key_file_path|
+    Kernel.abort "No such key file: '#{key_file_path}'" unless File.exist? key_file_path
+    Options[:key_file_path] = key_file_path
+  end
+
+  opts.on("-a", "--app-id APPID", "GitHub application ID") do |app_id|
+    Options[:app_id] = app_id
+  end
+
+  opts.on("-i", "--installation-id [INSTALLID]", "Installation ID.  This is optional, if not provided a query will be done and the first installation will be used") do |installation_id|
+    Options[:installation_id] = installation_id
+  end
+
+  opts.on("-l", "--local-server", "Use local development server instead of production") do
+    Options[:host] = "http://api.github.localhost:3000"
+  end
+
+  opts.on("-v", "--verbose", "Debug logging") do
+    Log.level = Logger::DEBUG
+  end
+
+  opts.on("-q", "--quiet", "No logging") do
+    Log.level = Logger::WARN
+  end
+end.parse!
+
+if !Options[:key_file_path]
+  Kernel.abort("Error: key file path (-k) is required")
+end
+
+if !Options[:app_id]
+  Kernel.abort("Error: application ID (-a) is required")
+end
+
+def jwt_token
+  Log.debug "Reading key file: #{Options[:key_file_path]}"
+
+  # Private key contents
+  private_pem = IO.read(Options[:key_file_path])
+  private_key = OpenSSL::PKey::RSA.new(private_pem)
+
+  # Generate the JWT
+  payload = {
+    # issued at time
+    iat: Time.now.to_i,
+    # JWT expiration time (10 minute maximum)
+    exp: Time.now.to_i + (9 * 60),
+    # GitHub App's identifier
+    iss: Options[:app_id],
+  }
+
+  JWT.encode(payload, private_key, "RS256")
+end
+
+def request_headers
+  {
+    "Authorization" => "Bearer #{jwt_token}",
+    "Accept" => "application/vnd.github.machine-man-preview+json",
+  }
+end
+
+def get_first_installation_id
+  response = Conn.get do |request|
+    request.url "/app/installations"
+    request.headers = request_headers
+  end
+  response_body = JSON.parse response.body
+  Log.debug "App installation response body:\n---\n#{JSON.pretty_generate(response_body)}\n---\n"
+  if response_body.empty?
+    Log.error "No installation IDs found?!"
+    return nil
+  end
+  installation_id = response_body[0]["id"]
+  Log.debug "Got installation ID: #{installation_id}"
+  installation_id
+end
+
+def get_access_token
+  response = Conn.post do |request|
+    request.url "/app/installations/#{Options[:installation_id]}/access_tokens"
+    request.headers = request_headers
+  end
+  if !response.success?
+    Log.error "Access token request failed"
+    return nil
+  end
+  response_body = JSON.parse response.body
+  token = response_body["token"]
+  Log.debug "Got access token: #{token}"
+  token
+end
+
+# Begin actually getting the token
+
+# initialize the HTTP client
+Conn = Faraday.new(url: Options[:host]) do |faraday|
+  faraday.response :logger, Log # use the logger from this script
+  faraday.adapter Faraday.default_adapter
+end
+
+if Options[:installation_id].nil?
+  Log.info "Getting the first installation ID for the GitHub app since none was provided"
+  Options[:installation_id] = get_first_installation_id
+  if Options[:installation_id].nil?
+    Kernel.abort "Error: No Installation IDs found for this app.  Have you installed this app?"
+  end
+  Log.info "Using installation ID: #{Options[:installation_id]}"
+end
+
+Log.debug "Getting an access token for installation id: #{Options[:installation_id]}"
+token = get_access_token
+if token.nil?
+  Kernel.abort "Failed to get access token"
+end
+
+# finally dump the token to STDOUT
+STDOUT.puts token

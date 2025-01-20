@@ -1,0 +1,66 @@
+#!/usr/bin/env ruby
+# GHE server side script to add gist routes.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one <gist_id> <gist_path> <server1> <server2> <server3>
+# per line, something like:
+#
+# a947f173038827dc89eb3391f2aba2a0 /data/repositories/8/8f/a6/36/gist/a947f173038827dc89eb3391f2aba2a0.git dgit-node1 dgit-node2 dgit-node3
+# ebd32d94d1ec44669ef182f96498af9e /data/repositories/0/0c/02/0e/gist/ebd32d94d1ec44669ef182f96498af9e.git dgit-node1 dgit-node2 dgit-node3
+# 1fc152adfc4be61c754b5155d6174434 /data/repositories/f/fe/5e/b2/gist/1fc152adfc4be61c754b5155d6174434.git dgit-node1 dgit-node2 dgit-node3
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/dgit"
+require "github/dgit/logger"
+require "github/dgit/import"
+require "github/routing"
+
+GitHub.load_activerecord
+GitRPC.timeout = 30.minutes.to_i
+GitRPC.connect_timeout = 16
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} gist_id shard_path [replicas...]"
+  exit 1
+end
+
+def process(logger, gist, shard_path, replicas)
+  unless replicas & GitHub::DGit.get_hosts == replicas
+    $stderr.puts "Invalid list of replicas: #{replicas}"
+    usage
+  end
+
+  gist_id   = GitHub::Routing.lookup_gist_id(gist)
+  repo_type = GitHub::DGit::RepoType::GIST
+  checksums = GitHub::DGit::Import::git_dgit_state_init(logger, [], replicas,
+                                                        repo_type, gist_id, shard_path)
+
+  if checksums && checksums[repo_type].present?
+    GitHub::DGit::Enterprise::remove_replica_routes(repo_type, gist_id)
+    GitHub::DGit::Enterprise::add_replica_routes(logger, repo_type, gist_id,
+                                                 replicas, checksums, true)
+    return true
+  end
+
+  false
+end
+
+logger = GitHub::DGit::SilentLogger.new(GitHub::AppEnvironment.root.join("log", "dgist_import.log").to_s)
+errors = []
+
+while line = $stdin.gets
+  args = line.split(" ")
+  usage unless args.length > 2
+
+  gist_id = args.shift.strip
+  shard_path = args.shift.strip
+
+  errors << [gist_id, shard_path] unless process(logger, gist_id, shard_path, args)
+end
+
+if !errors.empty?
+  $stderr.puts(errors.map { |id, path| "#{id}: #{path}" }.join("\n"))
+end

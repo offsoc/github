@@ -1,0 +1,52 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-file-change [-h]
+#/
+#/ Check to see if cluster.conf has been manually modified
+#/ Checks against nomad cluster status
+#/
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+  return 1
+}
+
+main () {
+    cluster_conf="/data/user/common/cluster.conf"
+
+    if ! [[ -f $cluster_conf ]]; then
+        echo "System is not a cluster" >&2
+        exit 1
+    fi
+
+    nomad_hosts=$(nomad node status | awk 'NR > 1 && $6 == "eligible" && $7 == "ready" {print $3}' | sort -u)
+    cluster_hosts=$(ghe-cluster-nodes | sort -u)
+
+    readarray -t nomad_array <<< "$nomad_hosts"
+    readarray -t cluster_array <<< "$cluster_hosts"
+
+    removals=()
+
+    for host in "${nomad_array[@]}"; do
+        found=false
+        for cluster_host in "${cluster_array[@]}"; do
+            if [[ "$host" == "$cluster_host" ]]; then
+                found=true
+                break
+            fi
+        done
+
+        if [[ $(ghe-config --true cluster."${host}".offline) ]] || [[ "$found" == false ]]; then
+            removals+=("$host")
+        fi
+    done
+
+    echo "${removals[*]}"
+    return 0
+}
+
+main "$@"

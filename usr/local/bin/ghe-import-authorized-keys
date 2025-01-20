@@ -1,0 +1,73 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+#/ Usage: ghe-import-authorized-keys [-h]
+#/
+#/ Import a backup taken with ghe-export-authorized-keys.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+#/ EXAMPLE:
+#/
+#/  Import the authorized keys from a dump file:
+#/    $ ghe-import-authorized-keys < dump-file
+#/
+#/  Transfer the authorized keys from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-authorized-keys | ghe-import-authorized-keys
+#/
+if ARGV.include?("--help") || ARGV.include?("-h") || $stdin.tty?
+  system "grep '^#/' '#{__FILE__}' |cut -c 4-"
+  exit 2
+end
+
+# Auto-sudo to root if effective user is something else.
+if Process.euid != 0
+  Process.exec("sudo", "-u", "root", __FILE__)
+  warn "error: exec failed"
+  exit 1
+end
+
+puts " --> Importing SSH authorized keys..."
+
+data = $stdin.read.strip
+keys = []
+
+if data.empty?
+  exit 0
+elsif data[0] == "["
+  # v11.10.34x JSON dump file. Ex:
+  # [{ "key": "ssh-rsa AAAAB3Nza...", "pretty-print": "ssh-rsa f3:9a:d9..." }, ...]
+  require "json"
+  hashes = JSON.parse(data)
+  keys = hashes.map { |hash| hash["key"] }
+else
+  # v2.0 authorized_keys formatted dump. Ex:
+  # ssh-rsa AAAAAB3Nza... ryan@bastion35.github.net
+  keys = data.split("\n")
+end
+
+# Load existing keys to avoid writing the same keys multiple times
+existing_keys = File.read("/home/admin/.ssh/authorized_keys").split("\n") rescue []
+
+# Write keys that don't already exist to end of file
+File.open("/home/admin/.ssh/authorized_keys", "a") do |fd|
+  keys.each do |key|
+    next if key.strip.empty?
+    next if existing_keys.include?(key)
+
+    fd.puts(key)
+  end
+end
+
+# If we created the file above it'll be root owned so chown and chmod.
+system("chown admin:admin /home/admin/.ssh/authorized_keys")
+system("chmod 0600 /home/admin/.ssh/authorized_keys")
+system("setfacl -m u:ghes-manage-agent:rw-x /home/admin/.ssh/")
+system("setfacl -Rm u:ghes-manage-agent:rw-x /home/admin/.ssh/authorized_keys")
+
+# Copy into the persistent user data directory
+if Dir.exist?("/data/user/common")
+  system("cp /home/admin/.ssh/authorized_keys /data/user/common/authorized_keys")
+  system("chmod 0660 /data/user/common/authorized_keys")
+  system("setfacl -m u:ghes-manage-agent:rw /data/user/common/authorized_keys")
+end

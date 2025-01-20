@@ -1,0 +1,296 @@
+<%# erblint:counter DeprecatedInPrimerCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# rubocop:disable GitHub/ContentFor %>
+<%
+  check_suite = check_run.check_suite
+  search_ui = logged_in? && !check_run.completed_without_logs?
+  display_waiting_logs = check_run.status == StatusCheckConfig::WAITING && current_repository.can_use_environments? && !check_run.all_gates_open?
+  blocking_resources = check_run&.workflow_job_run&.get_blocking_resources
+  display_blocked_run = check_run.status == StatusCheckConfig::PENDING && (blocking_resources || []).count > 0
+  completed_and_empty = check_run.completed? && steps.empty?
+  show_blankstate = completed_and_empty || check_run.expired_logs?
+  ux_refresh ||= false
+  execution = check_run.workflow_job_run&.workflow_run_execution
+  writable = current_repository.writable_by?(current_user)
+  show_rerun_button = check_suite.rerunnable? && execution&.is_latest_execution? && writable && !check_suite.expired_logs?
+%>
+<% content_for :scripts do %><%# erblint:disable NoContentForScripts %>
+  <%= javascript_bundle "workflow-run" %>
+  <%= javascript_bundle "workflow-runs" %>
+<% end %>
+<% content_for :head do %>
+  <%# We want to always re-fetch check steps when they are accessed via turbo %>
+  <meta name="turbo-cache-control" content="no-cache" data-turbo-transient>
+<% end %>
+<% if show_blankstate %>
+  <div class="js-check-run-blankslate js-socket-channel d-flex flex-auto height-full" data-channel="<%= live_update_view_channel(check_run.channel) %>">
+    <% if ux_refresh %>
+      <% if check_run.expired_logs? %>
+        <%= render partial: "actions/workflow_runs/job_blankslate", locals: { icon: "calendar", message: "The logs for this run have expired and are no longer available.", loading: false } %>
+      <% else %>
+        <%= render partial: "actions/workflow_runs/job_blankslate", locals: { icon: check_run_state_icon(check_run.conclusion, check_run.status), message: check_run_state_description(check_run), loading: false } %>
+      <% end %>
+    <% else %>
+      <% if check_run.expired_logs? %>
+        <%= render partial: "checks/zen_blankslate", locals: { icon: "calendar", message: "The logs for this run have expired and are no longer available.", loading: false } %>
+      <% else %>
+        <%= render partial: "checks/zen_blankslate", locals: { icon: check_run_state_icon(check_run.conclusion, check_run.status), message: check_run_state_description(check_run), loading: false } %>
+      <% end %>
+    <% end %>
+  </div>
+<% else %>
+  <div id="logs"
+    class="CheckRun js-check-steps <% if search_ui %> js-check-steps-search<% end %><% if ux_refresh %> rounded-0 rounded-md-1 border-md pb-3 <% end %>"
+    style="min-width: 750px; <% if ux_refresh %>min-height: calc(100vh - 275px<% if stats_ui_enabled? %> - 34px<% end %>); <% end %>" <%= color_mode_attributes_checks_logs %>>
+    <% if ux_refresh %>
+      <style>
+        @media (prefers-reduced-motion: no-preference) {
+          html {
+            scroll-behavior: smooth;
+          }
+        }
+      </style>
+    <% end %>
+    <div
+      <% if ux_refresh %>
+        class="uxr_CheckRun-header CheckRun-header mb-2 d-flex flex-justify-between flex-items-center mb-1 py-3 pr-3 js-checks-log-toolbar rounded-top-0 rounded-md-top-1 pl-3 pl-md-4"
+      <% else %>
+        class="CheckRun-header-wrapping mb-2 d-flex flex-justify-between flex-md-items-start flex-items-center mb-1 py-3 pr-3 js-checks-log-toolbar pl-4 rounded-top-0 rounded-md-top-1"
+      <% end %>
+    >
+      <span class="CheckRun-log-title color-fg-default<% if ux_refresh %> flex-auto mt-2 mt-md-0 overflow-hidden<% end %>">
+        <div class="f4">
+          <% if ux_refresh %>
+            <%# Don't show on md or larger screens %>
+            <div class="mr-2 pr-2 mr-sm-0 pr-sm-0 mx-sm-2 px-sm-2 py-1 rounded mt-1 d-flex flex-items-center d-md-none">
+
+              <%# Don't show on md or larger screens %>
+              <div class="d-block d-md-none ml-n3 mr-n3 mt-n1 overflow-hidden">
+                <div class="d-flex flex-items-center mx-3">
+                  <div class="d-flex mr-2 overflow-hidden">
+                    <%= render Actions::WorkflowRuns::WorkflowJobRunNameComponent.new(name: check_run.visible_name, can_split_name: check_run.workflow_job_run&.reusable_job?, tag: :h4) %>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <%# Show on medium or larger screens %>
+            <div class="d-none d-md-block">
+              <a href="#logs" class="color-text-white text-bold no-underline" id="check-step-header-title">
+                <span class="two-line-wrapping"><%= check_run.visible_name %></span>
+              </a>
+            </div>
+          <% else %>
+            <span class="text-bold"><%= check_run.visible_name %></span>
+          <% end %>
+        </div>
+        <%= render partial: "checks/checks_header", locals: { check_run: check_run } %>
+      </span>
+      <% if search_ui %>
+        <div
+          <%= "hidden" if steps.empty? %>
+          class="js-check-run-search CheckRun-search color-fg-muted d-flex text-right <% if ux_refresh %>uxr_CheckRun-search<% else %>flex-auto<% end %> ml-3"
+        >
+          <%= form_tag nil, method: :get, :class => ux_refresh ? "js-checks-log-search position-relative d-none d-md-block" : "js-checks-log-search position-relative flex-auto" do -%>
+            <%= primer_octicon(:search, style: "top:8px", position: :absolute, ml: 2) %>
+            <input type="text" id="name" class="CheckRun-search-input f5 pl-5 form-control js-checks-log-search-input" style="width:256px;" aria-label="Search" placeholder="Search logs" autocomplete="off" data-hotkey="Meta+f"><%# erblint:disable DataHotkey %>
+            <span class="js-checks-log-search-counter py-1 px-2 position-absolute text-small color-fg-muted" style="right:52px; top:4px;" hidden>0/0</span>
+
+            <div class="position-absolute d-flex flex-nowrap pt-1 pr-1" style="right:0; top:0;">
+              <button type="button" class="rounded-2 btn-link box-shadow-none lh-0 px-1 py-1 js-checks-log-search-previous" aria-label="Go to previous result" hidden>
+                <%= primer_octicon(:"chevron-up") %>
+              </button>
+              <button type="button" class="rounded-2 btn-link box-shadow-none lh-0 px-1 py-1 js-checks-log-search-next" aria-label="Go to next result" hidden>
+                <%= primer_octicon(:"chevron-down") %>
+              </button>
+            </div>
+          <% end -%>
+
+          <% if check_run.conclusion == "failure" && can_show_copilot_button %>
+            <div class="ml-2" data-test-id="copilot-actions-chat-button">
+              <%= render_react_partial name: "copilot-actions-chat-button" %>
+            </div>
+          <% end %>
+
+          <% if show_rerun_button && check_run.actions_rerequestable? %>
+            <span class="text-left">
+              <%= render Primer::Beta::IconButton.new(
+                icon: :sync,
+                type: :button,
+                tooltip_direction: :sw,
+                ml: 2,
+                scheme: :invisible,
+                "aria-label": "Re-run this job",
+                "data-show-dialog-id": "rerun-dialog-logs-#{check_run.id}",
+              ) %>
+              <%= render Actions::WorkflowRuns::RerunDialogComponent.new(
+                current_repository: current_repository,
+                workflow_run: check_suite.workflow_run,
+                job: check_run.workflow_job_run,
+                dialog_id: "rerun-dialog-logs-#{check_run.id}",
+                variant: :single_job,
+              ) %>
+            </span>
+          <% end %>
+
+          <details class="details-overlay details-reset position-relative d-inline-block ml-2">
+            <summary class="Button Button--iconOnly Button--invisible Button--medium"<% if ux_refresh %> aria-haspopup="menu" role="button"<% end %>>
+              <%= primer_octicon(ux_refresh ? "gear" : "kebab-horizontal", "aria-label": "Show options") %>
+            </summary>
+            <details-menu
+              class="dropdown-menu dropdown-menu-sw show-more-popover anim-scale-in color-shadow-medium js-socket-channel js-steps-dropdown"
+              style="width:230px" <% if ux_refresh %>role="menu"<% end %>
+              data-channel="<%= live_update_view_channel(check_suite.channel) %> <%= live_update_view_channel(check_run.channel) %>"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <label role="menuitemradio" class="dropdown-item btn-link text-normal d-block pl-5" tabindex="0" aria-checked="false">
+                <span class="position-absolute ml-n4">
+                  <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                </span>
+                <input type="checkbox" class="d-none js-checks-log-timestamps" data-hotkey="Shift+T"> Show timestamps<%# erblint:disable DataHotkey %>
+              </label>
+
+              <label role="menuitemradio" class="dropdown-item btn-link text-normal d-block pl-5" aria-checked="false">
+                <span class="position-absolute ml-n4">
+                  <%= render(Primer::Beta::Octicon.new(icon: "check")) %>
+                </span>
+                <input type="checkbox" class="d-none js-checks-log-fullscreen" data-hotkey="Shift+F"> Show full screen (Shift+F)<%# erblint:disable DataHotkey %>
+              </label>
+
+              <div role="none" class="dropdown-divider js-steps-dropdown-divider"
+                <% unless check_suite.completed_log_url.present? || check_run.completed_log_url.present? %>hidden<% end %>
+              >
+              </div>
+
+              <%= link_to "Download log archive",
+                check_suite_logs_path(id: check_suite.id, user_id: current_repository.owner, repository: current_repository, attempt: check_run.workflow_job_run&.workflow_run_execution&.attempt),
+                class: "pl-5 dropdown-item btn-link js-steps-dropdown-log-archive",
+                hidden: check_suite.completed_log_url.nil?
+              %>
+
+              <%= link_to "View raw logs",
+                check_run_logs_path(ref: check_suite.commit.oid, id: check_run.id),
+                target: "_blank",
+                rel: "noopener noreferrer",
+                class: "pl-5 dropdown-item btn-link js-steps-dropdown-raw-logs",
+                hidden: check_run.completed_log_url.nil?
+              %>
+
+              <% if check_run&.workflow_job_run&.summary_url&.present? %>
+                <%= link_to "View job summary",
+                  Actions::WorkflowRuns::JobSummariesComponent.permalink_for(current_repository,  check_suite.workflow_run, check_run.workflow_job_run&.workflow_run_execution, check_run.workflow_job_run),
+                  class: "pl-5 dropdown-item btn-link",
+                  data: { turbo: false }
+                %>
+              <% end %>
+            </details-menu>
+          </details>
+        </div>
+      <% elsif show_rerun_button && check_run.actions_rerequestable? %>
+        <span class="text-left">
+          <%= render Primer::Beta::IconButton.new(
+            icon: :sync,
+            type: :button,
+            tooltip_direction: :sw,
+            ml: 2,
+            scheme: :invisible,
+            classes: "rerun-single-button",
+            "aria-label": "Re-run this job",
+            "data-show-dialog-id": "rerun-dialog-logs-#{check_run.id}",
+          ) %>
+          <%= render Actions::WorkflowRuns::RerunDialogComponent.new(
+            current_repository: current_repository,
+            workflow_run: check_suite.workflow_run,
+            job: check_run.workflow_job_run,
+            dialog_id: "rerun-dialog-logs-#{check_run.id}",
+            variant: :single_job,
+          ) %>
+        </span>
+      <% end %>
+    </div>
+
+    <% if display_waiting_logs %>
+      <%= render partial: "checks/checks_wait", locals: { check_run: check_run } %>
+    <% end %>
+
+    <% if display_blocked_run %>
+      <div class="Blocked-Check-Warning d-flex flex-row flex-items-center mt-4 pl-3">
+        <span>
+          <span class="Blocked-Check-Text text-mono text-small mr-1 ">Waiting:</span>
+          <span class="Content-Text text-mono text-small">
+            This workflow is waiting on
+            <% if blocking_resources.count == 1 %>
+              <a class="no-underline" href="<%=blocking_resources.first[:url] %>"><%=blocking_resources.first[:display_name] %></a>
+            <% elsif blocking_resources.count == 2 %>
+              <a class="no-underline" href="<%=blocking_resources.first[:url] %>"><%=blocking_resources.first[:display_name] %></a> and
+              <a class="no-underline" href="<%=blocking_resources.second[:url] %>"><%=blocking_resources.second[:display_name] %></a>
+            <% elsif blocking_resources.count > 2 %>
+              <a class="no-underline" href="<%=blocking_resources.first[:url] %>"><%=blocking_resources.first[:display_name] %></a>,
+              <a class="no-underline" href="<%=blocking_resources.second[:url] %>"><%=blocking_resources.second[:display_name] %></a>
+              and <%= pluralize(blocking_resources.count - 2, "other") %>
+            <% end %>
+            to complete before running.
+          </span>
+        </span>
+      </div>
+    <% end %>
+
+    <div
+      class="position-relative js-full-logs-container WorkflowRunLogsScroll<% unless ux_refresh %> overflow-y-scroll<% end %>"
+      <% if ux_refresh %>
+        data-ux-refresh
+      <% else %>
+        style="min-height: 500px"
+      <% end %>>
+      <% if !display_waiting_logs && !display_blocked_run && steps.empty? %>
+        <div class="js-steps-blankslate CheckStep-line pl-md-4 mt-3">
+          <span class="CheckStep-line-content">Starting job<span class="AnimatedEllipsis"></span></span>
+        </div>
+        <% if show_check_run_logs && (check_run.completed_log_url.present? || check_run.system_logs_from_results?) %>
+          <div class="js-check-run-log-display" check-run-log-url="<%= check_run_logs_path(ref: check_suite.commit.oid, id: check_run.id) %>">
+            <div class="text-mono text-small py-1 my-2 mx-2 js-check-run-log-display-container">
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+
+      <%= render partial: "checks/checks_step_icons" %>
+      <%
+        step_to_expand = steps.reverse.find { |step| step.completed? && !step.success? && !step.completed_log_url.blank? }
+      %>
+
+      <check-steps
+        class="js-socket-channel"
+        data-job-status="<%= check_run.status %>"
+        <% if logged_in? %>
+          data-logged-in
+          data-channel="<%= live_update_view_channel(check_run.channel) %> <% if check_run.streaming_logs_via_results? %><%= live_update_view_channel(check_run.workflow_job_run&.actions_results_channel) %><% end %>"
+          data-job-steps-url="<%= workflow_run_job_steps_path(workflow_run_id: check_suite.workflow_run.id, job_id: check_run.workflow_job_run.id) if check_run.workflow_job_run.present?%>"
+          data-streaming-url="<%= check_run_live_logs_path(ref: check_run.head_sha, id: check_run.id) %>"
+          <% if check_run.steps_via_results_service? %>data-steps-from-results<%end%>
+          <% if check_run.streaming_logs_via_results? && !check_run.completed? %><% check_run.register_job_for_live_logs_from_results %><%end%>
+        <% end %>
+        <% if check_run.streaming_log_url.present? %>data-can-stream<%end%>
+        <% if use_actions_ux? %>data-use-actions-ux<% end %>>
+        <% steps.each do |step| %>
+          <check-step
+            data-name="<%= step.name %>"
+            data-number="<%= step.number %>"
+            data-conclusion="<%= step.conclusion ? step.conclusion.downcase : "null" %>"
+            data-external-id="<%= step.external_id %>"
+            data-expand="<%= step.external_id == step_to_expand&.external_id ? "true" : "" %>"
+            data-started-at="<%= step.started_at&.iso8601 %>"
+            data-completed-at="<%= step.completed_at&.iso8601 %>"
+            data-log-url="<%= step.completed_log_url.blank? ? "" : check_step_logs_path(ref: check_run.head_sha, id: check_run.id, step: step.number) %>"
+            <% if step.conclusion.nil? && step.started_at && step.completed_at.nil? %>data-in-progress<% end %>
+            <% if check_run.completed? %>data-job-completed<% end %>
+            <% if logged_in? %>data-logged-in<% end %>
+            <% if use_actions_ux? %>data-use-actions-ux<% end %>
+            <% if logged_in? && check_run.streaming_logs_via_results? %>
+              data-job-step-backscroll-url="<%= workflow_run_job_step_backscroll_path(workflow_run_id: check_suite.workflow_run.id, job_id: check_run.workflow_job_run.id, step_external_id: step.external_id)%>"
+            <% end %>
+          >
+          </check-step>
+        <% end %>
+      </check-steps>
+    </div>
+  </div>
+<% end %>

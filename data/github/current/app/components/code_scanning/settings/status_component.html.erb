@@ -1,0 +1,321 @@
+<%= component_wrapper do %>
+  <% if show_auto_codeql_setup_error? %>
+    <%= render(GitHub::FlashActionDismissibleComponent.new(
+      level: :danger,
+      dismissible_path: dismiss_auto_codeql_error_notice_path(repository.owner, repository),
+      dismissible_method: "delete",
+      is_dismissible: true,
+      test_selector: "auto-codeql-setup-error-banner",
+      text_align: :left,
+      display_icon: true,
+      mt: 3,
+      mb: 1
+    )) do |c| %>
+      <% c.with_title do %>
+        The default setup for CodeQL has failed
+      <% end %>
+      <% c.with_text do %>
+        Check the
+        <%= render(Primer::Beta::Link.new(href: last_scan_url, classes: "Link--inTextBlock")) { "initial setup log" } %>
+        for any errors. If the issue persists, try setting up CodeQL with the advanced configuration by
+        <%= render(Primer::Beta::Link.new(href: code_scanning_codeql_template_url(repository), classes: "Link--inTextBlock")) { "adding a workflow" } %>
+        to this repository.
+      <% end %>
+    <% end %>
+  <% elsif show_auto_codeql_setup_warning? %>
+  <%= render(GitHub::FlashActionDismissibleComponent.new(
+      level: :warning,
+      dismissible_path: dismiss_auto_codeql_error_notice_path(repository.owner, repository),
+      dismissible_method: "delete",
+      is_dismissible: true,
+      test_selector: "auto-codeql-setup-warning-banner",
+      text_align: :left,
+      display_icon: true,
+      mt: 3,
+      mb: 1
+    )) do |c| %>
+      <% if languages_removed_during_adjustment.length == 1 %>
+        <% c.with_title do %>
+            The default setup for CodeQL failed to enable <%= languages_removed_during_adjustment[0] %>
+        <% end %>
+        <% c.with_text do %>
+          Check the
+          <%= render(Primer::Beta::Link.new(href: urls.repository_code_scanning_results_tool_status_path(repository.owner, repository), classes: "Link--inTextBlock")) { "tool status page" } %>
+          for any errors.
+        <% end %>
+      <% else %>
+        <% c.with_title do %>
+          The default setup for CodeQL failed to enable multiple languages
+        <% end %>
+        <% c.with_text do %>
+          CodeQL tried to enable <%= languages_removed_during_adjustment.to_sentence %> in this repository without success.
+          Check the
+          <%= render(Primer::Beta::Link.new(href: urls.repository_code_scanning_results_tool_status_path(repository.owner, repository), classes: "Link--inTextBlock")) { "tool status page" } %>
+          for any errors.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% elsif show_failed_update_warning? %>
+    <%= render(GitHub::FlashActionDismissibleComponent.new(
+      level: :warning,
+      dismissible_path: dismiss_auto_codeql_error_notice_path(repository.owner, repository),
+      dismissible_method: "delete",
+      is_dismissible: true,
+      test_selector: "auto-codeql-update-warning-banner",
+      text_align: :left,
+      display_icon: true,
+      mt: 3,
+      mb: 1
+    )) do |c| %>
+      <% c.with_title do %>
+        <%= failed_update_warning_title %>
+      <% end %>
+      <% c.with_text do %>
+        <%= failed_update_warning_main_message %>
+        Check the
+        <%= render(Primer::Beta::Link.new(href: urls.repository_code_scanning_results_tool_status_path(repository.owner, repository), classes: "Link--inTextBlock")) { "tool status page" } %>
+        for any errors. All other languages are still enabled.
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <h4 class="mt-4 mb-2">Tools</h4>
+  <div class="mb-3">
+    <div class="border rounded px-3" <%= test_selector("code-scanning-tools-section") %>>
+      <div class="py-3 border-bottom">
+        <div class="d-flex flex-md-row flex-column gap-2">
+          <div class="mb-md-0 mb-2 flex-auto">
+            <h5>CodeQL analysis</h5>
+            <p class="text-small color-fg-muted m-0">
+              Identify vulnerabilities and errors with <%= render(Primer::Beta::Link.new(href: codeql_documentation_url, target: "_blank", classes: "Link--inTextBlock")) { "CodeQL" } %>
+              for <%= render(Primer::Beta::Link.new(href: eligible_repos_documentation_url, target: "_blank", classes: "Link--inTextBlock")) { "eligible" } %> repositories.
+            </p>
+          </div>
+
+          <% if latest_successful_codeql_analysis_date.present? && !auto_codeql_updating? %>
+            <div class="d-inline-flex flex-items-center text-small color-fg-muted" style="height: 2rem" <%= test_selector("latest-codeql-scan-date") %>>
+              Last scan&nbsp;<%= time_ago_in_words_js latest_successful_codeql_analysis_date %>
+            </div>
+          <% end %>
+
+          <% if initial_render? %>
+            <div data-hide-on-error>
+              <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+            </div>
+          <% elsif auto_codeql_enabling? %>
+            <div data-hide-on-error <%= test_selector("code-scanning-codeql-status-config-enabling-spinner") %>>
+              <%= render Primer::Beta::Button.new(disabled: true) do |c| %>
+                <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+                Setting up
+              <% end %>
+            </div>
+          <% elsif auto_codeql_updating? %>
+            <div data-hide-on-error <%= test_selector("code-scanning-codeql-status-config-updating-spinner") %>>
+              <div class="text-small color-fg-muted mb-2 mb-md-0 mr-2" >
+                <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+                Updating configuration
+              </div>
+            </div>
+          <% elsif auto_codeql_disabled?%>
+            <%= render CodeScanning::Settings::AutoCodeqlSetupMenuComponent.new(
+              repository: repository,
+              runners_error: runners_error,
+              enabling_auto_codeql_restricted_by_security_configuration:,
+            ) %>
+          <% end %>
+
+          <%= render CodeScanning::Settings::CodeqlStatusMenuComponent.new(
+            repository: repository,
+            auto_codeql_enabled: auto_codeql_enabled?,
+            auto_codeql_updating: auto_codeql_updating?,
+            codeql_last_scan_text: auto_codeql_enabling? || auto_codeql_setup_failed? ? "View setup log" : "View last scan log",
+            link_to_alerts: latest_successful_codeql_analysis_date.present?,
+            latest_run_id: latest_run_id_for_status_menu,
+            codeql_workflow_path: codeql_workflow_path,
+            disabling_auto_codeql_restricted_by_security_configuration:
+          ) %>
+
+          <div data-show-on-error hidden class="text-small color-fg-muted mb-2 mb-md-0 mr-md-3" <%= test_selector("status-unavailable-error")%>>
+            Something went wrong.
+            <%= render  Primer::Beta::Button.new(
+              **retry_button_data_attrs,
+              scheme: :link,
+              type: :button
+            ) do %>
+              Retry
+            <% end %>
+          </div>
+        </div>
+      </div>
+
+      <div class="py-3">
+        <div class="d-flex flex-md-row flex-column">
+          <div class="mb-md-0 mb-2 flex-auto">
+            <h5>Other tools</h5>
+            <p class="text-small color-fg-muted m-0">Add any third-party code scanning tool.</p>
+          </div>
+          <div>
+            <%= render Primer::Beta::Button.new(
+              scheme: :invisible,
+              tag: :a,
+              href: actions_onboarding_path(repository.owner, repository, category: "security", query: "code scanning"),
+              target: "_blank"
+            ) do %>
+              Explore workflows
+            <% end %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <% unless initial_render? %>
+    <%= render(Primer::Alpha::Dialog.new(
+      id: auto_codeql_dialog_id,
+      title: "CodeQL default configuration",
+      test_selector: "code-scanning-auto-codeql-config-dialog",
+      size: :medium_portrait
+    )) do |d| %>
+      <% d.with_header(variant: :large, show_divider: true) %>
+      <%= form_with(
+        url: create_repository_auto_codeql_modal_path(repository.owner, repository),
+        method: :post
+      ) do %>
+        <%= d.with_body(mt: 2) do %>
+          <% if existing_setup_warning? %>
+            <div class="mb-3">
+              <%= render Primer::Alpha::Banner.new(scheme: :warning, classes: "lh-default", test_selector: "code-scanning-auto-codeql-setup-warning") do %>
+                <% if existing_api_setup_warning? %>
+                  <p class="text-bold m-0" <%= test_selector("code-scanning-auto-codeql-api-setup-warning-title") %>>
+                    Overriding an existing API setup
+                  </p>
+                  <p class="m-0">
+                    The last CodeQL analysis was <b><%= time_ago_in_words_js latest_codeql_analysis_date %></b> via an <%= link_to "API upload", tool_status_page_url, class: "Link--inTextBlock" %>.
+                    If you continue, <i>default</i> setup will block future API uploads for CodeQL analyses.
+                  </p>
+                <% else %>
+                  <p class="text-bold m-0" <%= test_selector("code-scanning-auto-codeql-advanced-setup-warning-title") %>>
+                    Overriding an existing advanced setup
+                  </p>
+                  <p class="m-0">
+                    The last CodeQL analysis was <b><%= time_ago_in_words_js latest_codeql_analysis_date %></b> via an <%= link_to "advanced setup", tool_status_page_url, class: "Link--inTextBlock" %>.
+                    If you continue, <i>default</i> setup will disable the advanced setup.
+                  </p>
+                <% end %>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if disabled_schedule_warning? %>
+            <div class="mb-3">
+              <%= render Primer::Alpha::Banner.new(scheme: :warning, classes: "lh-default", test_selector: "code-scanning-auto-codeql-disabled-schedule-warning") do %>
+                <p class="text-bold m-0" <%= test_selector("code-scanning-auto-codeql-api-setup-warning-title") %>>
+                  Scheduled weekly analysis is disabled
+                </p>
+                <p class="m-0">
+                  The scheduled analysis has been automatically disabled because there has been no activity for 6 months. Open a PR or push to a protected branch to re-enable the scheduled analysis.
+                </p>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if languages.empty? %>
+            <% if auto_codeql_detected_languages.empty? %>
+              <div class="mb-3">
+                <p class="f4 color-fg-default m-0 mb-1">Languages</p>
+                <div class="border rounded-2 p-3 mt-2 mb-3 text-center" <%= test_selector("code-scanning-blankslate-no-languages-detected") %>>
+                  <p class="f5 color-fg-default text-bold m-0 mb-1">No CodeQL supported languages to scan in this repository</p>
+                  <p class="f6 color-fg-subtle m-0">
+                    CodeQL will automatically perform the first scan when it detects
+                    <%= render(Primer::Beta::Link.new(href: codeql_language_documentation_url, target: "_blank", classes: "Link--inTextBlock")) { "a supported language" } %>
+                    on the default branch.
+                  </p>
+                </div>
+              </div>
+            <% else %>
+              <%# There are detected languages, but none is selected %>
+              <div class="mb-3">
+                <p class="f4 color-fg-default m-0 mb-1">Languages</p>
+                <div class="border rounded-2 p-3 mt-2 mb-3 text-center" <%= test_selector("code-scanning-blankslate-no-languages-selected") %>>
+                  <p class="f5 color-fg-default text-bold m-0 mb-1">No languages selected</p>
+                  <p class="f6 color-fg-subtle m-0">
+                    CodeQL will automatically perform a scan when it detects a new
+                    <%= render(Primer::Beta::Link.new(href: codeql_language_documentation_url, target: "_blank", classes: "Link--inTextBlock")) { "supported language" } %>
+                    on the default branch.
+                  </p>
+                </div>
+              </div>
+            <% end %>
+          <% else %>
+            <div>
+              <p class="f4 color-fg-default m-0">Languages</p>
+              <p class="f6 color-fg-subtle m-0">These languages were detected on the default branch of this repository.</p>
+            </div>
+            <div class="border rounded-2 p-3 mt-2">
+              <ul class="list-style-none d-flex flex-column gap-2 m-0 text-medium">
+                <% languages.each do |lang| %>
+                  <li>
+                    <%= primer_octicon(:"dot-fill", style: "color:#{auto_codeql_language_color(lang)};") %>
+                    <span class="color-fg-default text-bold" <%= test_selector("auto-codeql-language") %>><%= auto_codeql_language_name(lang) %></span>
+                  </li>
+                <% end %>
+              </ul>
+            </div>
+            <p class="f6 color-fg-subtle mt-1"><%= languages.count %> of <%= auto_codeql_detected_languages.count %> languages selected</p>
+          <% end %>
+
+          <div>
+            <p class="f4 color-fg-default m-0">Query suites</p>
+            <p class="f6 color-fg-subtle m-0"><%= render(Primer::Beta::Link.new(href: query_documentation_url, target: "_blank", classes: "Link--inTextBlock")) { "Group of queries" } %> to run against your code.</p>
+          </div>
+          <div class="border rounded-2 p-3 mt-2 mb-3">
+            <p class="f5 color-fg-default text-bold m-0 mb-1"><%= query_suite_label %></p>
+            <p class="f6 color-fg-subtle m-0"><%= query_suite_description %></p>
+          </div>
+
+          <div>
+            <p class="f4 color-fg-default m-0">Scan events</p>
+            <p class="f6 color-fg-subtle m-0 ">These events will trigger a new scan.</p>
+          </div>
+          <div class="border rounded-2 pr-3 pl-3 mt-2">
+            <div class="pt-3 pb-3">
+              <p class="f5 color-fg-default text-bold m-0 mb-1">On push and pull requests to</p>
+              <p class="f6 color-fg-subtle m-0">
+                <strong class="branch-name" <%= test_selector("auto-codeql-default-branch") %>><%= repository.default_branch || "master" %></strong> and <%= link_to "protected branches", edit_repository_branches_path(repository.owner, repository), class: "Link--inTextBlock" %>
+              </p>
+            </div>
+            <% if show_schedule_row? %>
+              <div class="border-top pt-3 pb-3">
+                <p class="f5 color-fg-default text-bold m-0 mb-1" <%= test_selector("weekly-schedule-row") %>>On a weekly schedule</p>
+                <% if next_scheduled_run_at.present? %>
+                  <p class="f6 color-fg-subtle m-0" <%= test_selector("next-scheduled-run-at") %>>
+                    Next scan of <strong class="branch-name"><%= repository.default_branch || "master" %></strong> <%= render Primer::Beta::RelativeTime.new(datetime: next_scheduled_run_at, threshold: "PT0S", hour: :numeric, minute: :numeric) %>
+                  </p>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+        <%= d.with_footer(show_divider: true, flex_justify: :between) do %>
+          <%= render Primer::Beta::Button.new(mr: :auto, tag: :a, href: edit_repository_auto_codeql_path(repository.owner, repository)) do |button| %>
+            <% button.with_leading_visual_icon(icon: :pencil) %>
+            Edit
+          <% end %>
+
+          <div>
+            <% if auto_codeql_enabled? %>
+              <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": auto_codeql_dialog_id })) { "Close" } %>
+            <% else %>
+              <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": auto_codeql_dialog_id }, mr: 2)) { "Cancel" } %>
+              <%= render(Primer::Beta::Button.new(
+                type: :submit,
+                scheme: :primary,
+                data: { "disable-with": "Enabling CodeQL...", "submit-dialog-id": auto_codeql_dialog_id }
+              )) { "Enable CodeQL" } %>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

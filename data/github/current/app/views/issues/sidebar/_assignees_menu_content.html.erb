@@ -1,0 +1,102 @@
+<% currently_assigned ||= issue.assignees.to_a %>
+<% single_select ||= false %>
+<% type_ahead_amount_cutoff ||= 30 %>
+<% use_type_ahead ||= with_database_error_fallback(fallback: true) { current_repository.privileged_ids.size >= type_ahead_amount_cutoff } %>
+<% show_suggestion_header ||= !use_type_ahead %>
+
+<div class="select-menu-filters">
+  <div class="select-menu-text-filter hx_form-control-spinner-wrapper">
+    <input
+      type="text"
+      id="assignee-filter-field"
+      class="form-control js-filterable-field"
+      placeholder="<%= use_type_ahead ? "Find a user" : "Type or choose a user" %>"
+      aria-label="<%= use_type_ahead ? "Find a user" : "Type or choose a user" %>"
+      autofocus spellcheck="false"
+      autocomplete="off"
+      <% if use_type_ahead %>type-ahead<% end %>>
+      <%= render(Primer::Beta::Spinner.new(size: :small, classes: "hx_form-control-spinner")) %>
+  </div>
+</div>
+
+<div class="warning mb-0" hidden data-menu-max-options-warning>
+  You can only select <%= pluralize issue.assignee_limit, "assignee" %>.
+</div>
+
+<div class="select-menu-list">
+  <% if currently_assigned.any? %>
+    <button class="btn-block select-menu-clear-item select-menu-item"
+         role="menuitem"
+         type="button" aria-label="Clear assignee" data-clear-assignees>
+      <%= primer_octicon(:x, classes: 'select-menu-item-icon') %>
+      <div class="select-menu-item-text">Clear assignees</div>
+    </button>
+  <% end %>
+  <div class="select-menu-no-results">Nothing to show</div>
+
+  <%# We need this here so that params[:issue][:user_assignee_ids] is always passed back to the server %>
+  <input type="hidden" value="" name="issue[user_assignee_ids][]">
+  <div
+    data-filterable-for="assignee-filter-field"
+    data-filterable-type="substring-memory"
+    data-filterable-limit="<%= type_ahead_amount_cutoff %>"
+    data-filterable-src="<%= data_source %>"
+    data-filterable-data-pre-rendered
+    <% if show_suggestion_header %>data-filterable-show-suggestion-header<% end %>
+    <% if use_type_ahead %>data-filterable-type-ahead<% end %>>
+
+    <template>
+      <label class="select-menu-item text-normal"
+        role="<%= single_select ? "menuitemradio" : "menuitemcheckbox" %>"
+        aria-checked="false"
+        tabindex="0">
+        <%= render Primer::Beta::Octicon.new(icon: "check", classes: "select-menu-item-icon") %>
+
+        <input style="display:none"
+               type="<%= single_select ? "radio" : "checkbox" %>"
+               value=""
+               name="issue[user_assignee_ids][]">
+
+        <div class="select-menu-item-gravatar">
+          <img src="" alt="" size="20" class="avatar-small mr-1 js-avatar">
+        </div>
+
+        <div class="select-menu-item-text lh-condensed">
+          <span class="select-menu-item-heading">
+            <span class="js-username"></span>
+            <span class="description js-description"></span>
+          </span>
+        </div>
+      </label>
+    </template>
+
+    <% if use_type_ahead %>
+      <% participants ||= issue.participants.to_a %>
+      <% profile_names ||= profile_names_for(user_ids: currently_assigned.pluck(:id) + [current_user.id] + participants.pluck(:id)) %>
+      <div class="select-menu-divider js-divider-suggestions">Suggestions</div>
+      <%# Show assignees, then current user (if not already assigned), then participants sorted alphabetically %>
+      <% currently_assigned.sort_by(&:display_login).each do |assignee| %>
+        <%= render(Issues::IssueAssigneePickerComponent.new(user: assignee, assigned: true, single_select: single_select, profile_name: profile_names[assignee.id])) %>
+      <% end %>
+
+      <% if !currently_assigned.include?(current_user) %>
+        <%= render(Issues::IssueAssigneePickerComponent.new(user: current_user, assigned: false, single_select: single_select, profile_name: profile_names[current_user.id])) %>
+      <% end %>
+
+      <% participants.sort_by(&:display_login).each do |participant| %>
+        <% next if participant.eql?(current_user) || currently_assigned.include?(participant) %>
+        <%= render(Issues::IssueAssigneePickerComponent.new(user: participant, assigned: false, single_select: single_select, profile_name: profile_names[participant.id])) %>
+      <% end %>
+    <% else %>
+      <% profile_names ||= profile_names_for(user_ids: currently_assigned.pluck(:id)) %>
+      <% currently_assigned.sort_by(&:display_login).each do |assignee| %>
+        <%= render(Issues::IssueAssigneePickerComponent.new(user: assignee, assigned: true, single_select: single_select, profile_name: profile_names[assignee.id])) %>
+      <% end %>
+
+      <%= render(Primer::Beta::Spinner.new(my: 5, mx: :auto, display: :block)) %>
+      <% if show_suggestion_header %>
+        <div class="select-menu-divider js-divider-suggestions" hidden>Suggestions</div>
+      <% end %>
+    <% end %>
+  </div>
+</div>

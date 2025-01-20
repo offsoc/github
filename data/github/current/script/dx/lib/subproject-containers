@@ -1,0 +1,60 @@
+#!/bin/bash
+set -e
+
+GITHUB_ROOT=$(readlink -f "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../..")
+
+subproject_version() {
+  subproject="$1"
+  SUBPROJECT_VERSION_FILE="${GITHUB_ROOT}/config/${subproject}-version"
+
+  if [[ ! -f "$SUBPROJECT_VERSION_FILE" ]] ; then
+    >&2 echo "missing version file at $SUBPROJECT_VERSION_FILE"
+    return 1
+  fi
+
+  SUBPROJECT_VERSION=$(grep -v '^#' "$SUBPROJECT_VERSION_FILE")
+  if [ -n "$SUBPROJECT_VERSION" ]; then
+    echo $SUBPROJECT_VERSION
+  else
+    return 1
+  fi
+}
+
+start_subproject() {
+  local NAME=""
+
+
+  case "$1" in
+    --name=*)
+      NAME="${1#--name=}"
+      shift
+      ;;
+    --name)
+      NAME="$2"
+      shift 2
+      ;;
+  esac
+
+  if [ -z "$NAME" ]; then
+    echo "ERROR: Name not provided."
+    exit 1
+  fi
+
+  # Ensure we clean up any existing containers, and remove after shutdown.
+  cleanup_docker() {
+    echo "Stopping ${NAME}..."
+    docker stop ${NAME} || true
+    exit 0
+  }
+
+  trap cleanup_docker EXIT INT QUIT TERM HUP
+
+  docker stop ${NAME} &> /dev/null || true
+  docker rm ${NAME} &> /dev/null || true
+
+  # Run the service.
+  docker run -d --rm --name ${NAME} --network host "$@"
+
+  docker logs --follow ${NAME} &
+  wait
+}

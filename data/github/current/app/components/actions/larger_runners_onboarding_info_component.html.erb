@@ -1,0 +1,147 @@
+<%# Doing this check here because the layout for business vs org in stafftools is different %>
+<%= render(Primer::Beta::BorderBox.new(padding: :condensed)) do |component| %>
+  <% component.with_header do |h| %>
+    <% h.with_title(tag: :h2) do %>
+      Larger Runners Onboarding
+    <% end %>
+  <% end %>
+  <%
+    # Defining this array in html.erb file instead of rb file to allow using tags inside "note" property
+    onboarding_info_rows = [
+      {
+        title: "Can account use Larger Runners feature?",
+        method: :can_use_larger_runners?,
+        note: "Account can use Larger Runners feature if account is onboarded and eligible to use Larger Runners."
+      },
+      {
+        title: "Is account onboarded to Larger Runners feature?",
+        method: :is_larger_runners_onboarded?,
+        note: "Account is onboarded on first usage. The flag is set to true if user has ever created any runner, access feature UI or access feature API.<br>The value of this flag is equal to existence of host in Runner service for account.".html_safe
+      },
+      {
+        title: "Is account eligible to use Larger Runners feature?",
+        method: :is_eligible_to_use_larger_runners?,
+        note: "Account is eligible to use Larger Runners if it is not spammy and on paid billing plan (Team or Enterprise plans)."
+      },
+      {
+        title: "Is account eligible to onboard Larger Runners feature?",
+        method: :is_eligible_to_onboard_larger_runners?,
+        note: "Account is eligible to onboard Larger Runners if it is eligible to use Larger Runners feature and account is not trial.</i>".html_safe
+      }
+    ]
+  %>
+  <% onboarding_info_rows.each do |row| %>
+    <% component.with_row do %>
+      <div class="d-flex flex-justify-between flex-items-center">
+        <div class="pr-2">
+          <label for="<%= row[:method] %>">
+            <%= row[:title] %>
+          </label>
+          <div class="note">
+              <%= row[:note] %>
+          </div>
+        </div>
+        <div class="d-flex flex-justify-end position-relative">
+          <% if @owner.send(row[:method]) %>
+            <%= render Primer::Beta::Octicon.new(icon: "check-circle-fill", color: :success) %>
+          <% else %>
+            <%= render Primer::Beta::Octicon.new(icon: "x-circle-fill", color: :danger) %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+  <% component.with_row do %>
+    <div class="d-flex flex-justify-between flex-items-center">
+      <div class="pr-2">
+        <label for="host_id">
+          This action should onboard account to Larger Runners
+        </label>
+        <div class="note">
+          Onboarding account includes setup tenant and fault-in tenant in Runner service.<br>
+          If account is already onboarded, this action will validate onboarding and fix any issues.
+        </div>
+      </div>
+      <div class="d-flex flex-justify-end position-relative">
+        <%= form_tag onboard_larger_runners_form_url, method: :post do %>
+          <%= render Primer::Beta::Button.new(type: :submit, scheme: :default, float: :right, ml: 2, disabled: !is_eligible_to_onboard_larger_runners?) do %>Onboard account<% end %>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+  <% if owner_host_id.present? %>
+    <% component.with_row do %>
+      <div class="d-flex flex-justify-between flex-items-center mt-2 mb-2">
+        <div class="pr-2">
+          <label for="tenant_host">
+            HostId:
+          </label>
+          <%= owner_host_id %>
+        </div>
+        <div class="d-flex flex-justify-end position-relative">
+          <div class="pr-2">
+            <label for="tenant_scale_unit">
+              Runner Scale Unit:
+            </label>
+            <%= owner_runner_scale_unit %>
+          </div>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<br>
+
+<% if allow_managing_beta_features? %>
+  <%= render(Primer::Beta::BorderBox.new(padding: :condensed)) do |component| %>
+    <% component.with_header do |h| %>
+      <% h.with_title(tag: :h2) do %>
+        Larger Runners Features
+      <% end %>
+    <% end %>
+    <% component.with_row do %>
+      <div class="note">
+        The features below are enabled / disabled in Runner service and different from dotcom feature flags.
+        Enabling feature for a business won't automatically enable it for every organization which belongs to the business.
+        Feature access is not inherited and every account (organization or business) should be enabled separately.
+        If a feature needs to be enabled globally for everyone (public beta or GA), Runner Config Change should be used.
+      </div>
+    <% end %>
+    <% beta_features.each do |beta_feature| %>
+      <% component.with_row do %>
+        <div class="d-flex flex-justify-between flex-items-center mt-2 mb-2">
+          <div class="pr-2">
+            <label for="title">
+              <%= beta_feature[:title] %>
+
+            </label>
+            <div class="note">
+              <%= beta_feature[:note] %>
+            </div>
+          </div>
+          <div class="d-flex flex-justify-end position-relative">
+            <% if !beta_feature[:feature_state_found] %>
+              <%= render(Primer::Beta::State.new(title: "unknown", scheme: :closed, size: :small)) { "Unknown status" } %>
+            <% elsif beta_feature[:enabled_globally] %>
+              <%= render(Primer::Beta::State.new(title: "enabled_globally", scheme: :open, size: :small)) { "Enabled globally" } %>
+            <% else %>
+              <%= form_tag larger_runners_beta_features_form_url, method: :post do %>
+                <input type="hidden" name="feature_name" value="<%= beta_feature[:feature_name] %>">
+                <% if beta_feature[:enabled_for_user] %>
+                  <input type="hidden" name="feature_new_state" value="false">
+                  <%= render(Primer::Beta::State.new(title: "enabled", scheme: :open, size: :small)) { "Enabled" } %>
+                  <%= render(Primer::Beta::Button.new(type: :submit, scheme: :secondary, size: :small, ml: 2)) { "Disable" } %>
+                <% else %>
+                  <input type="hidden" name="feature_new_state" value="true">
+                  <%= render(Primer::Beta::State.new(title: "disabled", scheme: :closed, size: :small)) { "Disabled" } %>
+                  <%= render(Primer::Beta::Button.new(type: :submit, scheme: :secondary, size: :small, ml: 2)) { "Enable" } %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>

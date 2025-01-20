@@ -1,0 +1,132 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% url = request.referrer %>
+<% params = guess_url_params(url) || {} %>
+<% subject = GitHub::Resources.find_by_url(url, suppress_warning: true) %>
+<% current_repository = Repository.nwo("#{params[:user_id]}/#{params[:repository]}") %>
+
+<div class="Box-header"><h2 class="Box-title">
+  <a href="/stafftools" class="color-fg-default">Site admin<%= primer_octicon(:"link-external", ml: 2) %></a>
+</h2></div>
+
+<% if GitHub.billing_enabled? %>
+  <div class="Box-body color-bg-subtle"><%= link_to "Coupons", biztools_coupons_path %></div>
+<% end %>
+<div class="Box-body overflow-auto">
+  <h3>Caching actions</h3>
+
+  <div class="my-2">
+    <%= link_to "Clear page cache", stafftools_clear_cache_url(url) %>
+
+    <% if current_repository %>
+      &middot;
+      <%= button_to "Invalidate Git cache", increment_git_cache_stafftools_repository_network_path(*params.values_at(:user_id, :repository)),
+            :class => "btn-link",
+            :form_class => "inline-form" %>
+    <% end %>
+
+    <% if params[:controller] == "network" %>
+      &middot;
+      <%= button_to "Rebuild network graph", rebuild_network_graph_stafftools_repository_network_path(*params.values_at(:user_id, :repository)),
+            :class => "btn-link",
+            :form_class => "inline-form" %>
+    <% end %>
+
+    <% issue = subject.try(:issue) %>
+    <% if issue && !current_repository.archived? %>
+      <% if issue.locked? %>
+      &middot;
+      <%= button_to "Unlock conversation", unlock_issue_path(params.slice(:user_id, :repository).merge(:id => issue.number)),
+            :method => :put,
+            :class => "btn-link",
+            :form_class => "inline-form" %>
+      <% else %>
+      &middot;
+      <%= button_to "Lock conversation", lock_issue_path(params.slice(:user_id, :repository).merge(:id => issue.number)),
+            :method => :put,
+            :class => "btn-link",
+            :form_class => "inline-form" %>
+      <% end %>
+    <% end %>
+  </div>
+
+<% if current_repository %>
+  <h3>Repository links</h3>
+  <div class="my-2">
+    <p>
+      <strong>Repository:</strong>
+      <%= link_to current_repository.name_with_owner,
+                  gh_stafftools_repository_path(current_repository) %>
+    </p>
+    <p>
+      <strong>Owner:</strong>
+      <%= link_to current_repository.owner,
+                  stafftools_user_path(current_repository.owner) %>
+    </p>
+    <% if subject.try(:git_lfs_blob) -%>
+      <p>
+        <strong>Git LFS Object:</strong>
+        <%= link_to "#{subject.git_lfs_oid.to_s.first(7)}... (#{number_to_human_size subject.git_lfs_size})",
+              gh_stafftools_repository_large_files_path(current_repository, :oid => subject.git_lfs_oid) %>
+      </p>
+    <% end -%>
+    <% if subject.respond_to?(:notifications_thread) %>
+      <p>
+        <%= link_to "Notifications", stafftools_notifications_path(current_repository, subject.notifications_thread) %>
+      </p>
+    <% end %>
+  </div>
+<% end %>
+
+<% if subject.is_a?(User) %>
+  <p><strong>User:</strong> <%= link_to subject, stafftools_user_path(subject), class: "Link--inTextBlock" %></p>
+<% end %>
+
+<% if current_repository && current_repository.is_importing? %>
+  <h3>Import links</h3>
+  <div class="my-2">
+    <p>This repository is currently being imported.</p>
+    <p><strong>Import admin:</strong> <%= link_to current_repository.name_with_owner, porter_admin_repository_url(repository: current_repository), class: "Link--inTextBlock" %></p>
+  </div>
+<% end %>
+<hr class="ml-n3 mr-n3 my-3">
+<%= form_tag "/stafftools/search", :method => :get do %>
+  <label for="stafftools-search">Search users and repositories</label>
+  <div class="input-group mt-1">
+    <input id="stafftools-search" type="text" name="query" class="form-control" autofocus>
+    <span class="input-group-button">
+      <%= render Primer::ButtonComponent.new(type: :submit) do %>Search<% end %>
+    </span>
+  </div>
+  <% if subject.is_a?(Commit) %>
+    <hr class="ml-n3 mr-n3 my-3">
+    <p>
+      <strong>Author email address:</strong>
+      <%= subject.author_email %>
+    </p>
+    <p>
+      <strong>Committer email address:</strong>
+      <%= subject.committer_email %>
+    </p>
+  <% end %>
+
+  <% if subject.respond_to?(:contribution_status) %>
+    <hr class="ml-n3 mr-n3 my-3">
+
+    <h3>Contribution Status</h3>
+
+    <% begin %>
+      <% view = Stafftools::RepositoryViews::CommitContributionStatusView.new(:status => subject.contribution_status) %>
+      <p>
+        <ul class="status-check-list">
+          <%= view.email_linked_state %>
+          <%= view.in_upstream_default_state %>
+          <%= view.repo_valid_state %>
+          <%= view.internal_repo_state %>
+        </ul>
+      </p>
+    <% rescue Exception => e # rubocop:todo Lint/GenericRescue %>
+      <% Failbot.report(e) %>
+      <p>There was an error loading contribution status. Check Sentry.</p>
+    <% end %>
+  <% end %>
+<% end %>

@@ -1,0 +1,103 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# `view` is an instance of `PullRequests::RangeMenuView` %>
+<%
+  pull = view.pull
+  most_recent_review = view.most_recent_review
+  changed_commits = pull.changed_commits
+  current_commits = view.pull_comparison.commit_oids.to_set
+  viewing_subset  = current_commits.size != changed_commits.size
+  enable_range_selection = changed_commits.many?
+%>
+
+<% if Rails.env.test? %><!-- diffbar: <%= view.pull_comparison.start_commit.oid %>..<%= view.pull_comparison.end_commit.oid %> --><% end %>
+<details class="details-reset details-overlay diffbar-item diffbar-range-menu select-menu  <%= "js-diffbar-range-menu" if enable_range_selection %> ml-0">
+  <%= render Primer::ButtonComponent.new(tag: :summary, scheme: :link, classes: "Link--muted select-menu-button", "data-hotkey": "c") do %>
+    <% if view.pull_comparison.current? %>
+      Changes from <strong>all commits</strong>
+    <% else %>
+      <span class="color-fg-accent js-commits-filtered">
+        Changes from <strong><%= pluralize current_commits.size, "commit" %></strong>
+      </span>
+    <% end %>
+  <% end %>
+
+  <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+    <div class="select-menu-header">
+      <span class="select-menu-title">Commits</span>
+    </div>
+    <div class="select-menu-list">
+      <a href="<%= pull_request_tab_path(pull.repository.owner, pull.repository, pull.number, "files") %>" class="select-menu-item" role="menuitem">
+        <div class="select-menu-item-text">
+          <div class="text-emphasized css-truncate css-truncate-target">
+            Show all changes
+          </div>
+          <span class="description">
+            <%= pluralize view.pull_comparison.total_commits_size, "commit" %>
+          </span>
+        </div>
+      </a>
+
+      <% if logged_in? %>
+        <% if view.reviewed? && most_recent_review.pull_request_has_changed? %>
+          <% changes_base_sha = most_recent_review.applies_to_current_diff? ? most_recent_review.head_sha : pull.base_sha %>
+          <a
+            href="<%= pull_request_files_with_range_path(pull.repository.owner, pull.repository, pull.number, "#{changes_base_sha}..HEAD") %>"
+            class="select-menu-item"
+            role="menuitem">
+            <div class="select-menu-item-text">
+              <div class="text-emphasized css-truncate css-truncate-target">
+                Show changes since your last review
+              </div>
+              <span class="description">
+                <%= pluralize most_recent_review.pull_request_oids_since.count, "commit" %>
+              </span>
+            </div>
+          </a>
+        <% else %>
+          <div class="select-menu-item disabled" style="pointer-events: none;">
+            <div class="select-menu-item-text">
+              <div class="text-bold">
+                Show changes since your last review
+              </div>
+              <span class="description">
+                <% if view.reviewed? %>
+                  No new changes
+                <% else %>
+                  You haven’t reviewed this pull request yet
+                <% end %>
+              </span>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+
+      <div class="select-menu-divider">
+        Select commit
+        <% if changed_commits.many? %>
+          <span class="note text-normal mt-0 float-right">Hold shift + click to select a range</span>
+        <% end %>
+      </div>
+
+      <div <% if changed_commits.many? %>class="js-diffbar-range-list" <% end %> data-range-url="<%= pull_request_files_with_range_path(pull.repository.owner, pull.repository, pull.number, "$range") %>">
+        <% changed_commits.each_with_index do |commit, index| %>
+          <a
+            href="<%= pull_request_commit_path(pull, commit) %>"
+            class="select-menu-item <% if viewing_subset && current_commits.include?(commit.oid) %>in-range<% end %>"
+            role="menuitem"
+            data-commit="<%= commit.oid %>" <% if index > 0 && commit.parent_oids.any? %>data-parent-commit="<%= commit.parent_oids.first %>"<% end %>>
+
+            <div class="select-menu-item-text">
+              <code class="float-right"><%= commit.abbreviated_oid %></code>
+              <div class="text-emphasized css-truncate css-truncate-target">
+                <%= commit.short_message_text %>
+              </div>
+              <span class="description">
+                <%= commit.author&.display_login %> <%= time_ago_in_words_js commit.authored_date %>
+              </span>
+            </div>
+          </a>
+        <% end %>
+      </div>
+    </div>
+  </details-menu>
+</details>

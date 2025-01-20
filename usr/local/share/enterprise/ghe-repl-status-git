@@ -1,0 +1,80 @@
+#!/bin/bash
+#/ Usage: ghe-repl-status-git [-v] [--check]
+#/ Show replication status.
+#/ In --check mode, act like a nagios check.
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+process_cluster_ha() {
+  SPOKES_STATUS=${SPOKES_STATUS:-$(ghe-spokes status | grep -v ^app=)}
+
+  failed_count="$(total_counts_ha "$SPOKES_STATUS" \
+    "FAILED network replicas" "FAILED gist replicas")"
+
+  inactive_count="$(total_counts_ha "$SPOKES_STATUS" \
+    "CREATING network replicas" "CREATING gist replicas" \
+    "DESTROYING network replicas" "DESTROYING gist replicas" \
+    "REPAIRING network replicas" "REPAIRING gist replicas" \
+    "DORMANT network replicas" "DORMANT gist replicas")"
+
+  total_count="$(total_counts_ha "$SPOKES_STATUS" \
+    "under/over-replicated networks" "under/over-replicated gists" \
+    "network replicas that need cleanup" "gist replicas that need cleanup" \
+    "repo replicas with bad checksums" "gist replicas with bad checksums" \
+    "FAILED network replicas" "FAILED gist replicas" \
+    "CREATING network replicas" "CREATING gist replicas" \
+    "DESTROYING network replicas" "DESTROYING gist replicas" \
+    "REPAIRING network replicas" "REPAIRING gist replicas" \
+    "DORMANT network replicas" "DORMANT gist replicas" \
+    "under-replicated repository IDs")"
+
+  # We can't easily determine the number if above 1000, so add a qualifier to
+  # indicate there are more than 1000 repos/gists.
+  add_qualifier=
+  if [ $total_count -ge 1000 ]; then
+    add_qualifier="more than "
+  fi
+
+  if [ "$1" = "-v" ]; then
+    echo "$SPOKES_STATUS"
+    return 0
+  elif [ $# -eq 0 ]; then
+    if [ $total_count -eq 0 ]; then
+      echo "Git replication is in sync"
+      return 0
+    else
+      echo "Git replication is not in sync, ${add_qualifier}${total_count} repositories and/or gists out of sync"
+      return 1
+    fi
+  fi
+
+  if [ "$1" = "--check" ]; then
+    if [ $failed_count -gt 0 ]; then
+      echo "CRITICAL: $failed_count failed network replicas"
+      return 2
+    elif [ $inactive_count -gt 0 ]; then
+      echo "CRITICAL: $inactive_count inactive network replicas"
+      return 2
+    elif [ $total_count -gt 100 ]; then
+      echo "CRITICAL: git replication is behind the primary by ${add_qualifier}${total_count} repositories and/or gists"
+      return 2
+    elif [ $total_count -lt 100 -a $total_count -gt 0 ]; then
+      echo "WARNING: git replication is behind the primary by $total_count repositories and/or gists"
+      return 1
+    elif [ $total_count -eq 0 ]; then
+      echo "OK: git replication is in sync"
+      return 0
+    else
+      echo "UNKNOWN: git replication is not in sync"
+      return 3
+    fi
+  fi
+}
+
+if [ "$1" != "--source-only" ]; then
+  ensure_replica
+
+  process_cluster_ha "$@"
+fi

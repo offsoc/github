@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# Launch a git-daemon with high verbosity and lots of commands permitted,
+# for dev and unit tests.
+#
+# Usage:
+#   launch-git-daemon [--exec-path=WHERE] [--port=PORT]
+
+#
+# Consume script arguments into `port` and exported GIT_EXEC_PATH, PATH
+# environment variables.
+#
+port=9418
+logfile=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --exec-path=*)
+      p="${1#--exec-path=}"
+      p="$(cd "$p" && pwd -P)"
+      export GIT_EXEC_PATH="$p"
+      export PATH="$p:$PATH"
+      export EXEC_PATH="$1"
+      shift
+      ;;
+    --exec-path)
+      p="$2"
+      p="$(cd "$p" && pwd -P)"
+      export GIT_EXEC_PATH="$p"
+      export PATH="$p:$PATH"
+      export EXEC_PATH="--exec-path=$2"
+      shift 2
+      ;;
+    --port=*)
+      port="${1#--port=}"
+      shift
+      ;;
+    --port)
+      port="$2"
+      shift 2
+      ;;
+    --logfile=*)
+      logfile="${1#--logfile=}"
+      shift
+      ;;
+    --logfile)
+      logfile="$2"
+      shift 2
+      ;;
+    -*)
+      printf >&2 "%s: unexpected option: '%s'" "$0" "$1"
+      exit 1
+      ;;
+    *)
+      printf >&2 "%s: unexpected argument: '%s'" "$0" "$1"
+      exit 1
+      ;;
+  esac
+done
+
+start_daemon () {
+  if [ "$GITHUB_USE_DOCKER" == 1 ]; then
+    PORT_BINDING="127.0.0.1:$port:$port"
+    trap 'docker-compose stop git-daemon-server' TERM
+    docker-compose run --rm -p $PORT_BINDING git-daemon-server \
+      daemon \
+      --listen=127.0.0.1            \
+      --base-path=/                 \
+      --informative-errors          \
+      --verbose                     \
+      --export-all                  \
+      --enable=receive-pack         \
+      --enable=upload-archive       \
+      --enable=upload-file          \
+      --reuseaddr
+  else
+    export PATH=$(pwd)/vendor/gitrpcd/build:$PATH
+
+    exec bin/git $EXEC_PATH daemon  \
+      --listen=127.0.0.1            \
+      --port=$port                  \
+      --base-path=/                 \
+      --informative-errors          \
+      --verbose                     \
+      --export-all                  \
+      --enable=receive-pack         \
+      --enable=upload-archive       \
+      --enable=upload-file          \
+      --reuseaddr
+  fi
+}
+
+if [ -n "$logfile" ]; then
+  start_daemon &>"$logfile"
+else
+  start_daemon
+fi

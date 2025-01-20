@@ -1,0 +1,86 @@
+# typed: true
+# frozen_string_literal: true
+
+require "test_helper"
+require "<%= file_without_lib_or_extension %>"
+
+class <%= class_name %>Test < GitHub::TestCase
+  include GitHub::DatabaseHelpers
+  include GitHub::DatabaseQueryWarningsTestHelpers
+
+  fixtures do
+    RolePermission.delete_all
+    Role.delete_all
+  end
+
+  setup do
+    @config = T.let(YAML.load(GitHub::Transitions::<%= class_name %>::SYSTEM_ROLES_CONFIG), T.untyped)
+  end
+
+  sig do
+    params(args: T::Hash[Symbol, T.untyped]).
+    returns(GitHub::Transitions::<%= class_name %>)
+  end
+  def new_transition(args = {})
+    arguments = GitHub::Transitions::Arguments.new(args)
+
+    transition = GitHub::Transitions::<%= class_name %>.new(arguments)
+    transition.stubs(:parallel?).returns(false)
+    transition
+  end
+
+  test "transition" do
+    assert_equal 0, Role.count
+    assert_equal 0, RolePermission.count
+
+    transition = new_transition(dry_run: false)
+
+    assert_no_query_warnings { transition.run }
+
+    # Assert roles and permissions were seeded correctly.
+    assert_equal @config["system_roles"].keys.count, Role.count
+    @config["system_roles"].each do |name, metadata|
+      role = Role.find_by(name: name)
+      refute_nil role, "expected #{name} to exist"
+
+      next if role.nil? # Keep Sorbet happy
+
+      if metadata["base"].blank?
+        assert_nil role.base_role, "expected #{name} to have no base role"
+      else
+        assert_equal(
+          metadata["base"],
+          role.base_role&.name,
+          "expected #{name} to have a base role #{metadata["base"]}"
+        )
+      end
+      assert_same_elements(
+        metadata["permissions"],
+        role.permissions.map(&:action),
+        "role #{name} has incorrect permissions"
+      )
+    end
+
+    # TODO: Assert role(s) were updated correctly. For example, if an FGP called "new_fgp" is being added to
+    # write, maintain, and admin roles, this test would look like:
+    #
+    # refute_includes Role.read_role.permissions.map(&:action), "new_fgp"
+    # refute_includes Role.triage_role.permissions.map(&:action), "new_fgp"
+    # assert_includes Role.write_role.permissions.map(&:action), "new_fgp"
+    # assert_includes Role.maintain_role.permissions.map(&:action), "new_fgp"
+    # assert_includes Role.admin_role.permissions.map(&:action), "new_fgp"
+  end
+
+  test "does nothing on a dry run" do
+    assert_equal 0, Role.count
+    assert_equal 0, RolePermission.count
+
+    transition = new_transition(dry_run: true)
+
+    assert_no_query_warnings { transition.run }
+
+    # In dry run nothing should be changed
+    assert_equal 0, Role.count
+    assert_equal 0, RolePermission.count
+  end
+end

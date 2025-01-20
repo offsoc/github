@@ -1,0 +1,50 @@
+#!/bin/bash
+#/ Usage: ghe-es-restore
+#/ Restore ES indices from the last snapshot taken. Typically called by
+#/ the backup-utils ghe-restore command immediately after copying the
+#/ /data/user/elasticsearch-snapshots directory into place on recovery.
+set -e
+
+# Always run as admin user.
+[ "$(whoami)" = "admin" ] || {
+    exec sudo -u admin "$0" "$@"
+    exit 1
+}
+
+# Local ES snapshot directory. The ghe-es-snapshot command writes new snapshots
+# to this location.
+: ${GHE_ES_SNAPSHOT_DIR:=/data/user/elasticsearch-snapshots}
+
+# Create the local ES snapshot repository directory if needed
+if [ ! -d "$GHE_ES_SNAPSHOT_DIR" ]; then
+    echo "error: Elasticsearch snapshot directory ($GHE_ES_SNAPSHOT_DIR) doesn't exist" 1>&2
+    exit 1
+fi
+
+# Register the snapshot repository in ES if it isn't already. This is necessary
+# when restoring a fresh node and copying the elasticsearch-snapshots directory
+# from backups.
+curl -s -o /dev/null -XPUT 'localhost:9200/_snapshot/local' -d '{
+    "type": "fs",
+    "settings": {
+        "location": "'$GHE_ES_SNAPSHOT_DIR'",
+        "compress": true
+    }
+}'
+
+# Close all open ES indexes. ES will fail on restore if any of the indexes to be
+# restored are currently open.
+curl -o /dev/null -s -XPOST 'localhost:9200/_all/_close'
+
+# Determine the id of the most recent snapshot.
+snapshot_id="$(
+  cd "$GHE_ES_SNAPSHOT_DIR" &&
+  ls -1 snapshot-[0-9]* 2>/dev/null |
+  cut -f 2 -d - |
+  sort -rn |
+  head -n 1
+)"
+
+# Perform the snapshot restore and wait for it to complete.
+echo "Restoring Elasticsearch from snapshot: $snapshot_id ..."
+curl -s -o /dev/null -XPOST "localhost:9200/_snapshot/local/$snapshot_id/_restore?wait_for_completion=true"

@@ -1,0 +1,149 @@
+<% track_render_partial("actions/graph", trace: true) do %>
+  <div role="region" aria-label="Workflow run graph" class="js-updatable-content js-socket-channel"
+      <% if update_on_execution_change? %>
+        data-channel="<%= live_update_view_channel(workflow_run.execution_channel) %>"
+        data-url="<%= workflow_run_graph_partial_path(workflow_run_id: workflow_run.id, repository: workflow_run.repository, user_id: workflow_run.repository.owner_display_login) %>"
+      <% end %>>
+    <% if show_graph? %>
+      <%
+        repository_id = workflow_run.repository.id
+        session_id = GitHub.context[:actor_session].to_s
+        hydro_event = "actions.execution_graph_click"
+        hydro_setup_any = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "any" })
+        hydro_setup_zoom_in = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "zoom_in" })
+        hydro_setup_zoom_out = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "zoom_out" })
+        hydro_setup_screen_full = hydro_click_tracking_attributes(hydro_event, { repository_id: repository_id, session_id: session_id, click_area: "screen_full" })
+      %>
+      <action-graph data-hpc>
+        <div
+          class="actions-fullwidth-module WorkflowGraph color-shadow-small mb-3 border rounded color-bg-inset overflow-hidden position-relative p-2 border-top-0 border-md-top"
+          style="min-height: 200px; max-height: 600px;"
+          tabindex="0"
+          data-target="action-graph.canvas"
+          data-hydro-click="<%= hydro_setup_any["hydro-click"] %>"
+          data-hydro-click-hmac="<%= hydro_setup_any["hydro-click-hmac"] %>">
+          <%= render Actions::Graph::GraphHeaderComponent.new(
+              name: graph.name,
+              href: workflow_run.dynamic_workflow? ? nil : workflow_run_file_path(
+                user_id: workflow_run.repository.owner,
+                repository: workflow_run.repository,
+                workflow_run_id: workflow_run.id
+              ),
+              trigger: graph.trigger,
+              is_required_workflow_execution: workflow_run.required_workflow_run?,
+            ) %>
+          <div
+            class="width-full height-full position-relative px-2 mx-md-1"
+            style="touch-action: none; user-select: none; transform-origin: left top;"
+            <%# Cancel the selection start event, otherwise Safari is displaying a text selection cursor when dragging %>
+            data-action="selectstart:action-graph#cancelEvent">
+            <div class="visual-graph" data-target="action-graph.visualGraph" data-x="0" data-y="0" style="opacity: 0">
+
+              <div class="d-inline-flex flex-row position-relative" style="transform-origin: left top;" data-target="action-graph.stages">
+                <svg
+                  class="WorkflowConnectors position-absolute top-0 left-0"
+                  data-targets="action-graph.connectorLines"
+                  width="900"
+                  height="100%"
+                  aria-hidden="true"
+                  fill="none">
+                  <% graph.lines.each do |line| %>
+                    <path
+                      class="WorkflowConnector"
+                      data-from="<%= line[:from] %>"
+                      data-to="<%= line[:to] %>"
+                      fill="none"
+                      d="" <%# Path is going to be calculated dynamically client-side %>
+                      data-targets="action-graph.paths" />
+                  <% end %>
+                </svg>
+
+                <%#
+                  Second set of lines used for highlighting. We need a separate set in order to do the correct z-ordering
+                  among highlighted and faded out cards and lines
+                %>
+                <svg
+                  class="WorkflowConnectors position-absolute top-0 left-0"
+                  data-target="action-graph.connectorLineHighlights"
+                  data-targets="action-graph.connectorLines"
+                  width="900"
+                  height="100%"
+                  aria-hidden="true"
+                  fill="none">
+                  <% graph.lines.each do |line| %>
+                    <path
+                      class="WorkflowConnector WorkflowConnector--hl"
+                      data-from="<%= line[:from] %>"
+                      data-to="<%= line[:to] %>"
+                      fill="none"
+                      d="" <%# Path is going to be calculcated dynamically client-side %>
+                      data-targets="action-graph.paths action-graph.pathHighlights" />
+                  <% end %>
+                </svg>
+
+                <%= render Actions::Graph::StageComponent.with_collection(graph.stages, workflow_run: workflow_run, execution: @execution, retry_blankstate: @retry_blankstate, pull_request_number: pull_request_number) %>
+              </div>
+
+              <div aria-hidden="true" class="position-absolute text-small" style="top: -200px; left: -4000px">
+                <p>Oh hello! Nice to see you.</p>
+                <p>Made with ❤️ by <a class="Link--inTextBlock" href="https://actions.github.io/humans.txt" tabindex="-1">humans.txt</a></p>
+              </div>
+            </div>
+          </div>
+          <div class="position-absolute bottom-0 right-0 mr-3 mb-3 pr-1 pb-1 d-flex gap-2">
+            <%= render Primer::Beta::IconButton.new(
+              size: :small,
+              disabled: true,
+              icon: :"screen-full",
+              aria: {label: "Fit to window"},
+              data: {
+                action: "click:action-graph#fit",
+                target: "action-graph.zoomFit",
+                "hydro-click": hydro_setup_screen_full["hydro-click"],
+                "hydro-click-hmac": hydro_setup_screen_full["hydro-click-hmac"]
+              }
+            ) %>
+            <%= render Primer::Beta::ButtonGroup.new(size: :small) do |button_group| %>
+              <% button_group.with_button(
+                  icon: :dash,
+                  disabled: true,
+                  aria: {label: "Zoom out"},
+                  data: {
+                    action: "click:action-graph#out",
+                    target: "action-graph.zoomOut",
+                    "hydro-click": hydro_setup_zoom_out["hydro-click"],
+                    "hydro-click-hmac": hydro_setup_zoom_out["hydro-click-hmac"]
+                  }
+                ) %>
+              <% button_group.with_button(
+                icon: :plus,
+                disabled: true,
+                aria: {label: "Zoom in"},
+                data: {
+                  action: "click:action-graph#in",
+                  target: "action-graph.zoomIn",
+                  "hydro-click": hydro_setup_zoom_in["hydro-click"],
+                  "hydro-click-hmac": hydro_setup_zoom_in["hydro-click-hmac"]
+                }
+              ) %>
+            <% end %>
+          </div>
+        </div>
+      </action-graph>
+    <% else %>
+      <div class="actions-fullwidth-module mb-3 border rounded color-bg-inset overflow-hidden position-relative p-2 color-fg-muted">
+        <%= render Primer::Beta::Blankslate.new(spacious: true) do |c| %>
+          <% c.with_visual_icon(icon: "workflow", size: :medium) %>
+
+          <% c.with_heading(tag: :h2) do %>
+            This workflow graph cannot be shown
+          <% end %>
+
+          <% c.with_description do %>
+            A graph will be generated the next time this workflow is run.
+          <% end %>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

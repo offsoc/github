@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+
+require "getoptlong"
+require File.expand_path("../../config/basic", __FILE__)
+require "github/sql"
+require "github/dgit"
+require "github/config/mysql"
+
+GitHub.load_activerecord
+
+def usage(msg = nil)
+  $stderr.puts msg, nil if msg
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} [--gist] host [host2 [host3 [...]]]"
+  exit 1
+end
+
+def find_networks(hosts)
+  networks = GitHub::DGit::Util.network_ids_on_hosts(hosts)
+  return if networks.empty?
+
+  sql = Arel.sql <<-SQL, networks: networks
+    SELECT rn.id, CONCAT(r.owner_login, '/', r.name) AS nwo
+      FROM repository_networks rn
+      JOIN repositories r ON rn.root_id=r.id
+      WHERE rn.id IN (:networks)
+  SQL
+  ApplicationRecord::Domain::Repositories.connection.select_rows(sql).each do |row|
+    printf "%12d %s\n", *row
+  end
+end
+
+def find_gists(hosts)
+  gists = GitHub::DGit::Util.gist_ids_on_hosts(hosts)
+  return if gists.empty?
+
+  sql = Arel.sql <<-SQL, gists: gists
+    SELECT g.id, g.repo_name
+      FROM gists g
+      WHERE g.id IN (:gists)
+  SQL
+  ApplicationRecord::Domain::Gists.connection.select_rows(sql).each do |row|
+    printf "%12d gist/%s\n", *row
+  end
+end
+
+action = method(:find_networks)
+hosts = []
+ARGV.each do |arg|
+  case arg
+  when "--gist", "--gists"
+    action = method(:find_gists)
+  when /^-/
+    usage
+  else
+    hosts << GitHub::DGit::Util.long_host(arg)
+  end
+end
+usage unless hosts.length >= 1
+
+ActiveRecord::Base.connected_to(role: :reading_slow) do
+  action.call(hosts)
+end

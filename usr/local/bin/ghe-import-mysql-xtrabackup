@@ -1,0 +1,379 @@
+#!/bin/bash
+# Usage: ghe-import-mysql-xtrabackup [-h] | <file>
+#/
+#/ Import a backup taken with ghe-export-mysql-xtrabackup.
+#/ This can be run from either MySQL primary node or replica node,
+#/ with the behavior changing depending on node type.
+#/
+#/ When run on a MySQL primary node, metadata tables are snapshotted and imported.
+#/ Once that happens, the seed file used is no longer valid and is deleted.
+#/
+#/ OPTIONS:
+#/   -h | --help               Show this message.
+#/   --restore-from-external   Restore from external database, it will skip metadata tables and skip starting MySQL
+#/
+#/ EXAMPLE:
+#/
+#/  Import the MySQL data from a backup file:
+#/    $ ghe-import-mysql-xtrabackup < backup.tar.gz
+#/
+#/  Transfer the MySQL data from another appliance to this appliance:
+#/    $ ssh -p 122 admin@[hostname] -- ghe-export-mysql-xtrabackup | ghe-import-mysql-xtrabackup
+#/
+set -e
+
+export MYSQL_DATADIR=/data/user/mysql
+export MYSQL_BACKUP_DATADIR=/data/user/mysql-backup
+export USER_DATA_DIR=/data/user/tmp
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mysql-lib
+. /usr/local/share/enterprise/ghe-mysql-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. /usr/local/share/enterprise/ghe-repl-lib
+
+# Usage: error_message <message>
+error_message() {
+  (>&2 echo "${1}") | ts
+}
+
+usage () {
+  grep "^#/" <"$0" | cut -c4-
+  #shellcheck disable=SC2086
+  exit 2
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,restore-from-external --options h -- "$@") || {
+  usage
+}
+
+#shellcheck disable=SC2086
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    --restore-from-external)
+      RESTORE_FROM_EXTERNAL=1
+      ;;
+    --)
+      break
+      ;;
+  esac
+  shift
+done
+
+message() {
+  echo "${1}" | ts
+}
+
+run_sql_cmd() {
+  sudo mysql -u root -e "$1"
+}
+
+ghe_run_sql_cmd() {
+  sudo mysql -u root --database="github_enterprise" -e "$1"
+}
+
+snapshot_metadata_tables() {
+  mkdir -p /tmp/github_enterprise
+
+  # dump schemas for metadata table
+  message "Dump metadata table schema"
+  table_list=$(echo $tables |  tr ',' ' ')
+  sudo mysqldump \
+    --user=${GHE_MYSQL_USER:-root} \
+    --default-character-set=utf8 \
+    --hex-blob \
+    --single-transaction \
+    --quick \
+    --set-gtid-purged=OFF \
+    --ssl-mode=DISABLED \
+    --no-data \
+    github_enterprise \
+    $table_list \
+    > /tmp/github_enterprise/metadata_tables.sql
+
+  message "Export tablespace of metadata tables: $tables"
+  sqlcmd="FLUSH TABLES $tables FOR EXPORT;"
+  # run sql with session open -- cfg files will be deleted after session is closed
+  exec 3> >(sudo mysql -u root --database="github_enterprise" )
+  echo $sqlcmd >&3
+
+  # Copy tablespace files
+  old_IFS=$IFS
+  IFS=', ' read -r -a array <<< $tables
+  IFS=$old_IFS
+
+  sleep 1
+  for table in "${array[@]}"
+  do
+    count=0
+    # We found that the cfg file might not be ready if we try to copy immediately
+    while ! sudo ls /data/user/mysql/github_enterprise/$table.cfg
+    do
+      message "wait for /data/user/mysql/github_enterprise/$table.cfg to be ready"
+      sleep 1
+      if [ $((count++)) -ge 10 ] ; then
+        error_message "Time out on get /data/user/mysql/github_enterprise/$table.cfg!"
+        exit 2
+      fi
+    done
+
+    # note that if encryption is enabled, we also need to copy .cfp file along with .cfg
+    sudo cp /data/user/mysql/github_enterprise/$table.{ibd,cfg} /tmp/github_enterprise/
+  done
+  ## close sql connection
+  exec 3>&-
+
+  message "Unlock tables"
+  ghe_run_sql_cmd "UNLOCK TABLES;"
+}
+
+import_metadata_tables_snapshot() {
+  # Re-create metadata_table schema from dump
+  message "Create metadata table schema"
+  cat /tmp/github_enterprise/metadata_tables.sql | sudo mysql -u root --database="github_enterprise"
+
+  # DISCARD TABLESPACE
+  old_IFS=$IFS
+  IFS=', ' read -r -a array <<< $tables
+  IFS=$old_IFS
+  for table in "${array[@]}"
+  do
+    # Discard tablespace
+    message "Discard Tablespace for $table"
+    ghe_run_sql_cmd "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;ALTER TABLE $table DISCARD TABLESPACE;SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;"
+
+    count=0
+    sleep 1
+    # We found that the ibd file might not be deleted immediately after discard tablespace
+    while sudo ls /data/user/mysql/github_enterprise/$table.ibd &> /dev/null
+    do
+      message "wait for /data/user/mysql/github_enterprise/$table.ibd to be deleted"
+      sleep 1
+      if [ $((count++)) -ge 10 ] ; then
+        error_message "Time out on waiting for DISCARD command to delete /data/user/mysql/github_enterprise/$table.ibd!"
+        exit 2
+      fi
+    done
+
+    # copy tablespace files back to database directory
+    sudo cp /tmp/github_enterprise/$table.{ibd,cfg} /data/user/mysql/github_enterprise/
+  done
+
+  ## chown for mysql
+  sudo chown -R mysql:mysql /data/user/mysql/github_enterprise/
+  sudo sh -c 'chmod ug+w /data/user/mysql/github_enterprise/*.ibd'
+
+  for table in "${array[@]}"
+  do
+    # Import tablespace
+    message "Import Tablespace for $table"
+    ghe_run_sql_cmd "ALTER TABLE $table IMPORT TABLESPACE;"
+  done
+}
+
+backup_mysql_datadir() {
+  space_ratio_required=$(ghe-config mysql.backup.space-ratio-required) || space_ratio_required=3
+  available_mb="$(df -m /data/user | tail -n +2 | awk '{print $4}')"
+  datadir_mb="$(sudo du -sm /data/user/mysql | awk '{print $1}')"
+  available_ratio="$(bc -l <<< "$available_mb / $datadir_mb")"
+  message "Available space for data: $available_mb (MB). Existing datadir: $datadir_mb (MB). Available ratio: $available_ratio"
+  if (( $(bc -l <<< "$available_ratio < $space_ratio_required") )) ; then
+    error_message "We expect there is high ratio ($space_ratio_required) of available space to backup existing MySQL directory before restore, currently the available ratio is $available_ratio."
+    error_message "You can configure this setting by running ghe-config mysql.backup.space-ratio-required <int_ratio>"
+    # restart mysql service
+    message "Restarting MySQL service"
+    start_mysql
+    exit 2
+  fi
+
+  if [ -e "$MYSQL_BACKUP_DATADIR" ]; then
+    sudo rm -rf $MYSQL_BACKUP_DATADIR
+    message "Previous emergency copy $MYSQL_BACKUP_DATADIR is deleted!"
+  fi
+
+  sudo mv $MYSQL_DATADIR $MYSQL_BACKUP_DATADIR
+  message "Existing MySQL directory backed up to $MYSQL_BACKUP_DATADIR. If you need to restore from that, run \"sudo rm -rf $MYSQL_DATADIR\" and then \"sudo mv $MYSQL_BACKUP_DATADIR $MYSQL_DATADIR\""
+}
+
+
+catch() {
+  if [ "$1" != "0" ]; then
+    # error handling goes here
+    error_message "Database restore failed. Error: $1. Emergency copy can be found at $MYSQL_BACKUP_DATADIR"
+    exit "$1"
+  fi
+}
+
+
+# flip_mysql_replica_eligibility
+#  Allows disabling (and re-enabling) starting mysql allocation the current node.
+#  Does not automatically stop running allocations.
+flip_mysql_replica_eligibility() {
+  if [ "$1" = "disable" ]; then
+    # Back out this node from available mysql nodes of nomad jobs
+    # so it won't be started accidentally by other replica restores
+    sudo sed -i -e 's/disable_mysql_replica = "false"/disable_mysql_replica = "true"/' /etc/nomad.d/config.hcl
+    nomad node meta apply disable_mysql_replica=true # manually sync the node metadata with the nomad node api to avoid a nomad restart
+  elif [ "$1" = "enable" ]; then
+    # Put this node back to available mysql nodes of nomad job
+    sudo sed -i -e 's/disable_mysql_replica = "true"/disable_mysql_replica = "false"/' /etc/nomad.d/config.hcl
+    nomad node meta apply disable_mysql_replica=false # manually sync the node metadata with the nomad node api to avoid a nomad restart
+  fi
+}
+
+restore() {
+  # disable auto-failover before restore on cluster master. Later config apply will re-enable auto-failover
+  if [ "$is_cluster_primary" = "true" ] && ghe-config --true "cluster.mysql-auto-failover" ; then
+    /usr/share/orchestrator/orchestrator-client -c disable-global-recoveries || true
+  fi
+
+  # stop mysql service
+  message "Stop MySQL service"
+  stop_mysql
+
+  if [ "$is_primary" = "true" ] ; then
+    # Backup mysql datadir
+    backup_mysql_datadir
+  fi
+
+  trap 'catch $?' EXIT
+
+  if is_cluster && [ "$is_cluster_primary" != "true" ] ; then
+    # In cluster, during database seeding on a replica, we need to prevent race condition that
+    # other mysql replica accidentally start mysql job on this node (through start_mysql).
+    flip_mysql_replica_eligibility "disable"
+  fi
+
+  # ensure datadir is empty
+  message "Purge MySQL folder"
+
+  # When restoring to an unconfigured host, the $MYSQL_DATADIR directory will not be present.
+  # Attempting to create it here prevents the subsequent `find` command from failing.
+  sudo mkdir -p $MYSQL_DATADIR
+  sudo find "$MYSQL_DATADIR" -mindepth 1 -delete
+
+  # prepare for binary backup using xtrabackup
+  message "Prepare backup"
+
+  # for some of the commands we need to use our defaults file but some commands need to be run without defaults.
+  XTRABACKUP_CMD="xtrabackup8 --defaults-file=${MYSQL_DATADIR}/backup-my.cnf --open-files-limit=1048576"
+  XTRABACKUP_CMD_NO_DEFAULT="xtrabackup8 --open-files-limit=1048576"
+  message "xtracting from stream"
+  cd ${MYSQL_DATADIR}
+  sudo mkdir -p /var/log/xtrabackup
+  # first extract the compressed stream
+  cat | sudo xbstream -x 2>&1 | ts | sudo sponge /var/log/xtrabackup/xtrabackup-import.log
+  message "decompressing files into temporary directory ${MYSQL_DATADIR}"
+  sudo ${XTRABACKUP_CMD_NO_DEFAULT} --decompress --remove-original --target-dir=${MYSQL_DATADIR}/ 2>&1 | ts | sudo sponge /var/log/xtrabackup/xtrabackup-import.log
+
+  # if we supply the environment variable INCREMENTAL_RESTORE, then we are restore from incremental
+  # restores which would have already been uploaded by backup-utils
+  if [ -f "/tmp/incremental-backup-files.txt" ]; then
+    INCREMENTAL_RESTORE=$(cat /tmp/incremental-backup-files.txt)
+    message "performing incremental restore"
+    message "preparing full backup in temporary directory ${MYSQL_DATADIR}"
+    sudo ${XTRABACKUP_CMD} --prepare --apply-log-only --target-dir=${MYSQL_DATADIR}/ 2>&1 | ts | sudo sponge /var/log/xtrabackup/xtrabackup-import.log
+    message "performing incremental restore for snapshots"
+    for i in $(cat /tmp/incremental-backup-files.txt); do
+      if [ ! -d "$USER_DATA_DIR/$i" ]; then
+        message "incremental directory $USER_DATA_DIR/tmp/$i not present! aborting backup"
+        exit 1
+      fi
+      message "decompressing $MYSQL_DATADIR/tmp/mysql.sql.gz into $MYSQL_DATADIR/tmp/$i"
+      message "sudo xbstream -x -C '$USER_DATA_DIR/$i' < '$USER_DATA_DIR/$i/mysql.sql.gz'"
+      sudo xbstream -x -C "$USER_DATA_DIR/$i" < "$USER_DATA_DIR/$i/mysql.sql.gz"
+      sudo ${XTRABACKUP_CMD} --prepare --apply-log-only --target-dir=${MYSQL_DATADIR}/ --incremental-dir=${USER_DATA_DIR}/$i 2>&1 | ts | sudo sponge /var/log/xtrabackup/xtrabackup-import.log
+    done
+  else
+    message "preparing files in temporary directory ${MYSQL_DATADIR}"
+    sudo ${XTRABACKUP_CMD} --prepare --target-dir=${MYSQL_DATADIR}/ 2>&1 | ts | sudo sponge /var/log/xtrabackup/xtrabackup-import.log
+  fi
+
+  # chown for MySQL
+  message "Change owner to MySQL"
+  sudo chown -R mysql:mysql ${MYSQL_DATADIR}
+
+  # flip method is only needed for cluster seeding
+  if is_cluster && [ "$is_cluster_primary" != "true" ] ; then
+    # After seeding is done, it is safe to put this node back to
+    # avaialble nodes to start MySQL job
+    flip_mysql_replica_eligibility "enable"
+  fi
+
+  # start mysql
+  message "Start MySQL service"
+  start_mysql
+
+  # the default timeout is 900 seconds
+  if ! /usr/local/share/enterprise/ghe-service-wait-mysql --all; then
+    error_message "Failed to start MySQL service!"
+    exit 2
+  fi
+
+  message "MySQL service started"
+
+  set +e
+  if [ -f /etc/github/cluster ] && [ -z "$RESTORE_FROM_EXTERNAL" ] ; then
+    # Suppress ghe-repl-status-mysql output as can be misleading in this
+    # context, and we only care about the return code
+    /usr/local/share/enterprise/ghe-repl-status-mysql --check 2>/dev/null
+    replication_status=$?
+    if [ "$is_cluster_primary" = "true" ] ; then
+      message "Import the snapshot of metadata tables"
+      import_metadata_tables_snapshot
+    elif [ "$replication_status" -eq "0" ] ; then
+      message "Replication is running, skipping setting GTID for replication"
+    else
+      # Reset master and set GTID for replication. Note that we can safely assume gtid_mode is ON
+      message "Set GTID from backup"
+      gtid_executed=$(sudo cat /data/user/mysql/xtrabackup_binlog_info | cut -f3)
+      message "Reset to GTID: ${gtid_executed}"
+      run_sql_cmd "RESET MASTER"
+      run_sql_cmd "SET global gtid_purged='${gtid_executed}'"
+
+      message "Replication not started yet. If this called by ghe-repl-start, replication will be started with later steps"
+    fi
+  fi
+  set -e
+
+  # restore succeeded
+  message "Restore succeeded"
+
+  if [ "$is_primary" = "true" ] ; then
+    message "Emergency copy of $MYSQL_DATADIR is saved at $MYSQL_BACKUP_DATADIR. After you are sure the restore was successful, please delete this copy"
+  fi
+}
+
+if [ -f /etc/github/cluster ] && [ -z "$RESTORE_FROM_EXTERNAL" ]; then
+  local_host="$(cat /etc/github/cluster)"
+  mysql_primary="$(ghe-config cluster.mysql-master)"
+  if [ "$local_host" == "$mysql_primary" ]; then
+    is_primary="true"
+    is_cluster_primary="true"
+
+    # Replication can not be set up with older seed file after restore
+    # due to tablespace transactions that are not applicable for transaction replay
+    message "Delete MySQL seed file before restore"
+    MYSQL_SEED_DIR="/data/user/common/mysql"
+    SEED_FILE="$MYSQL_SEED_DIR/database_seed_$(cat /data/user/common/uuid).tar.gz"
+    sudo rm -f "$SEED_FILE"
+
+    # Stop all the replications
+    # TODO: this appears to break the import and is done later when setting up replication
+    # ghe-cluster-each -r mysql -- "sudo mysql -u root -e 'STOP SLAVE; RESET SLAVE ALL;' || true"
+
+    message "Restore on MySQL primary node in cluster mode: $mysql_primary, taking snapshot on git metadata tables"
+    tables="fileservers,network_replicas,repository_replicas,repository_checksums,pages_fileservers,pages_partitions,pages_replicas,gist_replicas,storage_replicas,storage_file_servers,cold_networks"
+    snapshot_metadata_tables
+  fi
+else
+  is_primary="true"
+fi
+
+
+restore

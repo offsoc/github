@@ -1,0 +1,188 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedInPrimerCounter 5 %>
+<%# `view` is an instance of Issues::IssueListItem %>
+
+<div id="<%= view.id %>" class="<%= view.classes %>" data-id="<%= view.issue.id %>" <% unless view.global %>data-pjax="#repo-content-pjax-container" data-turbo-frame="repo-content-turbo-frame"<% end %>>
+  <div class="d-flex Box-row--drag-hide position-relative">
+    <% if view.show_drag_controls? %>
+      <div class="flex-shrink-0 v-align-top pt-2 pr-1 color-fg-default Box-row--drag-button <% if view.draggable? %>js-drag-handle<% end %> pl-2" style="width:21px;"> <!-- To line up with checkbox in filter bar -->
+        <% if view.draggable || view.drag_disabled_message.blank? %>
+          <%= primer_octicon(:grabber, style: "width: 12px", vertical_align: :text_bottom) %>
+        <% else %>
+          <span class="tooltipped tooltipped-ne tooltipped-multiline" aria-label="<%= view.drag_disabled_message %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+            <%= primer_octicon(:grabber, style: "width: 12px", vertical_align: :text_bottom) %>
+          </span>
+        <% end %>
+      </div>
+      <%= render Primer::ButtonComponent.new(scheme: :link, "aria-label": "Move up", ml: 2, mt: 2, left: 0, top: 0, classes: "show-on-focus sortable-button js-sortable-button", "data-direction": "up") do %><%= primer_octicon(:"chevron-up") %><% end %>
+      <%= render Primer::ButtonComponent.new(scheme: :link, "aria-label": "Move down", ml: 2, mt: 2, left: 0, top: 0, classes: "show-on-focus sortable-button js-sortable-button", "data-direction": "down") do %><%= primer_octicon(:"chevron-down") %><% end %>
+    <% end %>
+
+    <%# checkbox and issue open icon %>
+    <% if !view.hide_checkbox? && current_repository && current_repository_writable? && current_user_can_push? %>
+      <label class="flex-shrink-0 py-2 <% if view.show_drag_controls? %>pl-1<% else %>pl-3<% end %>  <% if responsive? %>d-none d-md-block<% end %>">
+        <input type="checkbox" data-check-all-item class="js-issues-list-check" name="issues[]" value="<%= view.issue.number %>" aria-labelledby="<%= "#{view.id}_link" %>" autocomplete="off">
+      </label>
+    <% end %>
+
+    <div class="flex-shrink-0 pt-2 pl-3">
+      <span class="tooltipped tooltipped-e" aria-label="<%= view.icon_tooltip %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+        <%= octicon(view.icon, class: view.icon_class) %>
+      </span>
+    </div>
+
+    <!-- Issue title column -->
+    <div class="flex-auto min-width-0 p-2 <% if responsive? %>pr-3 pr-md-2<% end %>">
+      <% if view.global %>
+        <%= link_to view.issue.repository.permalink, class: "v-align-middle Link--muted h4 pr-1", data: hovercard_data_attributes_for_repository(view.issue.repository) do %>
+          <%= view.issue.repository.name_with_display_owner %>
+        <% end %>
+      <% end %>
+
+      <%= link_to title_markdown(view.issue.title), issue_permalink_path(view.issue),
+        id: "#{view.id}_link",
+        class: "Link--primary v-align-middle no-underline h4 js-navigation-open markdown-title",
+        data: hovercard_data_attributes_for_issue_or_pr(view.issue) %>
+
+      <% if view.issue.pull_request? && current_user %>
+        <%= render "statuses/deferred_icon", commit_oid: view.issue.pull_request.head_sha, dropdown_direction: "e", url: checks_statuses_batch_rollup_path(user_id: view.issue.repository.owner_display_login, repository: view.issue.repository), disable_live_updates: true %>
+      <% end %>
+
+      <% if view.issue.labels.any? %>
+        <span class="lh-default <% if responsive? %>d-block d-md-inline<% end %>">
+          <% view.issue.sorted_labels.each do |label| %>
+              <%= render Issues::LabelComponent.new(
+                  color: label.color,
+                  name: label.name,
+                  description: label.description,
+                  href: issues_search_query(
+                          replace: { label: nil },
+                          append: [[:label, label.name]],
+                          pulls_only: view.pulls_only)) do |component| %>
+                <%= label.name_html %>
+              <% end %>
+          <% end %>
+        </span>
+      <% end %>
+      <div class="d-flex mt-1 text-small color-fg-muted">
+        <span class="opened-by">
+          #<%= view.issue.number %>
+          <% if view.issue.open? %>
+            opened <%= time_ago_in_words_js(view.issue.created_at) %> by
+            <%= profile_link view.issue.safe_user, class: "Link--muted", title: "Open #{view.type_name}s created by #{view.issue.safe_user.display_login}", url: view.target_path(q: view.query_filter) %>
+            <%= bot_identifier(view.issue.safe_user) %>
+          <% else %>
+            by <%= profile_link view.issue.safe_user, class: "Link--muted", title: "#{view.type_name}s opened by #{view.issue.safe_user.display_login}", url: view.target_path(q: view.query_filter) %>
+            <%= bot_identifier(view.issue.safe_user) %>
+            <% if closed_at = view.issue.closed_at %>
+              was <%= view.status %> <%= time_ago_in_words_js(closed_at) %>
+            <% end %>
+          <% end %>
+        </span>
+
+        <% if responsive? %><span class="d-none d-md-inline-flex"><% end %>
+        <% if view.issue.pull_request %>
+          <%= render :partial => "pull_requests/review_status", :locals => { :pull_request => view.issue.pull_request } %>
+        <% end %>
+
+        <% if issues_search_term_values(:sort).first.try(:include?, "updated") %>
+          <span class="issue-meta-section ml-2">
+            <%= render(Primer::Beta::Octicon.new(icon: "clock")) %>
+            updated <%= time_ago_in_words_js(view.issue.updated_at) %>
+          </span>
+        <% end %>
+
+        <%= render_nothing_if_database_fails do %>
+          <%= task_list(view.subject) if view.task_list? %>
+        <% end %>
+
+        <% if responsive? %></span><% end %>
+
+        <% unless view.hide_milestone? %>
+          <% if view.issue.milestone %>
+            <span class="issue-meta-section css-truncate issue-milestone ml-2 <% if responsive? %>d-none d-md-inline<% end %>">
+              <a class="milestone-link Link--muted css-truncate tooltipped tooltipped-n" aria-label="<%= h(view.issue.milestone.title) %>" href="<%= gh_milestone_path(view.issue.milestone, current_repository) %>"><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                <%= primer_octicon(:milestone, :"aria-label" => "Milestone") %>
+                <span class="css-truncate-target">
+                  <%= h(view.issue.milestone.title) %>
+                </span>
+              </a>
+            </span>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="flex-shrink-0 col-4 col-md-3 pt-2 text-right pr-3 no-wrap d-flex <% if responsive? %>hide-sm<% end %> ">
+        <%
+          first_three = view.issue.assignees.first(3)
+          tooltip = view.assignees_tooltip
+        %>
+
+      <span class="ml-2 flex-1 flex-shrink-0">
+        <% if view.any_linked_xrefs? %>
+          <%
+            xref_subject_name = view.xref_subject.pluralize(view.linked_xrefs_count)
+            xref_tooltip_label = "#{view.linked_xrefs_count} linked #{xref_subject_name}"
+            xref_aria_label = "#{view.linked_xrefs_count} #{xref_subject_name}"
+          %>
+          <span class="tooltipped tooltipped-sw tooltipped-multiline tooltipped-align-right-1 mt-1" aria-label="<%= xref_tooltip_label %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+            <% if view.linked_xrefs_count > 1 %>
+              <span class="color-fg-muted" aria-label="<%= xref_aria_label %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse %>
+                <%= primer_octicon(view.xref_octicon, vertical_align: :middle) %>
+                <span class="text-small text-bold"><%= view.linked_xrefs_count %> </span>
+              </span>
+            <% else %>
+              <a aria-label="<%= xref_aria_label %>" href="<%= linked_closing_reference_path(view.issue.repository.owner, view.issue.repository, view.issue, params: { reference_location: view.reference_location }) %>" class="Link--muted">
+                <span class="color-fg-muted">
+                  <%= primer_octicon(view.xref_octicon, vertical_align: :middle) %>
+                  <span class="text-small text-bold"><%= view.linked_xrefs_count %></span>
+                </span>
+              </a>
+            <% end %>
+          </span>
+        <% end %>
+      </span>
+
+      <span class="ml-2 flex-1 flex-shrink-0">
+        <div class="AvatarStack AvatarStack--right ml-2 flex-1 flex-shrink-0 <%= avatar_stack_count_class(view.issue.assignees.length) %>">
+          <div class="AvatarStack-body tooltipped tooltipped-sw tooltipped-multiline tooltipped-align-right-1 mt-1"
+            aria-label="Assigned to <%= tooltip %>"><%# erblint:disable GitHub::Accessibility::NoAriaLabelMisuse, Primer::Accessibility::TooltippedMigration %>
+            <% view.issue.assignees.each_with_index do |assignee, index| %>
+              <% if view.issue.assignees.size > 3 && index == 2 %>
+                <div class="avatar-more avatar"></div>
+              <% end %>
+
+              <%= link_to view.target_path(q: "assignee:#{assignee.display_login} is:open", pulls_only: view.pulls_only),
+                    :class => avatar_class_names(assignee),
+                    "aria-label" => "#{assignee.display_login}’s assigned issues" do %>
+                <%= avatar_for(assignee, 20, class: "from-avatar") %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      </span>
+
+      <span class="ml-2 flex-1 flex-shrink-0">
+        <% if view.any_comments? %>
+          <a href="<%= issue_permalink_path(view.issue) %>" class="Link--muted" aria-label="<%= pluralize view.comment_count, "comment" %>">
+            <%= primer_octicon(:comment, vertical_align: :middle) %>
+            <span class="text-small text-bold"><%= view.comment_count %></span>
+          </a>
+        <% end %>
+      </span>
+      <% if view.any_reactions? %>
+        <span class="ml-2 flex-1 flex-shrink-0">
+          <a href="<%= issue_permalink_path(view.issue) %>" class="Link--muted" aria-label="<%= pluralize view.reaction_count, "reaction" %>">
+            <%= emoji_tag(view.emotion.emoji_character, alias: view.emotion.content, class: "emoji m-0 v-align-baseline") %>
+            <span class="text-small text-bold" <%= test_selector "issue-reactions-count" %>><%= number_to_human(view.reaction_count, units: {:thousand => "k"}, format: "%n%u") %></span>
+          </a>
+        </span>
+      <% end %>
+    </div>
+
+    <% if responsive? %>
+      <%= link_to "", issue_permalink_path(view.issue), class: "d-block d-md-none position-absolute top-0 bottom-0 left-0 right-0", "aria-label": "Link to Issue. #{view.issue.title}" %>
+    <% end %>
+  </div>
+</div>

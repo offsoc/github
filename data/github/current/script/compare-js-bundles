@@ -1,0 +1,76 @@
+#!/bin/sh
+
+# exit on error
+set -e
+
+# Before running this, run webpack to generate the bundles in two different ways
+# ensuring different output directories or manifest file names.
+# You can then run this script with references to the two manifest.json files to compare the bundles.
+
+# Fail if manifests are not provided
+if [ -z "$1" ] || [ -z "$2" ]; then
+  echo "Usage: compare-js-bundles <first_manifest.json> <second_manifest.json>"
+  exit 1
+fi
+
+# Use jq to get file names from manifest.json
+first_manifest_files=$(jq -r '.[] | .src' "$1")
+second_manifest_files=$(jq -r '.[] | .src' "$2")
+
+# Loop through the files in the first manifest and compare the file contents to the matching file in the second manifest
+for file in $first_manifest_files; do
+  # strip the hash from the file name by removing everything after the last -
+  file_base=$(echo "$file" | sed 's/-[^-]*$//')
+  new_file=$(echo "$second_manifest_files" | grep "^$file_base-[^-]\+\.js$") || echo ""
+
+  if [ "$new_file" ] ; then
+    file_1_path="$(dirname $1)/$file"
+    file_2_path="$(dirname $2)/$new_file"
+
+    # Make a copy of each file so that we can clean/prettify them before comparing
+    clean_file_1_path="$file_1_path.clean.js"
+    clean_file_2_path="$file_2_path.clean.js"
+    cp $file_1_path $clean_file_1_path
+    cp $file_2_path $clean_file_2_path
+
+    # Clean the files by removing code which we know will change between webpack builds (module numbers, sourcemap refs, etc)
+    module_number_function_sed='s/[0-9]\{2,\}(/NUM(/g'
+    module_number_param_sed='s/\([=,(]\)[0-9]\{2,\}\([,)]\)/\1NUM\2/g'
+
+    sed -i 's/\/\/# sourceMappingURL.*//g' $clean_file_1_path
+    sed -i $module_number_param_sed $clean_file_1_path
+    sed -i $module_number_function_sed $clean_file_1_path
+    sed -i 's/\/\/# sourceMappingURL.*//g' $clean_file_2_path
+    sed -i $module_number_param_sed $clean_file_2_path
+    sed -i $module_number_function_sed $clean_file_2_path
+
+    # Compare the files after cleaning
+    file_1_clean_sha=$(sha1sum $clean_file_1_path | cut -d " " -f 1)
+    file_2_clean_sha=$(sha1sum $clean_file_2_path | cut -d " " -f 1)
+
+    if [ "$file_1_clean_sha" = "$file_2_clean_sha" ]; then
+      echo "✅🧹 Files are the same after cleaning: $file_1_path and $file_2_path"
+      continue
+    fi
+
+    # Files aren't a perfect match yet, run prettier and compare them again
+    prettier --write $clean_file_1_path > /dev/null
+    prettier --write $clean_file_2_path > /dev/null
+
+    # Compare updated file shas after prettier
+    file_1_pretty_sha=$(sha1sum $clean_file_1_path | cut -d " " -f 1)
+    file_2_pretty_sha=$(sha1sum $clean_file_2_path | cut -d " " -f 1)
+
+    if [ "$file_1_pretty_sha" = "$file_2_pretty_sha" ]; then
+      # If they are the same after prettier, then they should be _functionally_ equivalent and don't need review
+      echo "✅✨ Files are the same after prettier: $file_1_path and $file_2_path"
+      continue
+    fi
+
+    # Files are different, open a diff in vscode
+    echo "❌ Files are different $file_1_path and $file_2_path"
+    code --diff $clean_file_1_path $clean_file_2_path
+  else
+    echo "❌ File $file_base is not in the second manifest.json"
+  fi
+done

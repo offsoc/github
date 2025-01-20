@@ -1,0 +1,65 @@
+#!/bin/bash
+# Script for generating a release and pushing the gem.
+# Usage: ./script/release
+
+set -e
+
+echoerr() {
+  printf '\e[31m%s\e[0m\n' "$@"
+}
+
+echosuccess() {
+  printf '\e[32m%s\e[0m\n' "$@"
+}
+
+BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )/.."
+
+##########################################################
+#######check to make sure we're on the right branch#######
+##########################################################
+
+# Make sure we don't have leftover artifacts
+rm -rf pkg/
+mkdir pkg
+
+if ! command -v gh &> /dev/null; then
+  echoerr "gh not installed! Please install \`gh\` to use this script. Exiting..."
+  exit 1
+fi
+
+# Grab version number
+VERSION=$(ruby -I lib -e "require 'windbeam_api/version'; puts WindbeamApi::VERSION")
+
+# Check if we're on the right tag
+current_tag=$(git describe --tags)
+desired_tag="v$VERSION"
+if [ "$current_tag" != "$desired_tag" ]; then
+  echoerr "Should be on tag \`$desired_tag\` to run this script! Exiting..."
+  exit 1
+fi
+
+##############################
+#######create gem build#######
+##############################
+
+# Run build script
+"$BASE_PATH"/script/generate
+
+# Verify
+count=$(find pkg -name "*.gem" | wc -l)
+if [ $count -ne 1 ]; then
+  echoerr "Somehow, the build failed to generate a gem file but didn't error out first. Exiting..."
+  exit 1
+fi
+
+# Show us the file
+ls -l "$BASE_PATH"/pkg/*.gem
+
+############################
+#######create release#######
+############################
+
+gh release create v"$VERSION" --generate-notes --draft "$BASE_PATH"/pkg/windbeam_api-"$VERSION".gem
+
+echosuccess "Release complete! Go to the link above to publish."
+

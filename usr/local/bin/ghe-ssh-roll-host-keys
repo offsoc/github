@@ -1,0 +1,90 @@
+#!/bin/bash
+#/ Usage: ghe-ssh-roll-host-keys
+#/
+#/ This utility will roll the SSH host keys and replace them with
+#/ newly generated ones.
+#/
+#/ OPTIONS:
+#/   -h | --help              Show this message.
+#/   -y | --yes               Answer yes to roll prompt.
+#/
+set -e
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,yes --options hy -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+prompt_less=
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -y|--yes)
+      prompt_less=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+if [ -z "$prompt_less" ]; then
+  echo "Proceed with rolling SSH host keys? This will delete the"
+  read -p "existing keys in /etc/ssh/ssh_host_* and generate new ones. [y/N] "
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+rm -rf /etc/ssh/ssh_host_*
+
+# This will also restart the SSH daemon
+dpkg-reconfigure -f noninteractive openssh-server 2> /dev/null
+
+for i in ssh_host_{rsa,dsa,ecdsa,ed25519}_key{,.pub}
+do
+  [ -f "/etc/ssh/$i" ] && cp "/etc/ssh/$i" /data/user/common/
+  [ -f "/data/user/common/$i" ] || continue
+  chown babeld:babeld "/data/user/common/$i"
+  setfacl -b "/data/user/common/$i"
+done
+
+# noop if HA hasn't been configured
+ghe-repl-sync-settings
+
+if [ -f /etc/github/repl-state -a -f /home/git/.ssh/known_hosts ]; then
+  sudo rm -f /home/git/.ssh/known_hosts
+  if [ -f /etc/github/cluster ]; then
+    for node in $(ghe-cluster-nodes -x); do
+      ip=$(ghe-config cluster.$node.ipv4 || true)
+      if [ -z "$ip" ]; then
+        ip=$(ghe-config cluster.$node.ipv6 || true)
+      fi
+      sudo -u git ssh -p 122 -o LogLevel=error -o PasswordAuthentication=no -o StrictHostKeyChecking=no git@$ip /bin/true
+    done
+  fi
+fi
+
+echo "SSH host keys have successfully been rolled."

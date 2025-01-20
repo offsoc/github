@@ -1,0 +1,106 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require File.expand_path("../../config/environment", __FILE__)
+
+def field_info(properties, field_name)
+  info = []
+  field_definition = properties.fetch(field_name)
+
+  if field_definition.key?(:properties)
+    field_properties = field_definition.fetch(:properties)
+    field_properties.each_key do |sub_field|
+      sub_field_info = field_info(field_properties, sub_field)
+      sub_field_info.each do |sfi|
+        sfi[:field_name] = "#{field_name}.#{sfi.fetch(:field_name)}"
+        info << sfi
+      end
+    end
+  elsif field_definition.key?(:type) && field_definition.fetch(:type) == "multi_field"
+    field_properties = field_definition.fetch(:fields)
+    field_properties.each_key do |sub_field|
+      sub_field_info = field_info(field_properties, sub_field)
+      sub_field_info.each do |sfi|
+        if field_name != sfi.fetch(:field_name)
+          sfi[:field_name] = "#{field_name}.#{sfi.fetch(:field_name)}"
+        end
+
+        info << sfi
+      end
+    end
+  else
+    info << { field_name: field_name, type: field_definition.fetch(:type), options: field_definition.except(:type) }
+  end
+
+  info
+end
+
+def fields_for_mapping(mapping_definition)
+  info = []
+
+  properties = mapping_definition.fetch(:properties)
+
+  properties.each_key do |field_name|
+    info.concat(field_info(properties, field_name))
+  end
+
+  info
+end
+
+def es_schema
+  Elastomer.env.indices.each_with_object({}) do |index, hash|
+    index.mappings_hook.each do |name, mapping_definition|
+      hash[name] = fields_for_mapping(mapping_definition)
+    end
+  end
+end
+
+# Helper to to sort hashes in reverse by their string representation.
+# This allows types with no options to be displayed first.
+class OptionSorter
+  attr_reader :options
+
+  def initialize(options)
+    @options = options
+  end
+
+  def <=>(other)
+    (options.inspect <=> other.options.inspect) * -1
+  end
+end
+
+def unique_types(schema)
+  schema.values
+    .flatten
+    .map { |f| [f.fetch(:type), f.fetch(:options)] }
+    .uniq
+    .sort_by { |f| [f.first, OptionSorter.new(f.last)] }
+end
+
+def field_options_string(options)
+  options.empty? ? "" : options.inspect
+end
+
+schema = es_schema
+
+schema.each do |mapping_name, fields|
+  table = Terminal::Table.new do |t|
+    t.title = mapping_name
+    t.headings = ["field name", "type", "options"]
+    fields.each do |field|
+      t.add_row([field.fetch(:field_name), field.fetch(:type), field_options_string(field.fetch(:options))])
+    end
+  end
+
+  puts table
+end
+
+table = Terminal::Table.new do |t|
+  t.title = "Unique types"
+  t.headings = %w[type options]
+  unique_types(schema).each do |type|
+    t.add_row([type.first, field_options_string(type.last)])
+  end
+end
+
+puts table

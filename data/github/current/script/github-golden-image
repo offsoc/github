@@ -1,0 +1,87 @@
+#!/bin/bash
+# ARG: Dockerfile,
+#  The name of the Dockerfile to build. Current options are Dockerfile.golden (Stretch) and Dockerfile.golden-buster (Buster)
+
+set -e
+
+if [ -z "$1" ] ; then
+  echo "No Dockerfile specified for golden image build. Exiting."
+  exit 1
+fi
+
+# Build our base container
+DOCKERFILE=${1}
+BUILDER_IMAGE="github-golden-builder:latest"
+BUILDER_CONTAINER="github-golden-builder-$(date +%s)"
+GIT_TOKEN=$(cat ${HOME}/.git-credentials | cut -c13-52)
+echo "docker build -f ${DOCKERFILE} --build-arg GIT_TOKEN=<redacted> -t ${BUILDER_IMAGE} ."
+docker build -f ${DOCKERFILE} --build-arg GIT_TOKEN=$GIT_TOKEN -t "${BUILDER_IMAGE}" .
+
+# Determine the distro and codename the image is running on
+DISTRO_DATA=$(docker run --privileged --name "OS-DIAGNOSTIC-$(date +%s)" "${BUILDER_IMAGE}" cat /etc/os-release)
+DISTRO=$(echo "$DISTRO_DATA" | sed -nr 's/ID=([a-zA-Z\s+])/\1/p')
+DISTRO_CODENAME=$(echo "$DISTRO_DATA" | sed -nr 's/VERSION_CODENAME=([a-zA-Z\s+])/\1/p')
+
+# Run script/bootstrap with a privileged container in an attempt to use docker in docker
+docker run --privileged \
+  --name "${BUILDER_CONTAINER}" \
+  -v /workspace/.git-credentials:/workspace/.git-credentials \
+  -e BUILD_BRANCH=$BUILD_BRANCH \
+  -e DISTRO_CODENAME=$DISTRO_CODENAME \
+  -e GPR_GITHUB_USERNAME \
+  -e GPR_GITHUB_TOKEN \
+  "${BUILDER_IMAGE}" \
+  runuser -u build -- script/golden-image-build
+
+# Export our container as the properly named golden image
+# Do some really nasty regexp and sed magic to get the tag to use for the golden image
+IMAGE_TAG=$(echo "$BUILD_BRANCH" | egrep -o "^(\w+\/)?(revert-.*-)?enterprise-([0-9\.]+)-(release|backport)" | sed -e 's,-backport$,,' -e 's,-release$,,' | sed -e 's,^[A-Za-z0-9]*/,,' | sed -e 's,^revert-[0-9]*-,,')
+# Set a default if we're not on an enterprise branch
+if [ -z "$IMAGE_TAG" ] ; then
+  IMAGE_TAG="bootstrap"
+fi
+
+IMAGE_OS_TAG="${IMAGE_TAG}-${DISTRO}-${DISTRO_CODENAME}"
+
+larger_runner_file="/.github-full-larger-runner"
+
+octofactory_url="octofactory.service.private-us-east-1.github.net"
+if [ -f "$larger_runner_file" ]; then
+  octofactory_url="octofactory-ang.githubapp.com"
+fi
+
+GOLDEN_CONTAINER_URL=${octofactory_url}/github-golden-docker/github-github
+GOLDEN_CONTAINER_URL_AND_TAG=${GOLDEN_CONTAINER_URL}:$IMAGE_TAG
+
+# Create a new image from the bootstrapped container and then use it to create a slim golden.
+# The "slim" golden image copies directories one-by-one from the bootstrapped vendor directory.
+# (We can't use FROM to create a multi-stage Dockerfile right now because bootstrapping requires
+# docker-in-docker, which only works with elevated privileges.)
+CONTAINER_ID=$(docker ps -a -f"name=${BUILDER_CONTAINER}" -q)
+docker commit "$CONTAINER_ID" "${BUILDER_IMAGE}"
+DOCKERFILE_SLIM=$(script/generate-dockerfile-golden-slim ${BUILDER_IMAGE})
+echo "Generated Dockerfile: $DOCKERFILE_SLIM"
+echo "$DOCKERFILE_SLIM" | docker build --tag "${GOLDEN_CONTAINER_URL_AND_TAG}" -
+docker tag $GOLDEN_CONTAINER_URL_AND_TAG $GOLDEN_CONTAINER_URL:$BUILD_SHA
+docker tag $GOLDEN_CONTAINER_URL_AND_TAG $GOLDEN_CONTAINER_URL:$IMAGE_OS_TAG
+
+if [ "$DRY_RUN" == "1" ] || [ "$JANKY_ENV_DRY_RUN_GOLDEN_IMAGE" == "1" ] ; then
+  echo "==> DRY RUN: docker push $GOLDEN_CONTAINER_URL:$IMAGE_OS_TAG"
+
+  if [ $DISTRO == "debian" ] && [ $DISTRO_CODENAME == "stretch" ] ; then
+    echo "==> DRY RUN: docker push $GOLDEN_CONTAINER_URL:$BUILD_SHA"
+    echo "==> DRY RUN: docker push $GOLDEN_CONTAINER_URL_AND_TAG"
+  fi
+else
+  echo "Executing: docker push $GOLDEN_CONTAINER_URL:$IMAGE_OS_TAG"
+  docker push $GOLDEN_CONTAINER_URL:$IMAGE_OS_TAG
+
+  # Only push the legacy tag for Debian Stretch to maintain backwards compatibility
+  if [ $DISTRO == "debian" ] && [ $DISTRO_CODENAME == "stretch" ] ; then
+    echo "Executing: docker push $GOLDEN_CONTAINER_URL:$BUILD_SHA"
+    docker push $GOLDEN_CONTAINER_URL:$BUILD_SHA
+
+    echo "Executing: docker push $GOLDEN_CONTAINER_URL_AND_TAG"
+    docker push $GOLDEN_CONTAINER_URL_AND_TAG
+  fi
+fi

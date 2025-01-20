@@ -1,0 +1,38 @@
+require "bundler/gem_tasks"
+require "rspec/core/rake_task"
+
+require "aqueduct"
+require "aqueduct/worker"
+require "logger"
+
+RSpec::Core::RakeTask.new(:spec)
+
+task :default => :spec
+
+namespace :aqueduct do
+  task :work do
+    backend = Aqueduct::Worker::AqueductBackend.new(
+      client: Aqueduct::Client.new(
+        app: Aqueduct.app,
+        url: Aqueduct.url,
+      )
+    )
+    queues = (ENV["QUEUES"] || ENV["QUEUE"]).to_s.split(',')
+
+    if queues.empty?
+      raise ArgumentError.new <<~ERROR
+        Please specify at least one queue with the QUEUES environment variable. For example:
+
+           $ QUEUES=high,low rake aqueduct:work
+
+      ERROR
+    end
+
+    $stdout.sync = true
+    Aqueduct::Worker::Worker.new(
+      backend: backend,
+      queues: queues,
+      logger: Logger.new(STDOUT),
+    ).work
+  end
+end

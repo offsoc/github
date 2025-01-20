@@ -1,0 +1,221 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+
+<%
+  pricing                     = Billing::Pricing.new(account: target, plan_annual_discount: target.annual_discount_allowed?)
+  plan_billed                 = pricing.plan_cost + pricing.seat_cost
+  current_plan                = view&.account&.plan
+%>
+<div class="Box mb-4" <%= test_selector("github-usage") %>>
+  <div class="Box-header d-flex flex-items-center">
+    <div class="d-flex flex-items-center">
+      <%= render(Primer::Beta::Octicon.new(icon: "mark-github", height: 32, color: :default)) %>
+    </div>
+    <div class="Box-title flex-auto ml-1 pl-2">
+      <h3 class="h5"><%= branded_plan_name(view.account.plan, account_type: view.account.type) %></h3>
+
+      <div class="text-small text-normal color-fg-muted">
+        <% if view.pro_upgrade? %>
+          The basics for all developers
+        <% elsif view.team_upgrade? %>
+          The basics for organizations and developers
+        <% elsif view.account.plan.per_repository? %>
+          Edit your private repository count or get unlimited private repositories
+        <% elsif view.business_upgrade? %>
+          Advanced collaboration and support for organizations
+        <% elsif view.org_is_on_per_seat? %>
+          <% if view.account.has_unlimited_seats? %>
+            Unlimited private repositories and members
+          <% else %>
+            Security, compliance, and flexible deployment for enterprises
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+
+    <% if current_plan&.business_plus? %>
+        <%= render Billing::Settings::DowngradeDialogComponent.new(organization: view.account, current_plan: current_plan, new_plan: GitHub::Plan.business, show_button: false) %>
+        <%= render Billing::Settings::DowngradeDialogComponent.new(organization: view.account, current_plan: current_plan, new_plan: GitHub::Plan.free, show_button: false) %>
+    <% elsif current_plan&.business? %>
+      <%= render Billing::Settings::DowngradeDialogComponent.new(organization: view.account, current_plan: current_plan, new_plan: GitHub::Plan.free, show_button: false) %>
+    <% elsif current_plan&.pro? %>
+      <%= render Billing::Settings::DowngradeDialogComponent.new(current_plan: current_plan, new_plan: GitHub::Plan.free, show_button: false) %>
+    <% end %>
+    <% options = view.github_usage_edit_options %>
+    <% if view.apple_iap_subscription? %>
+      <%= render Primer::Beta::Button.new(tag: :a, size: :small, classes: "flash-action", href: apple_app_store_subscriptions_url, rel: "noopener noreferrer", target: "_blank") do |button| %>
+        <% button.with_leading_visual_icon(icon: :"link-external") %>
+        Manage subscription
+      <% end %>
+    <% elsif options.any? %>
+      <details class="details-overlay details-reset dropdown float-right">
+        <summary class="btn btn-sm select-menu-button" aria-haspopup="true"
+          <%= safe_analytics_click_attributes(
+            category: "Edit plan",
+            action: "click to open edit dropdown",
+            label: "ref_cta:Edit;ref_loc:billing_settings"
+          ) %>
+        >
+          Edit
+        </summary>
+        <details-menu class="dropdown-menu dropdown-menu-sw"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <% options.each do |option| %>
+            <% if option == "edit-plan" %>
+              <a href="<%= org_plans_path(view.account) %>" class="dropdown-item" data-pjax="true" role="menuitem">
+                Compare Legacy plans
+              </a>
+            <% elsif option == "seats-add" %>
+              <a href="<%= org_seats_path(view.account) %>"
+                 class="dropdown-item"
+                 data-pjax="true"
+                 role="menuitem"
+                 <%= safe_analytics_click_attributes(
+                   category: "Add seat",
+                   action: "click to add seats",
+                   label: "ref_cta:Add seats;ref_loc:billing_settings"
+                 ) %>
+              >
+                Add seats
+              </a>
+            <% elsif option == "seats-remove" %>
+              <a href="<%= remove_org_seats_path(view.account) %>"
+                 class="dropdown-item"
+                 data-pjax="true"
+                 role="menuitem"
+                 <%= safe_analytics_click_attributes(
+                   category: "Remove seat",
+                   action: "click to remove seats",
+                   label: "ref_cta:Remove seats;ref_loc:billing_settings"
+                 ) %>
+              >
+                Remove seats
+              </a>
+            <% elsif option == "seats-details" %>
+              <a href="<%= org_consumed_licenses_path(view.account) %>"
+                 class="dropdown-item"
+                 data-pjax="true"
+                 role="menuitem"
+                 <%= safe_analytics_click_attributes(
+                   category: "View details",
+                   action: "click to view details",
+                   label: "ref_cta:View details;ref_loc:billing_settings"
+                 ) %>
+              >
+                View details
+              </a>
+            <% elsif option == "divider" %>
+              <div role="none" class="dropdown-divider"></div>
+            <% elsif option == "plan-business-plus" %>
+              <%= render Billing::Settings::DowngradeMenuButtonComponent.new(current_plan: current_plan, new_plan: GitHub::Plan.business) %>
+              <%= render Billing::Settings::DowngradeMenuButtonComponent.new(current_plan: current_plan, new_plan: GitHub::Plan.free) %>
+            <% elsif option == "plan-business" %>
+              <%= render Billing::Settings::DowngradeMenuButtonComponent.new(current_plan: current_plan, new_plan: GitHub::Plan.free) %>
+            <% elsif option == "plan-pro" %>
+              <%= render Billing::Settings::DowngradeMenuButtonComponent.new(current_plan: current_plan, new_plan: GitHub::Plan.free) %>
+            <% end %>
+          <% end %>
+        </details-menu>
+      </details>
+    <% end %>
+  </div>
+
+  <div class="Box-body">
+    <% if view.account.organization? %>
+      <% if view.account.org_free_plan? %>
+        <%= render "billing_settings/benefits/plan_free", cta_path: view.compare_plans_link %>
+      <% elsif view.account.org_business_plan? %>
+        <%= render "billing_settings/benefits/plan_business", annual_discount: view.account.annual_discount_allowed?(plan: GitHub::Plan.business, billing_cycle: User::BillingDependency::YEARLY_PLAN) && view.account.plan_duration == "year" %>
+      <% elsif view.account.org_business_plus_plan? %>
+        <%= render "billing_settings/benefits/plan_business_plus", annual_discount: view.account.annual_discount_allowed?(plan: GitHub::Plan.business_plus, billing_cycle: User::BillingDependency::YEARLY_PLAN) && view.account.plan_duration == "year"  %>
+      <% elsif view.account.over_plan_limit? || view.plan.repos == 0 %>
+        <%= pluralize(view.plan.repos, "private repository") %>.
+      <% elsif view.plan.per_repository? %>
+        <ul class="list-style-none">
+          <li class="mb-2 ml-4"><%= render(Primer::Beta::Octicon.new(icon: "check", size: :small, color: :success, ml: -4, mr: 2, alt: "Included")) %><%= view.plan.repos %> <%= "private repository".pluralize(view.plan.repos) %></li>
+        </ul>
+      <% end %>
+    <% else %>
+      <% if view.plan.free? || view.plan.free_with_addons? %>
+        <%= render "billing_settings/benefits/plan_free", cta_path: view.compare_plans_link %>
+      <% elsif view.plan.pro? %>
+        <%= render "billing_settings/benefits/plan_pro" %>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if is_trial_expired %>
+    <div class="Box-footer d-flex flex-items-center flex-justify-between">
+      <span>
+        <strong>Your GitHub Enterprise Cloud trial has expired.</strong>
+      </span>
+
+      <span>Questions? <a class="Link--inTextBlock" href="<%= ent_contact_url %>">Contact sales</a></span>
+    </div>
+  <% end %>
+
+  <% unless plan_billed.format(no_cents_if_whole: true) == "$0" %>
+    <div class="Box-footer py-2 border-top-0">
+      <div class="d-flex my-1 flex-items-center">
+        <div class="flex-auto mr-6">
+          <% if view.org_is_on_per_seat? %>
+            <% if view.account.has_unlimited_seats? %>
+              Learn more about other <%= link_to "plans", pricing_path, class: "Link--inTextBlock" %>
+            <% else %>
+              <%= render "billing_settings/per_seat_usage_section", account: view.account, view: view %>
+            <% end %>
+          <% else %>
+            <%= render "billing_settings/per_repo_usage_section", account: view.account, view: view %>
+          <% end %>
+        </div>
+
+        <strong>
+          <% if !target.invoiced? && !view.apple_iap_subscription? %>
+            <%= pricing.discounted_plan_and_seat_cost.format(no_cents_if_whole: false) %>
+          <% end %>
+        </strong>
+      </div>
+    </div>
+  <% end %>
+
+  <% if can_manage_munich_seats?(view.account) %>
+    <div class="Box-footer py-2" <%= test_selector("manage-seats-option") %>>
+      <%= link_to view.add_or_remove_link_text, view.manage_seats_path, class: "f6" %>
+    </div>
+  <% end %>
+
+  <% if view.account.disabled? %>
+    <%= render "billing_settings/github_usage_account_disabled", account: view.account, view: view %>
+  <% end %>
+  <% if view.pending_cycle.downgrading? %>
+    <div class="Box-footer py-2 pl-0 flash-warn rounded-bottom-2">
+      <div class="d-flex my-1 flex-items-baseline">
+        <div class="col-1 text-center text-small flex-items-center">
+          <%= primer_octicon(:clock) %>
+        </div>
+        <div class="flex-auto text-small">
+          <div class="mb-0" <%= test_selector("github-plan-price") %>>
+            Your
+            <%= view.pending_cycle.changing_duration? ? "change" : "downgrade" %>
+            to <%= view.pending_cycle.plan.display_name.humanize %> plan
+            <% if view.is_pending_cycle_changing_seats? %>
+              with <%= pluralize view.pending_cycle.seats, "seat" %>
+            <% end %>
+             will be effective on
+            <strong><%= view.pending_cycle.active_on.strftime("%b %d, %Y") %></strong>.<br>
+            The new price will be
+            <strong><%= view.pending_cycle.discounted_plan_price.format(no_cents_if_whole: true) %></strong> / <%= view.pending_cycle.plan_duration.downcase %>.
+
+            <%= form_tag update_pending_plan_change_path(view.account.display_login), class: "inline-form", method: :put do %>
+              <%= hidden_field_tag :cancel_plan, true %>
+              <%= hidden_field_tag :cancel_seats, true %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, mr: 2, font_size: 6, "data-confirm": "Are you sure you want to cancel this pending plan change?") do %>
+                Cancel
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+        <strong><%= view.pending_cycle.discounted_plan_price.format(no_cents_if_whole: false) %></strong>
+      </div>
+    </div>
+  <% end %>
+</div>

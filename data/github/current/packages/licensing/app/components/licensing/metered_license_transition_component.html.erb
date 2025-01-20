@@ -1,0 +1,108 @@
+<%
+transition_checks = [
+  Licensing::EnterpriseAgreementCheckComponent.new(business: business, tag: :div),
+  Licensing::TrialCheckComponent.new(business: business, tag: :div),
+]
+
+new_licensing_model = business.metered_plan? ? "volume" : "metered"
+%>
+
+<div class="Box-row">
+  <metered-license-transition>
+    <div class="form-group d-flex mt-0">
+      <div class="d-flex flex-column col-6">
+        <% if business.metered_plan? %>
+          <label>Change Enterprise from metered to volume licensing</label>
+          <span class="note">
+            This should only be done in extremely rare circumstances, such as a problem with the transition
+            to metered, or some other exceptional reason.
+          </span>
+        <% else %>
+          <label>Change Enterprise from volume to metered licensing</label>
+          <span class="note">
+            This converts a customer to metered billing, this is meant to be permanent, but can be reversed if
+            necessary.
+          </span>
+          <label class="pt-2">Prerequisites</label>
+          <% transition_checks.each do |status_component| %>
+            <% if status_component.render? %>
+              <%=
+                render(status_component) # rubocop:disable GitHub/RailsViewRenderLiteral
+              %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+      <div class="d-flex flex-1 flex-justify-center flex-column">
+        <% if transition&.status == "scheduled" %>
+          <label><%= "Transition to #{transition.licensing_model} licensing scheduled for #{transition.date} that #{transition.reset_ghas_configuration ? "will" : "will not"} reset GHAS configuration." %></label>
+          <%= form_tag cancel_transition_stafftools_enterprise_licensing_path(business, transition.id), method: :delete do %>
+            <%= render(Primer::Alpha::Dialog.new(
+                title: "Cancel transition",
+                id: dom_id(business, :cancel_licensing_model_transition),
+                size: :medium_portrait,
+              )) do |dialog| %>
+              <% dialog.with_show_button(
+                scheme: :danger,
+                block: true,
+                mt: 2
+              ) { "Cancel" } %>
+
+              <% dialog.with_body do %>
+                Are you sure you want to cancel the transition to <%= transition.licensing_model %> licensing scheduled for <%= transition.date %>?
+              <% end %>
+
+              <% dialog.with_footer do %>
+                <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": dom_id(business, :cancel_licensing_model_transition) })) { "Cancel" } %>
+                <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger)) { "Confirm" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% elsif transition&.status == "queued" || transition&.status == "running" %>
+          <label>Transition in progress, refresh the page to check in.</label>
+          <%= render(Primer::Beta::Spinner.new(size: :medium, my: 4, mx: :auto, display: :block)) %>
+        <% else %>
+          <%= form_tag transition_licensing_model_stafftools_enterprise_licensing_path(business), method: :post do %>
+            <input type="hidden" name="licensing_model" value="<%= new_licensing_model %>">
+            <%= render(Primer::Alpha::Dialog.new(
+                title: "Confirm transition to #{new_licensing_model} licensing model",
+                id: dom_id(business, :trigger_licensing_model_transition),
+                size: :medium_portrait,
+              )) do |dialog| %>
+              <% dialog.with_show_button(
+                scheme: :danger,
+                block: true,
+                disabled: new_licensing_model == "volume" ? !can_transition_to_volume? : !can_transition_to_metered?,
+                id: dom_id(business, :trigger_licensing_model_transition)
+              ) { "Change to #{new_licensing_model} licensing" } %>
+
+              <% dialog.with_body do %>
+                <%= render(Primer::Alpha::TextField.new(
+                  id: "transition-date",
+                  type: "date",
+                  name: "transition_date",
+                  value: Date.current,
+                  label: "Transition date",
+                  "aria-labelledby": "transition-date-label",
+                  min: Date.current
+                )) %>
+                <% if new_licensing_model != "volume" %>
+                  <br>
+                  <%= render(Primer::Alpha::CheckBox.new(
+                    name: "reset_ghas_configuration",
+                    label: "Reset GHAS Configuration (should be checked if the customer is not using GHAS, and is not about to start)",
+                  )) %>
+                <% end %>
+              <% end %>
+
+              <% dialog.with_footer do %>
+                <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": dom_id(business, :trigger_licensing_model_transition) })) { "Cancel" } %>
+                <%= render(Primer::Beta::Button.new(type: :submit, scheme: :danger)) { "Confirm" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </metered-license-transition>
+</div>

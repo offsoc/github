@@ -1,0 +1,187 @@
+<%# locals: (data:) %>
+<%
+  data => {
+    current_user:,
+    organization:,
+    backfill_in_progress:,
+    enablement_changes_in_progress:,
+    visible_features:,
+    query:,
+    default_query:,
+    hide_search_and_stats:,
+    filter_menus:,
+    filter_input_suggestions:,
+    async_stats_src:,
+    repository_list_data:,
+    list_menus:,
+    show_incomplete_data_warning:,
+    render_export_button:,
+    export_button_props:,
+    custom_properties:,
+  }
+%>
+
+<% page_info(title: "Security · Coverage · #{organization.display_login}") %>
+
+<%= render(
+  SecurityCenter::PageComponent.new(
+    backfill_in_progress: backfill_in_progress,
+    organization: organization,
+    selected_tab: :coverage,
+    user: current_user,
+    banner: "security-configs-banner"
+  )
+) do |c| %>
+  <% c.with_header_section do %>
+
+    <% if enablement_changes_in_progress %>
+      <%= render(Primer::Alpha::Banner.new(scheme: :default, icon: :info, mb: 3, test_selector: "blocking-enablement-warning")) do %>
+        Enablements in progress. Coverage information will be updated once complete.
+      <% end %>
+    <% end %>
+
+    <% if render_export_button %>
+      <%= render(Primer::Alpha::Banner.new( # Using Banner instead of Flash for the "dismiss_scheme: :hide" behavior
+        id: export_button_props[:errorBannerId],
+        description: flash[:export_error],
+        dismiss_scheme: :hide,
+        scheme: :danger,
+        hidden: flash[:export_error].blank?,
+        py: 2,
+        mb: 3,
+      )) do %>
+        <%# Using Text with role :heading instead of Heading because Banner mishandles rendering Heading in its <p> tags %>
+        <%= render(Primer::Beta::Text.new(
+          role: :heading,
+          aria: { level: 2 },
+          classes: "sr-only",
+          tabindex: -1,
+          autofocus: flash[:export_error].present?
+        )) do %>
+          Your export request could not be completed.
+        <% end %>
+      <% end %>
+      <%= render(Primer::Alpha::Banner.new( # Using Banner instead of Flash for the "dismiss_scheme: :hide" behavior
+        id: export_button_props[:successBannerId],
+        description: "Your report is ready and the download has started.",
+        dismiss_scheme: :hide,
+        scheme: :success,
+        hidden: true,
+        py: 2,
+        mb: 3,
+      )) %>
+    <% end %>
+
+    <%= render(SecurityCenter::SubheadComponent.new(
+      actor: current_user,
+      scope: organization,
+      heading: "Security coverage",
+      subheading: "Security tool adoption across your organization.",
+      hide_border: true,
+    )) do |c| %>
+      <% c.with_feedback_link %>
+      <% c.with_phase_label %>
+    <% end %>
+  <% end %>
+
+  <% c.with_main_section do %>
+
+    <% unless hide_search_and_stats %>
+      <%= render Primer::Box.new(
+        id: "coverage-filters",
+        display: :flex,
+        flex_wrap: :wrap,
+        justify_content: :space_between,
+        mt: 1,
+        mb: show_incomplete_data_warning ? 1 : 3,
+        style: "gap: 8px"
+      ) do %>
+
+        <%= render Primer::Box.new(flex: 1) do %>
+          <%= render(
+            Primer::Experimental::QueryBuilder.new(
+              id: "security-center-coverage-search",
+              input_name: "query",
+              label_text: "Search",
+              visually_hide_label: true,
+              placeholder: "Search",
+              form_action_url: security_center_coverage_path(organization),
+              hidden_form_fields: { is_search: true },
+              value: query == default_query ? "#{default_query} " : query,
+              test_selector: "security-center-org-level-coverage-search-query-builder",
+              "data-suggestable-repo-path": security_center_options_path(organization, "options-type": "repos"),
+              "data-suggestable-team-path": security_center_options_path(organization, "options-type": "teams"),
+              "data-suggestable-topic-path": security_center_options_path(organization, "options-type": "topics"),
+              "data-custom-properties": custom_properties.to_json,
+              "data-suggestable-custom-property-path": security_center_options_path(organization, "options-type": "props"),
+            )
+          ) do |component|
+            component.with_leading_visual_icon(icon: :search)
+          end %>
+        <% end %>
+
+        <%= render Primer::Box.new(display: :flex, align_items: :center, style: "gap: 8px; height: 32px;") do %>
+          <% filter_menus.each do |menu_data| %>
+            <%= render SecurityCenter::Coverage::SelectMenuComponent.new(menu_data) %>
+          <% end %>
+
+          <% if render_export_button %>
+            <%= render_react_partial name: "security-overview-export-button", ssr: true, props: export_button_props %>
+          <% end %>
+        <% end %>
+
+      <% end %>
+
+      <% if show_incomplete_data_warning %>
+        <%= render SecurityCenter::LimitedRepoWarningComponent.new(display: :block, mb: 3, test_selector: "security-center-repo-limit-exceeded") %>
+      <% end %>
+
+      <%= render SecurityCenter::Coverage::StatsSummariesComponent.new(
+        SecurityCenter::Coverage::StatsSummariesComponent::AsyncData.new(
+          src: async_stats_src
+        )
+      ) %>
+    <% end %>
+
+    <%= render Primer::Box.new(id: "coverage-data", mb: 3, data: { hpc: true }) do %>
+      <%= render SecurityCenter::Coverage::RepositoryListComponent.new(repository_list_data) do |l| %>
+        <% list_menus.each { |menu_data| l.with_action_menu(data: menu_data) } %>
+
+        <% if visible_features.empty? %>
+
+          <% doc_url = GitHub.enterprise? ?
+            "#{GitHub.enterprise_admin_help_url}/advanced-security/enabling-github-advanced-security-for-your-enterprise" :
+            "#{GitHub.help_url(ghec_exclusive: true)}/code-security/security-overview/about-the-security-overview" %>
+
+          <% l.with_blankslate(icon: :search, heading: "No security features enabled.") do %>
+            <%= render Primer::Beta::Text.new(test_selector: "security-center-coverage-blankslate-no-features") do %>
+              Your <%= GitHub.flavor %> instance does not have any security scanning features enabled.
+              Read more about <%= render(Primer::Beta::Link.new(href: doc_url, classes: "Link--inTextBlock")) { "enabling security features on #{GitHub.flavor}" } %>.
+            <% end %>
+          <% end %>
+
+        <% else %>
+
+          <% l.with_blankslate(icon: :search, heading: "No repositories found.") do %>
+            <% if hide_search_and_stats %>
+              <%= render(Primer::Beta::Text.new(display: :block, test_selector: "security-center-coverage-blankslate-no-repos")) do %>
+                Only repositories where you have access to manage security products are shown on this page.
+              <% end %>
+
+              <% doc_url = "#{GitHub.help_url(ghec_exclusive: true)}/code-security/security-overview/about-the-security-overview#security-coverage-view" %>
+              <%= render(Primer::Beta::Link.new(href: doc_url, classes: "Link--inTextBlock")) { "Learn more about viewing the coverage page" } %>.
+
+            <% elsif query.present? && query != default_query %>
+              <%= render Primer::Beta::Text.new(test_selector: "security-center-coverage-blankslate-clear-filters") do %>
+                Try <%= render(Primer::Beta::Link.new(href: "?", classes: "Link--inTextBlock")) { "clearing current search filters" } %>.
+              <% end %>
+            <% end %>
+
+          <% end %>
+
+        <% end %>
+      <% end %>
+    <% end %>
+
+  <% end %>
+<% end %>

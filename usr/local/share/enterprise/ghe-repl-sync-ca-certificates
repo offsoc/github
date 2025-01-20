@@ -1,0 +1,65 @@
+#!/bin/bash
+#/ Usage: ghe-repl-sync-ca-certificates
+#/
+#/ This script is used to sync the custom CA SSL certificates keys from the
+#/ primary to the replica.
+#/
+#/ If run on the primary, the settings are pushed to multiple replicas.
+#/ If run on a replica, the settings are pulled from the primary.
+#/
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+
+# Accept an IP address as a optional argument.
+# We use this when first setting up replication as `ghe-repl-lib` tramples over
+# the env var set by ghe-repl-setup.
+if [ -n "$1" ]; then
+  PRIMARY_IP=$1
+fi
+
+if [ "$(repl_role)" = "standalone" ]; then
+  exit 0
+fi
+
+if [ -f /home/admin/.ssh/id_ed25519 ]; then
+  identity_file="-o IdentityFile=/home/admin/.ssh/id_ed25519"
+else
+  identity_file="-o IdentityFile=/home/admin/.ssh/id_rsa"
+fi
+
+ssh_opts="-p 122 -l admin \
+-o PasswordAuthentication=no \
+-o ConnectTimeout=5 \
+-o ConnectionAttempts=1 \
+-o UserKnownHostsFile=/dev/null \
+-o StrictHostKeyChecking=no \
+-o LogLevel=error ${identity_file:-}"
+
+sync_replicas_with_primary() {
+  if replica_ssh -- test -f /etc/github/repl-running; then
+    changes=$(sudo rsync -e "ssh $ssh_opts" --rsync-path="sudo rsync" -aOJ --itemize-changes --delete --safe-links \
+      /usr/local/share/ca-certificates/ \
+      \[$1\]:/usr/local/share/ca-certificates/)
+    # Only update symlinks if there have been changes.
+    if [ -n "$changes" ]; then
+      replica_ssh -- sudo update-ca-certificates -f > /dev/null 2>&1
+    fi
+  fi
+}
+
+if [ "$REPL_STATE" == "primary" ]; then
+  for node in $(ghe-cluster-nodes --replica); do
+    sync_replicas_with_primary $node
+  done
+else
+  # Synchronize changes from primary to current replica
+  changes=$(sudo rsync -e "ssh $ssh_opts" -aOJ --itemize-changes --delete --safe-links \
+    \[$PRIMARY_IP\]:/usr/local/share/ca-certificates/ \
+    /usr/local/share/ca-certificates/)
+  # Only update symlinks if there have been changes.
+  if [ -n "$changes" ]; then
+    sudo update-ca-certificates -f > /dev/null 2>&1
+  fi
+fi

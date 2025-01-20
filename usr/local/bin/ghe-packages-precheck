@@ -1,0 +1,88 @@
+#!/bin/bash
+#/ Usage: ghe-packages-precheck [-h] -p [s3/azure] -cs ["connectionstring"] -cn ["containername"]
+#/
+#/ Check that blob storage provider for GitHub Packages is valid.
+#/
+#/ OPTIONS:
+#/   -h  | --help               Show this message
+#/   -p  | --provider           The name of the storage provider (Azure/S3/MinIO).
+#/                              If not specified, will default to s3.
+#/   -cs | --connection-string  The connection string to the storage provider.
+#/   -cn | --container-name     The Azure container name to use
+#/
+#/  Sample S3 connection string:
+#/   "BucketName=github-dev;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=https://s3.us-east-1.amazonaws.com;PathPrefix=actions-storage-check"
+#/  Sample Minio connection string:
+#/   "ForcePathStyle=true;BucketName=github-dev;AccessKeyId=<access-key-id>;SecretAccessKey=<access-secret>;ServiceUrl=<url-to-minio-service>;PathPrefix=actions-storage-check"
+#/  Sample Azure connection string:
+#/   "DefaultEndpointsProtocol=https;AccountName=<azure-account-name>;AccountKey=<azure-account-key>;EndpointSuffix=core.windows.net"
+#/
+set -e
+
+# Default options
+storage_provider="s3"
+connection_string=""
+container_name=""
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -p|--provider)
+            storage_provider="$(echo $2| tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;
+        -cs|--connection-string)
+            connection_string=$2
+            shift 2
+            ;;
+        -cn|--container-name)
+            container_name=$2
+            shift 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+if [[ -z $connection_string ]]; then
+ echo "Connection string is invalid."
+ usage
+fi
+
+if [[ $storage_provider == "azure" ]] || [[ $storage_provider == "s3" ]]; then
+    echo "Selected Storage Provider: $storage_provider"
+else
+    echo "$storage_provider blob storage provider is not supported"
+    exit 1
+fi
+
+if [[ $storage_provider == "azure" ]] && [[ -z $container_name ]]; then
+    echo "Container name is empty. Please provide one."
+    usage
+fi
+
+check-blob-storage() {
+    # The ghe-actions-script runs a docker container that requires these directories to exist and to be owned by the actions user
+    [ ! -d /data/user/actions ] && mkdir -p /data/user/actions
+    [ ! -d /data/user/actions/lightrail/Actions/logs ] && mkdir -p /data/user/actions/lightrail/Actions/logs
+    sudo chown -R -f actions:actions /data/user/actions
+    echo "Running blob storage checks."
+    if [[ $storage_provider == "azure" ]]; then
+        ghe-check-blob-connection -s actions -p "$storage_provider" -cs "$connection_string" -cn "$container_name"
+    elif [[ $storage_provider == "s3" ]]; then
+        ghe-check-blob-connection -s actions -p "$storage_provider" -cs "$connection_string"
+    fi
+}
+
+if check-blob-storage; then
+    echo "$storage_provider connection verified"
+fi

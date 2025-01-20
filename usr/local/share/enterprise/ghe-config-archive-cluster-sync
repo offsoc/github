@@ -1,0 +1,54 @@
+#!/bin/bash
+#/ Usage: ghe-config-archive-cluster-sync [options]
+#/ 
+#/ If run on cluster, syncs configuration history across the cluster nodes.
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/   -?                 Show this message
+#/   -v                 Run with verbose output
+
+set -e
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+while getopts "hv" OPTION; do
+  case $OPTION in
+    h)
+      usage
+      exit 2
+      ;;
+    v)
+      set -x
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+# shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+# If running from a cluster, an HA cluster, or standalone HA (current node must be a primary or a replica with replication running), sync the configuration history
+if is_cluster || is_cluster_ha || is_ha_primary || is_replication_running_on_current_node; then
+  echo "Syncing configuration history to all nodes"
+
+  sync_hosts=$(ghe-cluster-nodes -x)
+
+  set -o pipefail
+  for host in $sync_hosts; do
+    tar czpf - --acls -C /data/user/common/ghe-config-apply/ config-file-history |
+      ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$host" "tar --acls --same-owner -xzpf - -C ~/"
+    ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$host" "sudo rm -rf /data/user/common/ghe-config-apply/config-file-history/"
+    ssh -p 122 -i /home/admin/.ssh/id_ed25519 -oConnectTimeout=2 -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oLogLevel=quiet "admin@$host" "sudo mv ~/config-file-history /data/user/common/ghe-config-apply/."
+  done
+
+  echo "Configuration history has been synced to all nodes"
+else
+  usage
+  exit 2
+fi

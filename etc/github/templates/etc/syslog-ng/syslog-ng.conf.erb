@@ -1,0 +1,321 @@
+@version: 3.25
+@include "scl.conf"
+@include "`scl-root`/system/tty10.conf"
+
+# Syslog-ng configuration file, compatible with default Debian syslogd
+# installation.
+
+# First, set some global options.
+options { log_msg_size(61440); chain_hostnames(off); flush_lines(0); use_dns(no); dns-cache(no); use_fqdn(no);
+	  owner("root"); group("adm"); perm(0640); stats_freq(0);
+	  bad_hostname("^gconfd$"); create-dirs(yes);
+};
+
+########################
+# Sources
+########################
+# This is the default behavior of sysklogd package
+# Logs may come from unix stream, but not from another machine.
+#
+source s_src {
+       # Adding the journal tag so that we can filter out syslogs from the messages, syslog, and user.log files
+       # as they were causing massive log bloat and weren't being used.
+       systemd-syslog(tags("journal"));
+       file("/dev/kmsg" multi-line-mode(indented) keep-timestamp(no) format(linux-kmsg) program-override("kernel") flags(kernel));
+       internal();
+};
+
+# If you wish to get logs from remote machine you should uncomment
+# this and comment the above source line.
+#
+#source s_net { tcp(ip(127.0.0.1) port(1000)); };
+
+########################
+# Destinations
+########################
+# First some standard logfile
+#
+destination d_auth { file("/var/log/auth.log"); };
+destination d_cron { file("/var/log/cron.log"); };
+destination d_daemon { file("/var/log/daemon.log"); };
+destination d_kern { file("/var/log/kern.log"); };
+destination d_lpr { file("/var/log/lpr.log"); };
+destination d_mail { file("/var/log/mail.log"); };
+destination d_syslog { file("/var/log/syslog"); };
+destination d_user { file("/var/log/user.log"); };
+destination d_uucp { file("/var/log/uucp.log"); };
+
+# This files are the log come from the mail subsystem.
+#
+destination d_mailinfo { file("/var/log/mail.info"); };
+destination d_mailwarn { file("/var/log/mail.warn"); };
+destination d_mailerr { file("/var/log/mail.err"); };
+
+# Logging for INN news system
+#
+destination d_newscrit { file("/var/log/news/news.crit"); };
+destination d_newserr { file("/var/log/news/news.err"); };
+destination d_newsnotice { file("/var/log/news/news.notice"); };
+
+# Some catch-all logfiles.
+#
+destination d_debug { file("/var/log/debug"); };
+destination d_error { file("/var/log/error"); };
+destination d_messages { file("/var/log/messages"); };
+
+# The root's console.
+#
+destination d_console { usertty("root"); };
+
+# Virtual console.
+#
+destination d_console_all { file(`tty10`); };
+
+# The named pipe /dev/xconsole is for the nsole' utility.  To use it,
+# you must invoke nsole' with the -file' option:
+#
+#    $ xconsole -file /dev/xconsole [...]
+#
+destination d_xconsole { pipe("/dev/xconsole"); };
+
+# Send the messages to an other host
+#
+<%- if config_value('syslog', 'enabled') -%>
+<%-
+    protocol_name = @config['syslog']['protocol-name']
+		tls_enabled = @config["syslog"]["tls-enabled"]
+		ipv6_enabled = false
+
+		if ["tcp", "tcp6"].include?(protocol_name) && tls_enabled
+			protocol_name = "tls"
+			cert = @config["syslog"]["cert"]
+			c = OpenSSL::X509::Certificate.new(cert)
+			# dump the cert in the right place
+			cert_name = sprintf("%08x.0", c.subject.hash)
+			File.open("/etc/syslog-ng/ca.d/#{cert_name}", mode: "w", binmode: true) do |f|
+				f.write(cert)
+			end
+		end
+
+		if ["tcp6", "udp6"].include?(protocol_name)
+			ipv6_enabled = true
+			protocol_name = protocol_name.chop
+		end
+
+-%>
+<% if tls_enabled -%>
+# TLS cert <%= cert_name %>
+<% end %>
+destination d_net {
+        <%-
+        syslog_servers = @config['syslog']['server'].split(/[\s,]+/)
+        syslog_servers.each do |syslog_server|
+          server,port = syslog_server.split(":")
+          port ||= "514"
+        -%>
+        network("<%= server %>"
+					transport(<%= protocol_name %>)
+					port(<%= port %>)
+					<% if ipv6_enabled -%>
+					ip-protocol(6)
+					<% end -%>
+					<% if tls_enabled -%>
+					tls(ca-dir("/etc/syslog-ng/ca.d")
+						ssl-options(no-sslv2, no-sslv3))
+
+					<% end -%>
+					log_fifo_size(1000) );
+        <%- end -%>
+          };
+<%- end -%>
+
+# Debian only
+destination d_ppp { file("/var/log/ppp.log"); };
+
+# UFW logs
+destination d_ufw { file("/var/log/ufw.log"); };
+
+# GitHub Audit log
+destination d_audit { file("/var/log/github-audit.log"); };
+
+# Logging commands run by root/admin on SSH console
+destination d_commands { file("/var/log/ssh-console-audit.log"); };
+
+# GHES-Manage Logs
+destination d_ghesmanage_gateway { file("/var/log/ghes-manage-gateway/gateway.log"); };
+destination d_ghesmanage_agent { file("/var/log/ghes-manage-agent/agent.log"); };
+destination d_ghesmanage_auditlog { file("/var/log/ghes-manage-gateway/audit.log"); };
+
+# GitHub babeld log
+destination d_babeld { file("/var/log/babeld/babeld.log"); };
+
+# github-gitauth Nomad Job Logs
+destination d_github_gitauth { file("/var/log/github/gitauth.log" owner(git) group(git) perm(0644)); };
+
+# github-resqued Nomad Job Logs
+destination d_github_resqued { file("/var/log/github/resqued.log" owner(git) group(git) perm(0644)); };
+
+# github-unicorn Nomad Job Logs
+destination d_github_unicorn { file("/var/log/github/unicorn.log" owner(git) group(git) perm(0644)); };
+
+
+########################
+# Filters
+########################
+# Here's come the filter options. With this rules, we can set which
+# message go where.
+
+filter f_journal { tags("journal"); };
+
+filter f_dbg { level(debug); };
+filter f_info { level(info); };
+filter f_notice { level(notice); };
+filter f_warn { level(warn); };
+filter f_err { level(err); };
+filter f_crit { level(crit .. emerg); };
+
+filter f_debug { level(debug) and not facility(auth, authpriv, news, mail); };
+filter f_error { level(err .. emerg) ; };
+filter f_messages { level(info,notice,warn) and
+                    not facility(auth,authpriv,cron,daemon,mail,news) and not filter(f_debug) and not filter(f_audit) and not filter(f_haproxy) and not filter(f_journal); };
+
+filter f_auth { facility(auth, authpriv) and not filter(f_debug); };
+filter f_cron { facility(cron) and not filter(f_debug); };
+filter f_daemon { facility(daemon) and not filter(f_debug); };
+filter f_kern { facility(kern); };
+filter f_lpr { facility(lpr) and not filter(f_debug); };
+filter f_local { facility(local0, local1, local3, local4, local5,
+                        local6, local7) and not filter(f_debug); };
+filter f_mail { facility(mail) and not filter(f_debug); };
+filter f_news { facility(news) and not filter(f_debug); };
+# build a denylist of workloads we do not want flowing into syslog
+filter f_syslog3 { not facility(auth, authpriv, mail) and not (filter(f_debug) or filter(f_audit) or filter(f_haproxy) or filter(f_babeld) or filter(f_github_gitauth) or filter(f_github_resqued) or filter(f_github_unicorn) or not filter(f_not_snmpd_statfs_error)); };
+filter f_user { facility(user) and not filter(f_debug) and not filter(f_journal); };
+filter f_uucp { facility(uucp) and not filter(f_debug); };
+
+filter f_cnews { level(notice, err, crit) and facility(news); };
+filter f_cother { level(debug, info, notice, warn) or facility(daemon, mail); };
+
+filter f_ppp { facility(local2) and not filter(f_debug); };
+filter f_console { level(warn .. emerg); };
+
+# snmpd throws "Cannot statfs...Permission denied" for Docker overlay mounts, so don't log these errors
+filter f_not_snmpd_statfs_error { not (match("snmpd" value("PROGRAM")); match("Cannot statfs.*Permission denied" value("MESSAGE"));) };
+
+###
+# Fitering of audit log in GHES uses the facility and ident
+###
+filter f_audit_tag { match("github_audit" value("PROGRAM")); };
+filter f_audit { facility(local7) or filter(f_audit_tag); };
+
+filter f_babeld { match("babeld" value("PROGRAM")); };
+
+filter f_github_gitauth { match("github-gitauth" value("PROGRAM")); };
+filter f_github_resqued { match("github-resqued" value("PROGRAM")); };
+filter f_github_unicorn { match("github-unicorn" value("PROGRAM")); };
+
+filter f_ufw { match("\\[UFW" value("MESSAGE")); };
+filter f_commands { level("info") and facility("local6"); };
+filter f_ghesmanage_gateway { match("ghes-manage-gateway" value("PROGRAM")); };
+filter f_ghesmanage_agent { match("ghes-manage-agent" value("PROGRAM")); };
+filter f_ghesmanage_auditlog {match("management_console." value("MESSAGE"));};
+filter f_not_ghesmanage_auditlog { not match("management_console." value("MESSAGE"));};
+
+###
+# Rewrites
+###
+<% if actions_enabled? %>
+rewrite r_mssql{ subst("\r", "" value("MESSAGE") condition(program("mssql"))); };
+<%- end -%>
+
+########################
+# Log paths
+########################
+log { source(s_src); filter(f_auth); destination(d_auth); };
+#log { source(s_src); filter(f_cron); destination(d_cron); };
+#log { source(s_src); filter(f_daemon); destination(d_daemon); };
+log { source(s_src); filter(f_kern); destination(d_kern); };
+log { source(s_src); filter(f_lpr); destination(d_lpr); };
+log { source(s_src); filter(f_syslog3); destination(d_syslog); };
+log { source(s_src); filter(f_user); destination(d_user); };
+log { source(s_src); filter(f_uucp); destination(d_uucp); };
+
+log { source(s_src); filter(f_mail); destination(d_mail); };
+#log { source(s_src); filter(f_mail); filter(f_info); destination(d_mailinfo); };
+#log { source(s_src); filter(f_mail); filter(f_warn); destination(d_mailwarn); };
+#log { source(s_src); filter(f_mail); filter(f_err); destination(d_mailerr); };
+
+log { source(s_src); filter(f_news); filter(f_crit); destination(d_newscrit); };
+log { source(s_src); filter(f_news); filter(f_err); destination(d_newserr); };
+log { source(s_src); filter(f_news); filter(f_notice); destination(d_newsnotice); };
+#log { source(s_src); filter(f_cnews); destination(d_console_all); };
+#log { source(s_src); filter(f_cother); destination(d_console_all); };
+
+#log { source(s_src); filter(f_ppp); destination(d_ppp); };
+
+log { source(s_src); filter(f_debug); destination(d_debug); };
+log { source(s_src); filter(f_error); destination(d_error); };
+log { source(s_src); filter(f_messages); destination(d_messages); };
+
+log { source(s_src); filter(f_console); destination(d_console_all);
+				    destination(d_xconsole); };
+log { source(s_src); filter(f_crit); destination(d_console); };
+
+log { source(s_src); filter(f_ufw); destination(d_ufw); };
+
+log { source(s_src); filter(f_audit); destination(d_audit); };
+log { source(s_src); filter(f_babeld); destination(d_babeld); };
+
+log { source(s_src); filter(f_github_gitauth); destination(d_github_gitauth); };
+log { source(s_src); filter(f_github_resqued); destination(d_github_resqued); };
+log { source(s_src); filter(f_github_unicorn); destination(d_github_unicorn); };
+
+log { source(s_src); filter(f_commands); destination(d_commands); };
+log { source(s_src); filter(f_ghesmanage_gateway); filter(f_not_ghesmanage_auditlog) ; destination(d_ghesmanage_gateway); };
+log { source(s_src); filter(f_ghesmanage_agent); destination(d_ghesmanage_agent); };
+log { source(s_src); filter(f_ghesmanage_gateway); filter(f_ghesmanage_auditlog); destination(d_ghesmanage_auditlog); };
+# All messages send to a remote site
+#
+<%- if @config['syslog'] && @config['syslog']['enabled'] -%>
+log {
+  source(s_src);
+  # prevent the snmpd "Cannot statfs" errors from being forwarded
+  filter(f_not_snmpd_statfs_error);
+<% if actions_enabled? %>
+  rewrite(r_mssql);
+<%- end -%>
+  destination(d_net);
+};
+<%- end -%>
+
+#Enterprise-Manage AuditLog
+<%- if !config_value('app', 'enterprise-manage', 'audit-forward', "disabled") -%>
+source s_em{ file("/var/log/enterprise-manage/audit.log" persist-name("em-audit-log") flags(no-parse)); };
+destination d_http2hydro {
+    http(
+        url("http://localhost:9095/api/v1/events")
+        method("POST")
+        response-action(400 => drop, 500 => disconnect)
+        body('{"events": [{"schema": "com.github.hydro.schemas.audit_log.v2","value":${MESSAGE}}]}')
+        retries(3)
+        disk-buffer(
+            reliable(yes)
+            mem-buf-size(100000)
+            disk-buf-size(20000000)
+        )
+    );
+};
+log {source(s_em);destination(d_http2hydro); };
+log { source(s_src); filter(f_commands); destination(d_http2hydro); };
+log { source(s_src); filter(f_ghesmanage_gateway); filter(f_ghesmanage_auditlog); destination(d_http2hydro); };
+<% else %>
+#Forwarding is disabled run "ghe-config app.enterprise-manage.audit-forward enabled" to enable it
+<%- end -%>
+
+###
+# Include all config files in /etc/syslog-ng/conf.d/
+###
+@include "/etc/syslog-ng/conf.d/*.conf"
+<%- if @config['syslog'] && @config['syslog']['enabled'] -%>
+@include "/etc/syslog-ng/conf.d/github/*.conf"
+<%- end -%>

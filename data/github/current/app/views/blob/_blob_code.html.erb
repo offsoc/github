@@ -1,0 +1,97 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ClipboardCopyComponentMigrationCounter 2 %>
+<%# rubocop:disable GitHub/DeprecatedViewHelpers %>
+<%
+  # Gist has to prefix all named anchors with the file name
+  anchor_prefix = local_assigns.fetch(:named_anchor_prefix, "")
+  # Are we rendering a snippet? (used in gist discover/forked/starred pages)
+  snippet = local_assigns.fetch(:snippet, false)
+  colorize_strategy = robot? ? :from_cache_or_plain : nil
+  lines = blob.colorized_lines(strategy: colorize_strategy)
+  lines = lines.first(Gist::MAX_SNIPPET_LINES) if snippet
+  load_blob_editor_configs!(current_commit, blob)
+
+  show_toolbar = local_assigns.fetch(:show_toolbar, false)
+
+  lines_to_include = local_assigns.fetch(:lines_to_include, [])
+%>
+
+<div class="js-check-bidi js-blob-code-container blob-code-content">
+  <% if current_repository.present? && params[:name].present? && PreferredFile.is_type?(tree_entry: blob, type: :codeowners) %>
+    <include-fragment src="<%= codeowners_validity_path %>">
+      <%= render(Primer::Beta::Flash.new(icon: :clock, full: true, display: :flex, align_items: :center)) do |component| %>
+        Validating CODEOWNERS rules …
+      <% end %>
+    </include-fragment>
+  <% end %>
+
+  <%= render "shared/bidi_alert" %>
+  <table data-hpc class="highlight tab-size js-file-line-container js-code-nav-container js-tagsearch-file" data-tab-size="<%= tab_size(blob.path) %>" data-paste-markdown-skip data-tagsearch-lang="<%= blob&.language&.name %>" data-tagsearch-path="<%= scrubbed_utf8(blob.path) %>">
+    <%
+      lines.each_with_index do |line, i|
+        # Line numbers are 1-indexed.
+        i += 1
+
+        # Give browsers some text to copy so blank lines get preserved in
+        # copy-paste.
+        line = "\n" if line.empty?
+    %>
+      <% if lines_to_include.length > 0 %>
+        <% if lines_to_include.include?(i) %>
+          <tr>
+            <td id="<%= anchor_prefix %>L<%= i %>" class="blob-num js-line-number js-code-nav-line-number js-blob-rnum" data-line-number="<%= i %>"></td>
+            <td id="<%= anchor_prefix %>LC<%= i %>" class="blob-code blob-code-inner js-file-line"><%= line %></td>
+          </tr>
+          <% annotations_on_this_line = annotations.end_line(i) %>
+          <% if annotations_on_this_line.any? %>
+            <%= render partial: "diff/inline_annotations", locals: {
+                  annotations: annotations_on_this_line,
+                  pull_request: pull_request,
+                  end_line_text: line,
+                  current_repository: current_repository,
+                }
+            %>
+          <% end %>
+        <% end %>
+      <% else %>
+        <tr>
+          <td id="<%= anchor_prefix %>L<%= i %>" class="blob-num js-line-number js-code-nav-line-number js-blob-rnum" data-line-number="<%= i %>"></td>
+          <td id="<%= anchor_prefix %>LC<%= i %>" class="blob-code blob-code-inner js-file-line"><%= line %></td>
+        </tr>
+      <% end %>
+    <% end %>
+  </table>
+</div>
+
+<% if show_toolbar %>
+  <details class="details-reset details-overlay BlobToolbar position-absolute js-file-line-actions dropdown d-none" aria-hidden="true">
+    <summary class="btn-octicon ml-0 px-2 p-0 color-bg-default border color-border-default rounded-2" aria-label="Inline file action toolbar">
+      <%= primer_octicon(:"kebab-horizontal") %>
+    </summary>
+    <details-menu><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+
+      <ul class="BlobToolbar-dropdown dropdown-menu dropdown-menu-se ml-2 mt-2"
+      style="width:<%= blob.repository.discussions_active? && current_user&.can_create_discussion?(blob.repository) ? '220px' : '185px' %>"
+      >
+        <li>
+          <clipboard-copy role="menuitem" class="dropdown-item" id="js-copy-lines" style="cursor:pointer;" aria-label="Copy lines">
+            Copy lines
+          </clipboard-copy>
+        </li>
+        <li>
+          <clipboard-copy role="menuitem" class="dropdown-item" id="js-copy-permalink" style="cursor:pointer;" aria-label="Copy permalink">
+            Copy permalink
+          </clipboard-copy>
+        </li>
+        <li><%= link_to "View git blame", blob_blame_path(params[:path], commit_sha), class: "dropdown-item js-update-url-with-hash", id: "js-view-git-blame", role: "menuitem" %></li>
+        <% if blob.repository.has_issues? && !blob.repository.archived? %>
+          <li><%= link_to "Reference in new issue", new_issue_path(blob.repository.owner, blob.repository), class: "dropdown-item", id: "js-new-issue", role: "menuitem" %></li>
+        <% end %>
+        <% if blob.repository.discussions_active? && !blob.repository.archived? && current_user&.can_create_discussion?(blob.repository) %>
+          <li><%= link_to "Reference in new discussion", new_discussion_path(blob.repository.owner, blob.repository), class: "dropdown-item", id: "js-new-discussion", role: "menuitem" %></li>
+        <% end %>
+      </ul>
+    </details-menu>
+  </details>
+<% end %>

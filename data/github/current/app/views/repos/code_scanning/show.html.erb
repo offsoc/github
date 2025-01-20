@@ -1,0 +1,254 @@
+<%# view is an instance of RepositoryCodeScanning::ShowView %>
+
+<%
+  page_info(
+    title: view.page_title,
+    container_xl: true,
+    selected_link: :code_scanning,
+  )
+%>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <% if view.turboscan_unavailable? %>
+    <%= render Primer::Beta::Blankslate.new(my: 6, data: { hpc: "" }) do |c| %>
+      <% c.with_visual_icon(icon: "alert") %>
+      <% c.with_heading(tag: :h3, mt: 4, font_size: 2) { "Loading alert failed" } %>
+      <% c.with_description do %>
+        <% if GitHub.enterprise? %>
+          <p>If the problem persists <%= contact_support_snippet(true) %>.</p>
+        <% else %>
+          <p>We track these errors automatically, but if the problem persists feel free to <a class="Link--inTextBlock" href="<%= contact_path %>">contact us</a>.</p>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% else %>
+    <%= render Repos::Security::SecurityShowPageComponent.new(alert_title: result_title(view.result)) do |show_page_component| %>
+
+      <% show_page_component.with_pre_header do %>
+        <%= render "repos/code_scanning/site_admin_warning", view: view %>
+
+        <%= render Primer::Beta::Breadcrumbs.new(mb: 2) do |breadcrumbs| %>
+          <% breadcrumbs.with_item(href: repository_code_scanning_results_path).with_content("Code scanning alerts") %>
+          <% breadcrumbs.with_item(href: repository_code_scanning_result_path).with_content("##{view.result.number}") %>
+        <% end %>
+      <% end %>
+
+      <% show_page_component.with_alert_actions do %>
+        <span class="d-flex js-alert-actions-portal-root">
+          <% if view.alerts_writable_by_current_user? %>
+            <% if !view.result_resolved? %>
+              <%= render_react_partial name: "code-scanning-alert-dismissal", ssr: false, props: {
+                alertClosureReasons: alert_closure_reasons,
+                closeReasonDetails: close_reason_details_singular,
+                number: view.result.number,
+                refNames: view.ref_names_b64,
+                path: view.close_path_no_params
+              } %>
+            <% else %>
+              <div class="mb-1" <%= test_selector("code-scanning-reopen-alert") %>>
+                <%= form_tag view.reopen_path(number: view.result.number, ref_names: Array(view.selected_alert_instance&.ref_name_bytes)), method: :put do %>
+                  <%= render Primer::Beta::Button.new(scheme: :default, size: :small, type: :submit) do %>
+                    Reopen alert
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          <% end %>
+          <% if current_repository.issues_alerts_integration_enabled? && view.show_create_issue_button?  %>
+            <div class="mb-1 ml-2" <%= test_selector("code-scanning-alert-issue") %>>
+              <%= render Primer::Beta::Button.new(href: new_issue_path(current_repository.owner, current_repository, params: {title: view.tracking_issue_title, body: view.tracking_issue_body}), tag: :a, scheme: :primary, size: :small) do %>
+                  Create issue
+              <% end %>
+            </div>
+          <% end %>
+        </span>
+      <% end %>
+
+      <% show_page_component.with_status_information(
+        state: view.status,
+        title: view.status_badge_title_override
+      ) do %>
+        <span class="color-fg-muted">
+          <% if view.status_should_show_branch_name? %>
+            in <span class="branch-name"><%= view.status_branch_name %></span>
+          <% end %>
+          <%= time_ago_in_words_js(view.status_date) if view.status_date.present? %>
+        </span>
+
+        <% if current_repository.issues_alerts_integration_enabled? &&  view.displayable_tracking_issues.present? %>
+          <span class="d-inline-block" <%= test_selector("code-scanning-tracked-in-pill") %>>
+            <%= render partial: "repos/scanning/tracked_in_pill", locals: {
+                parent_issues: view.displayable_tracking_issues,
+                alert_number: view.result.number,
+              }
+            %>
+          </span>
+        <% end %>
+      <% end %>
+
+      <%# Pass in the default query so that the resulting link doesn't include a ref qualifier %>
+      <% show_page_component.with_severity_code_scanning(
+        severity: view.result.rule_severity,
+        security_severity: view.result.security_severity,
+        filter_url: view.severity_link_for_result(view.result, base_query: view.default_query)
+      )%>
+
+      <% show_page_component.with_affected_branches do %>
+        <% if view.affected_branches.nil? %>
+          <span class="color-fg-muted">
+            <%= render(Primer::Beta::Octicon.new(icon: :alert)) %>
+            Loading branches failed.
+          </span>
+        <% else %>
+          <% if view.affected_branches[:above_fold].empty? %>
+            <span class="color-fg-muted Truncate-text">
+              <span class="color-fg-default"> None </span>
+            </span>
+          <% else %>
+            <%= render(Repos::Security::DeleteConfigurationDialogComponent.with_collection(view.affected_branches[:all_branches], form_submit_path: view.affected_branches_form_submit_path, read_only_user: view.read_only_user, default_branch: current_repository.default_branch)) %>
+            <%= render(Repos::Security::AffectedBranchComponent.new(affected_branches: view.affected_branches[:above_fold]))  %>
+            <%# We're using this fragment in two places below %>
+            <% empty_or_more_branches_indicator = capture do %>
+              <% if view.show_more_affected_branches_not_shown_indicator? %>
+                <p class="color-fg-muted text-small">
+                  +
+                  <% if view.affected_branches[:plus_this_many_more] > 0 %>
+                    <% unless view.affected_branches[:complete]%>
+                      at least
+                    <% end %>
+                    <%= view.affected_branches[:plus_this_many_more]%>
+                  <% else %>
+                    more
+                  <% end %>
+                  branches (not shown)
+                </p>
+              <% end %>
+            <% end %>
+
+            <% if view.affected_branches[:below_fold].present? %>
+              <div class="Details js-details-container">
+                <%= render(Primer::Beta::Button.new(scheme: :link, font_size: :small, classes: "Details-content--shown js-details-target", aria: { expanded: false, controls: "affected-branches-more", label: "view more affected branches" })) { "View more" } %>
+                <div id="affected-branches-more" class="Details-content--hidden">
+                    <%= render(Repos::Security::AffectedBranchComponent.new(affected_branches: view.affected_branches[:below_fold], more: view.affected_branches[:above_fold].size)) %>
+                    <%= empty_or_more_branches_indicator %>
+                    <%= render(Primer::Beta::Button.new(scheme: :link, font_size: :small, classes: "js-details-target", aria: { expanded: true, controls: "affected-branches-more", label: "view fewer affected branches" })) { "View less" } %>
+                </div>
+              </div>
+            <% else %>
+              <%= empty_or_more_branches_indicator %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if view.campaigns_with_counts.present? %>
+        <% show_page_component.with_security_campaigns do %>
+          <% view.campaigns_with_counts.each do |campaign| %>
+            <%= render Repos::Security::SecurityCampaignComponent.new(
+              campaign_with_counts: campaign,
+              campaign_path: repository_security_campaign_path(number: campaign.number)) %>
+          <% end %>
+        <% end %>
+      <% elsif SecurityCampaigns.enabled?(current_repository.owner) && current_repository.private? %>
+        <% show_page_component.with_security_campaigns do %>
+          <%= render Repos::Security::SecurityCampaignEmptyStateComponent.new %>
+        <% end %>
+      <% end %>
+
+      <% if view.rule_tags_for_tags_section.present? %>
+        <% view.rule_tags_for_tags_section.each do |rule_tag| %>
+          <% show_page_component.with_tag(title: view.rule_tag_label(rule_tag), href: view.tag_path(rule_tag)) %>
+        <% end %>
+      <% end %>
+
+      <% if view.cwe_tags.present? %>
+        <% show_page_component.with_cwe_section(cwe_numbers: view.cwe_numbers) %>
+      <% end %>
+
+      <% show_page_component.with_main do %>
+        <% if view.result_resolved? %>
+          <h2 class="sr-only">Code snippet</h2>
+          <%= render partial: "repos/scanning/location", locals: {
+            full_path: view.alert_instance.location.file_path,
+            path_link: view.code_snippet_path_link,
+            snippet_helper: view.snippet_helper(view.alert_instance.location, view.alert_instance.commit_oid),
+            tool_display_name: view.tool_display_name,
+            alert_title: result_title(view.result),
+            code_paths_url: view.has_code_paths? ? view.code_paths_url : nil,
+            classifications: view.classifications,
+            line_number: view.alert_instance.location.start_line,
+          } %>
+        <% else %>
+          <%= render partial: "repos/code_scanning/suggested_fix", locals: { view: view } %>
+        <% end %>
+
+        <h2 class="sr-only">Rule</h2>
+        <div class="Box Box--condensed mt-3 Details js-details-container">
+          <div class="Box-header p-3 d-md-flex">
+            <% if view.tool_display_name.present? %>
+              <div class="mr-md-5" <%= test_selector("code-scanning-tool-name") %>>
+                <h3 class="Box-title mb-1">Tool</h3>
+                <div class="f6"><%= view.tool_display_name %></div>
+              </div>
+            <% end %>
+            <div class="mr-md-5 mt-3 mt-md-0">
+              <h3 class="Box-title mb-1">Rule ID</h3>
+              <div class="text-mono f6"><%= view.result.rule&.sarif_identifier %></div>
+            </div>
+            <% if view.rule_query_uri.present? %>
+              <div class="mr-5 mt-3 mt-md-0" <%= test_selector("code-scanning-query-source") %>>
+                <h3 class="Box-title mb-1">Query</h3>
+                <a class="Link--primary d-block f6" href="<%= view.rule_query_uri %>" target="_blank" rel="noopener noreferrer">View source</a>
+              </div>
+            <% end %>
+          </div>
+
+          <h3 class="sr-only">Description</h3>
+          <% if view.has_rule_help? %>
+            <div class="Box-body markdown-body comment-body position-relative border-bottom-0 Details-content--shown" <%= test_selector("code-scanning-rule-intro") %>>
+              <%= view.rule_intro %>
+            </div>
+            <div id="code-scanning-rule-description" class="Box-body markdown-body comment-body position-relative Details-content--hidden" <%= test_selector("code-scanning-rule-description") %>>
+              <%= view.rule_description %>
+            </div>
+
+            <% if view.rule_help_expandable? %>
+              <div class="Box-footer py-2 color-bg-subtle">
+                <%= render Primer::Beta::Button.new(scheme: :link, block: true, classes: "Details-content--shown js-details-target", aria: { expanded: true, controls: "code-scanning-rule-description" }) do %>Show more <%= primer_octicon(:"chevron-down") %><% end %>
+                <%= render Primer::Beta::Button.new(scheme: :link, block: true, classes: "Details-content--hidden js-details-target", aria: { expanded: false, controls: "code-scanning-rule-description" } ) do %>Show less <%= primer_octicon(:"chevron-up") %><% end %>
+              </div>
+            <% end %>
+          <% elsif view.result.rule&.full_description.present? %>
+            <div class="Box-body markdown-body comment-body">
+              <%= view.result.rule.full_description %>
+            </div>
+          <% else %>
+            <div class="Box-body markdown-body comment-body">
+              <p class="color-fg-muted f5"><em>No rule help available for this alert.</em></p>
+            </div>
+          <% end %>
+        </div>
+
+        <h2 class="sr-only">Activity</h2>
+        <include-fragment src="<%= view.timeline_path %>" <%= test_selector("code-scanning-alert-timeline-fragment") %>>
+          <%= render(Primer::Beta::TimelineItem.new(condensed: false, pb: 1)) do |component| %>
+            <% component.with_badge(icon: "shield") %>
+            <% component.with_body(display: :flex, align_items: :center) do %>
+              <span data-hide-on-error>
+                Loading<span class="AnimatedEllipsis"></span>
+              </span>
+              <span data-show-on-error hidden>
+                Sorry, something went wrong loading the alert history.
+              </span>
+            <% end %>
+          <% end %>
+        </include-fragment>
+        <% if blob_supports_code_navigation?(view.blob) %>
+          <%= render partial: "code_navigation/popover", locals: { repo: current_repository, ref: tree_name, code_nav_context: :BLOB_VIEW } %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>
+<% end %>

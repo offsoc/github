@@ -1,0 +1,25 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require File.expand_path("../../config/environment", __FILE__)
+
+if ARGV.include?("--review-lab")
+  group_id = "review_lab_aqueduct_relay_#{GitHub.current_ref.parameterize.underscore}"
+  subscribe_to = /review-lab.v1.AqueductJob$/
+  filter = ->(message) { message.value[:current_ref] == GitHub.current_ref }
+end
+
+processor = GitHub::StreamProcessors::AqueductJobRelay.new(
+  group_id: group_id,
+  subscribe_to: subscribe_to,
+  filter: filter,
+)
+consumer = GitHub.hydro_consumer(processor.options)
+
+begin
+  GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+rescue => e
+  GitHub.logger.error("failed to run stream processor", { "code.namespace" => processor.class.name, :exception => e })
+  Failbot.report(e)
+  raise
+end

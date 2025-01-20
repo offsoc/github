@@ -1,0 +1,88 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-maintenance [-hqseum]
+#/
+#/ Iterates over all the nodes in the cluster and sets or unset maintenance mode.
+#/
+#/ OPTIONS:
+#/   -h | --help                Show this message
+#/   -q | --query               Query current mode
+#/   -s | --set                 Set the maintenance mode
+#/   -e | --enable-ip-exception Unset the maintenance mode but make GHES only accessible by IP exception list provided as an argument
+#/        <list of IPv4/IPv6 addresses or CIDR blocks>
+#/   -u | --unset               Unset the maintenance mode
+#/   -m | --message             Set a custom message that will be shown whenever maintenance mode is set.
+#/
+set -e
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo Run this script as the admin user. >&2
+  exit 1
+}
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+node_args=
+
+if [ -z "$*" ]; then
+  usage
+  exit 2
+fi
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,query,set,enable-ip-exception,unset,message --options hqseum -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -s|--set)
+      shift 1
+      if [ $# -gt 1 ]; then
+        node_args="$node_args -s \"$2\""
+      else
+        node_args="$node_args -s" 
+      fi 
+      ;;
+    -e|--enable-ip-exception)
+      node_args="$node_args -e ${@:2}" 
+      ;;
+    -u|--unset)
+      node_args="$node_args -u"
+      ;;
+    -q|--query)
+      node_args="$node_args -q || true"
+      ;;
+    -m|--message)
+      shift 2
+      node_args="$node_args -m \"$1\""
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$node_args" ]; then
+  usage
+  exit 2
+fi
+
+export LC_ALL=en_US.UTF-8
+
+if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+ghe-cluster-each -- CLUSTER_CLI=1 ghe-maintenance $node_args

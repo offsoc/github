@@ -1,0 +1,32 @@
+#!/bin/bash
+#/ Usage:
+#/   ghe-mssql-remove-unassigned-replicas
+#/ Removes replicas from mssql that are no longer in cluster.conf.
+#/ Configuring new replicas will be handled in ha_mssql.rb
+
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. ghe-mssql-lib
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-repl-lib
+. ghe-mssql-repl-lib
+
+if [ "$(mssql_instance_replica_participation)" == "primary" ]; then
+
+  # this will get the hostname of each node so that we can compare it to the nodes that mssql knows about
+  current_mssql_hosts_raw=$(ghe-cluster-each --role mssql 'echo $(hostname)' | cut -d ":" -f2-) # the ghe-cluster-each return things in the form "name: hostname"
+  current_mssql_hosts=()
+  for host in $current_mssql_hosts_raw; do
+    current_mssql_hosts+=("$host")
+  done
+
+  # get the replica nodes that mssql knows about
+  current_replica_nodes=$(ghe-mssql-console -y -n -q "SET NOCOUNT ON; SELECT node_name FROM sys.dm_hadr_availability_replica_cluster_nodes")
+  for node in $current_replica_nodes; do
+    if ! printf '%s\0' "${current_mssql_hosts[@]}" | grep -Fxqz -- "$node" ; then
+      echo "Found $node registered as a mssql replica, but cluster.conf reports that node should not be running mssql.  Removing it from the replica group"
+      ghe-mssql-console -y -q "ALTER AVAILABILITY GROUP [ha] REMOVE REPLICA ON N'$node';"
+    fi
+  done
+fi

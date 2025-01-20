@@ -1,0 +1,1 @@
+export {TrendIndicator} from './TrendIndicator'

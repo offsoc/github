@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+# typed: true
+# frozen_string_literal: true
+
+require "bundler"
+require "packwerk"
+require "github/sorbet/runtime"
+require "github/packwerk/package_yml_linter"
+require "github/packwerk/privacy/privacy_violation_todos"
+require "github/packwerk/privacy/legacy_violation_validator"
+
+# Without this, we get warnings when the sorbet initializer runs in our rails app. While harmless,
+# this could confuse folks, so let's just shut it down here instead.
+GitHub::Sorbet::Runtime.ignore_directives!
+
+# Needs to be run in test environment in order to have test helper paths available in the autoload paths
+ENV["RAILS_ENV"] = "test"
+
+# We need to explicitly require environment because custom parser depends indirectly on better_html which
+# includes a railtie if `Rails` is defined. The problem is, we have a "pretend" Rails defined, but nothing else
+# and better_html assumes that Rails being defined means Rails is really there, not pretend. This is all a result
+# of our safe-ruby stuff and the fake Rails defined in config/basic.rb.
+require File.expand_path("../../config/environment", __FILE__)
+require "github/packwerk/custom_parser"
+require "packwerk/privacy/checker"
+
+
+ci_mode = ENV["GITHUB_CI"].present?
+
+configs = {
+  "include" => [
+    "app/**/*.{rb,rake,erb}",
+    "config/**/*.rb",
+    "db/**/*.rb",
+    "script/**/*.rb",
+    "lib/**/*.{rb,rake}",
+    "packages/**/*.{rb,rake,erb}",
+    "test/**/*.rb",
+    "vendor/gitrpc/**/*.rb"
+  ],
+  "exclude" => [
+    "{bin,node_modules,script,tmp,vendor}/**/*"
+  ],
+  "cache" => true
+}
+
+options = { configuration: Packwerk::Configuration.new(configs) }
+if ci_mode
+  require "github/packwerk/build_markup_offenses_formatter"
+
+  options[:style] = Packwerk::OutputStyles::Plain.new
+  options[:offenses_formatter] = GitHub::Packwerk::BuildMarkupOffensesFormatter.new
+else
+  options[:style] = Packwerk::OutputStyles::Coloured.new
+end
+
+cli = Packwerk::Cli.new(**options)
+begin
+  cli.run(ARGV.dup)
+rescue SystemExit => err
+  raise err unless err.status == 0
+end
+
+case ARGV[0]
+when "update-todo", "update"
+  GitHub::Packwerk::Privacy::PrivacyViolationTodos.persist!
+when "check"
+  GitHub::Packwerk::PackageYmlLinter.check!
+  GitHub::Packwerk::Privacy::PrivacyViolationTodos.check!
+
+  legacy_validator = GitHub::Packwerk::Privacy::LegacyViolationValidator.new
+  legacy_validator.check!
+  if legacy_validator.any_violations?
+    exit 1
+  end
+end

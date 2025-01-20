@@ -1,0 +1,173 @@
+<% if logged_in? && !github_sponsoring? %>
+  <div class="Box" <%= test_selector("not-sponsoring") %>>
+    <div class="Box-header color-bg-default">
+      <%=
+        render(Sponsors::AccountSwitcherComponent.new(
+          sponsorable: sponsorable,
+          sponsor: @sponsor,
+          sponsorship: sponsorship,
+          adminable_orgs_only: false,
+          allow_selecting_invoiced_orgs: true,
+          path_params: path_params,
+          header_tag: :h3,
+        ))
+      %>
+    </div>
+    <% if can_create_sponsorship? %>
+      <div class="Box-row color-bg-subtle d-flex">
+        <div class="d-inline-flex">
+          <div
+            data-hovercard-subject-tag="<%= "sponsors_listing:#{sponsors_listing.id}" %>"
+            <%= test_selector("sponsor-hovercard-preview") %>
+          >
+            <%= linked_avatar_for(@sponsor, 36, img_class: "avatar") %>
+          </div>
+          <div class="pl-3 f6 color-fg-default">
+            Hover over your avatar to review the badge you'll get that shows
+            <a href="<%= user_path(sponsorable) %>" class="Link--inTextBlock user-mention text-bold">@<%= sponsorable %></a>
+            <% if sponsor_is_current_user? %>
+              you're
+            <% else %>
+              <%= @sponsor %>'s
+            <% end %>
+            a sponsor.
+          </div>
+        </div>
+      </div>
+    <% elsif logged_in? %>
+      <div class="Box-row color-bg-subtle">
+        <div class="d-flex flex-items-center mb-3 flex-justify-center">
+          <span class="CircleBadge color-bg-sponsors-emphasis mr-2 avatar-5">
+            <%= render(Primer::Beta::Octicon.new(icon: "heart-fill", color: :on_emphasis, height: 24, classes: "CircleBadge-icon")) %>
+          </span>
+          <%= render(Primer::Beta::Octicon.new(icon: "plus", color: :muted, mr: 2)) %>
+          <div data-hovercard-subject-tag="<%= "sponsors_listing:#{sponsors_listing.id}" %>" <%= test_selector("sponsor-hovercard-preview") %>>
+            <%= linked_avatar_for(@sponsor, 32, img_class: "avatar avatar-5") %>
+          </div>
+        </div>
+
+        <% if sponsorship_adminable_by_current_user? %>
+          <div class="d-flex flex-items-center flex-justify-center my-2">
+            <h3 class="h5 text-center">Invoicing for sponsorships</h3>
+          </div>
+
+          <p class="text-center">
+            Because <strong>@<%= @sponsor %></strong>'s GitHub account is using invoiced billing,
+            you'll have to configure invoicing for sponsorships before creating a new sponsorship.
+          </p>
+
+          <%= render Primer::Beta::Button.new(
+            scheme: :primary,
+            size: :large,
+            block: true,
+            tag: :a,
+            href: org_sponsoring_billing_options_path(@sponsor),
+            mt: 3,
+            test_selector: "switch-to-invoicing-link",
+          ).with_content("Set up invoicing for sponsorships") %>
+        <% else %>
+          <h5 class="text-center my-2" <%= test_selector("share-with-#{@sponsor}-decision-maker") %>>
+            Help @<%= @sponsor %> become a sponsor
+          </h5>
+          <p class="text-center">
+            Share this with a decision-maker in the <strong>@<%= @sponsor %></strong> organization
+            who can help <strong>@<%= @sponsor %></strong> become a sponsor to <strong><%= sponsorable %></strong>.
+          </p>
+
+          <div class=" input-group mt-3">
+            <input
+              class="form-control text-small color-fg-muted"
+              type="text"
+              aria-label="<%= sponsors_profile_url %>"
+              value="<%= sponsors_profile_url %>"
+              data-autoselect
+              readonly
+            >
+            <%= render Primer::Beta::ClipboardCopy.new(
+              value: sponsors_profile_url,
+              aria: { label: "Copy sponsors profile URL to clipboard" },
+              classes: "input-group-button btn btn-sm")
+            %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<div class="d-flex flex-justify-between flex-items-center mt-5 mb-2" data-hpc>
+  <h4 <%= test_selector("tier-selection-header") %>><%= tier_selection_header_text %></h4>
+  <% if show_frequency_selector? %>
+      <%= render Primer::Alpha::SegmentedControl.new(
+        aria: { label: tier_selection_header_text },
+        test_selector: "frequency-selector",
+      ) do |component| %>
+        <%= component.with_item(
+          label: "Monthly",
+          tag: :a,
+          href: frequency_tab_path("recurring"),
+          selected: recurring?,
+          test_selector: "monthly-tab"
+        ) %>
+        <%= component.with_item(
+          label: "One-time",
+          tag: :a,
+          href: frequency_tab_path("one-time"),
+          selected: one_time?,
+          test_selector: "one-time-tab"
+        ) %>
+        <% if sponsorable_via_patreon? %>
+          <%= component.with_item(
+            label: "Patreon",
+            tag: :a,
+            href: frequency_tab_path("patreon"),
+            selected: patreon?,
+            test_selector: "patreon-tab"
+          ) %>
+        <% end %>
+      <% end %>
+  <% end %>
+</div>
+
+<div class="Box">
+  <% if logged_in? && current_user.no_verified_emails? %>
+    <div class="Box-row flash-warn" <%= test_selector("sponsorship-banner") %>>
+      <p class="mb-0">You need a
+        <a class="Link--inTextBlock" href="<%= settings_email_preferences_path %>">verified email address</a> before you can sponsor anyone.
+      </p>
+    </div>
+  <% end %>
+
+  <%= render Sponsors::Profile::PatreonTiersComponent.new(
+    sponsors_listing: sponsors_listing,
+    sponsorable: sponsorable,
+    sponsor: @sponsor,
+    frequency: @frequency,
+    sponsorship: sponsorship,
+  ) %>
+
+  <%= render Sponsors::Profile::CustomAmountFormComponent.new(
+    sponsors_listing: sponsors_listing,
+    frequency: @frequency,
+    previewing: previewing?,
+    sponsor: @sponsor,
+    current_sponsorship_tier: current_tier,
+    custom_amount: @custom_amount,
+    sponsorable_metadata: @sponsorable_metadata,
+    sponsors_tiers: sponsors_tiers,
+    selectable: !invoiced_org_without_sponsors_invoicing? && sponsorship_adminable_by_current_user?
+  ) %>
+
+  <% sponsors_tiers.each do |tier| %>
+    <%= render Sponsors::Profile::TierDisplayComponent.new(
+      tier: tier,
+      current_sponsorship_tier: current_tier,
+      sponsorable: sponsorable,
+      sponsor: @sponsor,
+      sponsorable_metadata: @sponsorable_metadata,
+      is_previous_sponsorship: tier.id == previous_tier&.id,
+      selectable: !invoiced_org_without_sponsors_invoicing? && sponsorship_adminable_by_current_user?,
+      has_active_patreon_sponsorship: sponsorship&.patreon?
+    ) %>
+  <% end %>
+</div>

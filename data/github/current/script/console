@@ -1,0 +1,83 @@
+#!/usr/bin/env safe-ruby
+
+$0 = "#$0 #{ARGV.join(' ')}"
+
+require "irb"
+require File.expand_path("../../config/basic", __FILE__)
+
+irb = RUBY_PLATFORM =~ /(:?mswin|mingw)/ ? "irb.bat" : "irb"
+
+require "optparse"
+
+options = { sandbox: false, irb: irb, readonly: false }
+OptionParser.new do |opt|
+  opt.banner = "Usage: console [environment] [options]"
+  opt.on("-s", "--sandbox", "Rollback database modifications on exit.") { |v| options[:sandbox] = v }
+  opt.on("--irb=[#{irb}]", "Invoke a different irb.") { |v| options[:irb] = v }
+  opt.on("--readonly", "Start a console against the read-only database instance.") { options[:readonly] = true }
+  opt.on("-p", "--pry", "Use Pry instead of IRB.") { options[:pry] = true }
+  opt.parse!(ARGV)
+end
+
+ENV["RAILS_ENV"] = case ARGV.shift
+when "p", "production"; "production"
+when "d", "development"; "development"
+when "t", "test"; "test"
+else
+  ARGV.first || ENV["RAILS_ENV"] || "development"
+end
+
+gh_console_set = !ENV["GH_CONSOLE"].nil? && ENV["GH_CONSOLE"] != ""
+fi_set = %w[true 1].include?(ENV["FI"])
+if ENV["RAILS_ENV"] == "production" && !fi_set && !gh_console_set
+  abort "In production, please use gh-console instead."
+end
+
+if options[:sandbox]
+  puts "Loading #{ENV['RAILS_ENV']} environment in sandbox"
+  puts "Any modifications you make will be rolled back on exit"
+else
+  puts "Loading #{ENV['RAILS_ENV']} environment"
+end
+
+if options[:readonly]
+  ENV["GITHUB_PRODUCTION_RO_CONSOLE"] = "1"
+end
+ENV["GITHUB_PRODUCTION_CONSOLE"] = "1"
+
+require "irb/completion"
+require_relative "../config/environment"
+require "rails/console/app"
+require "active_record/railties/console_sandbox" if options[:sandbox]
+require "rails/console/helpers"
+require_relative "../config/console"
+require "console_auth"
+
+# only launch console_auth if ENV["GH_CONSOLE"] is set (happens in gh-console command)
+# https://github.com/github/shell/blob/master/bin/gh-console#L12
+
+if gh_console_set && !GitHub.enterprise?
+  ConsoleMonitor.logger = GitHub.logger
+  ConsoleAuth.gatekeeper
+end
+
+ActiveRecord::Base.logger = ActiveSupport::Logger.new(STDOUT)
+
+if options[:readonly]
+  puts "Connecting to the read-only database."
+  puts "Still please do avoid long-lived, unbounded queries!"
+  ActiveRecord::Base.connecting_to(role: :reading)
+end
+
+Failbot.disable
+
+ENV["IRBRC"], ENV["IRBRC_WAS"] = Rails.root.join("config/console/irbrc.rb").to_s, ENV["IRBRC"]
+
+if options[:pry]
+  require "pry"
+  Pry.toplevel_binding.eval("self").extend(Rails::ConsoleMethods)
+  Pry.start(Pry.toplevel_binding, input: StringIO.new(""))
+else
+  IRB::ExtendCommandBundle.include(Rails::ConsoleMethods)
+  IRB.start
+end

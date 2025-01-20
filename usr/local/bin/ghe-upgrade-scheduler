@@ -1,0 +1,115 @@
+#!/bin/bash
+#/ Usage: ghe-upgrade-scheduler [options] <upgrade package file>
+#/
+#/ Schedule an upgrade package for future installation.  If a log file is not
+#/ specified, upgrade will log to /data/user/common/(basename of package file).log.
+#/
+#/ OPTIONS:
+#/   -h | --help            Show this message.
+#/   -r | --remove          Remove any scheduled jobs for the package.
+#/   -s | --show            Show existing scheduled job for the package.
+#/   -c | --schedule        Specify crontab formatted schedule for future package installation.  Ensure crontab schedule is quoted.
+#/   -l | --log             Specify output log file for package install (optional).
+#/   -u | --check           Run ghe-update-check after package install (optional).
+#/   <upgrade package file> The upgrade package file to apply.
+#/
+set -e
+
+BASE_PATH=$(cd "$(dirname ${BASH_SOURCE[0]})" && pwd)
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+[ "$(whoami)" = "admin" ] || {
+    exec sudo -u admin "$0" "$@"
+    echo Run this script as the admin user. >&2
+    exit 1
+}
+
+# Parse args.
+ARGS="$(getopt --name "$0" --long help,remove,show,schedule:,log:,check --options hrsc:l:u -- "$@")" || {
+  usage
+  exit 2
+}
+eval set -- "$ARGS"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -r|--remove)
+      action="remove"
+      shift
+      ;;
+    -s|--show)
+      action="show"
+      shift
+      ;;
+    -c|--schedule)
+      action="schedule"
+      schedule="$2"
+      if [ -z "$schedule" ]; then
+        echo "Error: Must specify a cron interval with --schedule"  >&2
+        usage
+        exit 1
+      fi
+      shift 2
+      ;;
+    -l|--log)
+      log="$2"
+      if [ -z "$log" ]; then
+        echo "Error: Must specify a logfile path with --log" >&2
+        usage
+        exit 1
+      fi
+      shift 2
+      ;;
+    -u|--check)
+      check=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+if [ ! -e "$1" ]; then
+  echo "Error: Need to specify a valid upgrade package file!"  >&2
+  usage
+  exit 1
+fi
+
+pkg=$1
+
+# replace "." with "\." in search string so that grep matches correctly
+cron_search="ghe-upgrade.*$(echo "$pkg" | sed 's/\./\\./g')"
+log=${log:-"/data/user/common/$(basename $pkg).log"}
+
+cron_list="$(crontab -l 2>/dev/null || true)"
+
+case "$action" in
+  show)
+    echo "$cron_list" | grep "$cron_search"
+    ;;
+  remove)
+    echo "$cron_list" | grep -v "$cron_search" | crontab -
+    ;;
+  schedule)
+    # run ghe-upgrade later and log results
+    sudo mkdir -p "$(dirname $log)"
+    cron_job="$schedule $BASE_PATH/ghe-upgrade -y -s $pkg > $log 2>&1"
+    if [ -n "$check" ]; then
+      cron_job="$cron_job && $BASE_PATH/ghe-update-check -q -i"
+    fi
+
+    echo "$(echo "$cron_list" | grep -v "$cron_search"; echo "$cron_job")" | crontab -
+    ;;
+  *)
+    usage
+    ;;
+esac

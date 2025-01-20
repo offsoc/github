@@ -1,0 +1,174 @@
+<%
+  hidden_events = group.hidden_events(viewer: current_user)
+  visible_events = group.visible_events(viewer: current_user)
+  header_link_class_names = class_names("Link--primary no-underline wb-break-all d-inline-block")
+%>
+
+<div class="body">
+  <div
+    class="<%= class_names("Details js-details-container", "open Details--on" => group.expanded?(viewer: current_user)) %>"
+    <%= test_selector("news-feed-event-group") %>
+    >
+    <div class="d-flex flex-items-baseline py-4">
+      <div class="d-flex flex-column flex-1" style="min-width: 0;">
+        <div class="d-flex flex-justify-between flex-items-baseline">
+          <div class="color-fg-muted">
+            <span <%= test_selector("feeds-redesign-avatar")%>  class="mr-2">
+              <%= linked_avatar_for(group.sender_record, 32, img_class: "avatar") %>
+            </span>
+            <% if group.same_actor? %>
+              <%= link_to_event_group_actor(group, classes: header_link_class_names) %>
+            <% elsif group.list_actors? %>
+              <% group.event_views.each_with_index do |event_view, i| %>
+                <% include_comma = i < group.total_unique_actors - 1 && group.total_unique_actors > 2 %>
+                <%= link_to_event_group_actor(group, event_view: event_view, classes: header_link_class_names) %><%= "," if include_comma %>
+                <% if i == group.total_unique_actors - 2 %>and <% end %>
+              <% end %>
+            <% else %>
+              <%= link_to_event_group_actor(group, classes: header_link_class_names) %>
+              and <%= pluralize(group.unique_actors.size - 1, "other") %>
+            <% end %>
+
+            <span class="no-underline color-fg-muted">
+              <%= group.action %>
+
+              <% if group.targets_include_viewer?(viewer: current_user) %>
+                you
+                <%= "and" if group.show_trailing_targets_description? %>
+              <% elsif group.follow_events? %>
+                <%= link_to_event_target_login(
+                  group.first_event_view,
+                  classes: header_link_class_names
+                ) %>
+                <%= "and" if group.show_trailing_targets_description? %>
+              <% end %>
+
+              <% if group.push_events? %>
+                <%= link_to_event_repo(group.first_event_view, classes: header_link_class_names) %>
+              <% elsif group.link_to_trailing_targets_description? %>
+                <%= link_to_event_target_login(
+                  group.event_for_second_target_user(viewer: current_user),
+                  classes: header_link_class_names
+                ) %>
+              <% elsif group.show_trailing_targets_description? %>
+                <span class="wb-break-all d-inline-block">
+                  <%= group.trailing_targets_description(viewer: current_user) %>
+                </span>
+              <% end %>
+
+              <%= group.trailing_action %>
+
+              <% if group.tag_or_branch_create_event? %>
+                in <%= link_to_event_repo(group.first_event_view, classes: header_link_class_names) %>
+              <% elsif group.issue_comment_events? %>
+                on
+                <%= group.issue_comment_parent_type %>
+                <%= link_to_event_issue_comment_issue(
+                  group.first_event_view,
+                  tooltip: true,
+                  classes: "Link--primary"
+                ) %>
+              <% elsif group.pull_request_review_comment_events? %>
+                on pull request
+                <%= link_to_event_pr_review_comment(
+                  group.first_event_view,
+                  tooltip: true,
+                  classes: "Link--primary"
+                ) %>
+              <% end %>
+              <span <%= test_selector("micro-time-ago") %>>
+                · <%= render(Primer::Beta::RelativeTime.new(datetime: group.most_recent_created_at, tense: :past)) %>
+              </span>
+            </span>
+          </div>
+
+          <% if group.expandable?(viewer: current_user) %>
+            <%= content_tag(:button, type: "button", class: "btn-link color-fg-default no-underline js-details-target", "aria-expanded" => false, data: group.click_attributes(org_id: current_organization&.id, viewer: current_user)) do %>
+              <span class="Details-content--shown">
+                <%= primer_octicon(:unfold, mr: 1, classes: "Link--secondary", "aria-label": "Expand") %>
+              </span>
+              <span class="Details-content--hidden">
+                <%= primer_octicon(:fold, mr: 1, classes: "Link--secondary", "aria-label": "Collapse") %>
+              </span>
+            <% end %>
+          <% end %>
+        </div>
+
+        <div>
+          <% if group.follow_events? %>
+            <%= render_grouped_follow_events(visible_events, is_visible: true, locals: { followed_user_ids: followed_user_ids }) %>
+          <% elsif group.push_events? %>
+            <% group.visible_commits_grouped_by_ref.each do |commit_group| %>
+              <%= render_grouped_push_event_commits(commit_group, is_visible: true) %>
+            <% end %>
+          <% elsif group.watch_events? %>
+            <%= render_grouped_watch_events(visible_events, is_visible: true, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.create_events? %>
+            <%= render_grouped_create_events(visible_events, is_visible: true, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.fork_events? %>
+            <%= render_grouped_fork_events(visible_events, is_visible: true,  locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.public_events? %>
+            <%= render_grouped_public_events(visible_events, is_visible: true, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.issue_comment_events? %>
+            <%= render_grouped_issue_comment_events(visible_events, is_visible: true) %>
+          <% elsif group.pull_request_review_comment_events? %>
+            <%= render_grouped_pull_request_review_comment_events(visible_events,
+                                                                  is_visible: true) %>
+          <% elsif group.release_events? %>
+            <%=
+              render_grouped_release_events(
+                visible_events,
+                is_visible: true,
+                locals: {
+                  discussion_number_and_comment_count_by_release_id: discussion_number_and_comment_count_by_release_id,
+                  reaction_count_by_content_by_release_id: reaction_count_by_content_by_release_id,
+                  viewer_reaction_contents_by_release_id: viewer_reaction_contents_by_release_id,
+                  sponsorable_user_ids: sponsorable_user_ids,
+                  sponsored_user_ids: sponsored_user_ids,
+                }
+              )
+            %>
+          <% end %>
+        </div>
+
+        <div class="Details-content--hidden dashboard-rollup-items body">
+          <% if group.follow_events? %>
+            <%= render_grouped_follow_events(hidden_events, is_visible: false, locals: { followed_user_ids: followed_user_ids }) %>
+          <% elsif group.push_events? %>
+            <% group.hidden_commits_grouped_by_ref.each do |commit_group| %>
+              <%= render_grouped_push_event_commits(commit_group, is_visible: false) %>
+            <% end %>
+          <% elsif group.watch_events? && !group.same_target? %>
+            <%= render_grouped_watch_events(hidden_events, is_visible: false, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.create_events? %>
+            <%= render_grouped_create_events(hidden_events, is_visible: false, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.fork_events? %>
+            <%= render_grouped_fork_events(hidden_events, is_visible: false, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.public_events? %>
+            <%= render_grouped_public_events(hidden_events, is_visible: false, locals: { starred_repo_ids: starred_repo_ids, starrable_repo_ids: starrable_repo_ids }) %>
+          <% elsif group.issue_comment_events? %>
+            <%= render_grouped_issue_comment_events(hidden_events, is_visible: false) %>
+          <% elsif group.pull_request_review_comment_events? %>
+            <%= render_grouped_pull_request_review_comment_events(hidden_events,
+                                                                  is_visible: false) %>
+          <% elsif group.release_events? %>
+            <%=
+              render_grouped_release_events(
+                hidden_events,
+                is_visible: false,
+                locals: {
+                  discussion_number_and_comment_count_by_release_id: discussion_number_and_comment_count_by_release_id,
+                  reaction_count_by_content_by_release_id: reaction_count_by_content_by_release_id,
+                  viewer_reaction_contents_by_release_id: viewer_reaction_contents_by_release_id,
+                  sponsorable_user_ids: sponsorable_user_ids,
+                  sponsored_user_ids: sponsored_user_ids,
+                }
+              )
+            %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+

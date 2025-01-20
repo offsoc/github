@@ -1,0 +1,80 @@
+import { Meta, Story } from '@storybook/blocks';
+
+<Meta title="Recipes/Filter/Documentation/User-defined filters" />
+
+# User-defined filters
+
+Qualifiers that are generated based on user content. For example `static-field.custom-user-data:hello-world`.
+
+![A filter input containing the query 'field.level:high' and a dropdown menu listing options such as Author, Assignee, Created on, Field, Labels, Mentions, Organization, and Repository.](https://github.com/primer/design/assets/980622/130b5469-119d-4cbb-9d34-594cfcef1dce)
+
+## 🚨 The problem
+
+Within issues, I can currently create a `priority` field with 3 options: `high`, `medium` and `low`.
+This then becomes available within the filter syntax as `priority:high`.
+
+However while this example sounds straightforward this solution creates **multiple problems**.
+
+#### 1️⃣ Introducing new filters is harder
+
+The first problem is that tomorrow we might want to introduce a `priority` field ourselves but sadly users started
+using this filter key already and therefore we need to come up with a migration plan for those users. This change will
+then cause friction for those users who might have relied on this for a long time.
+
+#### 2️⃣ Blacklist filters
+
+To avoid that users create conflicting field in issues a list of filter keys needs to be maintained to ensure
+no conflicts are created going forward.
+
+#### 3️⃣ Cross-feature conflicts
+
+If the discussions team adds a priority filter with options like urgent and non-urgent, they might not realize that
+users are already using these terms in issues. At first, this won't cause any problems in their feature.
+However, if they later decide to include this filter in a global search, it could become a problem.
+
+For instance, if I want to search for all issues and discussions tagged with `priority`, I would type `priority:`.
+Then, I expect to see a list of related filters like `urgent`, `non-urgent`, `high`, `medium`, and `low`.
+For this to happen, the global search team has to get information from both the discussions and issues tables.
+This is a challenge because it involves gathering data from different sources, which is costly at our scale.
+Plus, the search results need to be combined and organized, adding to the complexity.
+
+#### 4️⃣ Slow database queries
+
+Currently, our filters are static values, meaning we don't need to access our databases for initial suggestions.
+This provides a snappy experience as be don't need to wait for the initial suggestions.
+However, if we start using user-defined filters, we'll have to query the database first.
+This could become complex, as users might define between 10 to 20 filters per feature, leading to large and
+potentially overwhelming list of suggestions. Supporting this in global search complicates things even further.
+In this case we need to extract all possible filters from multiple tables to provide these suggestions,
+which could be challenging to manage efficiently
+
+## 🎉 The solution
+
+To prevent the issues mentioned earlier, it's essential to establish a subkey specifically for user-defined filters.
+
+For instance, rather than including a user-defined `priority` filter in the default suggestions, it's only available
+within the `field` filter. This arrangement means that when a user selects the `field` suggestion, they will see
+all the filters (sub-keys) they have created, including `priority`.
+
+![There are four filter inputs, each in a unique state. The first input is empty, displaying several suggestions like 'Field'. The second input contains 'field.' and presents five suggestions, with 'Level' among them. The third input, with 'field.level:' entered, shows three suggestions including 'High'. Finally, the last input holds 'field.level:high', where 'high' is emphasized with a blue background.](https://github.com/primer/design/assets/980622/b9886d04-f55e-49ce-aec1-7dfee9582380)
+
+We recognize that this approach requires users to type more to access their filters, but we expect the suggestions
+to expedite this process. In localised experiences for example within a project view we could further
+improve this experience by preloading all the user generated filters and show them when the user starts typing.
+For example `pri` would return `Field: Priority` this helps for discoverability and removes the need of using `field.`.
+Note that this can't be provided in a global context since it would require too many API calls.
+
+![Filter input showing a query 'field.level:high pri' with a suggestion box displaying 'Field: Priority'.](https://github.com/primer/design/assets/980622/97b7e6f1-e63b-41b7-8710-b9ed9b58f240)
+
+To alleviate further concerns about length, we propose offering shorthand options as well.
+For example, users can type `f.` as a quicker alternative to field.
+
+![Filter input showing a query 'field.level: high f.'. 'Level,' 'Reported,' 'Priority' are suggested.](https://github.com/primer/design/assets/980622/64bf7fa3-48e1-4fbd-8933-00e6eeaffd0d)
+
+Although we used the `field` example here, we suggest finding unique strings for each feature when there's no
+direct overlap. For instance, the repositories team uses `properties` for their [custom properties](https://github.blog/changelog/2023-10-12-github-repository-custom-properties-beta/) feature.
+
+Also, this method has extra advantages. Users can view all their created filters in one list within the suggestions.
+In big companies, this keeps the initial suggestions from becoming too cluttered.
+
+![Side-by-side screenshots of the filter input showing suggestions; left indicating 'Use subkeys to user generated filters', right advising 'Don't expose all user generated filters by default'. The left side shows a single 'Field' filter, the right multiple 'Field' sub-filters like 'Field: Level', 'Field: Reported'.](https://github.com/primer/design/assets/980622/de31c190-112f-4d35-a33d-c610cb78f421)

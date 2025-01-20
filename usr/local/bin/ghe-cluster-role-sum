@@ -1,0 +1,48 @@
+#!/usr/bin/env ruby
+require "json"
+require "digest"
+require "optparse"
+require "/data/enterprise-manage/current/lib/ghe-config"
+
+op = OptionParser.new do |opts|
+  opts.banner = <<~BANNER
+  Generate a sha256sum of a slice of node roles from cluster.conf.
+  Usage: ghe-cluster-role-sum ROLE... [OPTION]...
+  BANNER
+  opts.on("-fFILE", "--file=FILE", "Path to cluster.conf")
+  opts.on("-o", "--offline",       "Include the offline status of the filtered nodes in the sum")
+  opts.on("-h", "--help",          "Show this message") { puts opts; exit 2 }
+end
+
+options = {}
+op.parse!(into: options)
+op.abort("ROLE is required.\n#{op}") unless ARGV.any?
+
+# Get a list of node attributes that match the given roles.
+# If offline is true, also include the offline status of the nodes in the list.
+def get_node_attributes(config, roles, offline = false)
+  (config["cluster"] || {}).each_with_object([]) do |(name, node), out|
+    next unless node.is_a?(Hash)
+
+    node.each do |role, value|
+      next unless roles.include?(role)
+      out << "#{name}.#{role} = #{value}"
+    end
+
+    if offline && node.key?("offline")
+      out << "#{name}.offline = #{node["offline"]}"
+    end
+  end
+end
+
+file_path = options[:file] || "/data/user/common/cluster.conf"
+abort "Error: cluster.conf not found at #{file_path}" unless File.file?(file_path)
+
+begin
+  config = GheConfig.new.load_config(file_path)
+rescue StandardError => e
+  abort "Error loading cluster config: #{e.message}"
+end
+
+filtered_attrs = get_node_attributes(config, ARGV, options[:offline]).sort.join("\n")
+puts Digest::SHA256.hexdigest(filtered_attrs)

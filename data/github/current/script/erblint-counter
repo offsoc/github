@@ -1,0 +1,36 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+available_rules = Dir[".erb-linters/**/*.rb"].map do |path|
+  filename = File.basename(path, ".rb")
+  next if filename == "custom_rule_helpers"
+  name = filename.split("_").map { |s| s.capitalize }.join
+  name.end_with?("Counter") ? name : nil
+end.compact
+
+counter = ARGV[0]
+if counter.nil? || !available_rules.include?(counter)
+  $stderr.puts "Please provide a counter you wish to ignore for every file"
+  $stderr.puts "Available counters: #{available_rules.join(", ")}"
+  exit(1)
+end
+
+output = `bin/bundle exec erblint app/views app/components packages/**/app/components app/forms/**/`
+offenses = output.split("\n\n").select do |msg|
+  msg.match("erblint:counter #{counter}")
+end
+puts "Found #{offenses.length} file(s) requiring #{counter}"
+exit 0 if offenses.length == 0
+
+count = 0
+
+offenses.each do |msg|
+  filename = msg.match(/In file: (.+):\d+/)[1]
+  comment = msg.match(/(<%#.+%>)/)[1]
+  count += comment.match(/\s(\d+)\s/)[1].to_i
+  puts "Adding erblint:counter comment to #{filename}"
+  File.write(filename, "#{comment}\n" + File.read(filename))
+end
+
+puts "Ignored #{count} #{counter} offense(s)"
+exit 0

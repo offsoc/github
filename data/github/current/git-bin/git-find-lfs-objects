@@ -1,0 +1,39 @@
+#!/bin/sh
+#/ Usage: <included Git commits> via std-in | git-find-lfs-objects
+#/ Find all Git LFS object IDs referenced by commits that are reachable
+#/ by the given commits and not by all existing refs.
+#/
+#/ Ex: printf "7708adf" | git-find-lfs-objects
+set -e
+
+# Show usage.
+_usage () {
+  grep '^#/' <"$0" | cut -c 4-
+  exit 1
+}
+
+# Do some baseline sanity checking on args
+if [ $# -eq 1 ] && [ "$1" = "--help" ]; then
+    _usage
+fi
+
+# (1) We only look at Git LFS pointer files smaller than 140 bytes to keep the
+#     parsing effort to a minimum. With the https://git-lfs.github.com/spec/v1
+#     pointer format, this allows to reference files up to 9TB unless Git LFS
+#     extensions are used.
+#     The Git LFS reference implementation uses 1024 bytes as cutoff threshold.
+#     c.f. https://github.com/git-lfs/git-lfs/blob/master/docs/extensions.md
+#          https://github.com/git-lfs/git-lfs/blob/8a9048e548653f036fec042d13dc4d33354cb978/lfs/scanner.go#L6-L8
+# (2) TODO: Improve the '--filter' mechanism in Git core to filter *only*
+#     blobs. Right now the command returns every Git object below the threshold.
+# (3) Technically it is not correct to detect Git LFS points only by just the
+#     oid sha256 prefix. However, it is fast and I would argue good enough.
+#     c.f. https://github.com/git-lfs/git-lfs/blob/master/docs/spec.md
+#
+# Benchmarks showed that 'perl' is approximately 30% faster than 'sed' here for
+# large datasets. See github/github#94623 for more information.
+git rev-list --objects --filter=blob:limit=140 --not --all --stdin          | # Find all objects smaller than 140 bytes (1)(2)
+  git cat-file --batch-check='%(objecttype) %(objectname) %(rest)' --buffer | # Print the object type
+  perl -lne '/^blob ([0-9a-f]{40})/ and print $1'                           | # Filter blob objects
+  git cat-file --batch= --buffer                                            | # Cat blob objects
+  perl -lne '/^\s*oid sha256:([a-zA-Z0-9]{64})\s*$/ and print $1'             # Filter LFS object IDs (3)

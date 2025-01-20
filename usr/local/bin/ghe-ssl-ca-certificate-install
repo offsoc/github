@@ -1,0 +1,224 @@
+#!/bin/bash
+#/ Usage: ghe-ssl-ca-certificate-install [options]
+#/
+#/ This utility will install or remove a custom CA root certificate.
+#/ This may be necessary if you're using TLS which requires a custom
+#/ internal CA certificate or if you're installing a self-signed SSL
+#/ certificate.
+#/
+#/ OPTIONS:
+#/   -h | --help                Show this message.
+#/   -c <certificate file> | --cert <certificate file>
+#/                              Either the path to the certificate to install or the
+#/                              relative filename of the certificate to remove.
+#/   -r | --remove              Remove a previously installed certificate.
+#/   -l | --list                List installed certificates.
+#/   -v | --verbose             Run in verbose mode.
+#/
+#/ EXAMPLES:
+#/
+#/ To install the certificate either specify the full path to the file
+#/ on the server using the -c option or pipe the file contents directly
+#/ into the utility.
+#/
+#/   $ ghe-ssl-ca-certificate-install -c /home/admin/my_ca_certificate.crt
+#/
+#/     or
+#/
+#/   $ ghe-ssl-ca-certificate-install < /home/admin/my_ca_certificate.crt
+#/
+#/ You can remove a previously installed certificate by using the -r
+#/ option and specifying the relative filename of the certificate.
+#/
+#/   $ ghe-ssl-ca-certificate-install -r -c github_custom_ca_1360098987.crt
+#/
+#/ It can be used remotely over SSH as follows:
+#/
+#/   $ ssh -p 122 admin@[hostname] -- \
+#/     'ghe-ssl-ca-certificate-install' < /path/to/my_ca_certificate.crt
+#/
+set -e
+export PATH="$PATH:/usr/local/share/enterprise"
+
+[ "$(whoami)" = "root" ] || {
+    exec sudo -u root "$0" "$@"
+    echo Run this script as the root user. >&2
+    exit 1
+}
+
+CA_DIR=/usr/local/share/ca-certificates
+VERBOSE=
+REMOVE=
+CERT=
+
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+message() {
+  echo " --> ${1}"
+}
+
+list_certificates() {
+  # Exclude the haproxy.crt symlink as we don't want customers accidentally removing it.
+  ls -1 $CA_DIR | grep -v ^haproxy\.crt$ || true
+}
+
+admin_access_to_file() {
+  file=$(readlink -f "$1")
+  sudo -u admin head -n 1 "$file" > /dev/null 2>&1
+}
+
+update_certificates() {
+  if [ -n "$VERBOSE" ]; then
+    if [ -n "$REMOVE" ]; then
+      update-ca-certificates -v -f
+    else
+      update-ca-certificates -v
+    fi
+  else
+    if [ -n "$REMOVE" ]; then
+      update-ca-certificates -f > /dev/null 2>&1
+    else
+      update-ca-certificates > /dev/null 2>&1
+    fi
+  fi
+}
+
+cleanup(){
+  rm -f /tmp/tmp_cert.pem /tmp/tmp_cert_split*.pem
+}
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long verbose,help,cert:,remove,list --options vhc:rl -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      set -x
+      VERBOSE=1
+      ;;
+    -c|--cert)
+      CERT="$2"
+      shift
+      ;;
+    -r|--remove)
+      REMOVE=1
+      ;;
+    -l|--list)
+      list_certificates
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+# Cleanup previous invocations in case the trap didn't work
+cleanup
+trap cleanup EXIT
+
+if [ -z "$CERT" ]; then
+  if [ ! -t 0 ]; then
+    CERT="/tmp/tmp_cert.pem"
+    cat > $CERT
+  else
+    echo "No certificate file specified." >&2
+    exit 2
+  fi
+fi
+
+if [ -z "$REMOVE" ]; then
+  if [ ! -f "$CERT" ]; then
+    echo "The specified certificate file wasn't found. You might try using the full path." >&2
+    exit 2
+  elif [ ! -s "$CERT" ]; then
+    echo "The certificate file is empty." >&2
+    exit 2
+  fi
+fi
+
+# ensure that the CA_DIR exists
+[ -d $CA_DIR ] || {
+  mkdir -p $CA_DIR
+  chown root:staff $CA_DIR
+}
+
+if [ -n "$REMOVE" ]; then
+  # prevent someone from passing in a relative path to some other location
+  certificate=$(basename `readlink -f ${CERT}`)
+
+  if [ -f "${CA_DIR}/${certificate}" ]; then
+    message "Removing CA certificate at ${CA_DIR}/${certificate}..."
+    rm "${CA_DIR}/${certificate}"
+  else
+    echo "Specified certificate did not exist at ${CA_DIR}/${certificate}!" >&2
+    echo "The installed certificates are as follows:" >&2
+    list_certificates
+    exit 1
+  fi
+else
+  # ensure that the specified certificate is readable
+  # by the admin user
+  if [ -n "$CERT" ]; then
+    if ! admin_access_to_file "$CERT"; then
+      echo "The specified certificate file isn't readable by your user!" >&2
+      exit 3
+    fi
+  fi
+
+  # If the file is a certificate chain, split it into individual certificates
+  if [ $(grep -c "END CERTIFICATE" "$CERT") -gt 1 ]; then
+    awk '
+      split_after == 1 {n++;split_after=0}
+      /-----END CERTIFICATE-----/ {split_after=1}
+      {print > "/tmp/tmp_cert_split" n ".pem"}' < "$CERT"
+    certs=$(ls /tmp/tmp_cert_split*pem)
+  else
+    certs="$CERT"
+  fi
+
+  # Check if certificate is zero-length
+  # Obtain the serial number of the first certificate in the file uploaded via the UI.
+  # We use this later to prevent installing a duplicate copy of the certificate.
+  if [ -s "${CA_DIR}/haproxy.crt" ]; then
+    haproxy_serial=$(openssl x509 -in ${CA_DIR}/haproxy.crt -serial -noout | grep -o '[^/=]*$')
+  fi
+
+  echo "$certs" | while read cert; do
+    # Use the uploaded certificate subject and serial to uniquely identify the file.
+    # Using this means we don't end up with loads of duplicate certs too.
+    subject=$(openssl x509 -in "$cert" -subject -noout -nameopt utf8 | grep -o '[^/=]*$' | tr -s "[ '\"\\\]" '_')
+    serial=$(openssl x509 -in "$cert" -serial -noout | grep -o '[^=]*$')
+    filename="${CA_DIR}/${subject}_$serial.crt"
+
+    if [ "$serial" != "$haproxy_serial" -a ! -f "$filename" ]; then
+      message "Installing CA certificate to ${filename}..."
+      cp "$cert" "$filename"
+      chown root:root "$filename"
+      chmod 0644 "$filename"
+    fi
+  done
+fi
+
+message "Updating CA certificates..."
+if ! update_certificates; then
+    echo "Failed to update certificates!" >&2
+    exit 4
+fi
+
+# Push changes to replica, if replication is enabled.
+/usr/local/share/enterprise/ghe-repl-sync-ca-certificates
+
+message "Done."

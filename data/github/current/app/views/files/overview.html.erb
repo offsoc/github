@@ -1,0 +1,195 @@
+<%
+  full_page_title view.page_title
+  page_info \
+    selected_link: :repo_source,
+    container_xl: true,
+    canonical_url: repository_url(current_repository, current_ref, path_string),
+    dashboard_pinnable_item_id: current_repository.global_relay_id,
+    show_repository_header_placeholder: true,
+    container_full: false
+%>
+
+<% if pjax_request_wants_repo_content_container? || turbo_request_wants_repo_content_container? %>
+  <% unless header_redesign_enabled? %> <%# the full header containing the buttons are rendered in the redesign, so no need to swap via turbo %>
+    <% content_for :counts_to_replace do %>
+      <% track_render_partial("files/overview/counts_to_replace") do %>
+        <%= render(Repositories::NotificationsComponent::CounterComponent.new(repository: current_repository)) %>
+        <%= render(Repositories::ForkButtonComponent::CounterComponent.new(repository: current_repository)) %>
+        <%= render(Stars::ButtonComponent::CounterComponent.new(repository: current_repository, id_suffix: "star")) %>
+        <%= render(Stars::ButtonComponent::CounterComponent.new(repository: current_repository, id_suffix: "unstar")) %>
+      <% end %>
+    <% end %>
+    <%= content_for :repository_details_container do %>
+      <div id="repository-details-container" data-turbo-replace>
+        <% track_render_partial("repositories/details") do %>
+          <%= render "repositories/details", view: create_view_model(Repositories::DetailsView, {
+              repository: current_repository,
+              repository_is_offline: repository_offline?,
+              cap_view_filter: cap_view_filter,
+              viewer_can_read_repo: current_user_can_read_repo?,
+          }) %>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% content_for :head do %>
+  <meta data-hydrostats="publish">
+<% end %>
+
+<%#
+  Render template components manually here so they don't render only within the :responsive_meta block and get lost on
+  PJAX navigation.
+%>
+<%= render(UserLists::CreateDialogTemplateComponent.new) %>
+
+<% content_for :responsive_meta do %>
+  <div class="d-block d-md-none mb-2 px-3 px-md-4 px-lg-5">
+    <% if repos_header_redesign_enabled? %>
+      <% details_view = Repositories::DetailsView.new(
+        repository: current_repository,
+        repository_is_offline: repository_offline?,
+        cap_view_filter: cap_view_filter,
+        viewer_can_read_repo: current_user_can_read_repo?,
+      ) %>
+      <%# Compensate missing title height with negative margin %>
+        <div class="d-flex gap-2 mt-n3 mb-3 flex-wrap">
+          <div class="d-flex flex-row gap-2" <%= test_selector "responsive-social-buttons" %>>
+            <%=
+              render(Repositories::WatchButtonComponent.new(
+              aria_id_prefix: "responsive-repository-details",
+              repository: current_repository,
+              status: subscription_status,
+            )) %>
+            <% if details_view.include_sponsor_button_fragment? %>
+              <div><%# Prevent Sponsors button from shrinking in narrow viewports %>
+                <%= render Sponsors::Repositories::FundingModalComponent.new(
+                  owner_login: current_repository.owner_display_login,
+                  repo_name: current_repository.name,
+                  icon_button: true,
+                  modal_id: "responsive-sponsor-modal",
+                  button_id: "responsive-sponsor-button",
+                ) %>
+              </div>
+            <% end %>
+            <%= render(Repositories::ForkButtonComponent.new(
+              repository: current_repository, icon_button: true,
+              forkability_error_message: logged_in? ? details_view.forkability_error_message : nil,
+            )) %>
+            <%= render(Repositories::StarButtonComponent.new(repository: current_repository)) %>
+          </div>
+          <div class="d-flex flex-row gap-2">
+            <%= render partial: "files/use_this_template_button", locals: { view: view, small_button: !header_redesign_enabled?, use_left_padding: false} %>
+          </div>
+        </div>
+    <% end %>
+    <% if view.show_description? %>
+      <p class="f4 mb-3 <% if repos_header_redesign_enabled? %>color-fg-muted<% end %>">
+        <%= view.formatted_description %>
+      </p>
+    <% end %>
+    <% if view.show_website? %>
+      <div class="mb-2 d-flex flex-items-center Link--secondary">
+        <%= render Primer::Beta::Octicon.new(icon: "link", mr: 2, classes: "flex-shrink-0") %>
+        <span class="flex-auto min-width-0 css-truncate css-truncate-target width-fit">
+          <%= safe_link_to(view.website.downcase.sub(/https?:\/\//, "").strip, view.website, title: view.website, role: "link", target: "_blank", class: "text-bold") || view.website %>
+        </span>
+      </div>
+    <% end %>
+
+    <%= render_nothing_on_error do %>
+      <%= render Repositories::ViewLicensesComponent.new(repository: current_repository, options: {selector_classes: 'mb-2'})%>
+    <% end %>
+
+    <div class="mb-3">
+      <% if repos_header_redesign_enabled? %>
+        <%= render Repositories::ResponsiveDetailsComponent.new(repository: current_repository) %>
+      <% else %>
+        <%= link_to gh_stargazers_path(current_repository), class: "Link--secondary no-underline mr-3" do %>
+          <%= render Primer::Beta::Octicon.new(icon: :star, mr: 1) %>
+          <span class="text-bold"><%= social_count current_repository.stargazer_count %></span>
+          <%= "star".pluralize(current_repository.stargazer_count) %>
+        <% end %>
+        <%= link_to gh_fork_network_path(current_repository), class: "Link--secondary no-underline mr-3" do %>
+          <%= render Primer::Beta::Octicon.new(icon: :"repo-forked", mr: 1) %>
+          <span class="text-bold"><%= social_count current_repository.network_count %></span>
+          <%= "fork".pluralize(current_repository.network_count) %>
+        <% end %>
+        <%= link_to branches_path(current_repository), class: "Link--secondary no-underline mr-3 d-inline-block" do %>
+          <%= render Primer::Beta::Octicon.new(icon: "git-branch", mr: 1) %>
+          <span>Branches</span>
+        <% end %>
+        <%= link_to tags_path(current_repository.owner, current_repository), class: "Link--secondary no-underline d-inline-block" do %>
+          <%= render Primer::Beta::Octicon.new(icon: "tag", mr: 1) %>
+          <span>Tags</span>
+        <% end %>
+        <%= link_to activity_index_path(current_repository.owner, current_repository), class: "Link--secondary no-underline d-inline-block" do %>
+          <%= render Primer::Beta::Octicon.new(icon: "pulse", mr: 1) %>
+          <span>Activity</span>
+        <% end %>
+      <% end %>
+    </div>
+
+    <% unless repos_header_redesign_enabled? %>
+      <div class="d-flex flex-wrap gap-2">
+        <div class="flex-1">
+          <%= render(Stars::ButtonComponent.new(
+              entity: current_repository,
+              button_block: true,
+              context: "repository",
+              current_user_can_read_repo: current_user_can_read_repo?
+            )) %>
+        </div>
+        <div class="flex-1">
+          <%= render(
+            Repositories::NotificationsComponent.new(
+              aria_id_prefix: "files-overview",
+              repository: current_repository,
+              button_block: true,
+              status: GitHub.flipper[:notifications_async_watch_repo_button].enabled?(current_user) ? nil : subscription_status,
+              deferred_content: GitHub.flipper[:notifications_async_watch_repo_button].enabled?(current_user)
+            ),
+          ) do |component| %>
+            <%= component.with_fallback_error do %>
+              <span class="d-block f6 text-center mt-1">
+                <%= primer_octicon(:alert, mr: 1) %>
+                Couldn't load subscription status.
+                <%= render(Primer::Beta::Button.new(scheme: :link, "data-retry-button": "")) { "Retry" } %>
+              </span>
+            <% end %>
+            <%= component.with_spinner do %>
+              <%= render(Primer::Beta::Button.new(
+                size: :small,
+                block: true,
+                classes: "tooltipped tooltipped-n",
+                disabled: true,
+                aria: { label: "Watching a repository" },
+              )) do |c| %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+                <% c.with_leading_visual_icon(icon: "eye") %>
+                Watch
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+        <span>
+          <%= render partial: "files/use_this_template_button", locals: { view: view, small_button: true } %>
+        </span>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+  <h1 class='sr-only'><%= current_repository.name_with_display_owner %></h1>
+  <div class="clearfix container-xl px-md-4 px-lg-5 px-3">
+    <%= render partial: "files/overview_container",
+      locals: {
+        view: view,
+        commit: commit,
+        payload: payload,
+        app_payload: app_payload
+      }
+    %>
+  </div>
+<% end %>

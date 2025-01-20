@@ -1,0 +1,83 @@
+#!/bin/bash
+#/ Usage: ghe-blob-storage-config [-h]
+#/
+#/ Configures blob storage interactively.
+#/
+#/ OPTIONS:
+#/   -h | --help              Show this message
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+usage() {
+    grep '^#/' <"$0" | cut -c 4-
+    exit 2
+}
+
+while [ "${1:-none}" != "none" ]; do
+    case $1 in
+    -h | --help)
+        usage
+        ;;
+    *) usage ;;
+    esac
+done
+
+# Configure blob storage
+storage_provider=
+echo "Configuring blob storage provider..."
+read -r -p "Select blob storage provider [azure, s3, gcs]: " storage_provider
+ghe-config secrets.actions.storage.blob-provider $storage_provider
+
+connection_string=
+case $storage_provider in
+"azure")
+    read -r -s -p "Enter Azure Blob Storage connection string (hidden): " connection_string
+    ghe-config secrets.actions.storage.azure.connection-string $connection_string
+    ;;
+"s3" | "gcs")
+    bucket_name=
+    service_url=
+    access_key_id=
+    access_secret=
+    force_path_style=
+    read -r -p "Enter Bucket Name: " bucket_name
+    read -r -p "Enter Service URL: " service_url
+    read -r -s -p "Enter Access Key ID (hidden): " access_key_id
+    echo
+    read -r -s -p "Enter Access Secret (hidden): " access_secret
+
+    # If the user enters invalid input, we default to "true" instead of exiting
+    echo -e "\n\nForce path style: reference buckets and objects with path-style instead of virtual hosted-style URLs. This is only relevant for S3-compatible storage providers as they often only support path-style. Keep the setting disabled for new Amazon S3 buckets as they only support virtual hosted-style.\n"
+    read -r -p "Force path style? (true or false): " force_path_style
+    if [[ $force_path_style != "true" && $force_path_style != "false" ]]; then
+        echo -e "\nWarning, force path style must be \"true\" or \"false\", given: $force_path_style. Defaulting to \"false\"..."
+        force_path_style="true"
+    fi
+
+    ghe-config "secrets.actions.storage.$storage_provider.bucket-name" $bucket_name
+    ghe-config "secrets.actions.storage.$storage_provider.service-url" $service_url
+    ghe-config "secrets.actions.storage.$storage_provider.access-key-id" $access_key_id
+    ghe-config "secrets.actions.storage.$storage_provider.access-secret" $access_secret
+    ghe-config "secrets.actions.storage.$storage_provider.force-path-style" $force_path_style
+
+    # Set connection_string manually for tests with Test-StorageConnection
+    connection_string="BucketName=$bucket_name;AccessKeyId=$access_key_id;SecretAccessKey=$access_secret;ServiceUrl=$service_url"
+    ;;
+*)
+    echo -e "\nError, unknown blob storage provider: $storage_provider"
+    exit 1
+    ;;
+esac
+
+# Test blob storage connection
+echo -e "\nTesting blob storage configuration..."
+if ! ghe-check-blob-connection -s actions -p "$storage_provider" -cs "$connection_string" &>/dev/null; then
+    echo -e "\nError: blob storage connection test failed. Please check your credentials and run 'ghe-blob-storage-config' again."
+    exit 1
+fi
+
+echo -e "\nBlob storage successfully configured."
+exit 0

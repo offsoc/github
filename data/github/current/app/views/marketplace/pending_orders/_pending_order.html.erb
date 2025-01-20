@@ -1,0 +1,111 @@
+<%
+  listing = preview.listing
+  listing_plan = preview.listing_plan.can_user_see?(current_user) ? preview.listing_plan : listing.default_plan
+  account = preview.account
+%>
+
+<div class="position-relative overflow-hidden color-bg-default rounded-2 color-shadow-large p-4 mb-0">
+  <div class="position-absolute top-0 left-0 width-full color-bg-accent-emphasis pt-1"></div>
+  <div class="float-right pl-3">
+    <div style="background-color: #<%= listing.bgcolor %>" class="CircleBadge CircleBadge--small box-shadow-none">
+      <img src="<%= listing.primary_avatar_url(400) %>" class="CircleBadge-icon" alt="<%= listing.name %> logo preview">
+    </div>
+  </div>
+  <div class="lh-condensed color-fg-muted text-small"><%= listing.name %></div>
+  <h3 class="f2 text-normal lh-condensed mb-2"><%= listing_plan.name %></h3>
+  <p class="mb-3 lh-condensed"><%= listing_plan.description %></p>
+  <ul class="list-style-none mb-4">
+    <% listing_plan.bullets.order(:id).scoped.each do |bullet| %>
+      <li class="mb-1">
+        <svg class="octicon octicon-check color-fg-success mr-2" viewBox="0 0 12 16" version="1.1" width="12" height="16" aria-hidden="true">
+          <path fill-rule="evenodd" d="M12 5l-8 8-4-4 1.5-1.5L4 10l6.5-6.5L12 5z"></path>
+        </svg>
+        <%= bullet.value %>
+      </li>
+    <% end %>
+  </ul>
+
+  <%
+    # This could eventually live in MarketplacePurchases::OrderPreviewView, though it would need some
+    # refactoring to allow for both order preview and cart views.
+    next_step = "Confirm your installation location"
+    next_step += " and payment information" if listing_plan.paid?
+
+    if listing_plan.direct_billing?
+      button_text = "Setup with #{listing.name}"
+    elsif listing_plan.has_free_trial?
+      free_trial_length_string = pluralize(Billing::Subscription::FREE_TRIAL_LENGTH / (60 * 60 * 24), "day")
+      button_text = "Try free for #{free_trial_length_string}"
+    elsif listing_plan.paid?
+      button_text = "Buy with GitHub"
+    else
+      button_text = "Install it for free"
+    end
+  %>
+  <%= form_tag marketplace_order_path(listing_slug: listing.slug, plan_id: listing_plan.global_relay_id), method: :get do %>
+    <% if listing_plan.paid? %>
+      <div class="border-top border-bottom py-2 mb-3 d-flex flex-md-items-center flex-justify-between">
+        <% if listing_plan.per_unit %>
+          <% default_quantity = preview&.quantity || 1 %>
+          <div>
+            <input class="form-control input-contrast mb-1 mb-sm-0 mr-2" type="number" value="<%= default_quantity %>" id="quantity" name="quantity" min="0" max="100000" step="1" style="width:60px">
+            <label for="quantity" class="d-block d-sm-inline lh-condensed text-normal"><%= listing_plan.unit_name.capitalize %>(s) in this plan</label>
+          </div>
+        <% end %>
+        <div class="d-flex flex-md-items-center">
+          <span class="f2 pr-2"><%= casual_currency listing_plan.monthly_price_in_dollars %></span>
+          <span class="text-small color-fg-muted lh-condensed-ultra d-block mt-1 mt-md-0"><% if listing_plan.per_unit %>per&nbsp;<%= listing_plan.unit_name.downcase %><br><% end %>/ month</span>
+        </div>
+        <div class="d-flex flex-md-items-center d-none">
+          <span class="f2 pr-2"><%= casual_currency listing_plan.yearly_price_in_dollars %></span>
+          <span class="text-small color-fg-muted lh-condensed-ultra d-block mt-1 mt-md-0"><% if listing_plan.per_unit %>per&nbsp;<%= listing_plan.unit_name.downcase %><br><% end %>/ year</span>
+        </div>
+      </div>
+    <% end %>
+    <% if !listing_plan.paid? && !listing_plan.per_unit %>
+      <input name="quantity" value="<%= preview.quantity %>" type="hidden">
+    <% end %>
+    <input name="account" value="<%= account.display_login %>" type="hidden">
+    <div class="d-lg-flex mb-3 flex-justify-between">
+      <div class="mb-2">
+        Account: <span><%= account.display_login %></span>
+      </div>
+    </div>
+    <div class="d-md-flex flex-items-center">
+      <div class="mb-2 mb-lg-0 col-md-6">
+        <%= render(Primer::Beta::Button.new(
+          scheme: :primary,
+          type: :submit,
+          block: true,
+          size: :large,
+          data: {
+            octo_click: "marketplace-listing_install_click",
+            octo_dimensions: "marketplace_listing_id:#{listing.id}"
+          }
+        )) do %>
+          <%= button_text %>
+        <% end %>
+      </div>
+      <div class="col-md-6">
+        <p class="text-small ml-md-3 mb-0 lh-condensed">Next: <%= next_step %>.</p>
+      </div>
+    </div>
+  <% end %>
+  <%= form_tag delete_pending_marketplace_order_path(id: preview.id), method: :delete do %>
+    <div class="d-md-flex flex-items-center mt-2">
+      <div class="mb-2 mb-lg-0 col-md-6">
+        <%= render(Primer::Beta::Button.new(
+          type: :submit,
+          size: :large,
+          block: true,
+          aria: { label: "Remove #{listing.name} from pending orders" },
+        )) do %>
+          Remove from pending orders
+        <% end %>
+      </div>
+      <div class="col-md-6">
+        <p class="text-small ml-md-3 mb-0 lh-condensed">This will not affect your existing subscriptions.</p>
+      </div>
+    </div>
+  <% end %>
+</div>

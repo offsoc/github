@@ -1,0 +1,194 @@
+<%= render(Primer::Alpha::UnderlinePanels.new(
+  label: "Access type",
+  body_arguments: {
+    border: true,
+    border_bottom: 0,
+    classes: "overflow-hidden",
+    bg: :subtle,
+    pl: 3,
+    w: :full,
+    style: "border-radius: 6px 6px 0 0",
+  },
+  test_selector: "access-type-tabs",
+)) do |component| %>
+  <%= component.with_tab(id: "direct-access-tab", selected: selected_tab == :direct) do |tab| %>
+    <%= tab.with_text { "Direct access" } %>
+    <%= tab.with_panel do %>
+      <div itemscope itemtype="http://schema.org/Repository" class="js-check-all-container js-bulk-actions-container" data-bulk-actions-url="<%= members_toolbar_actions_path(repository: repository, user_id: repository.owner) %>">
+        <%= render(Primer::Box.new(display: :flex, align_items: :center, bg: :subtle, px: 3, py: 2, border: true, border_bottom: 0)) do %>
+          <% if view.show_admin_stuff? %>
+            <div class="pr-3">
+              <input type="checkbox" id="select-all-checkbox" data-check-all>
+            </div>
+            <div class="select-all-dropdown js-bulk-actions flex-auto">
+              <%= render partial: "edit_repositories/pages/members_toolbar_actions", locals: {
+                view: helpers.create_view_model(
+                  EditRepositories::Pages::MemberToolbarActionsView,
+                  repository: repository
+                )
+              } %>
+            </div>
+          <% else %>
+            <label class="flex-auto table-list-header-meta py-1">
+              <%= view.direct_access_headcount %> with direct access
+            </label>
+          <% end %>
+
+          <%= render "edit_repositories/admin_screen/access_management/search_bar", view: view %>
+
+          <% if view.org_owned_repo? || !repository.is_enterprise_managed? %>
+            <%= render "edit_repositories/admin_screen/access_management/filter_pulldown", view: view %>
+          <% end %>
+
+          <% if view.org_owned_repo? %>
+            <%= render "edit_repositories/admin_screen/access_management/role_pulldown", view: view %>
+          <% end %>
+        <% end %>
+
+        <turbo-frame id="repository-access-table-content" target="_top">
+          <div id="repository-access-table">
+            <%= render "edit_repositories/admin_screen/access_management/members_table_body", view: view %>
+          </div>
+        </turbo-frame>
+      </div>
+    <% end %>
+  <% end %>
+
+  <%= component.with_tab(id: "organization-access-tab", selected: selected_tab == :organization) do |tab| %>
+    <%= tab.with_text { "Organization access" } %>
+    <%= tab.with_panel do %>
+        <%= primer_octicon(:search, classes: "subnav-search-icon") %>
+        <%= render(Primer::Beta::Spinner.new(classes: "spinner")) %>
+        <%= render(Primer::Box.new(display: :flex, align_items: :center, bg: :subtle, px: 3, py: 2, border: true, border_bottom: 0)) do %>
+          <%= render(Primer::Beta::Text.new(color: :muted, flex: 1)) { organization_access_total_label } %>
+          <input-page-refresh data-tab="organization">
+            <%= render(Primer::Alpha::TextField.new(
+              placeholder: "Search by name",
+              name: "org_access_search",
+              label: "Search by name",
+              visually_hide_label: true,
+              leading_visual: { icon: :search },
+              full_width: false,
+              value: search_query,
+              data: {
+                target: "input-page-refresh.searchInput",
+                action: "input:input-page-refresh#search",
+              },
+            )) %>
+          </input-page-refresh>
+          <%= render(Primer::Alpha::ActionMenu.new(
+            select_variant: :single,
+            pl: 2,
+            dynamic_label: true,
+            dynamic_label_prefix: "Type",
+          )) do |menu| %>
+            <% menu.with_show_button(scheme: :invisible) do |button| %>
+              <% button.with_trailing_action_icon(icon: :"triangle-down")  %>
+            <% end %>
+            <% menu.with_item(label: "All", active: params[:type].nil?, href: ram_page_path(tab: :organization, type: nil)) { "Members" } %>
+            <% menu.with_item(label: "Team", active: params[:type] == "team", href: ram_page_path(tab: :organization, type: :team)) %>
+            <% menu.with_item(label: "User", active: params[:type] == "user", href: ram_page_path(tab: :organization, type: :user)) %>
+          <% end %>
+          <%= render(Primer::Alpha::ActionMenu.new(
+            select_variant: :single,
+            dynamic_label: true,
+            dynamic_label_prefix: "Role",
+          )) do |menu| %>
+            <% menu.with_show_button(scheme: :invisible) do |button| %>
+              <% button.with_trailing_action_icon(icon: :"triangle-down")  %>
+            <% end %>
+            <% menu.with_item(label: "All", active: filtered_role_id.nil?, href: ram_page_path(tab: :organization, role_id: nil)) { "Members" } %>
+            <% view.org_roles_with_repo_access.each do |role| %>
+              <% menu.with_item(label: role.display_name, active: filtered_role_id == role.id, href: ram_page_path(tab: :organization, role_id: role.id)) %>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <% if has_organization_based_actors? %>
+          <% if params[:type].nil? || params[:type] == "team" %>
+            <% paginated_teams.each do |team, description, role_name, warning| %>
+              <%= render(Primer::Box.new(display: :flex, border: true, border_bottom: 0, p: 3, align_items: :center)) do %>
+                <%= render(Primer::Beta::Avatar.new(src: team.primary_avatar_url, alt: team.name, shape: :square, size: 32)) %>
+                <%= render(Primer::Box.new(display: :flex, direction: :column, flex: 1, ml: 3)) do %>
+                  <%= render(Primer::Beta::Link.new(href: team_path(team), font_weight: :emphasized, color: :accent)) { team.name } %>
+                  <%= render(Primer::Beta::Text.new(color: :muted, font_size: 6)) { description } %>
+                <% end %>
+                <% if warning %>
+                  <%= render(Primer::Beta::Link.new(
+                    id: "warning-role-#{team.id}",
+                    scheme: :secondary,
+                    muted: true,
+                    href: settings_org_security_analysis_path(view.organization),
+                    target: "_blank",
+                    rel: "noopener",
+                    "aria-label": warning
+                    )) do |link| %>
+                      <% link.with_tooltip(type: :description, text: warning) %>
+                      <%= primer_octicon(:alert, color: :attention) %>
+                  <% end %>
+                <% end %>
+                <%= render(Primer::Beta::Label.new(test_selector: "team-#{team.id}-role-name").with_content(role_name)) %>
+              <% end %>
+            <% end %>
+          <% end %>
+          <% if params[:type].nil? || params[:type] == "user" %>
+            <% paginated_users.each do |user, role_name| %>
+              <%= render(Primer::Box.new(display: :flex, border: true, border_bottom: 0, p: 3, align_items: :center)) do %>
+                <%= render(Primer::Beta::Avatar.new(src: user.primary_avatar_url, alt: user.name, shape: :square, size: 32)) %>
+                <%= render(Primer::Beta::Link.new(href: user_path(user), font_weight: :emphasized, color: :accent, flex: 1, ml: 3)) { user.display_login } %>
+                <%= render(Primer::Beta::Label.new.with_content(role_name)) %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render(Primer::Box.new(
+            border: true,
+            border_bottom: 0,
+            p: 5,
+            display: :flex,
+            direction: :column,
+            align_items: :center,
+            justify_content: :center,
+            style: "min-height: 240px",
+            test_selector: "organization-access-empty-state",
+          )) do %>
+            <%= primer_octicon(:repo, height: 24) %>
+            <%= render(Primer::Beta::Text.new(font_weight: :bold, mt: 2, font_size: 4)) { "No people or teams have organization-based access to this repository" } %>
+
+            <%= render(Primer::Beta::Text.new(color: :muted)) { "Assigned individuals and teams will appear here once an organization owner grants them access" } %>
+          <% end %>
+        <% end %>
+        <%= render(Primer::Box.new(border: :bottom, border_radius: 2)) %>
+        <div class="mt-4 mb-6 text-center">
+          <% if has_organization_based_actors? %>
+            <nav class="paginate-container m-0" aria-label="Pagination">
+              <div class="pagination">
+                <% if has_previous_page? %>
+                  <%= render Primer::Beta::Link.new(
+                    href: repository_access_management_path(repository: repository, page: page - 1, tab: :organization, type: params[:type], role_id: filtered_role_id),
+                    classes: "previous_page",
+                  ) do %>
+                    Previous
+                  <% end %>
+                <% else %>
+                  <span class="previous_page disabled color-fg-muted"> Previous </span>
+                <% end %>
+
+                <% if has_next_page? %>
+                  <%= render Primer::Beta::Link.new(
+                    href: repository_access_management_path(repository: repository, page: page + 1, tab: :organization, type: params[:type], role_id: filtered_role_id),
+                    classes: "next_page",
+                    "aria-label": "Next page",
+                  ) do %>
+                    Next
+                  <% end %>
+                <% else %>
+                  <span class="next_page disabled color-fg-muted"> Next </span>
+                <% end %>
+              </div>
+            </nav>
+          <% end %>
+        </div>
+    <% end %>
+  <% end %>
+<% end %>

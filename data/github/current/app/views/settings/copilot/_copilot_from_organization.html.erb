@@ -1,0 +1,158 @@
+<% memberships = create_view_model(Settings::OrgsView).memberships %>
+
+<%= render(Primer::Beta::Subhead.new) do |component| %>
+  <% component.with_heading(tag: :h3, font_size: 4, font_weight: :bold, mt: 5) do %>
+    Get Copilot from an organization
+  <% end %>
+<% end %>
+<div>
+  <p>
+    Organizations can provide their members (including you) and their teams access to GitHub Copilot.
+  </p>
+
+  <%= render(Primer::Beta::BorderBox.new(mt: 4)) do |box| %>
+    <% if memberships.any? %>
+      <% memberships.each do |membership| %>
+        <%
+          feature_request = Organizations::MemberRequests::FeatureRequestComponent.new(
+            requester: current_user,
+            organization: membership.organization,
+            feature: MemberFeatureRequest::Feature::CopilotForBusiness
+          )
+        %>
+        <% box.with_row(position: :relative) do %>
+          <div class="d-flex flex-row flex-items-center flex-lg-row flex-wrap flex-justify-between my-1" style="gap: 8px;">
+            <div class="d-flex flex-column mr-2 flex-justify-center" <%= test_selector('membership-label')%>>
+              <div class="d-flex flex-row flex-wrap" style="gap: 8px;">
+                <span class="rounded-2"><%= avatar_for membership.organization, 20, class: "v-align-middle" %></span>
+                <strong class="mx-2 f5"><%= membership.organization.name %></strong>
+                <span class="text-small text-normal color-fg-muted">
+                  <%= render(Primer::Beta::Label.new) { membership.description } %>
+                </span>
+              </div>
+              <div class="d-flex flex-column">
+                <div class="color-fg-subtle mt-2" <%= test_selector('membership-action')%>>
+                  <% if !membership.organization.adminable_by?(copilot_user) && feature_request.dismissed? %>
+                    <p <%= test_selector('dismissed-content-p1')%>>Your request for <%= Copilot.business_product_name %> was declined by an admin on <%= feature_request.dismissed_at %>.</p>
+                    <p <%= test_selector('dismissed-content-p2')%>><%= render(Primer::Beta::Link.new(href: org_people_url(membership.organization, query: "role:owner"), classes: "Link--inTextBlock")) { "Contact an admin" } %> for more details around their decision.</p>
+                  <% else %>
+                    <%= membership.request_status_message(feature_request) %>
+                  <% end %>
+                </div>
+              </div>
+            </div>
+            <div class="d-flex flex-row">
+              <% if membership.organization.adminable_by?(copilot_user) %>
+                <% if membership.has_copilot_for_business? %>
+                  <%= render(Primer::Beta::Link.new(
+                    href: settings_org_copilot_seat_management_path(membership.copilot_organization),
+                    data: {
+                      test_selector: 'membership-action',
+                      **analytics_click_attributes(
+                        category: "copilot_settings",
+                        action: "click_to_manage_org_settings_for_copilot",
+                        label: "ref_cta:manage_org_settings_for_copilot;ref_loc:copilot_for_business"
+                      )
+                    }
+                  )) { "Manage org settings for Copilot" } %>
+                <% elsif membership.copilot_organization.can_enable_org_to_assign_seats?(current_user) %>
+                  <%= form_with(url: enterprise_copilot_permission_to_assign_seats_path(membership.organization.business, organization_id: membership.organization.display_login), method: :put) do %>
+                    <%= render(Primer::Beta::Button.new(
+                      test_selector: "membership-action",
+                      tag: :button,
+                      size: :medium,
+                      font_size: 5,
+                      style: "width: fit-content;",
+                      type: :submit,
+                      data: {
+                        **analytics_click_attributes(
+                          category: "assign_seats_cta",
+                          action: "click_to_allow_to_assign_seats",
+                          label: "ref_cta:allow_to_assign_seats; ref_loc:copilot_for_business"
+                        )
+                      }
+                    )) { "Allow this organization to assign seats" } %>
+                  <% end %>
+                <% elsif membership.copilot_organization.can_request_copilot_from_enterprise?(current_user) %>
+                  <%= render(feature_request) do |c| %>
+                    <%= c.with_request_cta(
+                      font_size: 5,
+                      flex: 1,
+                      data: {
+                        test_selector: 'membership-action',
+                        **analytics_click_attributes(
+                          category: "member_feature_request",
+                          action: "action.#{MemberFeatureRequest::Feature::CopilotForBusiness}",
+                          label: "ref_cta:ask_enterprise_owners_for_access;ref_loc:copilot_for_business;enterprise_id:#{membership.organization.business.id}"
+                        )
+                      }
+                    ) do %>
+                      Ask enterprise owners for access
+                    <% end %>
+                    <%= c.with_remove_request_cta(flex: 1) { "Remove request" } %>
+                  <% end %>
+                <% else %>
+                  <%= render(Primer::Beta::Button.new(
+                    tag: :a,
+                    size: :medium,
+                    "aria-label": "Buy #{Copilot.business_product_name} for #{membership.organization.name}",
+                    font_size: 5,
+                    style: "width: fit-content;",
+                    href: membership.organization.business ? settings_copilot_enterprise_path(membership.organization.business) : copilot_business_signup_organization_payment_path(org: membership.organization),
+                    data: {
+                      test_selector: 'membership-action',
+                      **analytics_click_attributes(
+                        category: "copilot_settings",
+                        action: "click_to_buy_copilot_for_business",
+                        label: "ref_cta:buy_copilot_for_business;ref_loc:copilot_for_business"
+                      )
+                    })) { "Buy #{Copilot.business_product_name}" }
+                  %>
+                <% end %>
+              <% else %>
+                <% if !feature_request.dismissed? && membership.show_request_for_copilot_button? %>
+                  <%= render(feature_request) do |c| %> <%# rubocop:disable GitHub/RailsViewRenderLiteral %>
+                    <%= c.with_request_cta(
+                      font_size: 5,
+                      flex: 1,
+                      data: {
+                        test_selector: 'membership-action',
+                        **analytics_click_attributes(
+                          category: "member_feature_request",
+                          action: "action.#{MemberFeatureRequest::Feature::CopilotForBusiness}",
+                          label: "ref_cta:ask_admin_for_access;ref_loc:copilot_for_business;"
+                        )
+                      }
+                    ) do %>
+                      Ask admin for access
+                    <% end %>
+                    <%= c.with_remove_request_cta(flex: 1) { "Remove request" } %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      <% end %>
+    <% else %>
+      <% box.with_row do %>
+        <div class="d-flex flex-column flex-md-row flex-justify-between">
+          <span class="f5 text-normal mb-2 mb-md-0" <%= test_selector('membership-label')%>>You do not belong to any organizations.</span>
+          <%= render(Primer::Beta::Button.new(
+            size: :medium, position: :relative, top: 0, right: 0, mt: -1,
+            tag: :a,
+            href: new_organization_path,
+            data: {
+              test_selector: 'membership-action',
+              **analytics_click_attributes(
+                category: "copilot_settings",
+                action: "click_to_create_org_and_set_up_copilot",
+                label: "ref_cta:create_an_org_and_set_up_copilot;ref_loc:copilot_for_business"
+              )
+            }
+          )) { "Create an organization" } %>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>

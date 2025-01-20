@@ -1,0 +1,155 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+<%# view is an instance of Oauth::AuthorizeView %>
+
+<% page_info title: "Authorize application" %>
+
+<%= render Oauth::SuggestedSignInComponent.new(application: view.application, original_url: request.original_url, raw_suggestion: params[:login]) %>
+
+<div class="mx-auto" style="max-width: 530px;">
+  <div class="px-3 pt-4">
+    <div class="DashedConnection mb-0 mx-auto d-none d-md-block" style="width: 300px;">
+      <div class="d-flex flex-justify-between flex-items-center py-4">
+
+        <div class="CircleBadge CircleBadge--medium" style="<%= view.logo_background_color_style_rule %>">
+          <%= oauth_application_logo(view.application, 50, :class => "CircleBadge-icon") %>
+        </div>
+        <div class="position-relative color-bg-success-emphasis text-center" style="border-radius: 50%; width:32px; height:32px;">
+          <%= primer_octicon(:check, color: :on_emphasis, mt: 2) %>
+        </div>
+        <div class="CircleBadge CircleBadge--medium box-shadow-none" style="background-color: #fff; overflow: hidden;">
+          <%= primer_octicon(:"mark-github", w: :full, h: :full) %>
+        </div>
+      </div>
+    </div>
+    <div class="DashedConnection mb-0 mx-auto d-block d-md-none" style="width: 200px;">
+      <div class="d-flex flex-justify-between flex-items-center py-4">
+
+        <div class="CircleBadge CircleBadge--small" style="<%= view.logo_background_color_style_rule %>">
+          <%= oauth_application_logo(view.application, 31, :class => "CircleBadge-icon") %>
+        </div>
+        <div class="position-relative color-bg-success-emphasis text-center" style="border-radius: 50%; width:32px; height:32px;">
+          <%= primer_octicon(:check, color: :on_emphasis, mt: 2) %>
+        </div>
+        <div class="CircleBadge CircleBadge--small box-shadow-none color-bg-default" style="overflow: hidden;">
+          <%= primer_octicon(:"mark-github", w: :full, h: :full) %>
+        </div>
+      </div>
+    </div>
+    <% if view.adding_scopes? %>
+      <h1 class="f2 text-normal text-center"><%= view.application.name %> is requesting additional permissions</h1>
+    <% elsif view.rate_limited? %>
+      <h1 class="f2 text-normal text-center">Reauthorization required</h1>
+      <p class="color-fg-muted text-center">
+        This application has made an unusually high number of requests to access your account. Please reauthorize the application to continue.
+      </p>
+    <% else %>
+      <h1 class="f2 text-normal text-center">Authorize <%= view.application.name %></h1>
+    <% end %>
+  </div>
+
+  <% if view.include_device_warning? %>
+    <div class="px-3">
+      <%= render partial: "device_authorization/trust_this_device_warning", locals: { view: view } %>
+    </div>
+  <% end %>
+
+  <div class="px-3 mt-5">
+    <div class="Box color-shadow-small">
+      <div class="Box-body p-3 p-md-4">
+        <div class="mb-2 position-relative lh-default" style="padding-left:45px;">
+          <%= avatar_for current_user, 32, :class => "avatar position-absolute mr-3 mt-1 top-0 left-0" %>
+          <strong><%= view.application.name %></strong> by
+          <% if GitHub.enterprise? && view.application_github_owned? %>
+            GitHub
+          <% elsif view.application.present? && show_contact_microsoft_link?(view.application) && GitHub.flipper[:open_footer_links_in_new_tab].enabled? %>
+            <strong><%= link_to "#{GitHub.flipper[:use_display_login_in_authorization_page].enabled? ? view.application.display_owner.display_login : view.application.owner.safe_profile_name}", user_path(view.application.owner), target: "_blank" %></strong>
+          <% else %>
+            <strong><%= render(Primer::Beta::Link.new(href: user_path(view.application.owner))) { GitHub.flipper[:use_display_login_in_authorization_page].enabled? ? view.application.display_owner.display_login : view.application.owner.safe_profile_name } %></strong>
+          <% end %>
+          <% if view.adding_scopes?%>
+            <small class="d-block color-fg-muted">would like additional permissions to</small>
+          <% else %>
+            <small class="d-block color-fg-muted">wants to access your <strong><%= current_user.display_login %></strong> account</small>
+          <% end %>
+        </div>
+
+        <div class="">
+          <% if !view.existing_authorization? && view.public_access_only? %>
+            <%= render :partial => "oauth_accesses/public_access" %>
+          <% else %>
+            <%= render :partial => "oauth_accesses/private_access", :locals => { :view => view } %>
+          <% end %>
+        </div>
+
+        <% if view.existing_authorization? %>
+          <h2 class="f5 permission-title border-top pt-3 mt-1" style="margin-bottom: -6px;">Existing access</h2>
+          <div><%= scopes_description_list(view.authorization.scopes) %></div>
+        <% end %>
+
+
+        <% if request_organization_approval?(user: view.current_user, application: view.application, scopes: view.all_scopes) && view.authorized_organizations.any? %>
+          <h2 class="f5 permission-title mb-2 pt-3 mt-1 border-top">Organization access</h2>
+
+          <div class="oauth-org-access-details">
+            <%= render :partial => "oauth/org_access", :locals => { :view => view } %>
+          </div>
+        <% end %>
+      </div>
+      <div class="Box-footer p-3 p-md-4 clearfix">
+        <div class="col-sm-12">
+          <%= form_tag view.form_submission_path do %>
+            <% view.oauth_params.each do |k, v| %>
+              <%= hidden_field_tag k, v %>
+            <% end %>
+            <%= hidden_field_tag :scope, view.scope %>
+            <% if request_organization_approval?(user: view.current_user, application: view.application, scopes: view.scopes) %>
+              <%= hidden_field_tag :org_policy, 1 %>
+            <% end %>
+
+            <div class="d-flex flex-justify-center js-authorization-buttons">
+              <button type="submit" name="authorize" value="0" class="btn width-full mr-2 ws-normal">Cancel</button>
+              <button data-octo-click="oauth_application_authorization" data-octo-dimensions="marketplace_listing_id:<%= view.marketplace_listing_id %>,came_from_marketplace:<%= view.came_from_marketplace? %>,paid_marketplace_plan_purchased:<%= view.paid_marketplace_plan_purchased? %>" data-ga-click="Oauth, oauth application authorized, oauth_application_id:<%= view.application.id %>; listing_id:<%= view.application.integration_listing.try(:id) %>; came_from_integrations_directory:<%= view.came_from_integrations_directory? %>; came_from_marketplace:<%= view.came_from_marketplace? %>; paid_marketplace_plan_purchased:<%= view.paid_marketplace_plan_purchased? %>; marketplace_listing_id:<%= view.marketplace_listing_id %>" type="submit" name="authorize" value="1" class="js-oauth-authorize-btn btn btn-primary width-full ws-normal" <% if disable_oauth_authorize_button?(view.application) %>disabled<% end %>>Authorize <%= view.application.display_owner.display_login %></button>
+            </div>
+          <% end %>
+        </div>
+
+        <% if view.location_available? %>
+          <div class="col-sm-12 mt-2">
+            <p class="text-small color-fg-muted mb-0 text-center">
+              Requested from <strong><%= view.location[:city] || view.location[:region_name] || view.location[:country_name] %> <span><%= view.ip_address %></span></strong> on <time><%= view.device_code_created_at %></time>
+            </p>
+          </div>
+        <% end %>
+
+        <% unless view.device_authorization? %>
+          <div class="col-sm-12 mt-2">
+            <p class="text-small color-fg-muted mb-0 text-center">Authorizing will redirect to <br><strong class="color-fg-default"><%= view.application_redirect_origin %></strong></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+    <div class="Box color-bg-subtle px-4 py-3 mt-3 text-small color-fg-muted clearfix">
+      <div class="gutter-condensed lh-condensed">
+        <div class="col-12 mb-3 mb-md-0 col-md-4 float-md-left">
+          <% if view.owned_or_operated_by_github? %>
+            <div class="position-relative pl-4"><%= primer_octicon(:"mark-github", position: :absolute, left: 0) %> Owned &amp; operated by GitHub</div>
+          <% else %>
+            <div class="position-relative pl-4"><%= primer_octicon(:"circle-slash", position: :absolute, left: 0) %> <strong>Not</strong> owned or operated by GitHub</div>
+          <% end %>
+        </div>
+        <div class="col-12 mb-3 mb-md-0 col-md-4 float-md-left ">
+          <div class="position-relative pl-4"><%= primer_octicon(:clock, position: :absolute, left: 0) %> Created <strong class="d-inline-block"><%= view.application_creation_time_in_words %> ago</strong></div>
+        </div>
+        <div class="col-12 col-md-4 float-md-left ">
+          <div class="position-relative pl-4"><%= primer_octicon(:organization, position: :absolute, left: 0) %> <strong><%= view.application_user_range %></strong> <span class="d-inline-block">GitHub users</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="text-center my-3">
+      <%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/articles/authorizing-oauth-apps", scheme: :secondary, font_size: :small, rel: "noopener noreferrer", target: "_blank")) do %>
+        Learn more about OAuth
+      <% end %>
+    </div>
+  </div>
+</div>

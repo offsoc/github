@@ -1,0 +1,121 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%# `file_list_view` is an instance of Diff::FileListView %>
+<%
+  @prose_url_hints ||= {}
+  locked             = @pull && @pull.issue.locked?
+  load_diff_editor_configs!(file_list_view.diffs)
+%>
+
+<%# Swapped in for .js-comment-button-placeholder elements at runtime %>
+<template class="js-comment-button-template">
+  <%= render Primer::ButtonComponent.new(
+    data: {
+      path: "{{ path }}",
+      anchor: "{{ anchor }}",
+      position: "{{ position }}",
+      side: "{{ side }}",
+      line: "{{ line }}",
+      "original-line": "{{ originalLine }}",
+    },
+    "aria-label": "Add line comment",
+    scheme: :link,
+    classes: "add-line-comment js-add-line-comment js-add-single-line-comment"
+  ) do %>
+    <%= primer_octicon(:plus) %>
+  <% end %>
+</template>
+
+<div id="files" class="diff-view <%= 'commentable' if file_list_view.commentable? && !locked %> js-diff-container js-code-nav-container" data-hpc>
+  <% if file_list_view.params[:tab] == "files" %>
+    <%= render PullRequests::Copilot::PullRequestReviewBannerComponent.new(
+      pull_request: @pull,
+      comparison: file_list_view.pull_comparison,
+      location: :files_changed,
+    ) %>
+  <% end %>
+
+  <% if (file_list_view.progressive?) && file_list_view.too_many_files? %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, test_selector: "diff-flash")) do %>
+      <%= file_list_view.too_many_files_changed_message %>
+    <% end %>
+  <% elsif (!file_list_view.progressive?) && file_list_view.truncated? %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning, spacious: true, test_selector: "diff-flash")) do %>
+      <%= file_list_view.truncate_message_for_the_toc %>
+    <% end %>
+  <% end %>
+
+  <div
+    class="container-md js-file-filter-blankslate"
+    data-target="diff-file-filter.blankslate"
+    hidden>
+    <%= render Primer::Beta::Blankslate.new do |c| %>
+      <% c.with_visual_icon(icon: "filter") %>
+
+      <% c.with_heading(tag: :h2) do %>
+        There are no files selected for viewing
+      <% end %>
+    <% end %>
+  </div>
+  <% if file_list_view.progressive? %><div class="js-diff-progressive-container"><% end %>
+  <%
+      if file_list_view.highlight?
+        shd = SyntaxHighlightedDiff.new(file_list_view.repository)
+        shd.highlight!(file_list_view.diffs,
+                       attributes_commit_oid: file_list_view.attributes_commit_oid)
+      end
+
+      file_list_view.diffs.record_diff_metrics(summary: true, params: params, dogstats_request_tags: dogstats_request_tags)
+
+      file_views = file_list_view.each_diff.to_a
+
+      tree_entries = file_views.map do |file_view|
+        file_view.diff_blob unless file_view.diff.text.blank?
+      end
+      tree_entries.reject! { |blob| blob.nil? || blob.oid.nil? }
+
+      Promise.all(tree_entries.map(&:async_data)).sync
+
+      TreeEntry.load_line_counts!(file_list_view.repository, tree_entries)
+      TreeEntry.load_attributes!(tree_entries, file_list_view.attributes_commit_oid)
+
+      skip_dependency_review = DependencyReview::ManifestLimitHelper.diff_too_large?(file_list_view)
+
+      file_views.each_with_index do |file_view, index|
+  %>
+    <%= render :partial => "diff/diff_entry", :locals => {
+
+          :sticky => local_assigns.fetch(:sticky, false),
+          :view => file_view,
+          :file_list_view => file_list_view,
+          :base_repository => base_repository,
+          :head_repository => head_repository,
+          :skip_dependency_review => skip_dependency_review,
+          :source_toggle_selected => params[:source].present?,
+          :disable_render => local_assigns.fetch(:disable_render, false),
+          :diff_entry_index => index } %>
+  <% end %>
+  <% if file_list_view.progressive? %></div><% end %>
+
+  <% if file_list_view.load_more? %>
+    <%= render :partial => 'diff/diff_loading', :locals => {
+      :sticky => local_assigns.fetch(:sticky, false),
+      :file_list_view => file_list_view,
+      :start_entry => file_list_view.next_start_entry_index,
+      :base_repository => base_repository,
+      :head_repository => head_repository } %>
+  <% end %>
+
+  <% if file_list_view.load_unchanged_files_with_annotations? %>
+    <%= render :partial => 'diff/non_diff_entries_loading', :locals => { :file_list_view => file_list_view } %>
+  <% end %>
+</div>
+
+<%# Hidden button to define `i` hotkey to toggle all file notes %>
+<button type="button" class="js-toggle-all-file-notes" data-hotkey="i" style="display:none">Toggle all file notes</button><%# erblint:disable DataHotkey %>
+
+<%# Hidden button to define `a` hotkey to toggle all file annotations %>
+<button type="button" class="js-toggle-all-file-annotations" data-hotkey="a" style="display:none">Toggle all file annotations</button><%# erblint:disable DataHotkey %>
+
+<%# Clip path and animated gradient for diff loader %>
+<%= render partial: "diff/placeholder" %>

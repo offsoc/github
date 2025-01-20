@@ -1,0 +1,299 @@
+<%# `view` is an instance of Stafftools::User::ShowView %>
+<% authorized_trade_controls_staffer = stafftools_action_authorized?(
+    controller: Stafftools::TradeCompliance::TradeScreeningRecordsController,
+    action: :index,
+  )
+  high_profile_user, high_profile_reason = HighProfileSignals.high_profile_user?(view.user)
+%>
+
+<div class="site-admin-box">
+  <h4>
+    <%= primer_octicon(:info) %>
+    <%= avatar_for(view.user, 50) %>
+    <%= link_to "#{view.user.class} info", stafftools_user_overview_path(view.user) %>
+  </h4>
+  <ul class="site-admin-detail-list">
+    <li>
+      <%= primer_octicon(:person) %>
+      <% if view.user.profile %>
+        <%= view.user.profile.name %>
+      <% else %>
+        <%= view.user.login %>
+      <% end %>
+      <small>
+        &ndash;
+        <%= link_to "View profile", user_url_to_main_site(view.user) %>
+      </small>
+    </li>
+    <% if view.show_business_plus_flag? %>
+      <li>
+        <%= primer_octicon(:megaphone) %>
+        <%= view.business_plus_flag %>
+      </li>
+    <% end %>
+    <% if view.show_owning_business? %>
+      <li>
+        <%= primer_octicon(:briefcase) %>
+        Belongs to <%= link_to view.user.business.name, stafftools_enterprise_path(view.user.business), class: "Link--inTextBlock" %>
+      </li>
+    <% end %>
+    <% if view.pending_business_invitations.any? %>
+      <% view.pending_business_invitations.each do |invitation| %>
+        <li>
+          <%= primer_octicon(:briefcase) %>
+          <% if invitation.status == :created %>
+            <%= link_to \
+              "Invited",
+              stafftools_enterprise_organization_invitations_path(invitation.business), class: "Link--inTextBlock" %>
+            to join
+            <%= link_to invitation.business.name, stafftools_enterprise_path(invitation.business), class: "Link--inTextBlock" %>.
+            Awaiting acceptance by an organization admin.
+          <% elsif invitation.status == :accepted %>
+            <%= link_to \
+              "Accepted invitation",
+              stafftools_enterprise_organization_invitations_path(invitation.business, status: "accepted"), class: "Link--inTextBlock" %>
+            to join
+            <%= link_to invitation.business.name, stafftools_enterprise_path(invitation.business), class: "Link--inTextBlock" %>.
+            Awaiting confirmation by an enterprise owner.
+          <% end %>
+        </li>
+      <% end %>
+    <% end %>
+    <% if view.user.is_a?(Organization) && !GitHub.enterprise? %>
+      <li>
+        <%= primer_octicon(:law) %>
+        <%= view.user.terms_of_service.name %> terms of service
+        <% if view.user.company.try(:name) %>
+          through <%= view.user.company.name %>
+        <% end %>
+        <small>
+          &ndash;
+          <%= link_to "Edit", stafftools_user_terms_of_service_record_path(view.user) %>
+        </small>
+      </li>
+    <% end %>
+    <% if view.user.legal_hold? %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        Legal Hold
+      </li>
+    <% end %>
+    <% if error_states[:reserved_login] %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        Denylisted/reserved username
+      </li>
+    <% end %>
+    <% if error_states[:no_primary_email] %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        <%= link_to \
+              "No primary email",
+              stafftools_user_emails_path(view.user) %>
+      </li>
+    <% elsif counts[:emails] %>
+      <li>
+        <%= primer_octicon(:mail) %>
+        <%= view.user.default_notification_email %>
+        <small>
+          <br>
+          <%= link_to \
+                "and #{counts[:emails] - 1} more",
+                stafftools_user_emails_path(view.user) %>
+        </small>
+      </li>
+      <% if obfuscated_dupe_emails > 0 %>
+        <li>
+          <%= primer_octicon(:mail, classes: 'highlight') %>
+          Email used by
+          <%= link_to duplicates_stafftools_user_emails_path(this_user) do %>
+            <%= obfuscated_dupe_emails %> other
+            <%= "account".pluralize(obfuscated_dupe_emails) %>
+          <% end %>
+        </li>
+      <% end %>
+    <% end %>
+    <% if error_states[:no_verified_email] %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        No verified email addresses
+      </li>
+    <% end %>
+    <% if error_states[:dupe_email] %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        Duplicate email address
+      </li>
+    <% end %>
+
+    <% if error_states[:suspended] %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        Account suspended
+        <% if view.user.login.end_with?("_admin") && business = Business.soft_deleted_businesses_for(view.user, emu_admin: true).first %>
+          by enterprise deletion of <%= business.slug %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.user.organization? && view.user.archived? %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        Archived - read-only
+      </li>
+    <% end %>
+
+    <% if view.show_high_profile_signals? %>
+      <li>
+        <%= primer_octicon(:alert, classes: "alert") %>
+        <%= link_to "High Profile", "https://github.com/github/trust-safety/blob/main/docs/operations/escalation-procedures/high-profile-escalation.md" %>
+        <small>
+          <br>
+          <%= high_profile_reason %>
+        </small>
+      </li>
+    <% end %>
+
+    <% if view.user.deceased? %>
+      <li>
+        <%= primer_octicon(:heart, classes: "highlight") %>
+        User is deceased
+      </li>
+    <% end %>
+
+    <% if GitHub.billing_enabled? %>
+      <li <%= test_selector "trade-screening-status" %>>
+        <%= primer_octicon(:shield) %>
+        <%= view.user_sdn_screening_status(authorized_staffer: authorized_trade_controls_staffer) %>
+      </li>
+    <% end %>
+
+    <% if view.show_dormant_indicator? %>
+    <li>
+      <%= render \
+        partial: "stafftools/accounts/dormancy_indicator",
+        locals: {view: view, icon_type: "hourglass"} %>
+    </li>
+    <% elsif !GitHub.enterprise? %>
+      <li>
+        <%= primer_octicon(:hourglass) %>
+        <% if view.user.last_active_timestamp %>
+          Last usage on
+          <%= link_to \
+                view.user.last_active_timestamp.to_date,
+                stafftools_user_activity_path(view.user),
+                class: "Link--inTextBlock" %>
+        <% else %>
+          <%= link_to \
+                "No activity",
+                stafftools_user_activity_path(view.user),
+                class: "Link--inTextBlock" %>
+        <% end %>
+      </li>
+    <% end %>
+
+    <% if view.show_repo_rules? %>
+      <li>
+        <%= render Primer::Beta::Octicon.new(icon: "repo-push") %>
+        <%= stafftools_selected_link_to \
+              "View rules",
+              stafftools_user_organization_rules_path(this_user) %>
+      </li>
+      <li>
+        <%= render Primer::Beta::Octicon.new(icon: "repo-push") %>
+        <%= stafftools_selected_link_to \
+              "View rule insights",
+              stafftools_user_organization_rules_insights_path(this_user) %>
+      </li>
+    <% end %>
+
+    <% if view.show_custom_properties? %>
+      <li>
+        <%= render Primer::Beta::Octicon.new(icon: "multi-select") %>
+        <%= stafftools_selected_link_to \
+              "View properties",
+              stafftools_user_organization_custom_properties_path(this_user) %>
+      </li>
+    <% end %>
+
+    <% unless GitHub.enterprise? %>
+      <li>
+        <%= primer_octicon(:graph) %>
+        <a href="<%= view.sentry_link %>">Search Sentry</a>
+      </li>
+      <li>
+        <%= primer_octicon(:log) %>
+        <a href="<%= view.splunk_link %>">Search Splunk</a>
+      </li>
+      <li>
+        <%= primer_octicon(:question) %>
+        Search Zendesk
+        &ndash;
+        <%= link_to "username", view.zendesk_user_url, class: "Link--inTextBlock" %>
+        &ndash;
+        <% if view.user.user? %>
+          <%= link_to "email", view.zendesk_email_url, class: "Link--inTextBlock" %>
+        <% end %>
+      </li>
+    <% end %>
+    <% if view.show_spam? %>
+      <% if view.user.spammy? %>
+        <li>
+          <%= primer_octicon(:stop, classes: "alert") %>
+          <%= link_to \
+                "Flagged as spammy",
+                Spam.url_for_account_login(view.user.login) %>
+          <br>
+          <small class="wb-break-word">
+            <%= autolink_spammy_reason(view.user.spammy_reason) %>
+            <% if spam_flag_timestamp(view.user) %>
+              <%= time_ago_in_words spam_flag_timestamp(view.user) %> ago
+            <% end %>
+          </small>
+        </li>
+      <% else %>
+        <li>
+        <%= primer_octicon(:check) %>
+        <%= link_to \
+                "Not spammy",
+                Spam.url_for_account_login(view.user.login) %>
+        </li>
+      <% end %>
+    <% end %>
+    <% if view.enterprise_managed_user_enabled? %>
+      <li <%= test_selector("emu-enabled-indicator") %>>
+        <%= primer_octicon(:info) %>
+        Enterprise managed user enabled (EMU)
+        <% if view.user.is_first_emu_owner? %>
+          <small <%= test_selector("emu-first-owner-indicator") %>>
+            <br>
+            First owner account
+          </small>
+        <% end %>
+      </li>
+    <% end %>
+    <% if counts[:recent_abuse_reports] && counts[:recent_abuse_reports] != 0 %>
+      <li>
+        <%= primer_octicon(:stop, classes: "alert") %>
+        <strong><%= counts[:recent_abuse_reports] %></strong>
+        <%= link_to "recent abuse report".pluralize(counts[:recent_abuse_reports]),
+          stafftools_audit_log_path(query: view.audit_log_abuse_reports) %>
+      </li>
+    <% end %>
+    <% if view.user.recent_staff_note? %>
+      <li>
+        <%= primer_octicon(:comment, classes: "highlight") %>
+        <%= link_to \
+              "Recent staff note",
+              stafftools_user_overview_path(view.user, :anchor => "staffnotes") %>
+        <br>
+        <small>
+          <strong>
+            @<%= view.user.staff_notes.last.creator_name %>:
+          </strong>
+          <%= view.user.staff_notes.last.body %>
+        </small>
+      </li>
+    <% end %>
+  </ul>
+</div>

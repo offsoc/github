@@ -1,0 +1,44 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-repl-status-es [-h]
+#/
+#/ Check the status of the Elasticsearch indices being built on the replica cluster.
+#/ While the indices are being rebuilt, the cluster replication cannot be considered in-sync.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+check_es_replica_index_build(){
+  # the systemd service we're checking for only runs on the cluster delegate
+  primary_nomad_delegate=$(ghe-config "cluster.mysql-master")
+
+  if ssh_cmd "$primary_nomad_delegate" -- systemctl show elasticsearch-setup-cluster@secondary.service -p ActiveState --value | grep -q activating > /dev/null; then
+     check_result "$primary_nomad_delegate" "elasticsearch-replica-cluster-indices" "warn" "Elasticsearch indices are currently being built on the replica cluster"
+  else
+     check_result "$primary_nomad_delegate" "elasticsearch-replica-cluster-indices" "ok" "Elasticsearch indices on the replica cluster are ready"
+  fi
+}
+
+# only if there's a replica cluster
+if [ -f /etc/github/cluster ] && ! ghe-config --true cluster.ha && ghe-config --present cluster.mysql-master-replica; then
+
+  start_output "Elasticsearch indices on replica cluster"
+
+  check_es_replica_index_build
+
+  end_output "Elasticsearch indices on replica cluster"
+else
+  echo "This script can only be run on a GHES Cluster HA configuration."
+fi

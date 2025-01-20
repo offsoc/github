@@ -1,0 +1,175 @@
+#!/bin/bash
+# This file contains utilties for removing storage services from a node. It wraps many of the ghe-storage commands
+# so that they are easier to work with in bash scripts.
+
+source /usr/local/share/enterprise/lib/ghe-cluster-commons
+
+#/ function: is_storage_server
+#/ Desciption:
+#/    Returns 0 if host is a storage server.
+#/    Returns 1 if host is NOT a storage server.
+#/
+#/ Usage:
+#/    is_storage_server <hostname>
+is_storage_server() {
+  ghe-config --true "cluster.$1.storage-server"
+}
+
+#/ function: get_storage_object_count
+#/ Desciption:
+#/    Print the storage object count to stdout.
+#/
+#/ Usage:
+#/    get_storage_object_count <hostname>
+get_storage_object_count() {
+  local hostname="$1"
+  is_storage_server "$hostname" || {
+    echo "error: $hostname is not a storage server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-storage evacuation-status "storage-server-$uuid")"
+  ## Expected output format:
+  # +-----------------------------------------------------+-------------------+
+  # | Host                                                | Remaining item(s) |
+  # +-----------------------------------------------------+-------------------+
+  # | storage-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331 | 0                 |
+  # +-----------------------------------------------------+-------------------+
+  ## same output if storage server doesn't exit ^^
+
+  # Extract the remaining item count from the matching row.
+  local row
+  row="$(echo "$output" | grep "$uuid")"
+  local last_column
+  last_column="$(echo "$row" | awk -F '|' '{print $(NF-1)}' | xargs)"
+  local storage_count
+  storage_count="$last_column"
+
+  if [ -z "$storage_count" ]; then
+    echo "error: could not determine storage object count" >&2
+    return 1
+  fi
+  echo "$storage_count"
+  return 0
+}
+
+#/ function: mark_storage_offline
+#/ Desciption:
+#/    Sets the storage server status to "offline". Does NOT perform an evacaution.
+#/
+#/ Usage:
+#/    mark_storage_offline <hostname>
+mark_storage_offline() {
+  local hostname="$1"
+  is_storage_server "$hostname" || {
+    echo "error: $hostname is not a storage server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-storage offline "storage-server-$uuid")"
+  ## Expected output:
+  # storage-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331 has been put offline
+
+  if ! [[ "$output" == *"has been put offline"* ]]; then
+    echo "error: failed to mark storage server as offline" >&2
+    echo "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
+#/ function: evacuate_storage
+#/ Desciption:
+#/    Evacuate the storage server. Evacuation is synchronous(?)
+#/    See: https://github.com/github/github/blob/25879947305a41b4450cf2bf8f297ac6b3407e15/script/storage-evacuate
+#/
+#/ Usage:
+#/    evacuate_storage <hostname>
+evacuate_storage() {
+  local hostname="$1"
+  is_storage_server "$hostname" || {
+    echo "error: $hostname is not a storage server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output=$(ghe-storage evacuate "storage-server-$uuid")
+  ## Expected output:
+  # Evacuating 0 from storage-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331
+
+  if ! [[ "$output" == *"Evacuating"* ]]; then
+    echo "error: failed to initiate storage server evacuation" >&2
+    echo "$output" >&2
+    return 1
+  fi
+  return 0
+}
+
+#/ function: is_storage_evacuated
+#/ Desciption:
+#/    Returns 0 if evacuation is complete.
+#/    Returns 1 if evacuation is not complete.
+#/
+#/ Usage:
+#/    is_storage_evacuated <hostname>
+is_storage_evacuated() {
+  local hostname="$1"
+  is_storage_server "$hostname" || {
+    echo "error: $hostname is not a storage server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  local output
+  output="$(ghe-storage evacuation-status "storage-server-$uuid")"
+  ## Expected output
+  # +-----------------------------------------------------+-------------------+
+  # | Host                                                | Remaining item(s) |
+  # +-----------------------------------------------------+-------------------+
+  # | storage-server-6b3a3f62-4cf4-11ee-9281-f7ebea130331 | 0                 |
+  # +-----------------------------------------------------+-------------------+
+  ## same output if storage server doesn't return any results ^^
+
+  local row
+  row="$(echo "$output" | grep "$uuid")"
+  local objects_remaining
+  objects_remaining="$(echo "$row" | awk -F '|' '{print $(NF-1)}' | xargs)"
+
+  if [ -z "$objects_remaining" ]; then
+    echo "error: could not determine storage object count" >&2
+    return 1
+  fi
+
+  if (( objects_remaining > 0 )); then
+    return 1
+  else
+    return 0
+  fi
+}
+
+#/ function: destroy_storage
+#/ Desciption:
+#/    Destroys the storage server. Cannot be undone.
+#/
+#/ Usage:
+#/    destroy_storage <hostname>
+destroy_storage() {
+  local hostname="$1"
+  is_storage_server "$hostname" || {
+    echo "error: $hostname is not a storage server. Operation skipped." >&2
+    return 0
+  }
+  local uuid
+  uuid="$(uuid_from_hostname "$hostname")"
+
+  ghe-storage destroy-host storage-server-"$uuid" --force
+}

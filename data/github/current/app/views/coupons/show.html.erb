@@ -1,0 +1,259 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% view = Coupons::ShowView.new(
+  coupon: @coupon,
+  selected_account: @selected_account,
+  plan: @plan,
+  current_user: current_user,
+) %>
+
+<% page_info title: "Redeem Coupon", class: "coupons" %>
+<%
+  account = view.account
+  trade_screening_record = view.trade_screening_record
+  trade_screening_error_data = trade_screening_cannot_proceed_error_data(target: account)
+  should_show_redeem_faq = !account.is_a?(Business)
+%>
+
+<div class="py-6 js-coupons-data-collection-wrapper" data-plan="<%= account&.plan&.display_name %>" data-login="<%= account&.display_login %>">
+  <div class="container-lg p-responsive">
+    <% if logged_in? %>
+      <h1 class="f1 mb-4">Redeem your coupon</h1>
+        <div class="clearfix">
+          <div class="col-md-5 pr-md-5 float-md-left mb-md-0">
+            <div class="d-flex flex-items-center">
+              <div class="d-flex mr-2">
+                <span class="pr-2"> <%= account.is_a?(Business) ? "Enterprise" : "Account" %>:</span>
+                <%= render GitHub::AvatarComponent.new(actor: account, size: 24) %>
+                <% if view.coupon.user_only? %>
+                  <%= render(Primer::Beta::Text.new(font_size: :small, pl: 2)) { account.display_login } %>
+                <% end %>
+              </div>
+              <% unless view.coupon.user_only? %>
+                <%= render(Primer::Alpha::ActionMenu.new(select_variant: :single, dynamic_label: true)) do |menu| %>
+                  <% menu.with_show_button(classes: "h6", p: 2, aria: {label: "Switch billing account"}) do |button| %>
+                    <% button.with_trailing_action_icon(icon: "triangle-down") %>
+                    <%= account.display_login %>
+                  <% end %>
+                  <% view.coupon.eligible_accounts(current_user).each do |acount_item| %>
+                    <% menu.with_avatar_item(
+                      href: redeem_coupon_path(code: params[:code], id: acount_item.display_login),
+                      src: acount_item.primary_avatar_url,
+                      label: acount_item.name,
+                      username: acount_item.name,
+                      active: account == acount_item,
+                      test_selector: "switch-billing-account-#{acount_item.display_login}",
+                    ) %>
+                  <% end %>
+                  <% if view.show_create_enterprise_account_from_coupon_button? %>
+                    <% menu.with_item(
+                      label: "Create new enterprise",
+                      test_selector: "create-new-enterprise",
+                      select_variant: :none,
+                      href: new_enterprise_from_coupon_path(code: @coupon.code),
+                    ) do |item| %>
+                       <% item.with_leading_visual_icon(icon: "plus", mr: 2) %>
+                    <% end %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+          <div class="col-md-7 pl-md-7 float-md-left">
+            <%= render(Primer::Beta::Heading.new(tag: :h2, mb: 3)) { "Coupon summary" } %>
+          </div>
+        </div>
+        <div class="clearfix">
+          <div class="col-md-5 pr-md-5 float-md-left mb-4 mb-md-0">
+            <h2 class="setup-form-title mb-3">Your new subscription</h2>
+
+            <% if view.coupon.user_only? %>
+              <%= render "billing_settings/plan_table",
+                account: current_user,
+                selected_account: current_user,
+                selected_plan: view.plan,
+                coupon: view.coupon
+              %>
+            <% else %>
+              <% view.coupon.eligible_accounts(current_user).each do |account| %>
+                <%= render "coupons/plan_table",
+                  account: account,
+                  selected_account: view.selected_account,
+                  selected_plan: @selected_plan,
+                  coupon: view.coupon,
+                  html_options: { visibility: "hidden" }
+                %>
+              <% end %>
+            <% end %>
+
+            <% if should_show_redeem_faq %>
+              <div class="setup-info-module mt-4">
+                <%= render :partial => "coupons/redeem_faqs" %>
+              </div>
+            <% end %>
+
+            <% if account.is_a?(Business) && account.creation_initiated_from_coupon? %>
+              <%= form_tag delete_enterprise_from_coupon_path(slug: account.slug), method: :delete do %>
+                <%= render Primer::Beta::Button.new(
+                  type: :submit,
+                  block: true,
+                ) do %>
+                  Cancel redemption
+                <% end %>
+              <% end %>
+            <% end %>
+
+          </div>
+          <div class="col-md-7 pl-md-7 float-md-left">
+            <div class="mb-3 py-3 d-flex flex-justify-between flex-items-center border color-bg-accent color-border-subtle rounded-2 p-3">
+              <div class="lh-condensed">
+                <h3 class="h4">You’re getting</h3>
+                <span class="text-small color-fg-muted d-block">
+                  <% if view.coupon.plan.present? %>the <%= view.coupon.plan_display_name %> plan<% end %> for <%= view.discount_duration %>
+                </span>
+              </div>
+              <h2 class="text-right unstyled-payment-due float-right mb-0 lh-condensed">
+                <%= view.discount_amount %>
+              </h2>
+            </div>
+            <div class="py-3">
+              <div class="clearfix mb-2 pb-3">
+                <h3 class="float-left">Billing information</h3>
+                <% if view.show_billing_info_edit_button? %>
+                  <div class="float-right js-edit-user-personal-profile-wrapper">
+                    <%= render(
+                      Primer::Beta::Button.new(
+                        size: :medium,
+                        font_size: 6, classes: "js-edit-user-personal-profile"
+                      )
+                      ) { "Edit" }
+                    %>
+                  </div>
+                <% end %>
+              </div>
+              <% unless account.org_is_on_standard_tos? %>
+                <% if trade_screening_record.nil? %>
+                  <div class="clearfix text-normal pb-3">
+                    Please confirm your billing details to continue. You only need to do this once.
+                  </div>
+                <% end %>
+                <div class="clearfix d-sm-flex">
+                  <div class="<%= class_names("col-sm-6 mb-3", "mb-sm-0" => trade_screening_record.present?) %>">
+                    <div class="d-flex flex-items-center">
+                      <%= render GitHub::AvatarComponent.new(actor: account, size: 48, mr: 2) %>
+                      <ul class="list-style-none lh-condensed mb-2" style="min-height: 48px;">
+                        <li class="pb-1 text-bold"><%= account.safe_profile_name %></li>
+                        <li class="text-small color-fg-muted"><%= view.account_type %> account</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="col-sm-6 text-sm-right lh-condensed">
+                    <% if trade_screening_record.present? %>
+                      <%= render Billing::Settings::NameAddressSummaryComponent.new(profile: trade_screening_record) %>
+                    <% end %>
+                  </div>
+                </div>
+                <div class="js-name-address-collection-wrapper" <%= "hidden" if view.hide_name_address_collection_wrapper? %>>
+                  <%= render Billing::Settings::NameAddressFormComponent.new(
+                    target: account,
+                    payment_flow_loaded_from: "COUPONS",
+                    return_to: account.is_a?(Business) ? request.url : nil,
+                  ) %>
+                </div>
+              <% end %>
+
+              <%= render Billing::Settings::BillingInformationLinkingComponent.new(
+                actor: current_user,
+                target: account,
+                display_title: false,
+                form_loaded_from: "COUPONS",
+                return_to_path: request.url,
+                no_redirect: true,
+                autocheck_link_checkbox: view.org_has_no_linked_info_but_user_has_saved_info?
+              ) %>
+
+              <% if account.has_saved_trade_screening_record? && account.has_commercial_interaction_restriction? %>
+                <div class="border-top py-3 js-sdn-screening-error-wrapper">
+                  <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+                    <%= render(Primer::Alpha::Banner.new(icon: trade_screening_error_data[:icon], scheme: trade_screening_error_data[:scheme])) do %>
+                      <h2 class="h5">
+                        You can't proceed at this time
+                      </h2>
+                      <div class="ml-5">
+                        <%= trade_screening_error_data[:message] %>
+                      </div>
+                    <% end %>
+                  <% else %>
+                    <%= render(Primer::Beta::Flash.new(scheme: trade_screening_error_data[:scheme])) do %>
+                      <h2 class="h5">
+                        <%= render(Primer::Beta::Octicon.new(trade_screening_error_data[:icon])) %>
+                        You can't proceed at this time
+                      </h2>
+                      <div class="ml-5">
+                        <%= trade_screening_error_data[:message] %>
+                      </div>
+                    <% end %>
+                  <% end %>
+                </div>
+              <% elsif view.show_payment_form? %>
+                <div class="border-top py-3 js-payment-methods-wrapper mb-1">
+                  <h4 class="mb-3">Payment Method</h4>
+                  <%= render Billing::Settings::PaymentMethodFormComponent.new(
+                    target: account,
+                    new_name_address_design: true,
+                    signature_view_context: Billing::Zuora::HostedPaymentsPage::COUPONS_SIGNATURE_VIEW_CONTEXT,
+                    return_to: request.url,
+                  ) %>
+                <div>
+              <% end %>
+            </div>
+            <div class="js-coupons-form-wrapper <%= "border-top py-3 mt-3" if view.show_redemption_button? %>">
+              <%= form_tag redeem_coupon_path,
+                  :autocomplete        => "off",
+                  :class               => "js-braintree-encrypt",
+                  "data-braintree-key" => GitHub.braintree_client_side_encryption_key do |f| %>
+
+                <%= hidden_field_tag :id, account.display_login, :class => "js-account", :id => nil %>
+                <%= hidden_field_tag :plan, view.default_plan(current_user, view.coupon), :class => "js-plan", :id => nil %>
+                <%= hidden_field_tag :code, view.coupon.code %>
+
+                <% if view.show_redemption_button? %>
+                  <div class="form-actions mt-3">
+                    <%= render(
+                      Primer::Beta::Button.new(
+                        type: :submit,
+                        size: :medium,
+                        scheme: :primary,
+                        block: true,
+                        classes: "btn btn-primary js-redeem-button",
+                        data: {
+                          disable_with: "Applying coupon…"
+                        })
+                      ) { "Apply coupon" }
+                    %>
+                  </div>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+    <% else %>
+      <div class="setup-wrapper">
+        <%= render "coupons/coupon_header", view: view %>
+
+        <div class="setup-main">
+          <div class="setup-form-container">
+            <div class="setup-form">
+              <%= render :partial => "coupons/login_or_create_user" %>
+
+              <div class="setup-info-module mt-4">
+                <%= render :partial => "coupons/redeem_faqs" %>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    <% end %>
+  </div>
+</div>

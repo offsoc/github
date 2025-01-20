@@ -1,0 +1,136 @@
+#!/usr/bin/env ruby
+require_relative "../config/environment"
+
+def schema_path(schema_name)
+  "config/schema.#{schema_name}.graphql"
+end
+
+def write_schema_file(schema_name, graphql_string)
+  filename = schema_path(schema_name)
+  File.write(filename, "#{graphql_string.chomp}\n")
+  system("bin/prettier --write #{filename}") || raise("Prettier failed to prettify schema, see errors above.")
+end
+
+def ensure_serviceowners_cache_updated
+  # we only want to run this in local development, and trust CI has already run this step
+  return if ENV["GITHUB_CI"]
+  system("bin/generate-service-files.rb --cache-only") || raise("Serviceowners local cache failed to update, see errors above.")
+end
+
+ensure_serviceowners_cache_updated
+
+# Use our own serviceowners here so we can generate dotcom schemas (with service mappings) on enterprise and
+# enterprise schemas (without service mappings) on dotcom.
+serviceowners = GitHub::Serviceowners.new
+
+# GraphQL Schema Dumps
+
+# schema.internal.graphql
+schema_sdl = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :internal,
+  environment: :dotcom,
+  serviceowners: serviceowners,
+)
+
+schema_sdl = Platform::SchemaPrinter::UnderDevelopment.inject_since_arguments_in_schema_sdl(schema_sdl, previous_schema_sdl: File.read(schema_path("internal")))
+write_schema_file("internal", schema_sdl)
+
+# schema.public.graphql
+old_public_schema = File.read(schema_path("public"))
+new_public_schema = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :public,
+  environment: :dotcom,
+  serviceowners: serviceowners,
+)
+write_schema_file("public", new_public_schema)
+
+# schema.docs.graphql
+new_docs_schema = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :docs,
+  environment: :dotcom,
+  serviceowners: serviceowners,
+)
+write_schema_file("docs", new_docs_schema)
+
+# schema.internal-enterprise.graphql
+schema_sdl = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :internal,
+  environment: :enterprise,
+)
+
+schema_sdl = Platform::SchemaPrinter::UnderDevelopment.inject_since_arguments_in_schema_sdl(schema_sdl, previous_schema_sdl: File.read(schema_path("internal-enterprise")))
+write_schema_file("internal-enterprise", schema_sdl)
+
+# schema.public-enterprise.graphql
+schema = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :public,
+  environment: :enterprise,
+)
+write_schema_file("public-enterprise", schema)
+
+# schema.docs-enterprise.graphql
+new_enterprise_docs_schema = Platform::SchemaPrinter.print(
+  Platform::Schema,
+  target: :docs,
+  environment: :enterprise,
+)
+write_schema_file("docs-enterprise", new_enterprise_docs_schema)
+
+# GraphQL Upcoming Changes
+
+# graphql_upcoming_changes.public.yml
+public_changes = Platform::Schema.upcoming_changes(
+  target: :public,
+  environment: :dotcom,
+)
+File.write("config/graphql_upcoming_changes.public.yml", public_changes.to_yaml)
+
+# graphql_upcoming_changes.internal.yml
+internal_changes = Platform::Schema.upcoming_changes(
+  target: :internal,
+  environment: :dotcom,
+)
+File.write("config/graphql_upcoming_changes.internal.yml", internal_changes.to_yaml)
+
+# graphql_upcoming_changes.internal-enterprise.yml
+internal_changes = Platform::Schema.upcoming_changes(
+  target: :internal,
+  environment: :enterprise,
+)
+File.write("config/graphql_upcoming_changes.internal-enterprise.yml", internal_changes.to_yaml)
+
+# graphql_upcoming_changes.public-enterprise.yml
+public_changes = Platform::Schema.upcoming_changes(
+  target: :public,
+  environment: :enterprise,
+)
+File.write("config/graphql_upcoming_changes.public-enterprise.yml", public_changes.to_yaml)
+
+
+def stringify_previews(previews)
+  previews_yaml = previews.map { |prev| prev.to_h.stringify_keys }.to_yaml
+  # Yaml leaves these trailing whitespaces for `nil` values,
+  # but some dev environments automatically clean them up, resulting in weird whitespace diffs.
+  # Let's improve the DX by just removing them here.
+  previews_yaml.gsub!(": \n", ":\n")
+  previews_yaml
+end
+
+# Warn about breaking changes
+require "graphql/schema_comparator"
+
+result = GraphQL::SchemaComparator.compare(old_public_schema, new_public_schema)
+
+if result.breaking_changes.any?
+  puts "\n"
+  puts "⚠️  Warning: The following breaking changes were detected when dumping the GraphQL schema:\n"
+  puts "\n"
+  puts result.breaking_changes.map { |breaking_change| "  - #{breaking_change.message}" }.join("\n")
+  puts "\n"
+  puts "Upon opening a pull request with these changes, you'll be instructed how to measure the impact of this change.\n"
+end

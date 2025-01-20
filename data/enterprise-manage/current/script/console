@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Get the GHES Manage SHA
+GHES_MANAGE_SHA="${GHES_MANAGE_SHA:-$(cat ../manifest-focal/base-pinned | grep ghes-manage | sed -n 's/.*~\(.*\)-\{1\}\([a-f0-9]*\).*/\2/p')""}"
+
+if ! [ -f /.dockerenv ] || [ -n "$CODESPACES" ]; then
+  service="${1:-single}"
+  exec env GHES_MANAGE_SHA=$GHES_MANAGE_SHA docker compose -f docker-compose.dependencies.yaml -f docker-compose.vscode.yaml -f docker-compose.dev.yaml \
+    run --rm "$service" script/console
+fi
+
+work_dir="$(cd $(dirname "$0")/.. && pwd)/work"
+mkdir -p "$work_dir"
+
+# use example key files
+export ENTERPRISE_LICENSE_KEY='examples/license.gpg'
+export ENTERPRISE_CUSTOMER_KEY='examples/customer.gpg'
+export ENTERPRISE_PACKAGE_KEY='examples/package.gpg'
+
+# transient files are written to ./work which isn't versioned
+export GHE_CONFIG="$work_dir/github.conf"
+export ENTERPRISE_LICENSE_PATH="$work_dir/enterprise.ghl"
+export ENTERPRISE_EXCEPTIONS_PATH="$work_dir/exceptions.log"
+
+# enable mock service list
+export MOCK=1
+
+exec bundle exec ruby -Ilib -rirb -e 'require "manage"; Manage.setup; IRB.start'

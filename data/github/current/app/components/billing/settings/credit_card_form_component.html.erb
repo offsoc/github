@@ -1,0 +1,130 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% SecureHeaders.append_content_security_policy_directives(
+  request,
+  frame_src: [GitHub.zuora_payment_page_server]
+) %>
+
+<% if helpers.show_development_payment_form_warning?(request&.original_url) %>
+  <%= render "payment_method/payment_form_development_warning" %>
+<% end %>
+
+<% if hide_payment_controls? %>
+  <% if new_name_address_design? %>
+    <div class="js-zuora-existing-card mb-3">
+      <div class="clearfix d-sm-flex">
+        <div class="col-sm-6 mb-3 mb-sm-0">
+          <div class="d-flex flex-items-center">
+            <div class="color-bg-subtle mr-2 CircleBadge box-shadow-none">
+              <%= primer_octicon(icon: "credit-card", color: :muted) %>
+            </div>
+            <ul class="list-style-none lh-condensed mb-0">
+              <li>
+                <strong <%= test_selector("credit-card-info") %>><%= payment_method.card_type %>
+                  <% if payment_method.card_type %>ending <%= payment_method.last_four %><% end %>
+                </strong>
+              </li>
+              <li class="color-fg-muted text-small">expiring <%= payment_method.formatted_expiration_date %></li>
+            </ul>
+          </div>
+        </div>
+        <% if allow_editing? %>
+          <div class="col-sm-6 text-sm-right lh-condensed">
+            <div class="float-right">
+              <%= render Primer::Beta::Button.new(
+                classes: "js-enter-new-card",
+                font_size: 6,
+                "data-sdn-data-collection": data_collection_enabled?,
+                test_selector: "credit-card-edit",
+              ) do %>
+                Edit<span class="sr-only">&nbsp;payment method</span>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% else %>
+    <div <%= test_selector("credit-card-info-container") %> class="<%= class_names(
+      "col-9 js-zuora-existing-card mt-3 mb-2",
+      "px-3 py-2" => modal_view? && include_modal_chrome?,
+    ) %>">
+      <p class="d-flex flex-justify-between mb-0">
+        <span <%= test_selector("credit-card-info") %>>
+          <%= primer_octicon(icon: "credit-card", color: :muted) %>
+          <strong><%= payment_method.card_type %></strong> ending
+          <span><%= payment_method.formatted_number %></span>
+        </span>
+      </p>
+      <%= render Primer::ButtonComponent.new(
+        scheme: :link,
+        classes: "js-enter-new-card",
+        font_size: 6,
+        "data-sdn-data-collection": "false",
+      ).with_content("New Card") %>
+    </div>
+  <% end %>
+<% end %>
+
+<div class="js-billing-section" <%= "hidden" if hide_payment_controls? %>>
+  <div class="js-zuora-spinner d-flex flex-items-center my-4">
+    <%= image_tag "spinners/octocat-spinner-32.gif", class: "mr-2", size: "16x16", alt: "", valign: "top" %>
+    Loading payment information…
+  </div>
+  <%= render Billing::Settings::ZuoraHppContainerComponent.new(
+    user_id: current_user.id,
+    signature_path: zuora_payment_page_signature_path,
+    container_class: "js-zuora-payment-page",
+    hidden: true,
+    signature_view_context: signature_view_context,
+    hydro_payload: {
+      account_id: target.id,
+    },
+    organization_id: (target.display_login if target.organization?),
+    business_id: (target.slug if target.is_a?(Business)),
+    redirect_to: zuora_redirect_to,
+    manual_payment: manual_payment?,
+    invoices: invoices,
+    payment_gateway: payment_gateway
+  ) %>
+  <% if target.disabled? %>
+    <%= render "payment_method/auth_notice_disabled_account" %>
+  <% end %>
+</div>
+
+<% if plan.present? %>
+  <%= render "payment_method/legal" %>
+<% elsif target.has_paypal_account? %>
+  <% if target.autopay_disabled_by_india_rbi? %>
+    <p>
+      Manual payments in India must use a credit or debit card. Payment via PayPal is not available for manual payments.
+    </p>
+  <% else %>
+    <p <%= test_selector("current-paypal") %>>
+      You are currently paying with your PayPal account <strong><%= payment_method.paypal_email %></strong>, but you can switch to using a credit or debit card at any time.
+    </p>
+  <% end %>
+<% end %>
+
+<% if show_auth_and_capture_message? %>
+  <%= render "payment_method/auth_notice_metered_usage" %>
+<% end %>
+
+<%= form_for :billing, url: helpers.target_update_credit_card_path(target),
+  html: { class: "d-none js-payment-method-form" } do |f|
+%>
+  <% if plan.present? %>
+    <%= hidden_field_tag "plan", plan %>
+  <% end %>
+
+  <% if return_to.present? %>
+    <%= hidden_field_tag "return_to", return_to %>
+  <% end %>
+
+  <%= render Billing::Settings::ZuoraBillingInfoComponent.new(target: target) %>
+<% end %>
+
+<% unless modal_view? || new_name_address_design? %>
+  <a href="<%= target_billing_settings_path %>" class="f6" <%= test_selector("back-to-billing-settings-link") %>>
+    Back to billing settings
+  </a>
+<% end %>

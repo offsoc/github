@@ -1,0 +1,82 @@
+#!/usr/bin/env ruby
+require 'yaml'
+require 'fileutils'
+require 'optparse'
+
+PWD = Dir.pwd
+
+INIT = ['git', 'init']
+REMOTE_ADD = ['git', 'remote', 'add', 'origin', 'url']
+FETCH_COMMIT = ['git', 'fetch', 'origin', 'commit_oid']
+CLONE_AT_COMMIT = ['git', 'reset', '--hard', 'FETCH_HEAD']
+
+COMMANDS_TO_CLONE = [INIT, REMOTE_ADD, FETCH_COMMIT, CLONE_AT_COMMIT]
+
+def monitor_process_run(command, url)
+  output, status = run_process(*command)
+  raise "Failed to clone #{url}. #{output.strip} Try `script/load-sample-repositories -f` to force reload the repositories." unless status.success?
+end
+
+def clone_repo_at_commit(name, url, commit_oid)
+  FileUtils.mkdir_p name
+  Dir.chdir name
+  COMMANDS_TO_CLONE.each do |command|
+    command_filtered = command.dup.map!{|keyword| keyword == 'url' ? url : keyword}.map!{|keyword| keyword == 'commit_oid' ? commit_oid : keyword}
+
+    monitor_process_run(command_filtered, url)
+  end
+end
+
+def clone_repo(name, url, commit_oid)
+  Dir.chdir PWD
+
+  puts "Cloning #{url} into #{name}..."
+  if commit_oid
+    return clone_repo_at_commit(name, url, commit_oid)
+  end
+
+  monitor_process_run(['git','clone', url, name], url)
+  puts "Successfully cloned #{url} into #{name}!"
+end
+
+def load_sample_repositories(forced_cleanup)
+  puts "Fetching sample repositories list from sample_repositories.yml ..."
+  repos_yml = File.expand_path('../../samples/sample_repositories.yml',  __FILE__)
+  repos_data = YAML.load_file(repos_yml)
+  if forced_cleanup
+    puts "Cleaning up samples/repositories"
+    FileUtils.rm_rf('samples/repositories')
+  end
+
+  puts "Cloning sample repositories to samples/repositories ..."
+
+  repos_data['repositories'].each do |repository|
+    puts "Cloning #{repository['url']}"
+
+    if File.directory?("samples/repositories/#{repository['name']}")
+      puts "Looks like #{repository['url']} is already cloned to samples/repositories/#{repository['name']}"
+      next
+    end
+
+    clone_repo("samples/repositories/#{repository['name']}", repository['url'], repository['SHA'])
+  end
+
+  puts "Successfully cloned all repositories!"
+end
+
+def run_process(*args)
+  read, write = IO.pipe
+  pid = Process.spawn(*args, in: :close, out: write, err: [:child, :out])
+  write.close
+  output = read.read
+  read.close
+  Process.wait(pid)
+  [output, $?]
+end
+
+forced_cleanup = false
+OptionParser.new do |parser|
+  parser.on('-f', '--force') { forced_cleanup = true }
+end.parse!
+
+load_sample_repositories(forced_cleanup)

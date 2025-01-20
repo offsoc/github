@@ -1,0 +1,64 @@
+#!/bin/bash
+# Usage: ./script/container-diff [filename]
+# Obtain a diff between the Docker image built from current sha and the image
+# built from origin/master. Takes an optional absolute filename to display a
+# diff of the contents of a specific file.
+#
+# To compare changes between images built via a legacy process and a new one:
+#
+# * export TAG_PREFIX=your-prefix- in `script/cibuild-deploy-tarball` for the
+#   new system
+# * `TAG_PREFIX=your-prefix- ./script/container-diff`
+#
+# More detailed usage:
+#
+# * Open a PR with changes to Docker build process
+# * Push your changes and observe an image be built & pushed
+# * Run this command locally to obtain information about the changes
+# * Optional: share this information as a part of obtaining review on your PR
+#
+# TODO:
+#
+# * Integrate this functionality into github-build-deploy-artifacts job
+# * Use Octofactory
+set -e
+
+: ${REGISTRY:="702486989568.dkr.ecr.us-east-1.amazonaws.com"}
+: ${IMAGE:="$(basename $(pwd))"}
+: ${DEFAULT_BRANCH:="master"}
+: ${A_SHA:="$(git show-ref -s origin/$DEFAULT_BRANCH)"}
+: ${BUILD_SHA:="$(git rev-parse HEAD)"}
+A="${REGISTRY}/${IMAGE}:${A_SHA}"
+B_WITHOUT_PREFIX="${REGISTRY}/${IMAGE}:${BUILD_SHA}"
+B="${REGISTRY}/${IMAGE}:${TAG_PREFIX}${BUILD_SHA}"
+
+if [ -n "$(which awssume 2>/dev/null)" ]; then
+  echo "Authenticating ..."
+  awssume --uc moda-production
+  eval "$(aws --profile moda-production --region=us-east-1 ecr get-login --no-include-email)"
+  echo
+fi
+
+# Download and install when run via Build Pipelines
+if [ -d /workspace ] && [ -z "$(which awssume 2>/dev/null)" ]; then
+  curl -LO https://storage.googleapis.com/container-diff/latest/container-diff-linux-amd64
+  chmod +x container-diff-linux-amd64
+  mkdir -p /workspace/bin
+  mv container-diff-linux-amd64 /workspace/bin/container-diff
+  export PATH=$PATH:/workspace/bin
+fi
+
+types="--type=history --type=apt --type=file --type=size"
+fileargs=""
+if [ -n "$1" ]; then
+  types="--type=file"
+  fileargs="--filename=$1"
+fi
+
+if [ -n "$TAG_PREFIX" ]; then
+  set -x
+  exec container-diff diff $types --order "$B_WITHOUT_PREFIX" "$B" $fileargs
+else
+  set -x
+  exec container-diff diff $types --order "$A" "$B" $fileargs
+fi

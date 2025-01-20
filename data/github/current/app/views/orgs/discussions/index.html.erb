@@ -1,0 +1,158 @@
+<% new_discussion_hydro_attrs = safe_discussions_list_click_attrs(nil, target: :NEW_DISCUSSION_LINK)
+   has_answerable_categories = repository.discussion_categories.any?(&:supports_mark_as_answer?)
+%>
+
+<% org_param = is_org_level? ? (repository.organization || this_organization)&.to_param : nil
+%>
+
+<% page_info \
+  title: discussion_page_title(nil, selected_category_slug),
+  class: "color-bg-inset",
+  html_class: "color-bg-inset",
+  canonical_url: request.original_url
+%>
+
+<%= render Discussions::IndexHeadingComponent.new(
+  repository: current_repository,
+  category_slug: selected_category_slug
+)
+%>
+
+<% if spotlights.any? %>
+  <%= render Discussions::SpotlightsComponent.new(
+    current_repository: current_repository,
+    spotlights: spotlights,
+    can_manage_spotlights: permissions.can?(:manage_discussion_spotlights),
+    can_toggle_discussions_setting: permissions.can?(:can_toggle_discussions_setting),
+    org_param: is_org_level? ? this_organization&.to_param : nil,
+  ) %>
+<% end %>
+
+<%= render Discussions::SearchAndCreateComponent.new(
+    current_repository: current_repository,
+    query: query,
+    can_create_discussion: permissions.can?(:create_discussion),
+    can_toggle_discussions_setting: permissions.can?(:can_toggle_discussions_setting),
+    selected_category_slug: selected_category_slug,
+    include_answer_filters: include_answer_filters,
+    parsed_discussions_query: parsed_discussions_query,
+    current_user_can_push: current_user_can_push?,
+    org_level: is_org_level?,
+    org: repository.organization || this_organization
+  ) %>
+
+<div class="<%= class_names("clearfix", "container-xl") %>" <%= test_selector("discussion-org-level-index") %>>
+  <%= render(Primer::Alpha::Layout.new) do |c| %>
+    <% c.with_sidebar(width: :narrow, stacking_breakpoint: :md) do %>
+       <%= render(Discussions::CategoriesListComponent.new(
+        current_repository: repository,
+        discussions_path: org_discussions_path(repository.organization || this_organization),
+        categories: repository.available_discussion_categories,
+        parsed_discussions_query: discussions_query_without_defaults,
+        selected_category_slug: selected_category_slug,
+        can_create_discussion_category: permissions.can?(:create_discussion_category),
+        can_toggle_discussions_setting: permissions.can?(:can_toggle_discussions_setting),
+        can_manage_spotlights: permissions.can?(:manage_discussion_spotlights),
+        org_param: org_param,
+      ))%>
+
+      <% unless has_answerable_categories %>
+        <%= render(Discussions::IndexSidebarLinksComponent.new(
+            wrap_text: local_assigns.key?(:wrap_text),
+            current_repository: repository,
+            code_of_conduct_file: code_of_conduct_file,
+            )) %>
+      <% end %>
+    <% end %>
+
+    <% c.with_main do %>
+      <%= render(Primer::Alpha::Layout.new(stacking_breakpoint: :lg)) do |l| %>
+        <% l.with_main do %>
+          <%= render(Discussions::CategoryIndexDescriptionComponent.new(
+            selected_category_slug: selected_category_slug,
+            current_repository: current_repository,
+            hide_separator: pinned_category_discussions.blank?,
+            categories: discussion_categories
+            )) %>
+          <% if pinned_category_discussions.any? %>
+              <%= render(Primer::Beta::Text.new(tag: :h3, mb: 2, classes: "h5")) { "Pinned to #{current_category.name}" } %>
+              <ul
+                role="list"
+                data-hpc
+                class="list-style-none border px-3 mb-2 color-bg-overlay rounded-2"
+                <%= test_selector("discussion-org-level-pinned-container") %>
+              >
+                <% pinned_category_discussions.each_with_index do |discussion, i| %>
+                  <%= render Discussions::DiscussionRowCollapsedComponent.new(
+                    permissions:,
+                    discussion:,
+                    index: i,
+                    header_element_name: :h4,
+                    participants: participants_by_discussion_id[discussion.id],
+                    parsed_discussions_query:,
+                    org_param:
+                  )%>
+                <% end %>
+              </ul>
+          <% end %>
+          <% if discussions.any? %>
+            <% if pinned_category_discussions.any? %>
+              <%= render(Primer::Beta::Text.new(tag: :h3, mb: 2, classes: "h5")) { "Discussions" } %>
+            <% end %>
+            <ul
+              role="list"
+              data-hpc
+              class="list-style-none border px-3 color-bg-overlay rounded-2"
+              <%= test_selector("discussion-org-level-feed-container") %>
+            >
+              <% discussions.each_with_index do |discussion, i| %>
+              <% next if pinned_category_discussions.any? { |p| p.id == discussion.id } %>
+                <%= render Discussions::DiscussionRowCollapsedComponent.new(
+                  permissions:,
+                  discussion:,
+                  index: i,
+                  header_element_name: pinned_category_discussions.any? ? :h4 : :h3,
+                  participants: participants_by_discussion_id[discussion.id],
+                  parsed_discussions_query:,
+                  org_param:
+                )%>
+              <% end %>
+            </ul>
+            <% if discussions.total_pages > 1 %>
+              <div class="paginate-container">
+                <div class="pagination">
+                  <%= will_paginate discussions %>
+                </div>
+              </div>
+            <% end %>
+          <% elsif repository.discussions.exists? %>
+            <%= render partial: "orgs/discussions/blankslate", locals: { repo: repository, title: "There are no discussions here yet" } %>
+          <% else %>
+            <%= render partial: "orgs/discussions/blankslate", locals: { repo: repository, title: "Welcome to Organization Discussions!" } %>
+          <% end %>
+        <% end %>
+
+        <% l.with_sidebar(width: :narrow, row_placement: :end, col_placement: :end) do %>
+          <% if repository.discussion_categories.any?(&:supports_mark_as_answer?) %>
+            <include-fragment
+              src="<%= discussions_leaderboard_path(current_repository.owner, current_repository, params: { show_v2: true }) %>"
+              <%= test_selector("discussions_leaderboard_fragment") %>>
+              <%= render(Primer::Beta::Spinner.new(mt: 6, mx: :auto, display: :block)) %>
+            </include-fragment>
+
+            <%= render(Discussions::IndexSidebarLinksComponent.new(
+                wrap_text: local_assigns.key?(:wrap_text),
+                current_repository: repository,
+                code_of_conduct_file: code_of_conduct_file,
+              )) %>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+</div>
+
+<%# These templates are used by optimistic reactions js when rendering added reaction groups %>
+<% Emotion.all.each_with_index do |emotion, index| %>
+  <%= render "discussions/emoji_button_reaction_template", emotion: emotion, index: index %>
+<% end %>

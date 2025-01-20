@@ -1,0 +1,92 @@
+#!/bin/bash
+#/ Usage: ghe-nomad-local-alloc-stop [-v] <job>
+#/
+#/ Checks the local node for allocations of the specified job type
+#/ and stops the allocation only on localhost.
+#/
+set -eu
+
+if [ "$(whoami)" != "root" ]; then
+  exec sudo -E "$0" "$@"
+fi
+
+# usage
+#   Display usage information for this script.
+usage() {
+  grep '^#/' < "$0" | cut -c 4-
+}
+
+echo_verbose() {
+  if [[ -n $verbose ]]; then
+    echo "$@"
+  fi
+}
+
+# Command line parsing
+verbose=''
+job=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -v|--verbose)
+      verbose=true
+      shift
+      ;;
+    -*)
+      echo "error: unexpected flag ${1%%=*}" 1>&2
+      usage 1>&2
+      exit 1
+      ;;
+    *)
+      break;
+      ;;
+  esac
+done
+
+# $1 should now be the only variable left in argv as the job name
+if [[ ${#@} -ne 1 ]]; then
+  usage 1>&2
+  exit 2
+fi
+
+job="${1}"
+echo_verbose "Attempting to stop allocations for $job on localhost"
+
+node_name="localhost"
+
+if [[ -f /etc/github/cluster ]]; then
+  node_name="$(cat /etc/github/cluster)"
+fi
+echo_verbose "Using ${node_name} as node_name"
+
+nomad_node_id=$(/usr/local/share/enterprise/ghe-nomad-node-id)
+echo_verbose "Nomad node id is ${nomad_node_id}"
+alloc_id=$(nomad job status "${job}" | grep running | grep "${nomad_node_id}" | awk '{ print $1 }')
+
+
+if [[ -n ${alloc_id} ]]; then
+  job_type=$(ghe-nomad-api job/"${job}" | jq -r .Type)
+  if [[ ${job_type} == "system" ]]; then
+    ## There is bug in nomad 1.3 that stopping a system type job 
+    ## might end up with placement error but job will be stopped susccessfully
+    nomad alloc stop "${alloc_id}"  || {
+      exit_code=$?
+      if [ $exit_code -eq 2 ]; then
+        ## Allow nomad stop to return a non-zero exit code (2) given a bug in nomad
+        ## See https://github.com/hashicorp/nomad/issues/12016#issuecomment-1527389689
+        echo "Stopping ${job} via Nomad returned a non-zero exit code, but ${job} could already be stopped; continuing"
+      else
+        echo "Failed to stop ${job} via Nomad; exiting with $exit_code" >&2
+        exit $exit_code
+      fi
+    }
+  else
+    nomad alloc stop "${alloc_id}"
+  fi
+  
+else
+  echo "Couldn't find running allocation for '${job}' on '${node_name}'"
+fi

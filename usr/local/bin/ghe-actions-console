@@ -1,0 +1,182 @@
+#!/bin/bash
+#/ Usage: ghe-actions-console [-chs]
+#/
+#/ Opens an interactive console to a GitHub Actions service.  Only use this
+#/ command if directed by GitHub Enterprise support.
+#/
+#/ OPTIONS:
+#/   -c | --command     LightRail command to run, leave out this arg for an
+#/                      interactive console
+#/   -h | --help        Show this message
+#/   -s | --service     The service name (actions, mps, artifactcache, or token), default to
+#/                      actions
+#/
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options
+command=
+service=actions
+use_tmpfs=false
+pwsh_params=()
+docker_params=()
+env_vars=()
+host_dir=/data/user/actions
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c|--command)
+      command="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -s|--service)
+      service="$(to-lower "$2")"
+      shift 2
+      ;;
+    --tmpfs)
+      use_tmpfs=true
+      shift 1
+      ;;
+    *)
+      >&2 echo "Unrecognized argument: $1"
+      usage
+      ;;
+  esac
+done
+
+ensure-service-name "$service"
+
+if [[ -z "$command" ]]; then
+  pwsh_params+=("-NoExit")
+  docker_params+=("-it")
+fi
+
+# Normalize to Mps/Token/Actions/ArtifactCache for case sensitivity.
+service_dir="$(capitalize "$service")"
+
+# LightRail writes logs to a directory in the actions user's data directory
+log_dir="$host_dir/lightrail/$service_dir/logs"
+
+# If the --tmpfs flag was passed,
+# mount the host and log directories to a temporary filesystem.
+if [ "$use_tmpfs" = true ]; then
+  docker_params+=("--mount" "type=tmpfs,destination=/home/actions/.actions-dev")
+else
+  docker_params+=("-v" "$host_dir:/home/actions/.actions-dev")
+  docker_params+=("-v" "$log_dir:/LR/Logs")
+  if [ ! -d "$log_dir" ]; then
+    sudo mkdir -p "$log_dir" # log_dir is a child of host_dir, so we don't need to check for host_dir existence too
+    sudo chown -R -f actions:actions "$host_dir" || true
+  fi
+fi
+
+# Get the Docker image and tag, and ensure it is loaded.
+image_name="actions-console"
+image_tag="$(tag-for-image "$image_name")"
+load-image "$image_name:$image_tag"
+
+# Actions will build public urls using this domain
+env_vars+=("GHES_DOMAIN=$(ghe-config --get core.github-hostname)")
+env_vars+=("GHES_HTTPS=$(ghe-config --get github-ssl.enabled)")
+
+# Configure deployment realm
+if ghe-config --exists secrets.actions.deployment-realm; then
+  env_vars+=("GHE_ACTIONS_REALM=$(ghe-config secrets.actions.deployment-realm)")
+fi
+
+# Store the secrets to an env file, each line a key=value pair.
+secrets=("ConfigurationDatabaseSqlLogin" \
+         "ConfigurationDatabaseSqlPassword" \
+         "OAuthS2SSigningCertThumbprint" \
+         "PrimaryEncryptionCertificateThumbprint" \
+         "S2SEncryptionCertificate" \
+         "SecondaryEncryptionCertificateThumbprint" \
+         "UrlSigningHmacKeyPrimary" \
+         "UrlSigningHmacKeySecondary" \
+         "ActionsAppAuthHmacKeyPrimary" \
+         "ActionsAppRealmWideHmacKeyPrimary")
+
+# Check if secrets are defined to allow ghe-actions-precheck running without Actions configured
+for secret in "${secrets[@]}"; do
+  if ghe-config --exists secrets.actions."$secret"; then
+    env_vars+=("LR_${secret^^}=$(ghe-config secrets.actions."$secret")")
+  fi
+done
+
+# Set SpsValidationCertThumbprint and related settings separately since they are not 1:1. Instead, up to 4 settings
+# all use the same value of the secrets.actions.SpsValidationCertThumbprint secret in ghe-config
+if ghe-config --exists secrets.actions.SpsValidationCertThumbprint; then
+  validation_secrets=("SpsValidationCertThumbprint" "JWTSigningCertificateThumbprint" "SecondaryJWTSigningCertificateThumbprint")
+  if [ "$service" == "token" ] ; then
+    validation_secrets+=("TokenJWTSigningCertificateThumbprint")
+  fi
+  for secret in "${validation_secrets[@]}"; do
+    env_vars+=("LR_${secret^^}=$(ghe-config secrets.actions.SpsValidationCertThumbprint)")
+  done
+fi
+
+if ghe-config --exists secrets.mssql.sa-password; then
+  env_vars+=("MSSQL_SA_PASSWORD=$(ghe-config secrets.mssql.sa-password)")
+fi
+
+# Configure Application settings
+env_vars+=("ApplicationSettings__DeploymentType=OnPremises")
+env_vars+=("ApplicationSettings__DeploymentEnvironment=Ghes")
+env_vars+=("ACTIONS_SQL_INSTANCE=localhost,1443")
+env_vars+=("ACTIONS_REDIS_CONNECTION_STRING=localhost:6380")
+
+# Configure the proxy
+if ghe-config --present "core.http-proxy"; then
+  env_vars+=("HTTP_PROXY=$(ghe-config core.http-proxy)")
+  env_vars+=("HTTPS_PROXY=$(ghe-config core.http-proxy)")
+
+  no_proxy="NO_PROXY=localhost,127.0.0.1,::1"
+  if ghe-config --present "core.http-noproxy"; then
+    no_proxy+=",$(ghe-config core.http-noproxy)"
+  fi
+  env_vars+=($no_proxy)
+fi
+
+# Create a protected temp file to store the env vars.
+temp_file="$(mktemp)"
+
+function cleanup {
+    rm -f "$temp_file"
+}
+
+trap cleanup EXIT
+( IFS=$'\n'; echo "${env_vars[*]}" ) > "$temp_file"
+
+docker_run() {
+  docker run \
+    --rm \
+    --entrypoint pwsh \
+    --network host \
+    --env-file "$temp_file" \
+    --user "$(id -u actions):$(id -g actions)" \
+    -v /etc/nomad-jobs/actions/:/etc/nomad-jobs/actions \
+    -v /etc/haproxy:/etc/haproxy \
+    -v /etc/ssl/certs:/etc/ssl/certs \
+    -v /usr/local/share/ca-certificates:/usr/local/share/ca-certificates \
+    "${docker_params[@]}" \
+    "$image_name:$image_tag" \
+    "${pwsh_params[@]}" Invoke-LightRail.ps1 -Initial "$service_dir/OnPrem" -Command "$command"
+}
+
+# Launch the Actions console.
+if [[ -z "$command" ]]; then
+  docker_run
+else
+  # sed commands make the LightRail output more readable.
+  docker_run | sed 's/      \+/\n/g' | sed 's/    //g' | sed "s/^/LR $service> /"
+  exit "${PIPESTATUS[0]}"
+fi

@@ -1,0 +1,36 @@
+#!/bin/bash
+#/ Usage: ghe-redis-repl-start
+set -e
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+primary=$1
+
+if [ -z "$primary" ]; then
+  echo "No primary given to setup replication"
+  exit 1
+fi
+
+. ghe-repl-lib
+
+if [ -f /etc/github/cluster ]; then
+  ghe-service-wait-redis --local
+else
+  ensure_replica
+  ghe-service-ensure-redis
+fi
+
+for ((n=0; n<30; n++)); do
+  if ghe-redis-cli --local slaveof no one | grep -q OK; then
+    break
+  fi
+  sleep 1
+done
+
+ghe-redis-cli --local slaveof $primary 6379 | grep -q OK
+
+while ! ghe-redis-cli --local info replication | egrep -q "master_sync_in_progress:0"; do
+  sleep 1
+done
+
+ghe-redis-cli --local config rewrite | grep -q OK

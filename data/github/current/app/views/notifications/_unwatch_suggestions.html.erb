@@ -1,0 +1,117 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+
+<%
+  service_error = unwatch_suggestions&.fetch(:error, nil)
+  suggestions = unwatch_suggestions&.fetch(:suggestions, nil)
+  subscriptions = if suggestions.present?
+    GitHub.newsies.list_subscriptions(current_user, suggestions.map { |suggestion| suggestion.repository_id })
+  else
+     []
+  end
+  subscriptions_by_repo_id = subscriptions.index_by(&:list_id)
+%>
+
+<% if service_error %>
+  <%= render Primer::Beta::Blankslate.new(test_selector: "notifications-unwatch-unavailable-box", border: :bottom, mb: 4) do |c| %>
+    <% c.with_visual_icon(icon: "alert") %>
+
+    <% c.with_heading(tag: :h2) do %>
+      Unwatch suggestions are unavailable at the moment.
+    <% end %>
+  <% end %>
+<% elsif suggestions.present? %>
+  <%
+    attrs = {
+      snapshot_date: suggestions.first.snapshot_date,
+      algorithm_version: suggestions.first.algorithm_version
+    }
+
+    shown_list_tracking_attributes = hydro_view_tracking_attributes("notifications.unwatch_suggestion_event.shown_list", attrs)
+    unwatched_all_tracking_attributes = hydro_click_tracking_attributes("notifications.unwatch_suggestion_event.unwatched_all", attrs)
+    dismissed_list_tracking_attributes = hydro_click_tracking_attributes("notifications.unwatch_suggestion_event.dismissed_list", attrs)
+  %>
+
+  <div
+    class="Box mb-4 js-notice js-unwatch-suggestions"
+    <%= test_selector("notifications-watching-unwatch-box") %>
+    <%= safe_data_attributes(shown_list_tracking_attributes) %>
+  >
+    <div class="Box-header d-flex py-2">
+      <div class="Box-title flex-auto">
+        <%= render GitHub::BetaFlagComponent.new(mr: 1) %>
+        Unwatch suggestions
+        <%= render Primer::Beta::Counter.new(count: suggestions.length) %>
+      </div>
+      <%= form_tag notifications_beta_dismiss_unwatch_suggestion_alert_path, :class => "js-notice-dismiss", :"data-replace-remote-form" => true do %>
+        <button
+          class="flash-close"
+          type="submit"
+          name="dismiss"
+          <%= test_selector("unwatch-suggestions-list-dismiss-button") %>
+          <%= safe_data_attributes(dismissed_list_tracking_attributes) %>
+        >
+          <%= primer_octicon(:x, :"aria-label" => "Dismiss") %>
+        </button>
+      <% end %>
+    </div>
+
+    <%= render Primer::Beta::Flash.new(full: true) do %>
+      <span>These repositories may be causing unnecessary notifications.</span>
+
+      <% if suggestions.length > 1 %>
+        <%= render(layout: "shared/details_dialog", locals: { button_class: "btn btn-sm btn-danger", button_text: "Unwatch all", title: "Are you sure?", details_class: "d-inline-block text-left float-right" }) do %>
+          <div class="Box-body">
+            <p>By unwatching these <%= pluralize(number_with_delimiter(suggestions.length), "repository") %>, you will only receive notifications when participating or @mentioned.</p>
+            <%= form_tag unwatch_repositories_path do %>
+              <% suggestions.each do |suggestion| %>
+                <input type="hidden" name="repository_ids[]" value="<%= suggestion.repository_id %>">
+              <% end %>
+              <button
+                type="submit"
+                class="btn btn-block btn-danger"
+                <%= safe_data_attributes(unwatched_all_tracking_attributes) %>
+                <%= test_selector("notifications-unwatch-suggestions-unwatch-all-button") %>
+                autofocus
+              >
+                Unwatch <%= pluralize(number_with_delimiter(suggestions.length), "repository") %>
+              </button>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <ul class="standalone repo-list">
+      <% suggestions.each_with_index do |suggestion, idx| %>
+        <li class="Box-row py-2 clearfix Box-row--blue <%= 'rounded-0' if idx == 0 %>">
+          <div class="d-inline-block v-align-middle">
+            <%= primer_octicon(suggestion.repository.private? ? "lock" : "repo", classes: "repo-icon") %>
+            <a href="<%= suggestion.repository.permalink %>" aria-label="<%= suggestion.repository.name_with_display_owner %>"><%= suggestion.repository.name_with_display_owner %></a>
+          </div>
+
+          <div class="float-right position-relative">
+            <%
+              subscription = subscriptions_by_repo_id[suggestion.repository_id]
+              repo = subscription.try(:list_object) || subscription
+            %>
+            <% if repo.present? %>
+              <%= render(Repositories::NotificationsComponent.new(
+                aria_id_prefix: "repo-#{repo.id}",
+                repository: repo,
+                button_block: true,
+                status: subscription,
+                unwatch_hydro_tracking_attributes: hydro_click_tracking_attributes("notifications.unwatch_suggestion_event.unwatch_repository", {
+                    repository_id: suggestion.repository_id,
+                    snapshot_date: suggestion.snapshot_date,
+                    algorithm_version: suggestion.algorithm_version
+                })
+              )) %>
+            <% end %>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

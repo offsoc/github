@@ -1,0 +1,79 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-unblock-ips [-h]
+#/
+#/ Removes all GHES firewall rules that were added via
+#/ ghe-cluster-block-ips or ghe-cluster-block-ip from all current cluster nodes.
+#/ Leaves /data/user/common/cluster-ip-blocklist in place.
+#/ Currently only supports ipv4 addresses.
+#/
+#/ OPTIONS:
+#/   -h                 Show this message
+#/
+set -euo pipefail
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+get_opts() {
+  while getopts "h" OPTION; do
+    case $OPTION in
+      h)
+        usage
+        exit 0
+        ;;
+      \?)
+        usage
+        exit 2
+        ;;
+    esac
+  done
+}
+
+main() {
+
+  get_opts "$@"
+
+  # Check if we're on a cluster.
+  if [ ! -f "/etc/github/cluster" ] || [ -z "$(cat /etc/github/cluster)" ] || [ ! -f "/data/user/common/cluster.conf" ]; then
+    echo "[ Error ] Clustering is not configured on this host. Exiting." >&2
+    exit 3
+  fi
+
+  # Check if cluster.conf is configured for standalone HA.
+  if [ -n "$(ghe-config --true cluster.ha)" ]; then
+    echo "[ Error ] ghe-cluster-unblock-ips is not supported on standalone HA. Exiting." >&2
+    exit 5
+  fi
+
+  ghes_block_rules=()
+  mapfile -t ghes_block_rules < <(sudo ufw status numbered | grep "GHES - ghe-cluster-block-ip" | sed 's/ \+/ /g')
+  if [ ${#ghes_block_rules[@]} -eq 0 ]; then
+    echo "[ Warning ] No GHES managed rules found. Exiting." >&2
+    exit 4
+  fi
+
+  # Rules returned via `sudo ufw status numbered | grep "GHES - ghe-cluster-block-ip"` will be formatted in one of the following ways:
+  # Outgoing: '[ 1] 10.0.1.231 DENY OUT Anywhere (out) # GHES - ghe-cluster-block-ip - outgoing'
+  # Incoming: '[ 2] Anywhere DENY IN 10.0.1.231 # GHES - ghe-cluster-block-ip - incoming'
+  declare -iA cluster_ips_to_unblock
+  for rule in "${ghes_block_rules[@]}"; do
+    if [[ "$rule" == *"- incoming" || "$rule" == *"- outgoing" ]]; then
+      ip=$(echo "$rule" | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b")
+    else # Should ignore anything else
+      echo "[ Warning ] Rule '$rule' does not specify incoming or outgoing. Skipping." >&2
+    fi
+
+    # If $ip is not empty, add it to the list of IPs to unblock
+    if [ -n "$ip" ]; then
+      cluster_ips_to_unblock["$ip"]+=1
+    fi
+  done
+
+  # Unblock each of the IPs on the blocklist on all the current cluster nodes
+  for cluster_ip_to_unblock in ${!cluster_ips_to_unblock[*]}; do
+    ghe-cluster-each -o -- ghe-cluster-unblock-ip "$cluster_ip_to_unblock"
+  done
+}
+
+main "$@"

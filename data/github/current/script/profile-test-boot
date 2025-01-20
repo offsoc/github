@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -e
+
+# Warm up first run
+echo "Warming up..."
+RAILS_ENV=test bin/safe-ruby -Itest > /dev/null <<RUBY
+require "test_helper"
+
+class TestTest < GitHub::TestCase
+  def test_test; end
+end
+RUBY
+
+# Run with stackprof
+echo "Running profile..."
+RAILS_ENV=test bin/safe-ruby -Itest > /dev/null <<RUBY
+require "./config/basic"
+require "stackprof"
+require "benchmark"
+
+StackProf.run(mode: :wall, out: 'tmp/stackprof-test-boot.dump', raw: true) do
+  time = Benchmark.realtime do
+    require "test_helper"
+
+    class TestTest < GitHub::TestCase
+      def test_test; end
+    end
+
+    Minitest.run
+  end
+  STDERR.puts "test environment fully booted in %.2f seconds" % time
+end
+
+Process.exit!(0)
+RUBY
+
+echo "Profile saved to tmp/stackprof-test-boot.dump"
+bin/stackprof tmp/stackprof-test-boot.dump
+echo "Generating flamegraph:"
+bin/stackprof --flamegraph tmp/stackprof-test-boot.dump > tmp/flamegraph-test-boot.js
+bin/stackprof --flamegraph-viewer tmp/flamegraph-test-boot.js

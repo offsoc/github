@@ -1,0 +1,158 @@
+<% view = Businesses::OrganizationsView.new(query: query) %>
+
+<% if view.query_or_filters_present? %>
+  <div class="issues-reset-query-wrapper">
+    <%= link_to enterprise_organizations_path(this_business), class: "issues-reset-query" do %>
+      <%= primer_octicon(:x, classes: "issues-reset-query-icon") %>
+      Clear current search query and filters
+    <% end %>
+  </div>
+<% end %>
+
+<% if this_business_organizations_count > 0 %>
+  <div class="d-flex table-list-header table-list-header-next d-flex flex-items-center">
+    <span data-autosearch-results class="d-none d-md-block d-lg-block table-list-heading table-list-header-meta flex-auto " data-autosearch-results>
+      <%= primer_octicon(:organization, mx: 1) %>
+      <%= number_with_delimiter organizations.count %>
+      <%= pluralize_without_number organizations.count, "organization" %>
+    </span>
+
+    <div class="table-list-header-toggle pl-0 mr-2">
+      <%= render Primer::Alpha::ActionMenu.new(
+        select_variant: :single,
+        anchor_align: :end
+      ) do |menu| %>
+        <% menu.with_show_button(scheme: :invisible) do |button|
+          button.with_trailing_action_icon(icon: :"triangle-down")
+          "Filter"
+        end %>
+        <% menu.with_item(
+            href: enterprise_organizations_path(this_business, query: view.apply_query_filters(viewer_role: nil)),
+            label: "All organization",
+            active: view.viewer_role.nil?,
+        ) %>
+        <% menu.with_item(
+          href: enterprise_organizations_path(this_business, query: view.apply_query_filters(viewer_role: "owner")),
+          label: "I'm an owner",
+          active: view.viewer_role == "owner",
+        ) %>
+        <% menu.with_item(
+          href: enterprise_organizations_path(this_business, query: view.apply_query_filters(viewer_role: "member")),
+          label: "I'm a member",
+          active: view.viewer_role == "member",
+        ) %>
+        <% menu.with_item(
+          href: enterprise_organizations_path(this_business, query: view.apply_query_filters(viewer_role: "unaffiliated")),
+          label: "Not a member",
+          active: view.viewer_role == "unaffiliated",
+        ) %>
+      <% end %>
+    </div>
+  </div>
+
+  <% if organizations.any? %>
+    <ul>
+      <% organizations.each do |organization| %>
+        <li class="d-flex flex-justify-between flex-items-center border border-top-0">
+          <%=
+            render Businesses::Organizations::OrganizationCardComponent.new \
+              business: this_business,
+              organization: organization,
+              transfer_in_progress: organization_transfers[organization.id]&.in_progress?,
+              transfer_failed_recently: organization_transfers[organization.id]&.failed? &&
+                organization_transfers[organization.id].failed_at > 1.day.ago,
+              show_options: true,
+              render_repo_and_member_details: true,
+              render_role_in_organization: true,
+              viewer_organization_ability: viewer_organization_abilities[organization.id] %>
+        </li>
+      <% end %>
+    </ul>
+
+    <div class="paginate-container" data-pjax data-html-cleaner-suppress-children>
+      <%= will_paginate organizations %>
+    </div>
+  <% elsif query.present? %>
+    <%= render Primer::Beta::Blankslate.new do |c| %>
+      <% c.with_visual_icon(icon: "search") %>
+
+      <% c.with_heading(tag: :h2) do %>
+        No organizations found
+      <% end %>
+
+      <% c.with_description do %>
+        <%= "There aren’t any organizations in this enterprise matching '#{query}'." %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% else %>
+  <div class="border rounded-2 d-flex flex-column flex-items-center p-5" <%= test_selector("enterprise-org-empty-state") %>>
+    <%= svg("unified-business-marketing-icon.svg", width: "72", height: "72", class: "mb-3") %>
+    <h3 class="mb-2"><%= this_business.name %> has no organizations</h3>
+    <% if GitHub.single_business_environment? %>
+      <p class="color-fg-muted mb-3">Get started by creating an organization.</p>
+      <% if this_business.owner?(current_user) %>
+        <%= link_to "New organization", new_enterprise_organization_path(this_business), class: "btn btn-primary px-6" %>
+      <% elsif GitHub.org_creation_enabled? %>
+        <%= link_to "New organization", new_organization_path, class: "btn btn-primary px-6" %>
+      <% end %>
+    <% elsif this_business.owner?(current_user) %>
+      <% connected_installations = this_business.enterprise_installations.select(&:connected?) %>
+      <% if show_create_org_ui %>
+        <p class="color-fg-muted mb-3">
+          <% if !this_business.enterprise_managed_user_enabled? || this_business.external_provider_enabled? %>
+            Get started by
+            <% if GitHub.business_organization_invitations_available? && !this_business.enterprise_managed_user_enabled? && (!this_business.metered_ghec_trial? || current_user.feature_enabled?(:metered_ghe_allow_volume_transfers)) %>
+              inviting or
+            <% end %>
+            creating an organization.
+          <% else %>
+            Get started by configuring single sign-on for <%= this_business.name %>
+          <% end %>
+          <% if connected_installations.any? %>
+            <span <%= test_selector "enterprise-org-empty-state-github-connect-link" %>>
+              You can also
+              <%= link_to "view your Enterprise Server connections", enterprise_enterprise_installations_path(this_business), class: "Link--inTextBlock" %>.
+            </span>
+          <% end %>
+        </p>
+        <% if !this_business.enterprise_managed_user_enabled? || this_business.external_provider_enabled? %>
+          <div class="d-flex">
+            <% if GitHub.business_organization_invitations_available? && !this_business.enterprise_managed_user_enabled? %>
+              <% pending_organizations_count =
+                this_business.organization_invitations.with_status(:created).count +
+                this_business.organization_invitations.with_status(:accepted).count %>
+              <% if pending_organizations_count > 0 %>
+                <%= render(Primer::Beta::Button.new(
+                  tag: :a,
+                  href: pending_organizations_enterprise_path(this_business),
+                  mr: 1,
+                  test_selector: "pending-org-invitations-button")) { "#{pending_organizations_count} pending" } %>
+              <% end %>
+              <% if (!this_business.metered_ghec_trial? && !this_business.metered_plan?) || current_user.feature_enabled?(:metered_ghe_allow_volume_transfers) %>
+                <%= render(Primer::Beta::Button.new(
+                  tag: :a,
+                  mr: 1,
+                  href: new_enterprise_organization_invitation_path(this_business),
+                  test_selector: "invite-org-button")) { "Invite organization" } %>
+                <% end %>
+            <% end %>
+            <%= render(Primer::Beta::Button.new(
+              tag: :a,
+              scheme: :primary,
+              href: new_enterprise_organization_path(this_business),
+              test_selector: "new-org-button")) { "New organization" } %>
+          </div>
+        <% else %>
+          <%= link_to "Configure single sign-on", settings_security_enterprise_path(this_business), class: "btn btn-primary px-6" %>
+        <% end %>
+      <% else %>
+        <% if connected_installations.any? %>
+          <span <%= test_selector "enterprise-org-empty-state-github-connect-link" %>>
+            <%= link_to "View your Enterprise Server connections", enterprise_enterprise_installations_path(this_business), class: "Link--inTextBlock" %>.
+          </span>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

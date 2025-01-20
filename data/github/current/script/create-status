@@ -1,0 +1,73 @@
+#!/usr/bin/env ruby
+#/ usage: ./script/create-status sha -s <stats> -u <url> -d <desc>
+#/ Create a Status for the specified sha, with optional other stuff
+#/ This uses the API end point, defaulting to your local dev endpoint
+#/
+#/ Example:
+#/   script/create-status -r github/github -s pending \
+#/        -u defunkt -p passworD1 db70f212edcdc9e90051c4b19dbd5456f415b363
+#/
+#/ Options
+#/   -r <repo>          the name with organization repository
+#/   -s <state>          State to create
+#/   -t <target_url>     Target url for the status
+#/   -u <username>       Username to auth with for the API
+#/   -p <password>       Password to auth with for the API
+#/
+require File.expand_path("../../config/basic", __FILE__)
+require "github"
+require "ostruct"
+require "optparse"
+require "uri"
+require "net/https"
+require "json"
+
+API_URL = "http://api.github.localhost"
+options = OpenStruct.new
+
+optparse = OptionParser.new do |opts|
+  opts.on("-r", "--repo REPOSITORY", String) { |repo| options.repo = repo }
+  opts.on("-s", "--state STATE", String) { |state| options.state = state || "successful" }
+  opts.on("-t", "--target_url URL", String) { |url| options.target_url = url }
+  opts.on("-c", "--context CONTEXT", String) { |desc| options.context = desc }
+  opts.on("-d", "--description DESCRIPTION", String) { |desc| options.description = desc }
+  opts.on("-u", "--username USERNAME", String) { |username| options.username = username }
+  opts.on("-p", "--password PASSWORD", String) { |password| options.password = password }
+  opts.on_tail("-h", "--help")         { exec "grep ^#/<'#{__FILE__}'|cut -c4-" }
+end
+
+begin
+  optparse.parse!
+  options.sha = ARGV.shift
+  mandatory = [:repo, :state, :username, :password]
+  missing = mandatory.select { |param| options.send(param).nil? }
+  raise OptionParser::MissingArgument, missing if missing.any?
+rescue OptionParser::InvalidOption, OptionParser::MissingArgument
+  puts $!.to_s
+  puts optparse
+  abort
+end
+
+def self.post(options)
+  path = "/repos/#{options.repo}/statuses/#{options.sha}"
+  uri  = URI.parse(API_URL)
+  http = Net::HTTP.new(uri.host, uri.port)
+  post = Net::HTTP::Post.new(path)
+  post.basic_auth options.username, options.password
+
+  post["Content-Type"] = "application/json"
+
+  post.body = {
+    sha: options.sha,
+    state: options.state,
+    target_url: options.target_url,
+    description: options.description,
+    context: options.context || "default",
+  }.to_json
+
+  http.request(post)
+end
+
+response = post(options)
+puts "Response code => #{response.code}"
+puts response.body

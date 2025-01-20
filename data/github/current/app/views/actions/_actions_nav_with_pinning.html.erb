@@ -1,0 +1,129 @@
+<%# This view is the workflow list shown behind flag :actions_workflow_list_pinning %>
+
+<%
+  workflow_pages_url = workflows_partial_path(
+    user_id: current_repository.owner_display_login,
+    repository: current_repository,
+    lab: selected_workflow&.lab?,
+    workflow_file_name: selected_workflow&.filename,
+    query: actions_filtered_query(filters: workflow_run_filters)
+  )
+%>
+
+<% track_render_partial("actions/actions_nav_with_pinning") do %>
+  <div class="d-flex flex-justify-between flex-items-start flex-lg-items-center mt-1 mb-2">
+    <h2 class="f3 color-fg-default d-none d-md-block">Actions</h2>
+    <% if current_repository.writable_by?(current_user) && !current_repository.archived? && !show_only_required_workflows %>
+      <%= link_to "New workflow", actions_onboarding_path, class: "d-none d-md-block btn btn-sm" %>
+    <% end %>
+  </div>
+
+  <%= form_tag pin_workflow_path(repository: current_repository, user_id: current_repository.owner), method: :post do %>
+    <div data-pjax="#repo-content-pjax-container" data-turbo-frame="repo-content-turbo-frame">
+      <actions-workflow-list>
+
+        <%= render(Primer::Beta::NavList.new(aria: { label: "Actions Workflows" }, selected_item_id: selected_item_id)) do |component| %>
+          <% if !show_only_required_workflows %>
+            <% component.with_item(selected_by_ids: :all_workflows, href: actions_workflow_path(filters: workflow_run_filters)) do |item| %>
+              All workflows
+            <% end %>
+          <% end %>
+        <% if workflows.length > 0 %>
+          <% component.with_group(
+            test_selector: "workflows-list"
+            ) do |group| %>
+            <% group.with_heading(title: "Workflows", hidden: :true) %>
+            <% workflows.select { |w| w.is_pinned? }.each do |workflow| # Pinned workflows are shown first even before selected workflow %>
+              <% group.with_item(
+                selected_by_ids: [workflow.id],
+                component_klass: Actions::WorkflowNavComponent,
+                selected_workflow: selected_workflow,
+                workflow: workflow,
+                current_repo: current_repository,
+                current_user: current_user,
+                allow_pinning: allow_pinning,
+                filters: workflow_run_filters,
+              ) %>
+            <% end %>
+            <% if selected_workflow.present? && workflows.exclude?(selected_workflow) %>
+              <% group.with_item(
+                selected_by_ids: [selected_workflow.id],
+                component_klass: Actions::WorkflowNavComponent,
+                selected_workflow: selected_workflow,
+                workflow: selected_workflow,
+                current_repo: current_repository,
+                current_user: current_user,
+                allow_pinning: allow_pinning,
+                filters: workflow_run_filters) %>
+            <% end %>
+            <% workflows.select { |w| !w.is_pinned? }.each do |workflow| %>
+              <% group.with_item(
+                selected_by_ids: [workflow.id],
+                component_klass: Actions::WorkflowNavComponent,
+                selected_workflow: selected_workflow,
+                workflow: workflow,
+                current_repo: current_repository,
+                current_user: current_user,
+                allow_pinning: allow_pinning,
+                filters: workflow_run_filters) %>
+            <% end %>
+            <% group.with_show_more_item(
+              test_selector: 'workflows-show-more',
+              src: workflow_pages_url,
+              pages: workflow_pages_count,
+              ) do |item| %>
+              <span class="color-fg-accent">Show more workflows...</span>
+            <% end %>
+          <% end %>
+        <% end %>
+
+        <% if !show_only_required_workflows %>
+          <% component.with_group(
+            test_selector: "management-section"
+            ) do |group| %>
+            <% group.with_heading(title: "Management" ) %>
+            <% group.with_item(selected_by_ids: :caches, href: actions_caches_path ) do |item| %>
+              <% item.with_leading_visual_icon(icon: :cache) %>
+              Caches
+            <% end %>
+            <% if current_repository.deployments.any? %>
+              <% group.with_item(href: deployments_path(current_repository.owner, current_repository) ) do |item| %>
+                <% item.with_leading_visual_icon(icon: :rocket) %>
+                <% item.with_trailing_visual_icon(icon: :"arrow-up-right") %>
+                Deployments
+              <% end %>
+            <% end %>
+            <% if show_attestations_view %>
+              <% group.with_item(href: attestations_path(current_repository.owner, current_repository), test_selector: 'attestations-nav-item') do |item| %>
+                <% item.with_leading_visual_icon(icon: :verified) %>
+                <% item.with_trailing_visual_icon(icon: :"arrow-up-right") %>
+                Attestations
+              <% end %>
+            <% end %>
+            <% if show_runners_view %>
+              <% group.with_item(href: actions_runners_path(current_repository.owner, current_repository), selected_by_ids: :runners) do |item| %>
+                <% item.with_leading_visual_icon(icon: :server) %>
+                Runners
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+        <% end %>
+
+        <%# Pin and unpin icons to show on hover %>
+        <template data-target="actions-workflow-list.pinIconTemplate">
+          <%= primer_octicon(:pin)%>
+        </template>
+
+        <template data-target="actions-workflow-list.pinSlashIconTemplate">
+          <%= primer_octicon(:"pin-slash") %>
+        </template>
+      </actions-workflow-list>
+    </div>
+  <% end %>
+
+  <% if allow_pinning %>
+    <%# Defer loading confirmation dialogs for unpinning workflows %>
+    <include-fragment <%= test_selector("unpin-dialogs-fragment") %> src="<%= unpin_workflow_dialogs_path(repository: current_repository, user_id: current_repository.owner) %>"></include-fragment>
+  <% end %>
+<% end %>

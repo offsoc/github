@@ -1,0 +1,106 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<% page_info title: this_business.name, stafftools: stafftools_enterprise_path(this_business) %>
+
+<%= render layout: "businesses/layout", locals: {
+    business: this_business,
+    title: "Create an organization",
+    back_to_link_path: enterprise_organizations_path(this_business),
+    back_to_link_text: "organizations",
+    hide_header: true
+  } do %>
+  <% if this_business.metered_plan? && !this_business.metered_ghec_trial? %>
+    <span class="color-fg-muted f5" <%= test_selector("metered-potential-costs") %> >
+      Adding new members may result in a charge of up to $21 per month, for each additional member. Add-ons such as GitHub Advanced Security will incur
+      additional charges.
+    </span>
+  <% end %>
+  <%
+    login_error = current_organization.try(:errors) && current_organization.errors[:login].any?
+    hint_name = if login_error || current_organization.nil?
+      "name"
+    else
+      current_organization.try(:name)
+    end
+  %>
+
+  <% create_organization_task = OnboardingTasks::Businesses::CreateOrganization.new(taskable: this_business, user: current_user) %>
+  <%= render(Businesses::TipComponent.new(
+    business: this_business,
+    show_tip: params[:show_onboarding_guide_tip].present?,
+    task: create_organization_task,
+    container_class: "mt-6"
+  )) do %>
+  <h3 class="mb-1">Name your first organization</h3>
+
+  <div class="color-fg-muted">
+    <p>You can
+      <a class="Link--inTextBlock"
+        href="https://docs.github.com/enterprise-cloud@latest/admin/user-management/managing-organizations-in-your-enterprise/adding-organizations-to-your-enterprise"
+        target="_blank"
+      >create new organizations</a>
+      <% unless this_business.metered_ghec_trial? %> or
+        <a
+          href="<%= new_enterprise_organization_invitation_path(this_business) %>"
+          target="_blank"
+        >invite existing organizations</a>
+      <% end %>
+      to manage within your enterprise. Your enterprise account will own those organizations, and members of your enterprise can collaborate across related projects within them.
+    </p>
+  </div>
+<% end %>
+<%= render(Businesses::CompletedGuidanceComponent.new(
+  business: this_business,
+  completed_task: create_organization_task,
+  show_tip: params[:show_onboarding_guide_tip].present?,
+  container_class: "mt-4"
+)) %>
+
+  <% if current_organization.errors.any? -%>
+    <%= render(Primer::Beta::Flash.new(scheme: :danger, mt: 2)) do %>
+      There were problems creating your organization.
+    <% end %>
+  <% end %>
+
+  <div>
+    <% if this_business.trial_org_creation_limit_reached? %>
+      <p>
+        You can only create 3 organizations as part of your trial in
+        <strong><%= this_business.name %></strong>. To create more new organizations, you must
+        first upgrade the trial by <%= buying_enterprise_flavor %>.
+      </p>
+      <%= render(Primer::Beta::Button.new(
+        tag: :a,
+        my: 2,
+        href: billing_settings_upgrade_enterprise_path(this_business)
+      )) { buy_enterprise_flavor } %>
+    <% else %>
+      <%= form_for(current_organization, url: enterprise_organizations_path(this_business)) do |f| %>
+        <div class="form-group">
+          <auto-check src="<%= organization_check_name_path %>" required>
+            <%= f.text_group("Organization name", :profile_name, {
+              error: login_error && "Name is unavailable",
+              value: current_organization.display_login,
+              class: "js-new-organization-name",
+              hint: safe_join([
+                "This will be your organization name on #{GitHub.url}/",
+                content_tag(:strong, hint_name, :class => "js-field-hint-name"),
+                "."
+              ]),
+              required: true,
+              autofocus: true,
+            }) %>
+            <%= csrf_hidden_input_for organization_check_name_path %>
+          </auto-check>
+        </div>
+
+        <div class="form-group mt-4">
+          <button type="submit" name="commit" class="btn btn-primary" disabled data-disable-invalid data-disable-with="Creating organization...">
+            Create organization
+          </button>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

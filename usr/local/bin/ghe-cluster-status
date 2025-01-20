@@ -1,0 +1,128 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status [-hejnv]
+#/
+#/ Check the status of each of the services in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -e | --extended  Perform extended status checks.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+IFS=" " read -r -a args <<< "$*"
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+
+cleanup() {
+  # ensure we output the result even when we have errors
+  end_output ""
+
+  kill -9 "$(jobs -p)" 2> /dev/null || true
+  rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+export EXISTING_TRAP=cleanup
+
+get_cluster_status_checks() {
+  # To add a new ghe cluster service check:
+  # 0. Name the script following the `ghe-cluster-status-xxx` pattern
+  # 1. Make the script executable
+  # 2. Add the script to `/usr/local/share/enterprise/` directory
+  # 3. Add the name of script to `$check_list` collection
+
+  local check_list_dir="/usr/local/share/enterprise/"
+  local check_list=(
+  "ghe-cluster-status-es"
+  "ghe-cluster-status-git"
+  "ghe-cluster-status-kafka-lite"
+  "ghe-cluster-status-memcache"
+  "ghe-cluster-status-metrics"
+  "ghe-cluster-status-nodes"
+  "ghe-cluster-status-pages"
+  "ghe-cluster-status-redis"
+  "ghe-cluster-status-storage"
+  )
+
+  if is_service_external "mysql" ; then
+    check_list+=( "ghe-cluster-status-external-mysql" )
+  else
+    check_list+=( "ghe-cluster-status-mysql" )
+  fi
+
+  is_cluster_disaster_recovery_configured && {
+    check_list+=("ghe-cluster-status-consul")
+  }
+
+  if ghe-config --true app.actions.enabled ; then
+    check_list+=("ghe-cluster-status-mssql")
+  fi
+
+  printf "$check_list_dir%s\n" "${check_list[@]}" | sort -n
+}
+
+# JSON env var gets modified using `jq` within each ghe-cluster-status-* script, if output=json
+export JSON='{}'
+
+start_output ""
+checks=$(get_cluster_status_checks)
+
+pids=""
+for check in $checks; do
+  # Run each check in parallel
+  (
+    if [ "$output" = "nagios" ]; then
+      set +e
+      out=$($check "${args[@]}")
+      status=$?
+      set -e
+      if [ "$status" -gt "$exit_code" ]; then
+        # Only record the latest, highest priority error.
+        echo "$out" > "$WORKDIR/nagios.out"
+        exit $status
+      fi
+    elif [ "$output" = "json" ]; then
+      $check "${args[@]}" >> "$WORKDIR/$$.json" || true
+    else
+      printf "%s\\n" "$($check "${args[@]}")" || true
+    fi
+  ) &
+  pids="$pids $!"
+done
+
+# Wait for all backgrounded checks to finish
+for p in $pids; do
+  wait "$p" || exit_code=$?
+done
+
+# Pull in the results of the parallel checks and cleanup
+if [ "$output" = "nagios" ]; then
+  if [ "$exit_code" -eq 2 ]; then
+    error_count=$((error_count + 1))
+  elif [ "$exit_code" -eq 1 ]; then
+    warn_count=$((warn_count + 1))
+  fi
+  if [ -f "$WORKDIR/nagios.out" ]; then
+    # Remove the priority that may have been added as it'll be added right at the end
+    nagios_message=$(sed 's/\(CRITICAL|WARNING\)\ -\ +//' < "$WORKDIR/nagios.out" && rm -f "$WORKDIR/nagios.out")
+  fi
+fi
+
+# Merge all the temp json check results and return.
+if [ "$output" = "json" ]; then
+  jq -n '[inputs] | sort | add' "$WORKDIR"/*.json
+fi
+
+end_output ""
+
+exit $exit_code

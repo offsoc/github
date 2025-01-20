@@ -1,0 +1,273 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  package_dependent_type      = PlatformTypes::DependencyGraphDependentType::PACKAGE
+  repo_dependent_type         = PlatformTypes::DependencyGraphDependentType::REPOSITORY
+  package_dependents_selected = dependent_type == package_dependent_type
+  repo_dependents_selected    = dependent_type == repo_dependent_type
+  selected_dependent_type     = package_dependents_selected ? package_dependent_type : repo_dependent_type
+  package_dependents_path     = network_dependents_path(package_id: package_id, dependent_type: package_dependent_type, owner: owner_filter)
+  repo_dependents_path        = network_dependents_path(package_id: package_id, dependent_type: repo_dependent_type, owner: owner_filter)
+%>
+
+<%
+  page_info \
+    container_xl: true,
+    responsive: false,
+    selected_link: :dependency_graph,
+    dashboard_pinnable_item_id: current_repository.global_relay_id
+  page_title "Network Dependents · #{current_repository.name_with_display_owner}#{' · ' + package.name + ' repositories' if package.present?}"
+%>
+
+<%= render layout: "layouts/repository/insights" do %>
+  <div id="dependents" data-hpc>
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>Dependency graph<% end %>
+    <% end %>
+    <%= render partial: "network/dependency_tabs", locals: { selected_tab: :dependents } %>
+    <% if packages.many? %>
+      <details class="<%= class_names(
+        "select-menu float-right position-relative details-reset details-overlay",
+        "ml-3" => package && owner_filter,
+      ) %>">
+      <%= render Primer::ButtonComponent.new(tag: :summary, variant: :small, classes: "select-menu-button", "aria-label": "Filter by Package") do %>
+          <i>Package:</i> <%= package&.name %>
+        <% end %>
+        <details-menu class="select-menu-modal position-absolute right-0" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <div class="select-menu-header">
+            <span class="select-menu-title">Packages</span>
+          </div>
+          <div class="select-menu-list">
+            <% names = packages.map(&:name) %>
+            <% packages.each_with_index do |option, i| %>
+              <%
+                disambiguation = if names.grep(option.name).many?
+                   content_tag(:small) do
+                     " - #{option.package_manager_human_name}"
+                   end
+                end
+              %>
+              <% selected = package&.id == option.id %>
+              <a
+                href="<%= network_dependents_path(package_id: option.id, owner: owner_filter) %>"
+                class="select-menu-item" role="menuitemradio"
+                aria-checked="<%= selected %>">
+                <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                <span class="select-menu-item-text">
+                  <%= option.name %>
+                  <%= disambiguation %>
+                </span>
+              </a>
+            <% end %>
+          </div>
+        </details-menu>
+      </details>
+    <% end %>
+
+    <% if package %>
+      <p role="status" class="<%= class_names(
+        "mb-4",
+        "clearfix" => owner_filter,
+      ) %>" <%= test_selector("dependents-summary") %>>
+        <% if owner_filter %>
+          <%= render Primer::Beta::Link.new(
+            href: network_dependents_path(package_id: package_id, dependent_type: selected_dependent_type),
+            muted: true,
+            float: :right,
+            test_selector: "clear-owner-filter-link",
+          ).with_content("Clear filter") %>
+        <% end %>
+        Repositories
+        <% if owner_filter %>
+          owned by <strong><%= owner_filter %></strong>
+        <% end %>
+        that depend on <strong><%= package.name %></strong>
+      </p>
+    <% end %>
+
+    <% if dependents_unavailable %>
+      <div role="status" class="Box color-bg-default color-border-muted p-5 position-relative">
+        <div class="border-bottom color-bg-subtle p-3 position-absolute top-0 left-0 width-full">
+          <div class="table-list-filters flex-auto d-flex min-width-0">
+            <div class="table-list-header-toggle states flex-auto pl-0">
+              <%= link_to repo_dependents_path, class: "btn-link #{"selected" if repo_dependents_selected}" do %>
+                <%= primer_octicon(:"code-square") %>
+                ? Repositories
+              <% end %>
+              <%= link_to package_dependents_path, class: "btn-link #{"selected" if package_dependents_path}" do %>
+                <%= primer_octicon(:package) %>
+                ? Packages
+              <% end %>
+            </div>
+          </div>
+        </div>
+
+        <% if package_dependents_selected %>
+          <%= render Primer::Beta::Blankslate.new(spacious: true, mt: 4) do |c| %>
+            <% c.with_visual_icon(icon: "package") %>
+
+            <% c.with_heading(tag: :h2) do %>
+              Packages dependents are currently unavailable.
+            <% end %>
+
+            <% c.with_description do %>
+              Please try again later.
+            <% end %>
+          <% end %>
+        <% elsif repo_dependents_selected %>
+          <%= render Primer::Beta::Blankslate.new(spacious: true, mt: 4) do |c| %>
+            <% c.with_visual_icon(icon: "code-square") %>
+
+            <% c.with_heading(tag: :h2) do %>
+              Repository dependents are currently unavailable.
+            <% end %>
+
+            <% c.with_description do %>
+              Please try again later.
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    <% elsif !package || package.dependents.none? %>
+      <div role="status" class="Box color-bg-default color-border-muted p-5 position-relative">
+        <div class="border-bottom color-bg-subtle p-3 position-absolute top-0 left-0 width-full">
+          <div class="table-list-filters flex-auto d-flex min-width-0">
+            <div class="table-list-header-toggle states flex-auto pl-0">
+              <%= link_to repo_dependents_path, class: "btn-link #{"selected" if repo_dependents_selected}" do %>
+                <%= primer_octicon(:"code-square") %>
+                <% if package %>
+                  <%= number_with_delimiter(package.repository_dependents_count) %>
+                  <%= 'Repository'.pluralize(package.repository_dependents_count) %>
+                <% else %>
+                  0 Repositories
+                <% end %>
+              <% end %>
+              <%= link_to package_dependents_path, class: "btn-link #{"selected" if package_dependents_selected}" do %>
+                <%= primer_octicon(:package) %>
+                <% if package %>
+                  <%= number_with_delimiter(package.package_dependents_count) %>
+                  <%= 'Package'.pluralize(package.package_dependents_count) %>
+                <% else %>
+                  0 Packages
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+        </div>
+
+        <% if GitHub.enterprise? %>
+          <%= render Primer::Beta::Blankslate.new(mt: 4, spacious: true) do |c| %>
+            <% c.with_visual_icon(icon: (package_dependents_selected ? "package" : "code-square")) %>
+
+            <% c.with_heading(tag: :h2) do %>
+              GitHub Enterprise Server does not calculate information about dependents, the repositories and packages that depend on a repository.
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render Primer::Beta::Blankslate.new(mt: 4, spacious: true) do |c| %>
+            <% c.with_visual_icon(icon: (package_dependents_selected ? "package" : "code-square")) %>
+
+            <% c.with_heading(tag: :h2) do %>
+              We haven’t found any dependents for this repository yet.
+            <% end %>
+
+            <% c.with_description do %>
+              We’ll keep looking!
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    <% else %>
+      <div class="Box">
+        <div class="Box-header clearfix">
+          <div class="table-list-filters flex-auto d-flex min-width-0">
+            <div role="status" class="table-list-header-toggle states flex-auto pl-0">
+              <%= link_to repo_dependents_path, class: "btn-link #{"selected" if repo_dependents_selected}" do %>
+                <%= primer_octicon(:"code-square") %>
+                <%= number_with_delimiter(package.repository_dependents_count) %>
+                <%= 'Repositories'.pluralize(package.repository_dependents_count) %>
+              <% end %>
+              <%= link_to package_dependents_path, class: "btn-link #{"selected" if package_dependents_selected}" do %>
+                <%= primer_octicon(:package) %>
+                <%= number_with_delimiter(package.package_dependents_count) %>
+                <%= 'Package'.pluralize(package.package_dependents_count) %>
+              <% end %>
+              <details class="details-reset d-inline-block details-overlay js-dropdown-details position-relative">
+                <summary aria-label="Warning" class="d-block px-1"><%= primer_octicon(:info) %></summary>
+                <div class="Popover mt-2 right-0 mr-n2">
+                  <div class="Popover-message Popover-message--large Box color-shadow-large p-3 Popover-message--top-right ws-normal">
+                    These counts are approximate and may not exactly match the dependents shown below.
+                  </div>
+                </div>
+              </details>
+            </div>
+            <div class="table-list-header-toggle no-wrap d-flex flex-auto flex-justify-between flex-sm-justify-start flex-lg-justify-end">
+              <details class="details-reset details-overlay d-inline-block position-relative" id="owner-filter-select-menu">
+                <%= render Primer::ButtonComponent.new(
+                  tag: :summary,
+                  scheme: :link,
+                  "data-hotkey": "o",
+                  "aria-haspopup": "true",
+                  dropdown: true,
+                  "aria-label": "Filter by Owner",
+                ).with_content("Owner") %>
+                <details-menu class="SelectMenu SelectMenu--hasFilter right-lg-0" role="dialog" aria-label="Filter by owner menu"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <div class="SelectMenu-modal">
+                    <header class="SelectMenu-header">
+                      <span id="owner-filter-field-label" class="SelectMenu-title">Filter by owner</span>
+                      <button class="SelectMenu-closeButton" type="button" data-toggle-for="owner-filter-select-menu">
+                        <%= primer_octicon(:x, "aria-label": "Close menu") %>
+                      </button>
+                    </header>
+                    <div class="SelectMenu-filter">
+                      <input aria-labelledby="owner-filter-field-label" class="SelectMenu-input form-control js-filterable-field" id="owner-filter-field" type="text" placeholder="Enter a user name" autocomplete="off" spellcheck="false" autofocus>
+                    </div>
+                    <div class="SelectMenu-list select-menu-list" data-filter="owner" role="listbox" aria-label="Filter by owner list">
+                      <div data-filterable-for="owner-filter-field" data-filterable-type="substring">
+                        <% if logged_in? %>
+                          <% selected = owner_filter == current_user %>
+                          <%= render Issues::IssueFilterAuthorComponent.new(
+                            user: current_user,
+                            url: network_dependents_path(package_id: package_id,
+                              dependent_type: selected_dependent_type, owner: selected ? nil : current_user.to_param),
+                            selected: selected,
+                          ) %>
+                        <% end %>
+                        <% if owner_filter && owner_filter != current_user %>
+                          <%= render Issues::IssueFilterAuthorComponent.new(
+                            user: owner_filter,
+                            url: network_dependents_path(package_id: package_id, dependent_type: selected_dependent_type),
+                            selected: true,
+                          ) %>
+                        <% end %>
+                      </div>
+                      <%= form_tag network_dependents_path(package_id: package_id), class: "select-menu-new-item-form js-new-item-form", method: :get do %>
+                        <input type="hidden" name="dependent_type" value="<%= selected_dependent_type %>">
+                        <button class="SelectMenu-item d-block js-new-item-value" type="submit" name="owner" role="option">
+                          <div class="text-bold f5 js-new-item-name"></div>
+                          <div class="color-fg-muted">Filter by this user</div>
+                        </button>
+                      <% end %>
+                    </div>
+                  </div>
+                </details-menu>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <% package.dependents.compact.each do |dependent| %>
+          <%= render "network/dependent", {dependent: dependent} %>
+        <% end %>
+      </div>
+
+      <div class="paginate-container">
+        <%= cursor_paginate(package.dependents_page_info,
+          previous_label: "Previous",
+          next_label: "Next",
+          previous_param: :dependents_before,
+          next_param: :dependents_after
+        ) %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

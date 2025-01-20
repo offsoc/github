@@ -1,0 +1,139 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+
+<%= render layout: "settings/oauth_application" do %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %><%= current_application.name %><% end %>
+  <% end %>
+  <div class="profile-picture clearfix app-owner d-flex">
+    <%= avatar_for current_application.user, 30 %>
+    <p class="flex-auto">
+      <strong><%= link_author current_application.user %></strong> owns this application.
+    </p>
+
+    <% if can_transfer_application?(current_application)  %>
+      <%= render layout: "shared/details_dialog", locals: {
+        button_text: "Transfer ownership",
+        button_class: "btn",
+        title: "Where should we transfer #{current_application.name}?"
+      } do %>
+        <div class="overflow-auto">
+          <% if current_context.organization? && current_organization.restrict_oauth_applications? %>
+            <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+              <%= render Primer::Alpha::Banner.new(scheme: :warning, full: true) do %>
+                Your organization has third-party application restrictions enabled. After transferring <%= current_application.name -%>, it will no longer be able to access your organization’s resources. For more information on third-party application restrictions and re-enabling access, see <strong><a class="Link--inTextBlock" href="<%= docs_url "organizations/about-oauth-app-access-restrictions" %>">our help documentation</a></strong>.
+              <% end %>
+            <% else %>
+              <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                Your organization has third-party application restrictions enabled. After transferring <%= current_application.name -%>, it will no longer be able to access your organization’s resources. For more information on third-party application restrictions and re-enabling access, see <strong><a class="Link--inTextBlock" href="<%= docs_url "organizations/about-oauth-app-access-restrictions" %>">our help documentation</a></strong>.
+              <% end %>
+            <% end %>
+          <% end %>
+
+          <% settings_path = current_context.organization? ? transfer_settings_org_application_path : transfer_settings_user_application_path %>
+          <%= form_tag settings_path, :method => :put do %>
+            <div class="Box-body">
+              <p>Transferring may be delayed until the new owner approves the transfer.</p>
+
+              <dl class="form-group">
+                <dt><label for="confirm_repository_name">Type the name of the application to confirm</label></dt>
+                <dd>
+                  <input class="form-control" type="text" id="confirm_repository_name" autofocus required
+                          pattern="<%= case_insensitive_pattern current_application.name %>|<%= case_insensitive_pattern current_application.name %>"
+                          aria-label="Type in the name of the application to confirm that you want to transfer this repository.">
+                </dd>
+              </dl>
+              <dl class="form-group">
+                <dt><label for="confirm_transfer_to">New owner’s GitHub username or organization name</label></dt>
+                <dd><input id="confirm_transfer_to" class="form-control" type="text" name="transfer_to" id="transfer_field" required aria-label="Type in the username of the new owner."></dd>
+              </dl>
+            </div>
+
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger, "data-disable-invalid": "") do %>Transfer this application<% end %>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+  <hr class="form-hr">
+
+  <% if GitHub.marketplace_enabled? && !(is_enterprise_managed? current_application.user) %>
+    <% if listing = current_application.marketplace_listing %>
+      <% if listing.allowed_to_edit?(current_user) %>
+        <a href="<%= edit_marketplace_listing_path(listing) %>" class="btn float-right ml-2">
+          Edit Marketplace listing
+        </a>
+        <p>
+          You can edit how <strong><%= current_application.name %></strong> is presented on <a class="Link--inTextBlock" href="<%= marketplace_path %>">GitHub Marketplace</a>,
+          including description, screenshots, and pricing information.
+        </p>
+        <hr class="form-hr">
+      <% end %>
+    <% else %>
+      <div class="d-flex flex-items-center">
+        <p class="flex-auto">
+          You can list your application in the
+          <a class="Link--inTextBlock" href="<%= marketplace_path %>">GitHub Marketplace</a> so that other users can discover
+          it.
+        </p>
+        <a href="<%= new_marketplace_listing_with_integratable_path(MarketplaceListingsController::OAUTH_APP_TYPE, current_application.id) %>" class="btn" style="white-space: normal; text-align: center">
+          List this application in the Marketplace
+        </a>
+      </div>
+      <hr class="form-hr">
+    <% end %>
+  <% end %>
+
+  <div class="clearfix">
+    <%= render(OauthApplications::TransferBannerComponent.new(application: current_application)) %>
+  <% if current_application.feature_enabled?(:async_oauth_authorizations_display) %>
+    <include-fragment src="<%= async_oauth_authorizations_path %>" <%= test_selector("authorizations_fragment") %>>
+      <div class="border-bottom mb-2 py-2">
+        <div data-hide-on-error>
+          <%= render(Primer::Beta::Spinner.new("aria-label": "Loading authorizations...")) %>
+        </div>
+        <div data-show-on-error hidden>
+          <p><%= render Primer::Beta::Octicon.new(icon: "alert") %> Sorry, something went wrong loading authorizations</p>
+        </div>
+      </div>
+    </include-fragment>
+  <% else %>
+    <%= render(partial: "oauth_applications/oauth_authorizations") %>
+  <% end %>
+  </div>
+
+  <%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2, font_size: 3) do %>Client ID<% end%>
+  <% end %>
+  <code class="f4"><%= current_application.key %></code>
+
+  <%= render partial: "oauth_applications/client_secrets", locals: {
+        app: current_application,
+        create_client_secret_path: oauth_application_generate_client_secret_path(current_application),
+        delete_client_secret_path: -> (client_secret) { oauth_application_remove_client_secret_path(current_application, client_secret) }
+      } %>
+
+  <strong>Application logo</strong>
+  <div class="Box application-show-group mb-2 border-0">
+    <div class="d-block mt-3">
+      <%= render partial: "oauth_applications/uploader" %>
+    </div>
+  </div>
+
+  <%= form_for current_application,
+        :method => :put,
+        :url => oauth_application_path(current_application) \
+    do |f| -%>
+    <%= render :partial => "oauth_applications/application_form", :object => f %>
+    <hr class="form-hr">
+    <% if current_user.employee? && Apps::Internal.capable?(:proxima_first_party_sync, app: current_application) %>
+      <%= render(Primer::Alpha::Banner.new(scheme: :warning, mb: 3, mt: 4)) do %>
+        <p>This application is currently sync'd on all Proxima stamp environments. Before making changes, please ensure that you are properly handling the setting changes in all environments. There may be a delay of up to five minutes before changes to this application's settings are reflected in the Proxima stamp environments.</p>
+        <p>Refer to <%= link_to("the documentation on The Hub", "https://thehub.github.com/epd/engineering/products-and-services/dotcom/apps/proxima/how-to-synchronize-apps-on-proxima/", class: "Link--inTextBlock") %> for more information.</p>
+      <% end %>
+    <% end %>
+    <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, mr: 2, float: :left) do %>Update application<% end %>
+  <% end -%>
+<% end -%>

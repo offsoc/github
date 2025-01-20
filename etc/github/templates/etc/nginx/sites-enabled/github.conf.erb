@@ -1,0 +1,89 @@
+upstream github_upstream {
+  <% if cluster_ha_replica_active? -%>
+  server <%= cluster_ha_primary_ip %>:9100;
+  <% else -%>
+  server 127.0.0.1:4327 fail_timeout=0;
+  <% end -%>
+}
+
+<% github_hostname = @config['github-hostname'] -%>
+<% assets_hostname = "assets.#{github_hostname}" -%>
+<% uploads_hostname = "uploads.#{github_hostname}" -%>
+
+map $http_origin $assets_origin_value {
+  default "";
+  "~^https?://.*<%= "#{github_hostname}" %>$" "$http_origin";
+}
+
+server {
+
+  <% if cluster_ha_primary? -%>
+  listen 9100 default_server;
+  listen [::]:9100 default_server ipv6only=on;
+  <% else -%>
+  listen 127.0.0.1:9100 default_server;
+  listen [::1]:9100 default_server ipv6only=on;
+  <% end -%>
+  listen 1336 default_server; # enterprise local access port
+  listen [::]:1336 default_server ipv6only=on;
+
+  server_name <%= "#{github_hostname}" %>;
+  server_name <%= "#{assets_hostname} #{uploads_hostname}" %>;
+<% if cluster_ha_replica_cache_domain -%>
+  server_name <%= cluster_ha_replica_cache_domain %>;
+<% end -%>
+
+  access_log /var/log/nginx/github.log main;
+  error_log  /var/log/nginx/github.error.log;
+
+  client_max_body_size 1g;
+
+  # Setup path for private mode authentication.
+  #
+  # WARNING: This include needs to be above other includes and location blocks
+  # so the auth request locations aren't hijacked by another location.
+  include /etc/nginx/private_mode_server_include.conf;
+
+  include /etc/nginx/common/maint_page.conf;
+  include /etc/nginx/common/error_pages.conf;
+
+  root /data/github/current/public;
+  try_files $uri /index.html @github;
+
+  location ~ ^/(static/|favicon-enterprise.ico$) {
+    add_header Access-Control-Allow-Origin *;
+  }
+
+<% if cluster_ha_replica_cache_domain -%>
+  location ^~ /api/ {
+    if ($server_port != 1336) {
+      rewrite ^.*$ /index.html last;
+    }
+    try_files $uri @github;
+  }
+<% end -%>
+
+  location ^~ /assets/ {
+    expires max;
+    add_header Cache-Control public;
+    add_header Access-Control-Allow-Origin "$assets_origin_value";
+    add_header Vary Origin;
+    add_header Access-Control-Allow-Credentials true;
+
+    root /data/github/shared/public;
+  }
+
+  location ^~ /static/javascripts/ {
+    add_header Access-Control-Allow-Origin "$assets_origin_value";
+    add_header Access-Control-Allow-Credentials true;
+    add_header Vary Origin;
+  }
+
+  # apps and service routes go in here.
+  include /etc/nginx/sites-enabled/github_includes/*.conf;
+
+  location @github {
+    proxy_set_header Host $http_host;
+    proxy_pass http://github_upstream;
+  }
+}

@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+if GitHub.enterprise? && GitHub.environment.fetch("ENTERPRISE_ENABLE_ACTIONS_USAGE_STATS", false) == "true"
+  processor = GitHub::StreamProcessors::EnterpriseServerActionsUsageProcessor.new
+  consumer = GitHub.hydro_consumer(processor.options)
+
+  EnterpriseServerActionsUsageProcessorError = Class.new(StandardError)
+
+  begin
+    GitHub.logger.info("start", { "code.namespace" => processor.class.name })
+    GitHub.hydro_client.run(processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+    GitHub.logger.info("finish", { "code.namespace" => processor.class.name })
+  rescue => e
+    # rubocop:disable Style/HashSyntax
+    GitHub.logger.error("failed to run stream processor", { "code.namespace" => processor.class.name, exception: e })
+    Failbot.report(EnterpriseServerActionsUsageProcessorError.new)
+    raise
+  ensure
+    GitHub.logger.info("exit", { "code.namespace" => processor.class.name, "exception.type" => $!.class.name })
+  end
+end

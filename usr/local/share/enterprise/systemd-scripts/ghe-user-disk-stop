@@ -1,0 +1,42 @@
+#!/bin/bash
+set -e
+
+# Exit if in docker
+
+if [ -e /run/virt-what/docker  ] || [ -e /run/virt-what/podman ]; then
+  echo "cannot use storage in a docker container"
+  exit 0
+fi
+
+# Stop fluent-bit service if its running since it will hold file descriptors
+if systemctl is-active --quiet fluent-bit; then
+  echo "*** Stopping fluent-bit"
+  systemctl stop fluent-bit
+fi
+
+# After Nomad 1.5 these processes are no longer killed when Nomad exits - reap them now before they hold the disk
+/usr/bin/pkill -f "nomad docker_logger"
+/usr/bin/pkill -f "nomad logmon"
+
+# The filesystem may still be busy right after stopping the services
+# so let's wait a bit
+for i in $(seq 120); do
+  if ! lsof -n | grep -q '/data/user'; then
+    break
+  fi
+  sleep 1
+done
+
+if mountpoint -q /data/db; then
+ echo "*** Umounting /data/db"
+ umount -d /data/db
+ VGNAME=$(lvs --noheadings -o vg_name | grep ghe_db_ | awk '{ print $1 }')
+ vgchange -an $VGNAME || true
+fi
+
+echo "*** Umounting /data/user"
+mountpoint -q /data/user && umount -d /data/user
+
+echo "*** Deactivating the volume groups"
+VGNAME=$(lvs --noheadings -o vg_name | grep ghe_storage_ | awk '{ print $1 }')
+vgchange -an $VGNAME || true

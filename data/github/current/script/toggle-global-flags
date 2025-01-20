@@ -1,0 +1,161 @@
+#!/usr/bin/env ruby
+
+# typed: strict
+# frozen_string_literal: true
+
+# This script retrieves the names of the current globally enabled feature flags in production using the API
+# and globally enables them. This reduces codespaces friction where many of these flags are off by default.
+
+require "yaml"
+require "date"
+require "net/http"
+require "uri"
+require "json"
+require "sorbet-runtime"
+require_relative "./dx/telemetry/datadog"
+require_relative "./vexi_setup"
+
+class GlobalFlags
+  include Kernel
+
+  extend T::Sig
+
+  HMAC_ALGORITHM = "sha256"
+  HMAC_KEY = "API_INTERNAL_GLOBAL_FLAGS_HMAC_KEYS"
+
+
+  sig { void }
+  def initialize
+    @feature_flags_names = T.let([], T::Array[String])
+    @should_enable = T.let(false, T::Boolean)
+
+    @vexi_enabled = T.let(VexiSetup::Adapter.enabled?, T::Boolean)
+    if @vexi_enabled
+      @adapter = T.let(VexiSetup::Adapter.create, Vexi::Adapters::FileAdapter)
+    end
+
+    @hmac_key = T.let(ENV[HMAC_KEY].to_s, String)
+    @github_token = T.let(ENV["GITHUB_TOKEN"].to_s, String)
+    raise "HMAC Key not found. #{HMAC_KEY} is not set in Codespaces environment.
+    Please see changes in this Issue: https://github.com/github/security-iam/issues/5998 or fill a new request" if @hmac_key.empty?
+    raise "GITHUB_TOKEN not set." if @github_token.empty?
+  end
+
+  sig { void }
+  def fetch_feature_flags!
+    start_time = Time.now
+    uri = URI.parse("https://api.github.com/internal/global_flags")
+    req = Net::HTTP::Get.new(uri)
+    req["Request-HMAC"] = request_hmac(Time.now, @hmac_key)
+    req["Authorization"] = "Bearer #{@github_token}"
+    res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) do |http|
+      http.request(req)
+    end
+    end_time = Time.now
+
+    fully_enabled_flags = JSON.parse(res.body)
+    feature_flags_names = fully_enabled_flags["flag_names"]
+    raise "Missing feature flags from response: #{res.body}" unless feature_flags_names
+
+    elapsed = ((end_time - start_time) * 1000).to_i
+    DX::Datadog::MetricsBackend.new.submit_gauge("api.global_flags_elapsed", end_time.to_i, elapsed)
+
+    @feature_flags_names = feature_flags_names
+  end
+
+  sig { void }
+  def toggle_feature_flags!
+    require_relative "../config/environment"
+    action = @should_enable ? "enable" : "disable"
+    @feature_flags_names.each do |feature_name|
+      warn "#{feature_name} globally #{action}d"
+      GitHub.flipper[feature_name].method(action).call
+
+      if @vexi_enabled
+        begin
+          @adapter.create(Vexi::FeatureFlag.create_boolean_feature_flag(feature_name, false)) if @adapter.get_feature_flag(feature_name).nil?
+        rescue => exception # rubocop:disable Lint/GenericRescue
+          warn "Failed to create #{feature_name} in Vexi: #{exception.message}"
+        end
+
+        begin
+          if @should_enable
+            @adapter.enable(feature_name)
+          else
+            @adapter.disable(feature_name)
+          end
+        rescue => exception # rubocop:disable Lint/GenericRescue
+          warn "Failed to #{action} #{feature_name} in Vexi: #{exception.message}"
+        end
+      end
+
+    end
+  end
+
+  sig { void }
+  def print_help
+    puts <<~HEREDOC
+      This script toggles all production global feature flags in your local environment.
+      Enable them by using ./bin/toggle-global-flags --enable
+      If you want to enable/disable them individually, please try ./bin/toggle-feature-flag --help.
+
+      Usage: ./bin/toggle-global-flags [--list|-l] [--disable|-d] [--enable|-e] [--help|-h]
+      --list, -l: Lists global flags.
+      --enable, -e: Enables global flags.
+      --disable, -d: Disables global flags.
+      --help,-h: Prints help message.
+    HEREDOC
+    exit(0)
+  end
+
+  sig { params(feature_flags_names: T::Array[String]).void }
+  def list(feature_flags_names)
+    feature_flags_names.each do |feature_name|
+      puts feature_name
+    end
+  end
+
+  sig { void }
+  def check_set_args!
+    if ARGV.empty?
+      puts "Missing argument.\nUsage: ./bin/toggle-global-flags [--disable|-d] [--enable|-e] [--help|-h] \n"
+      exit(0)
+    end
+
+    if ["--help", "-h"].include? ARGV[0]
+      print_help
+    end
+
+    if ["--list", "-l"].include? ARGV[0]
+      list(@feature_flags_names)
+      exit(0)
+    end
+
+    if ["--disable", "-d"].include? ARGV[0]
+    elsif ["--enable", "-e"].include? ARGV[0]
+      @should_enable = true
+    else
+      puts "Invalid argument. Please use --enable or --disable.\nUsage: ./bin/toggle-global-flags [--disable|-d] [--enable|-e] [--help|-h] \n"
+      exit(0)
+    end
+    action = @should_enable ? "enable" : "disable"
+    DX::Datadog::MetricsBackend.new.submit_count("api.global_flags", Time.now.to_i, 1, ["action:#{action}"])
+  end
+
+  private
+
+  sig { params(time: T.any(Time, Integer), key: String).returns(String) }
+  def request_hmac(time, key)
+    timestamp = time.to_i.to_s
+    hmac = OpenSSL::HMAC.hexdigest(
+      HMAC_ALGORITHM,
+      key, timestamp
+    )
+    "#{timestamp}.#{hmac}"
+  end
+end
+
+flags_client = GlobalFlags.new
+flags_client.fetch_feature_flags!
+flags_client.check_set_args!
+flags_client.toggle_feature_flags!

@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby
+$LOAD_PATH[0, 0] = File.join(File.dirname(__FILE__), '..', 'lib')
+
+require 'rugged'
+require 'json'
+require 'optparse'
+require 'linguist'
+require 'scout/repository'
+require 'scout/tech_stack'
+require 'scout/stack'
+require 'scout/cache_helper'
+require 'scout/project_analysis'
+
+COMMANDS = ['stacks-list'].freeze
+
+def valid_commit_oid(rugged, commit_sha)
+  begin
+    rugged.lookup(commit_sha)
+  rescue
+    raise "scout must be called with a valid commit SHA to perform project analysis"
+  end
+
+  true
+end
+
+def valid_repo_path(path)
+  is_valid_repo = `git -C #{path} rev-parse`
+  $?.success?
+end
+
+def stacks_list(path, commit_sha, forced_rescan)
+  if valid_repo_path(path)
+    rugged = Rugged::Repository.new(path)
+  else
+    raise "scout must be run in a Git repository"
+  end
+
+  if commit_sha.nil?
+    commit_sha = rugged.head.target_id
+  end
+
+  if valid_commit_oid(rugged, commit_sha)
+    projects = Scout::ProjectAnalysis.new(rugged, commit_sha, forced_rescan).get_repository_projects
+
+    projects.map {|project| project.to_h}
+  end
+end
+
+def command_parser(args)
+  # Use this flag to by-pass loading cache
+  forced_rescan = false
+  commit_sha = nil
+
+  parser = OptionParser.new do |opts|
+    opts.banner = <<~HELP
+      Scout v#{Scout::VERSION}
+      Detect programming stack type and determine project breakdown for a given Git repository.
+
+      Usage:
+      scout /path/to/repository [OPTIONS] stacks-list
+
+      When not provided, /path/to/repository defaults to current directory.
+    HELP
+
+    opts.on("-f", "--force", "Force a full rescan") { forced_rescan = true }
+    opts.on("-c", "--commit=COMMIT_SHA", "Commit to perform analysis on") { |v| commit_sha = v}
+  end
+  parser.parse!(args)
+
+  path = args[0] || Dir.pwd
+
+  if COMMANDS.include? path
+    path = Dir.pwd
+  else
+    args.shift
+  end
+
+  case args.pop
+  when 'stacks-list'
+    puts JSON.dump(stacks_list(path, commit_sha, forced_rescan))
+  else
+    $stderr.print(parser.help)
+    exit 1
+  end
+end
+
+command_parser(ARGV)

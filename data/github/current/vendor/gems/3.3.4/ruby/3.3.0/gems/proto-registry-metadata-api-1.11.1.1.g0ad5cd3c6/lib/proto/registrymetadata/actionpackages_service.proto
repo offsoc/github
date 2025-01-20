@@ -1,0 +1,151 @@
+syntax="proto3";
+
+import "proto/rms/v1/pkg/entities.proto";
+import "proto/rms/v1/container/entities.proto";
+import "proto/rms/v1/actionpackages/entities.proto";
+
+package github.registry.metadata.v1.pkg;
+
+option go_package = "github.com/github/registry-metadata/rms/twirp/proto/rms/v1/actionpackages";
+option ruby_package = "Proto::RegistryMetadata::V1::ActionPackages";
+
+// The Action Packages Twirp service is interface for immutable actions (Action Packages) with RMS.
+// It's meant for interaction with the monolith only.
+
+service ActionPackagesService {
+  rpc ResolveActionPackages(ResolveActionPackageVersionsRequest) returns (ResolveActionPackageVersionsResponse);
+  // Get the resolution settings for an action package by its ID.
+  rpc GetActionPackageResolutionSettings(GetActionPackageResolutionSettingsRequest) returns (GetActionPackageResolutionSettingsResponse);
+  // Set the sharing policy of an action package by its ID.
+  rpc UpdateActionPackageSharingPolicy(UpdateActionPackageSharingPolicyRequest) returns (UpdateActionPackageSharingPolicyResponse);
+  // Set the action package with the given ID as activated, meaning it can now be resolved as an action.
+  rpc ActivateActionPackageResolution(ActivateActionPackageResolutionRequest) returns (ActivateActionPackageResolutionResponse);
+  // Get Metadata for a given set of Action Package versions by ID and tag.
+  rpc GetActionPackageVersionsMetadata(GetActionPackageVersionsMetadataRequest) returns (GetActionPackageVersionsMetadataResponse);
+}
+
+// A List of action package versions to be resolved.
+message ResolveActionPackageVersionsRequest {
+   repeated ActionReference actions = 1;
+
+   // The repository running the workflow which is making the resolution request.
+   // If anonymous_request is set to true, this value will be ignored.
+   int64 workflow_repo_id = 2;
+
+   // If this is set, we are making the request "anonymously" via a mechanism like GitHub Connect.
+   // In this case, access to certain types of action package will be limited.
+   // If anonymous_request is true, workflow_repo_id will be ignored.
+   bool anonymous_request = 3;
+}
+
+// A reference to an action, containing an nwo and a version ref.
+// e.g. actions/checkout@v2, actions/test@1.0.0
+// Note: this should not include further path elements such as actions/myaction/mysubaction@v2
+message ActionReference {
+  // The owner/namespace of this action e.g. the actions in actions/checkout
+  string namespace = 1;
+  // The name of this action e.g. the checkout in actions/checkout
+  string name = 2;
+  // The partial or full semver ref (for resolution, this is the ref specified in the workflow file).
+  string semver_ref = 3;
+}
+
+// List of resolved action package versions.
+message ResolveActionPackageVersionsResponse {
+    repeated ResolveActionPackageVersionResult results = 1;
+}
+
+enum ActionPackageResolutionOutcome {
+    UNKNOWN_OUTCOME = 0;
+    PACKAGE_NOT_FOUND = 1;
+    VERSION_NOT_FOUND = 2;
+    NAMESPACE_RETIRED = 3;
+    ACCESS_DENIED = 4;
+    VERSION_RESOLVED = 5;
+}
+
+// The result of resolving a single action package version.
+message ResolveActionPackageVersionResult {
+  // The unmodified action reference we got passed as part of the request.
+  ActionReference action_ref = 1;
+
+  // The outcome of resolving a package
+  ActionPackageResolutionOutcome outcome = 2;
+
+  // The resolved package with the resolved semver tag.
+  // Will be populated if the above ActionPackageResolutionOutcome is PACKAGE_RESOLVED
+  ResolvedActionPackageVersion resolved_package_version  = 3;
+}
+
+// A single resolved action package.
+message ResolvedActionPackageVersion {
+  // The ID of the resolved package.
+  int64 package_id = 1;
+  // The actual semver tag that the corresponding query was resolved to.
+  string semantic_version_tag = 2;
+  // The visibility of the action package.
+  Visibility package_visibility = 3;
+}
+
+// The request to get the settings for a given action package.
+message GetActionPackageResolutionSettingsRequest {
+  // The ID of the action package to get the settings for.
+  int64 package_id = 1;
+}
+
+// The response to get the settings for a given action package.
+message GetActionPackageResolutionSettingsResponse {
+  // Whether this package is an action package.
+  // If this value is false, settings will not be populated.
+  bool is_action_package = 1;
+  // The settings for the action package.
+  ActionPackageResolutionSettings settings = 2;
+}
+
+message ActionPackageResolutionSettings {
+  // Whether the action package has been activated, meaning it can be resolved as an action.
+  bool activated = 1;
+
+  // The sharing policy configured for this action package.
+  ActionPackageSharingPolicy sharing_policy = 2;
+}
+
+// The request to update the sharing policy of an action package.
+message UpdateActionPackageSharingPolicyRequest {
+  // The ID of the action package to update the sharing policy for.
+  int64 package_id = 1;
+  // The new sharing policy to set for the action package.
+  ActionPackageSharingPolicy sharing_policy = 2;
+}
+
+// The response to update the sharing policy of an action package.
+message UpdateActionPackageSharingPolicyResponse {}
+
+// The request to activate an action package.
+message ActivateActionPackageResolutionRequest {
+  // The ID of the action package to activate.
+  int64 package_id = 1;
+}
+
+// The response to activate an action package.
+message ActivateActionPackageResolutionResponse {}
+
+// The request to get metadata for a given action package version.
+// Receives a list of action references (NWO + Tag) and returns the metadata for each.
+// Unlike for resolution, tags are expected to be existing, valid full semver tags.
+message GetActionPackageVersionsMetadataRequest {
+  repeated ActionReference versions = 1;
+}
+
+// The response to get metadata for a given action package version.
+message GetActionPackageVersionsMetadataResponse {
+  repeated MetadataWrapper results = 1;
+}
+
+message MetadataWrapper {
+  // Whether this version was found in the metadata store.
+  bool found = 1;
+  // The metadata for the action package version.
+  container.ContainerMetadata metadata = 2;
+}
+

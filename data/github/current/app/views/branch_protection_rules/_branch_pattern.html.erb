@@ -1,0 +1,118 @@
+<%
+  if branch_protection_rule.persisted? && heads_count <= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES
+    matches_and_conflicts = Platform::Loaders::BranchProtectionRule::MatchesAndConflicts.load(current_repository, branch_protection_rule).sync
+    matching_refs = matches_and_conflicts[:matches]
+    conflicts = matches_and_conflicts[:conflicts]
+  end
+
+  account = current_repository.owner
+%>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+	<% component.with_heading(tag: :h2) do %>Branch protection rule<% end %>
+<% end %>
+
+<% if current_repository.protected_branches.empty? %>
+  <aside class="position-relative overflow-hidden d-md-flex border rounded-2 color-border-default p-3 mb-3" aria-label="About branch protection rules">
+    <div class="marketplace-product-callout">
+      <span class="branch-action-item-icon completeness-indicator completeness-indicator-success float-none mr-3 ml-0">
+        <%= render(Primer::Beta::Octicon.new(icon: "git-branch")) %>
+      </span>
+    </div>
+    <div class="position-relative z-1">
+      <h1 class="h4 mb-1">Protect your most important branches</h1>
+      <p class="color-fg-muted mb-0"><%= render(Primer::Beta::Link.new(href: "#{GitHub.help_url}/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/about-protected-branches", data: analytics_click_attributes(category: "Suggestion", action: "click to learn more about branch protection rules", label: "ref_page:#{request.fullpath};ref_cta:Branch protection rules;ref_loc:top of rule editing page;"), classes: "Link--inTextBlock")) { "Branch protection rules" } %> define whether collaborators can delete or force push to the branch and set requirements for any pushes to the branch, such as passing status checks or a linear commit history.</p>
+
+      <% if current_repository.supports_protected_branches? %>
+        <% if !GitHub.enterprise? && ((account.personal_plan? || account.org_free_plan?) && current_repository.public?) %>
+          <p class="color-fg-muted mt-3 mb-0"><%= render(Primer::Beta::Link.new(href: account.organization? ? settings_org_billing_path(account) : settings_user_billing_path, data: analytics_click_attributes(category: "Suggestion", action: "click to see account's current plan", label: "ref_page:#{request.fullpath};ref_loc:top of rule editing page;"), classes: "Link--inTextBlock")) { "Your #{"organization's " if account.organization?}GitHub Free plan" } %> can only enforce rules on its public repositories, like this one.</p>
+        <% end %>
+      <% else %>
+        <div class="d-flex mt-3">
+          <div class="mr-2">
+            <%= render(Primer::Beta::Octicon.new(icon: "alert", color: :attention)) %>
+          </div>
+          <p class="color-fg-muted mb-0">
+            Your rules won't be enforced on this private repository until
+            <% if account.organization? %>
+              <% if account.adminable_by?(current_user) %>
+                you <%= render(Primer::Beta::Link.new(href: settings_org_plans_path(account), data: analytics_click_attributes(category: "Suggestion", action: "click to see compare plans for this account", label: "ref_page:#{request.fullpath};ref_loc:top of rule editing page;"), classes: "Link--inTextBlock")) { "upgrade this organization to GitHub Team or Enterprise" } %>.
+              <% else %>
+                one of your organization's owners upgrades the account to GitHub Team or Enterprise.
+              <% end %>
+            <% else %>
+              you <%= render(Primer::Beta::Link.new(href: new_move_work_path(account, feature: "protected_branches"), data: analytics_click_attributes(category: "Suggestion", action: "click to move work to an organization account", label: "ref_page:#{request.fullpath};ref_loc:top of rule editing page;"), classes: "Link--inTextBlock")) { "move to a GitHub Team or Enterprise organization account" } %>.
+            <% end %>
+          </p>
+        </div>
+      <% end %>
+    </div>
+  </aside>
+<% end %>
+
+<div class="Box mb-3">
+  <div class="Box-header">
+    <h3 class="Box-title m-0">
+      <dl class="form-group m-0 required">
+        <dt>
+          <label for="rule_field">Branch name pattern</label>
+        </dt>
+        <dd></dd>
+      </dl>
+    </h3>
+  </div>
+
+  <div class="Box-body">
+    <div>
+      <input autocapitalize="off" spellcheck="false" autocomplete="off" class="form-control long width-full js-branch-name-pattern" id="rule_field" name="rule" type="text" value="<% if !branch_protection_rule.persisted? && params["branch_name"] %><%= params["branch_name"] %><% else %><%= branch_protection_rule&.name&.dup&.force_encoding("UTF-8") %><% end %>">
+    </div>
+  </div>
+
+  <% if branch_protection_rule.persisted? %>
+    <div class="Box-footer pb-2">
+      <strong>
+        <% if heads_count > ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES %>
+          Unable to show count for repositories with <%= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_MATCHES / 1000 %>k+ branches
+        <% elsif heads_count > ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_WILDCARD_MATCHES %>
+          <% if branch_protection_rule.wildcard_rule? == false %>
+            <% if matching_refs.size == 1 %>
+              Currently applies to 1 branch
+            <% elsif matching_refs.size == 0 %>
+              Currently applies to 0 branches
+            <% end %>
+          <% else %>
+            Unable to count wildcard matches for repositories with <%= ProtectedBranch::MAX_BRANCHES_TO_CALCULATE_WILDCARD_MATCHES / 1000 %>k+ branches
+          <% end %>
+        <% else %>
+          Applies to <%= matching_refs.size %>
+          <%= "branch".pluralize(matching_refs.size) %>
+        <% end %>
+      </strong>
+    </div>
+  <% end %>
+  <% if matching_refs.present? %>
+    <% matching_refs.take(100).each do |ref| %>
+      <div class="Box-body">
+        <span class="branch-name"><%= ref.name.dup.force_encoding("UTF-8") %></span>
+      </div>
+    <% end %>
+  <% end %>
+
+  <% if conflicts.present? %>
+    <div class="Box-footer pb-2">
+      <strong>
+        <%= conflicts.size %>
+        <%= "conflict".pluralize(conflicts.size) %>
+      </strong>
+    </div>
+    <ul>
+      <% conflicts.take(100).each do |conflict| %>
+        <li class="Box-row">
+          <span class="branch-name"><%= conflict[:ref].name.dup.force_encoding("UTF-8") %></span>
+          <% puts "wtf", conflict %>
+          <span class="float-right">This branch is covered by the <span class="branch-name"><%= conflict[:conflicting_protected_branch].name.dup.force_encoding("UTF-8") %></span> rule.</span>
+        </li>
+      <% end %>
+    </ul>
+  <% end %>
+</div>

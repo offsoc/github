@@ -1,0 +1,49 @@
+#!/bin/bash
+
+port=9418
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port=*)
+      port="${1#--port=}"
+      shift
+      ;;
+    --port)
+      port="$2"
+      shift 2
+      ;;
+    -*)
+      printf >&2 "%s: unexpected option: '%s'" "$0" "$1"
+      exit 1
+      ;;
+    *)
+      printf >&2 "%s: unexpected argument: '%s'" "$0" "$1"
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$GITHUB_USE_DOCKER" != 1 ]; then
+  export ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd)"
+  export PATH="$PATH:$ROOT/bin:$ROOT/git-bin"
+  GIT_EXEC="vendor/git-core/libexec/git-core"
+
+  until [ -x "$GIT_EXEC/git" ]; do
+    if [ "$GIT_BIN" != "1" ]; then
+      echo "Run 'script/build-git' to setup git (needed for codeload and babeld)."
+      GIT_BIN=1
+    fi
+    sleep 60
+  done
+
+  echo "[uploadArchive]" >"$GIT_EXEC/.gitconfig"
+  echo "  allowUnreachable = true" >>"$GIT_EXEC/.gitconfig"
+
+  echo '[filter "lfs"]' >>"$GIT_EXEC/.gitconfig"
+  echo "  process = $ROOT/vendor/librarian/bin/librarian-filter $ROOT/vendor/librarian/config.development.json" >>"$GIT_EXEC/.gitconfig"
+
+  export HOME="$(pwd)/$GIT_EXEC"
+
+  exec script/launch-git-daemon --exec-path="$GIT_EXEC" --port="$port"
+else
+  exec script/launch-git-daemon --port="$port"
+fi

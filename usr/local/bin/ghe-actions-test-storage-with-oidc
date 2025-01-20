@@ -1,0 +1,112 @@
+#!/bin/bash
+#/ Usage: ghe-actions-test-storage-with-oidc [-h] -p [s3/azure] -cs ["connectionstring"]
+#/
+#/ Check that blob storage provider for GitHub Actions is valid.
+#/
+#/ OPTIONS:
+#/   -h  | --help              Show this message
+#/   -p  | --provider          The name of the storage provider (Azure/S3).     
+#/   -cs | --connection-string The connection string to the storage provider.
+set -e
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Recursively run this script via lockrun to prevent concurrent execution.
+# Anything that was executed before this point will be executed for a second
+# time during the lockrun execution.
+lock_file=/data/user/common/ghe-actions-test-storage-with-oidc.lock
+[ -n "$LOCKED_GHE_ACTIONS_TEST_STORAGE_WITH_OIDC" ] || {
+  export LOCKED_GHE_ACTIONS_TEST_STORAGE_WITH_OIDC=1
+  exec lockrun --lockfile=$lock_file -- "$0" "$@"
+}
+
+# On error perform cleanup
+trap 'teardown-token' ERR EXIT
+
+teardown-token() {
+    local retval=$?
+    
+    # de-register the trap
+    trap - ERR EXIT
+
+    echo "Clearing Token start enabled setting..."
+    ghe-config --unset app.actions.start.token || true
+  
+    #Teardown token if actions not enabled
+    if ! actions-ever-enabled; then
+        ghe-actions-teardown -i  --exclude-secrets
+    fi
+    create-nomad-templates
+    
+    if [ "$retval" -ne 0 ] ; then
+        echo "error" > "$test_storage_status_file"
+    else
+        echo "success" > "$test_storage_status_file"
+    fi
+    # Remove the lock
+    rm -f $lock_file
+    
+    echo "Test Storage Completed!!"
+}
+
+create-nomad-templates() {
+    echo "Creating Nomad templates for Token, Mps and MSSQL..."
+    sudo consul-template -template=/etc/consul-templates/etc/nomad-jobs/mssql/mssql.hcl.ctmpl:/etc/nomad-jobs/mssql/mssql.hcl -once 2>&1
+    
+    for service in $(token-services); do
+        sudo consul-template -template=/etc/consul-templates/etc/nomad-jobs/actions/$service.hcl.ctmpl:/etc/nomad-jobs/actions/$service.hcl -once 2>&1
+    done
+}
+
+# usage
+#   Display usage information for this script.
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+storage_provider="s3"
+connection_string=""
+test_storage_status_file="/data/user/tmp/actions-test-storage-status.txt"
+# Process command line arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -p|--provider)
+            storage_provider="$(echo $2| tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;            
+        -cs|--connection-string)
+            connection_string="$2"
+            shift 2
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+ghe-config app.actions.start.token true
+
+echo "InProgress" > "$test_storage_status_file"
+
+# Load actions Images
+sudo /usr/local/share/enterprise/ghe-docker-load-images
+#Prepare storage
+sudo /usr/local/share/enterprise/ghe-storage-prepare
+
+create-nomad-templates
+
+# start MSSQL 
+/usr/local/share/enterprise/ghe-nomad-jobs queue /etc/nomad-jobs/mssql/mssql.hcl
+/usr/local/share/enterprise/ghe-nomad-jobs apply-wait-all-queues
+
+ghe-actions-start -s "$(token-services)"
+ghe-actions-check -s token
+
+# test storage connection
+ghe-check-blob-connection -s token -p "$storage_provider" -cs "$connection_string" -at oidc 2>&1

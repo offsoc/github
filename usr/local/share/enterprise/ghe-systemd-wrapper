@@ -1,0 +1,61 @@
+#!/bin/bash
+set -e
+
+. /usr/local/share/enterprise/ghe-systemd-lib.sh
+
+if [ $# -lt 2 ] ; then
+  echo "usage: $0 [service name] [program] [args...]"
+  exit 1
+fi
+
+SERVICE_NAME=$1
+shift
+echo "starting $SERVICE_NAME in $(pwd)"
+
+if [ ${LOAD_ENV:-yes} = "yes" ] ; then
+  if [ -f ../shared/env.sh ] ; then
+    ENV_PATH=$(readlink -f ../shared/env.sh)
+    echo "loading environment for $SERVICE_NAME from $ENV_PATH"
+    [ -n "$DEBUG_ENV" ] && set -x
+    . $ENV_PATH
+    [ -n "$DEBUG_ENV" ] && set +x && env
+  else
+    echo "no environment to load for $SERVICE_NAME"
+  fi
+fi
+
+if [ ${CHECK_SERVICE:-yes} = "yes" ] ; then
+  if ! service_enabled $SERVICE_NAME; then
+    echo "$SERVICE_NAME is not enabled on this node"
+    exit 126
+  fi
+fi
+
+if [ ${CHECK_MYSQL:-no} = "yes" ] ; then
+  /usr/local/share/enterprise/ghe-service-wait-mysql 30 || {
+    log_message "can't start $SERVICE_NAME; no MySQL daemon available"
+    exit 1
+  }
+fi
+
+if [ ${CHECK_REDIS:-no} = "yes" ] ; then
+  /usr/local/share/enterprise/ghe-service-wait-redis 30 || {
+    log_message "cant' start $SERVICE_NAME; no redis daemon available"
+    exit 1
+  }
+fi
+
+INCLUDE="/usr/local/share/enterprise/systemd-scripts/$SERVICE_NAME.include"
+
+if [ -f "$INCLUDE" ] ; then
+  echo "including $INCLUDE"
+  . $INCLUDE
+fi
+
+echo "$SERVICE_NAME: executing $*"
+if [ -n "$LOGFILE" ]; then
+  [ ! -f "$LOGFILE" ] && touch $LOGFILE
+  exec "$@" > $LOGFILE 2>&1
+else
+  exec "$@"
+fi

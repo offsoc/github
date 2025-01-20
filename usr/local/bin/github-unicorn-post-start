@@ -1,0 +1,46 @@
+#!/bin/bash
+set -e
+
+timeout=120
+
+log_message() {
+  echo "`date` $1"
+}
+
+echo "$(whoami)"
+
+log_message "waiting for unicorn child processes..."
+
+# wait for unicorn workers to spawn
+for i in `seq 1 $timeout`; do
+  UNICORN_STATUS=$(curl -s -o /dev/null -w ''%{http_code}'' localhost:4327/status)
+  if [[ $UNICORN_STATUS == "200" ]]; then
+    break
+  fi
+  log_message "Waiting for unicorn workers..."
+  sleep 1
+done
+if [[ "$UNICORN_STATUS" != "200" ]]; then
+  log_message "unicorn workers failed to start"
+  exit 1
+fi
+log_message "removing preflight page."
+sudo /bin/rm -f /data/github/current/public/index.html
+sudo /bin/rm -f /data/enterprise-manage/current/public/ssl_warning.html
+
+# Recreate html pages in case the smtp.support-address has changed
+log_message "regenerating html pages with support address."
+github-env bin/maintenance   # /data/github/current/public/maintenance.html
+github-env bin/500           # /data/github/current/public/500.html
+github-env bin/502           # /data/github/current/public/502.html
+github-env bin/503           # /data/github/current/public/503.html
+github-env bin/503-external  # /data/github/current/public/503-external.html
+
+if [ -f /etc/github/cluster ]; then
+  node=$(cat /etc/github/cluster)
+  replication_enabled=$(ghe-config cluster.$node.replica || true)
+  if [ "$replication_enabled" = "enabled" ]; then
+    /usr/local/share/enterprise/ghe-replica-mode-html
+  fi
+fi
+

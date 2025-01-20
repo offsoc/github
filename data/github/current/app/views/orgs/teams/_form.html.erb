@@ -1,0 +1,294 @@
+<%# erblint:counter DeprecatedComponentsCounter 4 %>
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# `view` is an instance of Orgs::Teams::FormView %>
+
+<% page_info class: "team", title: view.page_title_text %>
+
+<% if view.legacy_admin_team? %>
+  <%= render Primer::Beta::Flash.new(scheme: :warning, mb: 3) do %>
+    <div class="d-flex flex-justify-between flex-items-center mx-auto" style="max-width: 980px;">
+      <div> This is a <strong>legacy admin team</strong> </div>
+      <%= form_tag migrate_legacy_admin_team_path(this_organization, this_team), :method => :put do %>
+        <a href="<%= GitHub.help_url %>/articles/migrating-your-previous-admin-teams-to-the-improved-organization-permissions/">What's this?</a>
+        <%= render Primer::ButtonComponent.new(ml: 1, classes: "btn-default", type: :submit) do %>Migrate team<% end %>
+      <% end %>
+    </div>
+  <% end %>
+<% end %>
+
+<% if view.requested_parent_team %>
+  <%= render Primer::Beta::Flash.new(scheme: :warning, mb: 3) do %>
+    <div class="d-flex flex-justify-between flex-items-center mx-auto" style="max-width: 980px;">
+      <div> Parent team request for <%= content_tag(:span, view.requested_parent_team_name, class: "text-bold") %> is pending approval </div>
+      <%= button_to "Cancel request", cancel_team_change_parent_request_path(this_organization, id: view.requested_parent_team_request.id),
+        method: "delete",
+        class: "btn border",
+        form_class: "BtnGroup-parent"
+      %>
+    </div>
+  <% end %>
+<% end %>
+
+<% form_action_path = view.making_new_team ? create_team_path(this_organization) : team_path(this_team) %>
+
+<% if view.making_new_team %>
+  <div class="mx-auto <%= view.making_new_team ? "col-md-6 col-12 my-4" : "col-12" %>">
+<% end %>
+<%= form_with(
+  url: form_action_path,
+  class: "js-org-team-form org-team-form",
+  method: view.form_method,
+  html: {
+    novalidate: "novalidate",
+    "data-turbo": "false",
+    "data-important-changes-summary-url": org_teams_important_changes_summary_path(edit_team: 1)
+  }
+) do |f| %>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h1) do %><%= view.header_text %><% end %>
+  <% end %>
+
+  <% if view.allow_team_avatar_uploads? %>
+  <dl class="form-group edit-profile-avatar mt-0 float-lg-right">
+    <dt class="text-bold">Profile picture</dt>
+    <dd class="avatar-upload-container clearfix">
+      <%= file_attachment_tag(
+          model: :avatars,
+          input: "team-avatar-input",
+          class: "js-upload-avatar-image is-default",
+          :"data-alambic-owner-id" => view.team_database_id,
+          :"data-alambic-owner-type" => Team.name) do %>
+
+        <img src="<%= view.team_avatar_url %>" class="avatar rounded-2" width="200" height="200" alt="@<%= view.team_combined_slug %>">
+
+        <div class="avatar-upload">
+          <label class="position-relative btn button-change-avatar mt-3 width-full text-center">
+            Upload new picture
+            <input type="file" class="manual-file-chooser width-full height-full ml-0" id="team-avatar-input">
+          </label>
+
+          <div class="upload-state loading">
+            <button type="button" class="btn mt-3 width-full text-center" disabled>
+              <%= render(Primer::Beta::Spinner.new(size: :small)) %> Uploading...
+            </button>
+          </div>
+
+          <p class="note mt-3">You may also drag and drop an image from your computer. The image must be less than 1MB.</p>
+
+          <div class="upload-state color-fg-danger file-empty">
+            This file is empty.
+          </div>
+
+          <div class="upload-state color-fg-danger too-big">
+            Please upload a picture smaller than 1 MB.
+          </div>
+
+          <div class="upload-state color-fg-danger bad-dimensions">
+            Please upload a picture smaller than 10,000x10,000.
+          </div>
+
+          <div class="upload-state color-fg-danger bad-file">
+            We only support PNG, GIF, or JPG pictures.
+          </div>
+
+          <div class="upload-state color-fg-danger failed-request">
+            Something went really wrong and we can’t process that picture.
+          </div>
+
+          <div class="upload-state color-fg-danger bad-format">
+            File contents don’t match the file extension.
+          </div>
+        </div>
+      <% end %>
+    </dd>
+  </dl>
+  <% end %>
+
+  <% check_url = check_team_name_path(this_organization, team_slug: view.team_slug) %>
+  <auto-check required src="<%= check_url %>">
+    <dl class="form-group">
+      <dt>
+        <label for="team-name">Team name</label>
+      </dt>
+      <dd>
+        <input
+          type="text"
+          value="<%= view.team_name %>"
+          name="team[name]"
+          id="team-name"
+          class="form-control"
+          <%= "autofocus" if view.autofocus_name_field? %>
+          required>
+        <p class="note"><%= view.team_name_note %></p>
+      </dd>
+    </dl>
+    <%= csrf_hidden_input_for check_url %>
+  </auto-check>
+
+  <dl class="form-group">
+    <dt>
+      <label for="team-description">Description</label>
+    </dt>
+    <dd>
+      <input class="form-control" type="text" name="team[description]" id="team-description" value="<%= view.team_description %>" autocomplete="off">
+      <p class="note">What is this team all about?</p>
+    </dd>
+  </dl>
+
+  <% if GitHub.ldap_sync_enabled? && org_admin? %>
+    <%= render partial: "orgs/teams/ldap_group", locals: {team: view.team_entity} %>
+  <% end %>
+
+  <% if !view.externally_managed? || view.current_parent_team %>
+    <dl class="form-group">
+      <dt class="text-bold">Parent team</dt>
+      <dd>
+        <%=
+          render layout: "orgs/teams/search", locals: {
+            selection_text: "Select parent team",
+            search_url: "#{team_parent_search_path}?team_slug=#{view.original_team_slug}",
+            selected_team_name: view.parent_team_name,
+            selected_team_id: view.parent_team_id,
+            original_team_visibility: view.original_team_visibility,
+            id_field_name: "team[parent_team_id]",
+            name_field_name: "team[parent_team_name]",
+            has_teams: view.team_count > 0,
+            requested_parent_team_name: view.requested_parent_team_name,
+            current_parent_team: view.current_parent_team,
+            requested_parent_team: view.requested_parent_team
+          } do
+        %>
+          <%= render partial: "orgs/teams/parent_search", locals: {
+            organization: this_organization,
+            team: this_team,
+            query: ''
+            } %>
+        <% end %>
+      </dd>
+    </dl>
+  <% end %>
+
+  <% if view.team_can_be_externally_managed? %>
+    <%= render partial: "orgs/teams/group_mapping", locals: {team: view.team_entity} %>
+  <% elsif view.show_scim_groups_settings? %>
+    <%= render partial: "orgs/teams/external_group_team", locals: {team: view.team_entity, form_builder: f} %>
+  <% end %>
+
+  <dl class="form-group">
+    <dt class="text-bold">Team visibility</dt>
+    <dd>
+      <div class="form-checkbox js-team-privacy-closed">
+        <label>
+          <%= radio_button_tag "team[privacy]", "closed", (view.team_privacy != "SECRET") %>
+          Visible
+          <%= render Primer::Beta::Label.new(scheme: :secondary, title: "Label: Recommended") do %>
+            Recommended
+          <% end %>
+        </label>
+        <p class="note">
+          A visible team can be seen and <a class="Link--inTextBlock" href="<%= GitHub.blog_url %>/2012-05-09-introducing-team-mentions/">@mentioned</a> by every member of this organization.
+        </p>
+      </div>
+
+      <div class="form-checkbox js-team-privacy-secret">
+        <label>
+          <%= radio_button_tag "team[privacy]", "secret", (view.team_privacy == "SECRET"), "aria-describedby": "secret-team-note" %>
+          Secret
+        </label>
+        <p class="note" id="secret-team-note">
+          A secret team can only be seen by its members and may not be nested.
+        </p>
+      </div>
+    </dd>
+  </dl>
+
+  <dl class="form-group" <%=test_selector("team_notifications_form_group")%>>
+    <dt class="text-bold">Team notifications</dt>
+    <dd>
+      <div class="form-checkbox" <%=test_selector("team_notifications_enabled_radio_button")%>>
+        <label>
+          <%= radio_button_tag "team[notification_setting]", "notifications_enabled", (view.team_notification_setting != "NOTIFICATIONS_DISABLED"), "aria-describedby": "team-notifications-enabled-note"%>
+          Enabled
+        </label>
+        <p class="note" id = "team-notilfications-enabled-note">
+          Everyone will be notified when the team is @mentioned.
+        </p>
+      </div>
+
+      <div class="form-checkbox" <%=test_selector("team_notifications_disabled_radio_button")%>>
+        <label>
+          <%= radio_button_tag "team[notification_setting]", "notifications_disabled", (view.team_notification_setting == "NOTIFICATIONS_DISABLED"), "aria-describedby": "team-notifications-disabled-note"%>
+          Disabled
+        </label>
+        <p class="note" id= "team-notifications-disabled-note">
+          No one will receive notifications.
+        </p>
+      </div>
+    </dd>
+  </dl>
+
+  <% if view.enhanced_team_posts_enabled? && !this_organization.team_discussions_disabled? %>
+    <dl class="form-group">
+      <dt class="text-bold">Team posts</dt>
+      <dd>
+        <div class="form-checkbox">
+          <label>
+            <%= radio_button_tag "team[team_post_creation_disabled]", false, !view.team_post_creation_disabled? %>
+            All team members
+          </label>
+          <p class="note">
+            Enabling this setting will allow all team members to create new team posts.
+          </p>
+        </div>
+
+        <div class="form-checkbox">
+          <label>
+            <%= radio_button_tag "team[team_post_creation_disabled]", true, view.team_post_creation_disabled? %>
+            Certain team members
+          </label>
+          <p class="note">
+            Enabling this setting will allow only specified team members the ability to create new team posts.
+          </p>
+        </div>
+      </dd>
+    </dl>
+  <% end %>
+
+  <button type="submit" class="btn btn-primary js-create-team-button" data-disable-invalid <%= "disabled" if view.disable_submit_button_on_load? %>>
+    <%= view.submit_button_text %>
+  </button>
+<% end %>
+
+<% if view.show_delete_button? %>
+  <%= render Primer::Beta::Subhead.new(spacious: true, hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2, danger: true) do %>Danger zone<% end %>
+  <% end %>
+  <div class="Box Box--danger">
+    <ul>
+      <li class="Box-row">
+        <% if view.not_deletable? %>
+          <%= render Primer::ButtonComponent.new(scheme: :danger, float: :right, disabled: true) do %>Delete this team<% end %>
+        <% else %>
+          <%= render layout: "shared/details_dialog", locals: {
+            details_class: "float-right",
+            button_text: "Delete this team",
+            title: "Are you sure you want to delete this team?",
+            button_class: "btn btn-danger"
+            } do %>
+            <%= render partial: "orgs/teams/delete_team_dialog", locals: { view: view } %>
+            <% end %>
+        <% end %>
+        <strong>Delete this team</strong>
+        <% if view.not_deletable? %>
+          <p>Parent teams can only be deleted by organization admins.</p>
+        <% else %>
+          <p>Once deleted, it will be gone forever. Please be certain.</p>
+        <% end %>
+      </li>
+    </ul>
+  </div>
+<% end %>
+<% if view.making_new_team %>
+</div>
+<% end %>

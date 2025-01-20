@@ -1,0 +1,226 @@
+#!/bin/bash
+#/ Usage: script/flaky-test-stats-utils/file-blame [<options>]
+#/ Get blame information for a file using GitHub API
+#/
+#/ Options:
+#/       --help         print this usage information
+#/       --token        PAT used to perform graphql request
+#/       --repo         repository name for file
+#/       --org          organization name for file
+#/       --sha1         the SHA1 of the commit we're searching. Defaults to HEAD
+#/       --file-path    the path to the file
+#/       --line-numbers CSV of lines to filter blame
+#/       --debug        print debug information
+#/       --record       record curl responses to test/fixtures/test_info/stubs
+#/       --test-seed    used with --record, used to record multiple stub files per request
+#/                      used with --replay, used to replay recorded response
+#/       --replay       replay recorded response saved in the test/fixtures/test_info/stubs directory
+
+# show usage
+if [ "$1" = "--help" ]; then
+    grep ^#/ <"$0" |cut -c4-
+    exit
+fi
+
+# Guess defaults if running locally
+: ${BUILD_SHA:="$(git rev-parse HEAD)"}
+
+if [ "$GITHUB_CI" = "1" ]; then
+  CI_TEST_INFO_PERSONAL_ACCESS_TOKEN="$BP_GITHUB_TEST_INFO_PERSONAL_ACCESS_TOKEN"
+fi
+
+# defaults
+DEBUG=0                 # 0=Debug OFF | 1=Debug ON
+COMMIT_SHA=$BUILD_SHA
+RECORD=0
+TEST_SEED='c137'
+REPLAY=0
+ROOT_PATH=$(cd $(dirname "$0")/../.. && pwd)
+
+# parse args
+while [ -n "$1" ]; do
+    case "$1" in
+        -t|--token)
+            CI_TEST_INFO_PERSONAL_ACCESS_TOKEN="$2"
+            shift 2
+            ;;
+        -r|--repo)
+            REPO="$2"
+            shift 2
+            ;;
+        -o|--org)
+            ORG="$2"
+            shift 2
+            ;;
+        -s|--sha1)
+            COMMIT_SHA="$2"
+            shift 2
+            ;;
+        -f|--file-path)
+            FILE_PATH="$2"
+            shift 2
+            ;;
+        -l|--line-numbers)
+            LINE_NUMBERS="$2"
+            shift 2
+            ;;
+        -d|--debug)
+            DEBUG=1
+            shift
+            ;;
+        --record)
+            RECORD=1
+            shift
+            ;;
+        --test-seed)
+            seed="$2"
+            # replace all non alphanumeric numbers with '_'
+            TEST_SEED=$(echo $seed | sed 's/[^a-zA-Z0-9]/_/g')
+            shift 2
+            ;;
+        --replay)
+            REPLAY=1
+            shift
+            ;;
+        -*)
+            echo "error: invalid argument: $1" 1>&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ $DEBUG -eq 1 ]; then
+  echo "DEBUG --- repo is $REPO"
+  echo "DEBUG --- org is $ORG"
+  echo "DEBUG --- sha1 is $COMMIT_SHA"
+  echo "DEBUG --- file_path is $FILE_PATH"
+  echo "DEBUG --- line_numbers is $LINE_NUMBERS"
+  echo "DEBUG --- record is $RECORD"
+  echo "DEBUG --- test seed is $TEST_SEED"
+  echo "DEBUG --- replay is $REPLAY"
+  echo "DEBUG --- ROOT_PATH is $ROOT_PATH"
+fi
+
+# checksum function returns checksum of params passed in + test seed
+checksum() {
+  (
+    echo $REPO
+    echo $ORG
+    echo $COMMIT_SHA
+    echo $FILE_PATH
+    echo $LINE_NUMBERS
+    echo $TEST_SEED
+  )  | md5sum | cut -d' ' -f1 | cut -c 1-7
+}
+
+STUB_FILE="$ROOT_PATH/test/fixtures/test_info/stubs/${TEST_SEED}-$(checksum).json"
+
+# Return stubbed responses based on checksum of arguments and test seed
+if [ $REPLAY -eq 1 ]; then
+  # Check that stub file exists
+  if [[ -f "$STUB_FILE" ]]; then
+    cat $STUB_FILE | jq .
+    exit 0
+  else
+    echo "ERROR! Could not find stub file!"
+    exit 1
+  fi
+fi
+
+QUERY='{"query":
+         "query(
+            $repo: String!
+            $org: String!
+            $commitSha: GitObjectID!
+            $filePath: String!
+            $lineNumbers: [Int!]
+          ){
+            repository(name: $repo, owner: $org) {
+              object(oid: $commitSha) { 
+                ... on Commit {
+                  history(
+                    path: $filePath,
+                    first: 100,
+                  ) {
+                    nodes {
+                      author {
+                        name
+                        user {
+                          login
+                        }
+                        email
+                      }
+                      committedDate
+                      authoredDate
+                      oid
+                    }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                  }
+                  blame(path: $filePath, lineNumbers: $lineNumbers ) {
+                    ranges {
+                      commit {
+                        author {
+                          name
+                          user {
+                            login
+                          }
+                        }
+                        oid
+                        committedDate
+                      }
+                      age
+                      startingLine
+                      endingLine
+                    }
+                  }
+                }
+              }
+            }
+          }
+          ",
+          "variables": {
+            "repo":"'"$REPO"'",
+            "org":"'"$ORG"'",
+            "commitSha":"'"$COMMIT_SHA"'",
+            "filePath":"'"$FILE_PATH"'",
+            "lineNumbers":['"$LINE_NUMBERS"']
+          }
+        }'
+
+# Submit request
+GQL_RESPONSE=$( curl -sS -X POST \
+  --url https://api.github.com/graphql \
+  -H "authorization: Bearer $CI_TEST_INFO_PERSONAL_ACCESS_TOKEN" \
+  -H 'content-type: application/json' \
+  -H 'graphql-schema: internal' \
+  --data "$(echo $QUERY)"  )
+
+# Check error code
+ERROR_CODE=$?
+
+if [ $ERROR_CODE -ne 0 ]; then
+  echo "ERROR! Failed to gather data from GitHub!"
+  echo "GQL_RESPONSE:[$GQL_RESPONSE]"
+  echo "ERROR_CODE: $ERROR_CODE"
+  exit 1
+fi
+
+# Debug response
+if [ $DEBUG -eq 1 ]; then
+  echo "DEBUG --- GQL_RESPONSE:[$GQL_RESPONSE]"
+fi
+
+# If --record is set, save the graphql response to the test/fixtures/test_info/stubs directory
+if [ $RECORD -eq 1 ]; then
+  echo $GQL_RESPONSE | jq . > $STUB_FILE
+fi
+
+# Output to stdout
+echo $GQL_RESPONSE | jq .
+exit 0

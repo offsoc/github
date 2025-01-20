@@ -1,0 +1,66 @@
+#!/bin/bash
+# Usage: script/bootstrap
+# Ensures all dependencies are installed locally.
+set -e
+cd "$(dirname "$0")/.."
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  brew update >/dev/null
+  brew bundle check &>/dev/null || brew bundle
+
+  brew bootstrap-rbenv-ruby
+  brew setup-nginx-conf enterprise-manage . config/dev/nginx.conf.erb
+fi
+
+mkdir -p log
+
+dc() {
+  docker compose -f docker-compose.dependencies.yaml -f docker-compose.build.yaml -f docker-compose.vscode.yaml -f docker-compose.dev.yaml \
+    "$@"
+}
+
+#If running on a GitHub Codespace, verify the VPN is connect
+if [ -n "$CODESPACES" ]; then
+  vpn_status="$(dev-vpn status 2>&1 ||echo 'VPN not connected')"
+  if [[ ! "$vpn_status" == *"vpn request succeeded"* ]]; then
+    echo "VPN is not connected. Please connect to the VPN using 'dev-vpn connect' and try again."
+    exit 1
+  fi
+fi
+
+if ([ "$NODE_ENV" = "production" ] || [ -n "$NO_DOCKER" ] || [ -f /.dockerenv ]) && [ -z "$CODESPACES" ]; then
+  npm ci --offline
+
+  [ "$NODE_ENV" = "production" ] || npx shrinkpack 
+
+  # Set path to vendored gem directory
+  bundle config set path 'vendor/gems'
+
+  # Actually install the gems
+  bundle install --local ${BUNDLE_WITHOUT:+"--without" "$BUNDLE_WITHOUT"}
+
+  # Binstubs are scripts that wrap around executables.
+  # Bundler creates a small Ruby file (a binstub) that loads Bundler, runs the command, and puts it into bin/.
+  bundle binstubs --all
+
+  # used for updating gems across Ruby versions
+  # bundle update --ruby
+
+  # Cache all gems, including path and git gems
+  bundle config set cache_all true
+  bundle clean --force
+else
+  export UID
+  export GID=$(id -g)
+  if [ -n "$JANKY_SHA1" ] || [ -n "$FORCE_BUILD" ]; then
+    target=build
+  else
+    target=vscode
+  fi
+  for f in $(seq 1 5); do
+    if dc build --pull --force-rm "$target"; then
+      break
+    fi
+  done
+  dc run --rm --no-deps "$target" script/bootstrap
+fi

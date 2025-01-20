@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunk=globalThis.webpackChunk||[]).push([["marketing-signup"],{67573:(e,t,s)=>{(0,s(21403).lB)(".js-octocaptcha-parent",function(e){let t=e.querySelector(".js-octocaptcha-form-submit");e.addEventListener("input",()=>i(e,t)),e.addEventListener("change",()=>i(e,t))});function i(e,t){e.checkValidity()?t.disabled=!1:t.disabled=!0}}},e=>{var t=t=>e(e.s=t);e.O(0,["vendors-node_modules_github_selector-observer_dist_index_esm_js"],()=>t(67573)),e.O()}]);
+//# sourceMappingURL=marketing-signup-51b2f3b68d23.js.map

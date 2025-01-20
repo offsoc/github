@@ -1,0 +1,91 @@
+#!/bin/bash
+#/ Usage: ghe-chatops-remove 
+#/ Remove the chatops service
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/   -a | --app      App type to remove(slack/msteams/slacksocket)
+
+
+usage() {
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+}
+
+[ "$(whoami)" = "admin" ] || {
+  exec sudo -u admin "$0" "$@"
+  echo "Run this script as the admin user." >&2
+  exit 1
+
+}
+
+stop_chatops_service() {
+  if [ "$type" != "slack" ] && [ "$type" != "slacksocket" ] && [ "$type" != "msteams" ] ; 
+  then
+    echo "Invalid chatops app type. Please use ghe-chatops-remove -h for help."
+    exit 1
+  fi
+  if ghe-config --true app.chatops.slack.enabled || ghe-config --true app.chatops.msteams.enabled
+  then
+    if [ "$type" == "slack" ] || [ "$type" == "slacksocket" ]
+    then
+      echo "Stopping slack service..."
+
+      echo "Deleting github app for slack service"
+      github-env bin/rake --trace "enterprise:chatops:delete_slack"
+      
+      # Slack app id
+      CLIENT_APP_ID=$(ghe-config-ctmpl secrets.chatops.slack.app-id)
+      # GitHub app id
+      APP_ID=$(ghe-config-ctmpl secrets.chatops.app-id-slack)
+      CHATOPS_CLIENT_INSTANCE="slack"
+      ghe-config app.chatops.slack.enabled 'false'
+    elif [ "$type" == "msteams" ]
+    then
+      echo "Stopping msteams service..."
+
+      echo "Deleting github app for msteams service"
+      github-env bin/rake --trace "enterprise:chatops:delete_msteams"
+
+      # MSTeams app id
+      CLIENT_APP_ID=$(ghe-config-ctmpl secrets.chatops.msteams.app-id)
+      # GitHub app id
+      APP_ID=$(ghe-config-ctmpl secrets.chatops.app-id-teams)
+      CHATOPS_CLIENT_INSTANCE="teams"
+      ghe-config app.chatops.msteams.enabled 'false'
+    fi
+
+    mysql_username=$(/usr/local/share/enterprise/ghe-call-configrb mysql_username)
+    mysql_password=$(/usr/local/share/enterprise/ghe-call-configrb mysql_password)
+
+    SLACK_GO_SHA="$(cat /data/docker-image-tags/slack_image_tag)"
+    SLACK_IMAGE_TAG="slack:${SLACK_GO_SHA}"
+    DATABASE_URL="mysql://$mysql_username:$mysql_password@localhost:3307/github_enterprise"
+    echo "Running docker run command..."
+    dbCleanOutput=$(docker run --network host -e CLEAN_DB_TABLES=true -e CLIENT_APP_ID="$CLIENT_APP_ID" -e APP_ID="$APP_ID" -e CHATOPS_CLIENT_INSTANCE="$CHATOPS_CLIENT_INSTANCE" -e  DROP_DB=false -e GHES=true -e RUN_DB_MIGRATION=false -e DATABASE_URL="$DATABASE_URL" -e REDIS_URL="redis://127.0.0.1:6380" "$SLACK_IMAGE_TAG")
+    echo "ChatOps DB cleanup operation is completed. Output:$dbCleanOutput"
+    ghe-config-apply
+
+  else
+    echo "ChatOps service is not enabled!"
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a|--app)
+      type="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+stop_chatops_service

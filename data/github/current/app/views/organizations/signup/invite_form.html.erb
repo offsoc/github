@@ -1,0 +1,153 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 4 %>
+<%
+  view = create_view_model(
+      Orgs::Invitations::InviteFormView,
+      organization: current_organization,
+      per_seat_pricing_model: per_seat_pricing_model,
+  )
+  invite_ga = ga_label_with_analytics_tracking_id(
+    "Signup funnel invite users,click,text:Invite;",
+    organization: current_organization
+  )
+  complete_setup_ga = ga_label_with_analytics_tracking_id(
+    "Signup funnel invite users,click,text:Complete setup;",
+    organization: current_organization
+  )
+  complete_setup_with_upgrade_ga = ga_label_with_analytics_tracking_id(
+    "Signup funnel invite users,click,text:Invite members;",
+    organization: current_organization
+  )
+  skip_ga = ga_label_with_analytics_tracking_id(
+    "Signup funnel invite users,click,text:Skip this step;",
+    organization: current_organization
+  )
+
+  skip_this_step_path = if session[:return_to] == "copilot_business_signup"
+    copilot_business_signup_organization_payment_path(org: current_organization, **utm_memo)
+  else
+    user_path(current_organization)
+  end
+%>
+
+<div class="setup-form-container">
+  <% if org_admin? %>
+    <div class="subnav subnav-flush">
+      <% if GitHub.bypass_org_invites_enabled? %>
+        <%= form_tag view.form_add_or_invite_path_for_organization, :class => "js-add-org-member-form #{"js-per-seat-invite-field" if current_organization.plan.per_seat?}" do %>
+          <% if Rails.env.development? && params[:fakestate] %>
+            <input type="hidden" name="fakestate" value="<%= params[:fakestate] %>">
+          <% end %>
+
+          <label for="search-member">Search by username, full name or email address</label>
+          <div class="input-group">
+            <auto-complete src="<%= org_invitations_invitee_suggestions_path(current_organization) %>" for="new-org-members-complete-results">
+              <div class="auto-search-group">
+                <input type="text" name="member" id="search-member" class="form-control input-block">
+                <ul id="new-org-members-complete-results" class="autocomplete-results"></ul>
+              </div>
+            </auto-complete>
+            <div class="input-group-button">
+              <%= render Primer::ButtonComponent.new(type: :submit, classes: "js-auto-complete-button", "data-ga-click": invite_ga, test_selector: "invite-button") do %>
+                  Invite
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
+        <% if on_per_seat_pricing?(current_organization) %>
+          <strong class="unstyled-filled-seats"><%= current_organization.filled_seats %></strong> of
+          <strong class="unstyled-total-seats"><%= current_organization.seats %></strong> <%= seat_or_license(current_organization).pluralize(current_organization.seats) %> used
+          <span class="js-need-more-seats d-none">
+            &mdash; <%= more_seats_link_for_organization(current_organization, self_serve_return_to: org_people_path(current_organization, anchor: "invite-member")) %>
+          </span>
+        <% end %>
+      <% else %>
+        <%= form_tag bulk_org_invitations_create_for_new_org_path(current_organization), method: :post, id: "multi-invite-form"  do %>
+          <% if current_organization.plan.free? %>
+            <input type="hidden" name="source" value="organization_create">
+          <% end %>
+
+          <%= render partial: "organizations/signup/multi_user_invite", locals: {organization: current_organization} %>
+
+          <% if on_per_seat_pricing?(current_organization) %>
+            <%= render partial: "orgs/invitations/upgrade_message", locals: { view: view } %>
+          <% end %>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <div class="team-member-container <%= "js-per-seat-invite" if current_organization.plan.per_seat? %>">
+    <ul class="team-member-list edit-person-list org-list js-member-list">
+      <%
+        existing_members = current_organization.direct_members
+      %>
+      <% if GitHub.bypass_org_invites_enabled? %>
+          <% existing_members.reverse_each do |user| %>
+              <% unless user == current_user %>
+              <%= render :partial => 'orgs/people/members_for_new_org', :locals => {
+                  :user  => user,
+                  :organization  => current_organization
+              } %>
+              <% end %>
+          <% end %>
+      <% else %>
+        <%
+          # We want to list all existing and invited members. The `reverse` is so
+          # we show the most-recently-added member first, which will keep the list
+          # order consistent between refreshes.
+          current_organization.direct_member_pending_invitations.reverse_each do |invitation|
+            render 'orgs/invitations/invitation_for_new_org', :user => invitation.invitee, :invitation => invitation
+          end
+
+          existing_members.each do |user|
+            render 'orgs/invitations/invitation_for_new_org', :user => user, :invitation => nil
+          end
+        %>
+      <% end %>
+    </ul>
+  </div>
+
+  <% if GitHub.bypass_org_invites_enabled? %>
+    <%= form_tag user_path(current_organization), method: :get, class: "mt-8"  do %>
+      <%= render partial: "signup/button", locals: {
+        text: "Complete setup",
+        type: "submit",
+        data: { ga_click: complete_setup_ga },
+        test_selector: "complete-setup-button"
+      } %>
+    <% end %>
+  <% else %>
+    <%= render partial: "signup/button", locals: {
+      text: "Complete setup",
+      type: "submit",
+      data: analytics_click_attributes(
+        category: "Organization Complete Setup",
+        action: "click to complete setup",
+        label: "ref_page:#{request.fullpath};ref_cta:Complete setup;ref_loc:org_invite",
+      ),
+      test_selector: "complete-setup-button",
+      form: "multi-invite-form",
+      custom_classes: "js-complete-button"
+    } %>
+    <div hidden class="js-invite-button">
+      <%= render partial: "signup/button", locals: {
+        text: "Invite members",
+        type: "submit",
+        data: { ga_click: complete_setup_with_upgrade_ga },
+        test_selector: "complete-setup-button-with-upgrade",
+        form: "multi-invite-form",
+      } %>
+    </div>
+  <% end %>
+
+  <div class="text-center f6 pt-4">
+    <a href="<%= skip_this_step_path %>"
+      data-ga-click="<%= skip_ga %>"
+      <%= test_selector("skip-step-link") %>
+      <%= safe_data_attributes(invite_skip_hydro_tracking) %>>
+      Skip this step
+    </a>
+  </div>
+</div><!-- /.setup-form-container -->

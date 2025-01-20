@@ -1,0 +1,239 @@
+#!/bin/bash
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+CMD_ID="$(date +%Y%m%d-%H%M%S)"
+
+## Return codes
+# 3-8 sanity checking
+# 9 initial config check
+# 10 proceed check
+# 11 backup
+# 12 unconfigure nodes
+# 13 reconfigure consul kv
+# 14 updated config check
+
+usage_core() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+hosts(){
+  ghe-config --get-regexp 'cluster.*.hostname' | awk '{print $2}'
+}
+
+sanity_check_core() {
+  # Check if we're on a cluster.
+  if is_standalone ; then
+    echo "[ Error ] Clustering is not configured on this host. Exiting." >&2
+    return 3
+  fi
+
+  # Check if cluster.conf is configured for standalone HA.
+  if is_standalone_ha ; then
+    echo "[ Error ] cluster.conf is configured for standalone HA. Exiting." >&2
+    return 4
+  fi
+
+  # Check if cluster.conf is not configured for cluster HA.
+  if ! is_cluster_ha ; then
+    echo "[ Error ] cluster.conf is not configured for cluster HA. Exiting." >&2
+    return 5
+  fi
+
+  # Check if datacenter on the redis-master-replica host is set.
+  redis_replica_host="$(ghe-config cluster.redis-master-replica || true)"
+  if [ -z "$(ghe-config "cluster.${redis_replica_host}.datacenter")" ]; then
+    echo "[ Error ] cluster.${redis_replica_host}.datacenter is not set. Exiting." >&2
+    return 6
+  fi
+
+  # Check if datacenter on the mysql-master-replica host is set.
+  mysql_replica_host="$(ghe-config cluster.mysql-master-replica || true)"
+  if [ -z "$(ghe-config "cluster.${mysql_replica_host}.datacenter")" ]; then
+    echo "[ Error ] cluster.${mysql_replica_host}.datacenter is not set. Exiting." >&2
+    return 7
+  fi
+
+  # Check datacenter is set for each host
+  for host in $(hosts); do
+    local dc
+    dc="$(ghe-config "cluster.${host}.datacenter")" || true
+
+    if [ -z "$dc" ]; then
+      echo "[ Error ] cluster.${host}.datacenter is not set for $host. Exiting." >&2
+      return 8
+    fi
+  done
+}
+
+# Get the primary datacenter by looking at the
+# datacenter where "mysql-master" is.
+get_primary_datacenter(){
+  local host
+  host="$(ghe-config cluster.mysql-master)"
+
+  local dc
+  dc="$(ghe-config "cluster.${host}.datacenter")"
+
+  echo "$dc"
+}
+
+# Get the failover datacenter by looking at the
+# datacenter where "mysql-master-replica" is.
+get_failover_datacenter(){
+  local host
+  host="$(ghe-config cluster.mysql-master-replica)"
+
+  local dc
+  dc="$(ghe-config "cluster.${host}.datacenter")"
+
+  echo "$dc"
+}
+
+# Get the failover consul datacenter by looking at the
+# consul-datacenter where "mysql-master-replica" is.
+get_failover_consul_datacenter(){
+  local host
+  host="$(ghe-config cluster.mysql-master-replica)"
+
+  local dc
+  dc="$(ghe-config "cluster.${host}.consul-datacenter")"
+
+  echo "$dc"
+}
+
+# Performs the cluster configuration check
+check_cluster_configuration_core() {
+  if [ "$SKIP_CONFIG_CHECK" = "true" ]; then
+    return
+  fi
+
+  file=${1:-""}
+
+  sudo ghe-cluster-config-check "${file}" || {
+    echo "[ Error ] Configuration errors must be fixed before continuing. Exiting." >&2
+    return 9
+  }
+}
+
+# Confirm before proceeding.
+proceed_check_core() {
+  if [ -n "$1" ]; then
+    message="$1"
+    echo "$message"
+    read -p "Do you wish to proceed with this operation? [y/N] " -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo "[ Error ] Aborting $CMD_NAME." >&2
+      return 10
+    fi
+  else
+    return 10
+  fi
+}
+
+backup_cluster_configuration_core() {
+  # Back up existing cluster configuration
+  echo ""
+  echo "Backing up existing cluster configuration"
+  cluster_conf_dir="/data/user/common"
+  cluster_backup_file="$cluster_conf_dir/$CMD_NAME-$CMD_ID-cluster.conf.backup"
+  cp "$cluster_conf_dir/cluster.conf" "$cluster_backup_file" || true
+  if [ -f "$cluster_backup_file" ]; then
+    echo "Backed up existing cluster configuration to '$cluster_backup_file'"
+  else
+    echo "[ Error ] Failed to back up existing cluster configuration. Exiting." >&2
+    return 11
+  fi
+}
+
+# Unconfigures all nodes from a given datacenter.
+# We'll need to check that the host this is being called from isn't in the datacenter being targeted
+unconfigure_nodes_in_datacenter() {
+  target_dc="$1"
+
+  # $target_dc needs to be not-empty.
+  if [ -z "$target_dc" ]; then
+    echo "[ Error ] Target datacenter was not specified. Exiting." >&2
+    return 12
+  fi
+
+  if [ -n "${2-}" ]; then
+    file="-f $2"
+  else
+    file=""
+  fi
+
+  for host in $(hosts); do
+    host_dc="$(ghe-config "cluster.${host}.datacenter")"
+    if [ "$host_dc" = "$target_dc" ]; then
+      ghe-config $file --remove-section "cluster.${host}"
+    fi
+  done
+}
+
+reconfigure_consul_kv() {
+  if [ "$SKIP_CONFIGURE_CONSUL" = "true" ]; then
+    return
+  fi
+
+  target_dc="$1"
+
+  # $target_dc needs to be not-empty.
+  if [ -z "$target_dc" ]; then
+    echo "[ Error ] Target datacenter was not specified. Exiting." >&2
+    return 13
+  fi
+
+  # Identify the mysql-master-replica.
+  mysql_master_replica_host="$(ghe-config cluster.mysql-master-replica)"
+
+  ghe-consul kv put "mysql/master/ghe/hostname" "$mysql_master_replica_host"
+
+  for host in $(hosts); do
+    host_dc="$(ghe-config "cluster.${host}.datacenter")"
+    if [ "$host_dc" = "$target_dc" ]; then
+      # cleanup corresponding consul kv settings
+      ghe-consul kv delete -recurse "/ghe/cluster/nodes/${host}/"
+    fi
+  done
+}
+
+apply_cluster_configuration_core() {
+  # Apply the new configuration
+  if [ "$SKIP_CONFIG_APPLY" != "true" ]; then
+    echo ""
+    echo "Started ghe-config-apply"
+    ghe-config-apply
+    echo "Finished ghe-config-apply"
+  fi
+}
+
+place_failover_semaphore() {
+  if [ "$SKIP_PLACE_SEMAPHORE" = "true" ]; then
+    return
+  fi
+
+  # we use the cluster.mysql-master value because at this stage in the
+  # ghe-cluster-failover, we've already updated the cluster.conf on the node it
+  # is being run from
+  mysql_master_host="$(ghe-config cluster.mysql-master)"
+  # NOTE: This semaphore will get cleaned up when ghe-run-migrations is run. It
+  # only runs on the Nomad delegate, hence we place it there.
+  # Copying this to the Nomad delegate allows the ghe-cluster-failover command
+  # to be run from any node.
+  ssh "${mysql_master_host}" -- 'date | sponge /data/user/common/cluster-failover-occurred' || {
+    echo "[ Warning ] Failed to place /data/user/common/cluster-failover-occurred onto $mysql_master_host host" >&2
+  }
+}
+
+check_updated_consul_servers() {
+  consul_leader_host=$1
+
+  consul_members=$(ssh "$consul_leader_host" -- "consul members" | grep -v Node | sort)
+  consul_members_wan=$(ssh "$consul_leader_host" -- "consul members -wan" | grep -v Node | sort)
+
+  if [ "$consul_members" != "$consul_members_wan" ]; then
+      echo "[ Warning ] Failed to remove Consul servers from Serf WAN pool. Run 'consul members -wan' for more information." >&2
+  fi
+}

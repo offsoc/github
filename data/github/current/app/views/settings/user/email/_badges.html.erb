@@ -1,0 +1,107 @@
+<%# `view` is an instance of `Settings::EmailsView` %>
+
+<% if current_user.is_enterprise_managed? || email.primary_role? %>
+  <% if current_user.is_enterprise_managed? %>
+    <%= render(Primer::Beta::Text.new(font_size: :small, color: :muted, tag: :p)) do %>
+      This email will be used for account-related notifications.
+    <% end %>
+  <% else %>
+    <%= render(Primer::Beta::Text.new(font_size: :small, color: :muted, tag: :p)) do %>
+      This email will be used for account-related notifications and can also be used for password resets.
+    <% end %>
+  <% end %>
+<% elsif email.backup_role? %>
+  <%= render(Primer::Beta::Text.new(font_size: :small, color: :muted, tag: :p)) do %>
+    This email will be used as an additional destination for security-relevant account notifications and can also be used for password resets.
+  <% end %>
+<% end %>
+<% if !current_user.change_email_enabled? %>
+  <%= render(Primer::Beta::Text.new(font_size: :small, color: :muted, tag: :p)) do %>
+    Your email address is managed in your Identity Provider: <%= GitHub.auth.name %>
+  <% end %>
+<% end %>
+
+<ul class="mt-2 ml-4 color-fg-muted" style="list-style: disc">
+  <% if current_user.is_enterprise_managed? %>
+    <% if !GitHub.multi_tenant_enterprise? && !GitHub.enterprise? %>
+      <%= render partial: "settings/user/email/enterprise_managed_user_email_claim", locals: { email: current_user.primary_user_email } %>
+    <% end %>
+  <% else %>
+    <% if email.bouncing? %>
+      <li>
+        <span class="text-bold color-fg-attention">Undeliverable</span>
+        <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) { view.bouncing_tooltip(email) } %>
+      </li>
+    <% end -%>
+
+    <% if email.unverified? && view.verification_enabled? %>
+      <li>
+      <span class="text-bold color-fg-attention">Unverified</span>
+      <% if current_user.change_email_enabled? %>
+        <% if email.bouncing? %>
+          <%= form_tag request_verification_user_email_path(email.user, email), class: "d-inline-block ml-1" do %>
+            <%= render Primer::Beta::Button.new(type: :submit, scheme: :link, aria: { label: "Verify email for #{email}" }) do %>
+              Verify email
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= form_tag request_verification_user_email_path(email.user, email), class: "d-inline-block ml-1" do %>
+            <%= render Primer::Beta::Button.new(type: :submit, scheme: :link, aria: { label: "Resend verification email for #{email}" }) do %>
+              Resend verification email
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+        Unverified email addresses cannot receive notifications or be used to reset your password.
+      <% end %>
+      </li>
+    <% end -%>
+
+    <% if current_user.change_email_enabled? && view.verification_enabled? && !email.try_to_verify? %>
+      <li>
+        Cannot be verified
+        <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+          Emails from <%= email.domain ? "the #{email.domain}" : 'this' %> domain cannot be verified.
+        <% end %>
+      </li>
+    <% end %>
+  <% end %>
+
+  <% if !current_user.is_enterprise_managed? && ((GitHub.stealth_email_enabled? && current_user.use_stealth_email?) ||
+    (email.unverified? && view.verification_enabled?)) %>
+    <li>
+      Not visible in emails
+      <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+        This email will not be used as the 'from' address for web-based Git operations, e.g., edits and merges. We will instead use <%= StealthEmail.new(current_user).email %>.
+      <% end %>
+    </li>
+  <% else %>
+    <li>
+      Visible in emails
+      <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+        This email may be used as the 'author' or 'committer' address for web-based Git operations, e.g., edits and merges.
+      <% end %>
+    </li>
+  <% end -%>
+
+  <% if current_user.is_enterprise_managed? || view.is_global_notifications_email?(email) %>
+    <li>
+        Receives notifications
+        <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+          This email address is the default used for GitHub notifications, i.e., replies to issues, pull requests, etc.
+        <% end %>
+    </li>
+  <% end -%>
+
+  <% unless current_user.is_enterprise_managed? %>
+    <% if UserEmail.generic_domain?(email.email) %>
+      <li>
+        Not used for blame
+        <%= render(Primer::Beta::Text.new(font_size: :small, tag: :p)) do %>
+          This email will not be used for commit blame.
+        <% end %>
+      </li>
+    <% end %>
+  <% end %>
+</ul>

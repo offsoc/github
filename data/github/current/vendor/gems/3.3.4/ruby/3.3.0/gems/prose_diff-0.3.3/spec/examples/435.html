@@ -1,0 +1,1328 @@
+<html>
+<head>
+    <title>435</title>
+    <link href="./example.css" rel="stylesheet" type="text/css">
+</head>
+<body>
+
+  <div class="example prose-diff">
+
+    <div class="options"><div data-key="profile">false</div></div>
+
+    <h2>should not time out</h2>
+
+    <div class="before">
+      <article class="markdown-body entry-content" itemprop="mainContentOfPage"><h1>
+      <a name="abilities" class="anchor" href="#abilities"><span class="octicon octicon-link"></span></a>Abilities</h1>
+
+      <p><strong>Abilities are a work in progress. The code doesn't use them consistently. Talk
+      to a friend on the @github/ability team before you start using 'em.</strong></p>
+
+      <p>The <a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability.rb">abilities</a> API provides a unified and encapsulated way to
+      model authorization on github.com. Abilities also provide
+      generalized membership for organizations, teams, and repositories. See
+      <a href="https://github.com/github/github/pull/6980">PR #6980</a> for the original discussion and implementation
+      and <a href="https://github.com/github/github/pull/13599">PR #13599</a> for a significant later refactoring.
+      <a href="https://github.com/github/github/pull/15032">PR #15032</a> adds a rewritten cascade and ancestor tracking.</p>
+
+      <p>Please also read the TomDoc on <a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability.rb">Ability</a>, <a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability/actor.rb">Ability::Actor</a>, and
+      <a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability/subject.rb">Ability::Subject</a>. There are a lot of useful ActiveRecord scopes, helper
+      methods, and hooks.</p>
+
+      <h2>
+      <a name="concepts" class="anchor" href="#concepts"><span class="octicon octicon-link"></span></a>Concepts</h2>
+
+      <p>An ability is the combination of <strong>actor</strong>, an <strong>action</strong>, and
+      a <strong>subject</strong>. A model can also be a <strong>connector</strong>, which is both an actor and
+      a subject. In code, actors include the <code>Ability::Actor</code> mixin and subjects
+      include <code>Ability::Subject</code>. Connectors include <code>Ability::Connector</code>. Some
+      examples from the <code>github/github</code> domain model:</p>
+
+      <ul>
+      <li>Users are actors,</li>
+      <li>Repositories are subjects, and</li>
+      <li>Organizations and teams are connectors.</li>
+      </ul><p>An ability's <strong>action</strong> indicates what level of control an actor has
+      over a subject. There are only three types of actions: <code>:read</code>,
+      <code>:write</code>, and <code>:admin</code>. Each action includes any "less powerful"
+      actions, so <code>:admin</code> implies both <code>:write</code> and <code>:read</code> ability.</p>
+
+      <p>Actors, subjects, and connectors are all participants. A <strong>participant</strong>
+      is identified by its <code>ability_id</code> and <code>ability_type</code>.</p>
+
+      <h3>
+      <a name="kinds-of-abilities" class="anchor" href="#kinds-of-abilities"><span class="octicon octicon-link"></span></a>Kinds of abilities</h3>
+
+      <p>The simplest possible ability is a <strong>direct ability</strong>. A direct ability grants
+      an actor the right to perform a certain level of action on a subject. This is
+      also how membership is encoded: A <strong>member</strong> is another way to describe an
+      actor with direct ability on a subject. For example:</p>
+
+      <ul>
+      <li>A user is a member of a team</li>
+      <li>A user is a member of an organization</li>
+      <li>A user is a member of a repository</li>
+      <li>A team is a member of a repository</li>
+      </ul><p>An ability that isn't explicitly granted to an actor is an
+      <strong>indirect ability</strong>. When a connector is involved in a direct ability,
+      it grants matching indirect abilities to its own actors. For example:</p>
+
+      <ul>
+      <li>A user is a member of a team, the team is a member of a repository,
+      so user has an indirect ability on the repository</li>
+      </ul><p>Indirect abilities may also exist if a subject has dependents. A
+      <strong>dependent</strong> is a model "owned" by a subject. For example, organizations have
+      team and repository dependents. An actor with admin ability on a subject
+      automatically has a indirect admin ability on its dependents.</p>
+
+      <p>An actor can act on a subject in a few other situations too:</p>
+
+      <ul>
+      <li>The actor is acting on itself,</li>
+      <li>The subject explicitly permits the actor to do something, or</li>
+      <li>The subject allows a default level of ability for all actors.</li>
+      </ul><h3>
+      <a name="priorities" class="anchor" href="#priorities"><span class="octicon octicon-link"></span></a>Priorities</h3>
+
+      <p>An actor can only have one <em>direct</em> ability on a subject, but it's possible
+      (common, even) for an actor to have many <em>indirect</em> abilities . The ability
+      with the highest <code>action</code> value always "wins," no matter whether it's direct
+      or indirect.</p>
+
+      <p>An ability's <strong>priority</strong> explains why it was created. All direct abilities are
+      have a <code>:direct</code> priority. Indirect abilities are <code>:indirect</code> except for admin
+      abilities cascaded to dependents, which are <code>:admin_on_owner</code>.</p>
+
+      <h3>
+      <a name="cascades-and-indirect-abilities" class="anchor" href="#cascades-and-indirect-abilities"><span class="octicon octicon-link"></span></a>Cascades and indirect abilities</h3>
+
+      <p>When a direct ability is granted, the ability system also grants indirect
+      abilities based on related abilities on the actor or subject. This is a
+      transitive relationship: if there is a direct ability from <code>B-&gt;C</code> and a new
+      ability from <code>A-&gt;B</code> is created, then an indirect ability from <code>A-&gt;C</code> is created
+      as well.</p>
+
+      <p>Indirect abilities can't be managed directly, and are created or revoked
+      automatically as direct abilities are changed. For example, if either the direct
+      abilities from <code>A-&gt;B</code> or <code>B-&gt;C</code> are revoked, the indirect ability from <code>A-&gt;C</code>
+      is revoked as well (the "chain" is broken).</p>
+
+      <p>The <code>action</code> for an indirect ability depends on the ability of the grant on the
+      subject. For example, if <code>A-(write)-&gt;B-&gt;(read)-&gt;C</code>, the resulting indirect
+      ability will be <code>A-(read)-&gt;C</code>. Similarly, <code>A-(read)-&gt;B-&gt;(write)-C</code> results in
+      <code>A-(write)-&gt;C</code>.</p>
+
+      <p>Indirect abilities use the <code>Ability::Derivation</code> model to track these
+      relationships. For the previous example, the <code>A-&gt;C</code> ability will include two
+      ancestry entries linking it to both <code>A-&gt;B</code> and <code>B-&gt;C</code>.</p>
+
+      <p>Abilities are cascaded in three ways:</p>
+
+      <ul>
+      <li>From an ability's subject "downward" to anything the subject has direct
+      abilities on</li>
+      <li>From an actor "upward" to anyone who has direct abilities on that actor</li>
+      <li>Explicitly-defined dependents of a subject</li>
+      </ul><h4>
+      <a name="subject-subject-cascades" class="anchor" href="#subject-subject-cascades"><span class="octicon octicon-link"></span></a>Subject-&gt;Subject cascades</h4>
+
+      <p>Permissions are cascaded "downward" from an ability's subject to the subject's
+      direct subjects. For example:</p>
+
+      <ol>
+      <li>Team is granted an ability on Repository</li>
+      <li>User is granted an ability on Team</li>
+      <li>Because Team (the subject) has an ability on Repository (its subject), User
+      is granted an indirect ability on Repository.</li>
+      </ol><pre><code>+------+           2  3
+      | User |-----------+--+-
+      +------+           |  .
+                         |  .
+      +------+        1  v  .
+      | Team |--------+-----.-
+      +------+        |     .
+                      |     .
+      +------------+  v     v
+      | Repository |----------
+      +------------+
+      </code></pre>
+
+      <p>Two ancestry items are stored along with the indirect grant:</p>
+
+      <ul>
+      <li>The indirect ability's parent, that is, the direct ability that initiated the
+      cascade: ability 2 is the initial direct grant.</li>
+      <li>The direct ability between Team and Repository that allowed the cascade to
+      continue "downward" to Repository: ability 1.</li>
+      </ul><p>This establishes both abilities 1 and 2 as being "ancestors" of ability 3, so if
+      either is revoked, then ability 3 will be revoked as well.</p>
+
+      <h4>
+      <a name="actor-actor-cascades" class="anchor" href="#actor-actor-cascades"><span class="octicon octicon-link"></span></a>Actor-&gt;Actor cascades</h4>
+
+      <p>Similarly, abilities are cascaded "upward" to direct actors on an ability's
+      actor. For example:</p>
+
+      <ol>
+      <li>User is granted an ability on Team</li>
+      <li>Team is granted an ability on Repository</li>
+      <li>Because User has an ability on Team (the actor), it is also granted an
+      indirect ability on Repository.</li>
+      </ol><pre><code>+------+        1     3
+      | User |--------+-----+-
+      +------+        |     .
+                      |     .
+      +------+        v  2  .
+      | Team |-----------+--.-
+      +------+           |  .
+                         |  .
+      +------------+     v  v
+      | Repository |----------
+      +------------+
+      </code></pre>
+
+      <p>Again, two ancestry items are stored for indirect ability 3:</p>
+
+      <ul>
+      <li>The "parent", the direct grant which started the cascade: ability 2.</li>
+      <li>The related direct ability that allowed the cascade to continue "upward":
+      ability 1.</li>
+      </ul><h4>
+      <a name="explicit-child-cascades" class="anchor" href="#explicit-child-cascades"><span class="octicon octicon-link"></span></a>Explicit child cascades</h4>
+
+      <p>Admin abilities can be cascaded to an explicitly-defined list of dependents.
+      To enable this, you can override two methods on a Subject. For example,
+      paraphrased from <a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/organization/ability_dependency.rb">Organization's Ability code</a>:
+      When <code>:admin</code> is granted on <code>Organization</code>, the ability is cascaded to the
+      organization's repositories and teams.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">dependents?</span>
+        <span class="kp">true</span>
+      <span class="k">end</span>
+
+      <span class="k">def</span> <span class="nf">dependents</span>
+        <span class="n">repositories</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span> <span class="o">+</span> <span class="n">teams</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Abilities created from explicit lists of dependents will always be indirect. The
+      only ancestor of these indirect dependent abilities will be the "parent" ability
+      since that is the only ability dependents can be cascaded from.</p>
+
+      <h4>
+      <a name="ancestor-stealing-for-efficient-cascades" class="anchor" href="#ancestor-stealing-for-efficient-cascades"><span class="octicon octicon-link"></span></a>"Ancestor stealing" for efficient cascades</h4>
+
+      <p>As an example, here is a sequence of grants on a hierarchy of actors and
+      subjects. In order to calculate an indirect ability through multiple levels the
+      ability system must look at each direct ability and recursively propagate the
+      original ability. When the direct ability 4 is created, indirect ability 5 is
+      created because of ability 1, and then (working "downward") indirect ability 6
+      is created by way of ability 1 <em>and</em> 2.</p>
+
+      <p>This diagram and the following differ only in how ability 6 is created: via
+      recursive descent of the direct ability tree, or via an optimization we're
+      calling "ancestor stealing".</p>
+
+      <pre><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom
+                           |  .  .        cascaded via ability 1
+                           |  .  .     +------------------------------------+
+      +-----+     1     3  v  .  .     |             Derivations            |
+      | Top |-----+-----+-----.--.-    |------------------------------------|
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 2 (parent)  |
+                  |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+      +--------+  v  2  .     v  .     4. Direct: Actor -&gt; Top
+      | Middle |-----+--.--------.-    5. Indirect: Actor -&gt; Middle
+      +--------+     |  .        .        cascaded via ability 1
+                     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+      +--------+     v  v        v     |  ability: 5, ancestor: 1 (cascade) |
+      | Bottom |-------------------    +------------------------------------+
+      +--------+                       6. Indirect: Actor -&gt; Bottom
+                    +------------------&gt;  cascaded via ability 2 via ability 1
+                    |                  +------------------------------------+
+       Created via traversal of        |  ability: 6, ancestor: 4 (parent)  |
+       ability 1 followed by           |  ability: 6, ancestor: 2 (cascade) |
+       ability 2 (recursive descent)   |  ability: 6, ancestor: 1 (cascade) |
+                                       +------------------------------------+
+      </code></pre>
+
+      <p>The ability system uses a shortcut to give us the same indirect abilities and
+      ancestry information as a recursive descent without having to explicitly
+      traverse the entire tree of direct grants. Instead, it only examines the first
+      level of related grants, <em>including indirect grants</em>, and copies the ancestry
+      information of any indirect grant it encounters.</p>
+
+      <p>Here, when cascading ability 4, abilities only looks at the grants on <code>Top</code>,
+      which are the direct ability 1 and the indirect ability 3. This results in two
+      new indirect grants:</p>
+
+      <ul>
+      <li>Ability 5: based on direct ability 1. Since ability 1 is a direct grant, the
+      indirect grant saves its parent (4) and ability 1 as its only related
+      ancestor.</li>
+      <li>Ability 6: based on indirect ability 3. Because 3 is indirect, we simply copy
+      all of the ancestors from ability 3, and add our own parent (ability 4) as an
+      additional entry. The ancestry of ability 3 is the same as what we would have
+      generated had we recursively descended ability 1 and 2, so this saves us the
+      trouble of actually doing it.</li>
+      </ul><pre><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom cascaded via 1
+                           |  .  .     +------------------------------------+
+                           |  .  .     |             Derivations            |
+      +-----+     1     3  v  .  .     |------------------------------------|
+      | Top |-----+-----+-----.--.-    |  ability: 3, ancestor: 2 (parent)  |
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+                  |     .     .  .     4. Direct: Actor -&gt; Top
+      +--------+  v  2  .     v  .     5. Indirect: Actor -&gt; Middle
+      | Middle |-----+--.--------.-       cascaded via ability 1
+      +--------+     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+                     |  .        .     |  ability: 5, ancestor: 1 (cascade) |
+      +--------+     v  v        v     +------------------------------------+
+      | Bottom |-------------------    6. Indirect: Actor -&gt; Bottom
+      +--------+                          cascaded via indirect ability 3
+                                       +------------------------------------+
+                                       |  ability: 6, ancestor: 4 (parent)  |
+                 +--------------------&gt;|  ability: 6, ancestor: 2 (cascade) |
+                 |                     |  ability: 6, ancestor: 1 (cascade) |
+        "Ancestor stealing":           +------------------------------------+
+        Ability 6 writes its parent
+        as an ancestor, then copies all
+        ancestors of Ability 3, in this
+        case abilities 1 and 2.
+      </code></pre>
+
+      <h2>
+      <a name="cookbook" class="anchor" href="#cookbook"><span class="octicon octicon-link"></span></a>Cookbook</h2>
+
+      <p>Want to actually use this stuff? Here's a bunch of examples. All
+      examples assume that the <code>dat</code> console helper is available.</p>
+
+      <h3>
+      <a name="making-an-actor" class="anchor" href="#making-an-actor"><span class="octicon octicon-link"></span></a>Making an actor</h3>
+
+      <p>Turn any model into an actor by including the <code>Ability::Actor</code>
+      module. Abilities requires a String <code>ability_type</code> and Fixnum
+      <code>ability_id</code> for identity. This is optimized for ActiveRecord
+      models, so it defaults to <code>self.class.name</code> and <code>self.id</code>. Override
+      <code>ability_id</code> and <code>ability_type</code> to control identity yourself.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Once your model is an actor you can ask it if it's capable of action
+      on a subject:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Widget</span><span class="o">.</span><span class="n">first</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; probably false</span>
+      </pre></div>
+
+      <h3>
+      <a name="making-a-subject" class="anchor" href="#making-a-subject"><span class="octicon octicon-link"></span></a>Making a subject</h3>
+
+      <p>Turning a model into a subject is remarkably similar:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Like actors, subjects have a <code>ability_id</code> and a <code>ability_type</code>.
+      <code>Ability::Subject</code> has a large and powerful set of hooks: See
+      "<a href="#customizing-the-lifecycle">Customizing the lifecycle</a>" below for
+      details.</p>
+
+      <h3>
+      <a name="granting-abilities" class="anchor" href="#granting-abilities"><span class="octicon octicon-link"></span></a>Granting abilities</h3>
+
+      <p>When you <strong>grant</strong> a ability, you're creating a direct ability
+      for an actor to perform an action on a subject. Granting an ability may
+      also cause a cascade of indirect grants. For instance, granting a
+      User ability on a Team will also grant all of the Team's abilities to the User.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">grant</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">),</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <h3>
+      <a name="checking-abilities" class="anchor" href="#checking-abilities"><span class="octicon octicon-link"></span></a>Checking abilities</h3>
+
+      <p>Need to know whether or not an actor can perform an action on a
+      subject? Use <code>can?</code>, which just gives you a thumbsup/down.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">repo</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like a little more information about the ability,
+      <code>Ability::Actor.ability</code> will hand you back the correct Ability
+      for an actor and subject.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">ability</span> <span class="o">=</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">ability</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; #&lt;Ability...&gt;</span>
+      </pre></div>
+
+      <p>Given an Ability instance, you can ask the same question as <code>can?</code>
+      above. <code>Ability::Actor#can?</code>.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">ability</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <h3>
+      <a name="revoking-abilities" class="anchor" href="#revoking-abilities"><span class="octicon octicon-link"></span></a>Revoking abilities</h3>
+
+      <p>Revoking removes an actor's direct ability to act on a subject. If you try to
+      revoke permissions when only an indirect ability exists, you'll receive an
+      error.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">revoke</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill all of an <em>actor's</em> direct abilities, use
+      <code>Ability::Actor.clear</code>. You might do this when a user is deleted.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill all of a <em>subject's</em> grants, use
+      <code>Ability::Subject.clear</code>. You might do this when a repository is deleted.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill every direct Ability that involves a participant, <em>no
+      matter whether the participant is an actor or subject</em>, use <code>Ability.clear</code>.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/orgs-next"</span><span class="p">)</span>
+      </pre></div>
+
+      <h3>
+      <a name="listing-direct-actors" class="anchor" href="#listing-direct-actors"><span class="octicon octicon-link"></span></a>Listing direct actors</h3>
+
+      <p>Abilities control access, but they're also useful when a subject
+      has a list of members or collaborators.</p>
+
+      <p>For example, here's how to get an Array of collaborators for a
+      repository:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, #&lt;Team:...&gt;, ...]</span>
+      </pre></div>
+
+      <p>Boom, no need for a separate table. And access control will never be
+      out of sync with membership. The result can optionally be constrained
+      by type:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, ...]</span>
+      </pre></div>
+
+      <p>Ability has a powerful set of scopes to help you out.</p>
+
+      <h3>
+      <a name="listing-subjects" class="anchor" href="#listing-subjects"><span class="octicon octicon-link"></span></a>Listing subjects</h3>
+
+      <p>As with listing actors for a subject, you can work with an actor's abilities
+      directly if necessary:</p>
+
+      <pre><code>repos = dat("rick").
+        abilities(:type =&gt; Repository).direct.map &amp;:subject
+      repos = dat("rick").
+        abilities(:type =&gt; Repository).indirect.map &amp;:subject
+      </code></pre>
+
+      <h3>
+      <a name="customizing-the-lifecycle" class="anchor" href="#customizing-the-lifecycle"><span class="octicon octicon-link"></span></a>Customizing the lifecycle</h3>
+
+      <p><code>Ability::Subject</code> is chock full of hooks. Here are a few ways to
+      use them.</p>
+
+      <h4>
+      <a name="only-github-staff-can-have-ability-on-my-instances" class="anchor" href="#only-github-staff-can-have-ability-on-my-instances"><span class="octicon octicon-link"></span></a>"Only GitHub staff can have ability on my instances."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">grant?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="n">actor</span><span class="o">.</span><span class="n">is_a?</span><span class="p">(</span><span class="no">User</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">actor</span><span class="o">.</span><span class="n">staff?</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>This method returns <code>true</code> by default.</p>
+
+      <h4>
+      <a name="im-a-public-repository-everybody-can-read-me" class="anchor" href="#im-a-public-repository-everybody-can-read-me"><span class="octicon octicon-link"></span></a>"I'm a public repository. Everybody can read me."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">permit?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="k">super</span> <span class="o">||</span> <span class="p">(</span><span class="kp">public</span><span class="p">?</span> <span class="o">&amp;&amp;</span> <span class="n">action</span> <span class="o">==</span> <span class="ss">:read</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>This method returns <code>Ability.can?(actor, action, self)</code> by default.</p>
+
+      <h4>
+      <a name="tell-me-when-an-ability-is-directly-granted-on-me" class="anchor" href="#tell-me-when-an-ability-is-directly-granted-on-me"><span class="octicon octicon-link"></span></a>"Tell me when an ability is directly granted on me."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">granted</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">send_welcome_email</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <h4>
+      <a name="tell-me-when-a-direct-ability-on-me-is-revoked" class="anchor" href="#tell-me-when-a-direct-ability-on-me-is-revoked"><span class="octicon octicon-link"></span></a>"Tell me when a direct ability on me is revoked."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">revoked</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">bust_dem_caches</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <h2>
+      <a name="idioms-and-lessons-learned" class="anchor" href="#idioms-and-lessons-learned"><span class="octicon octicon-link"></span></a>Idioms and lessons learned</h2>
+
+      <ul>
+      <li><p>Ask about abilities via the actor (<code>actor.can? :read, subject</code>).
+      This helps us make sure hooks and overrides work correctly. Avoid
+      direct calls to <code>Ability.can?</code> or <code>Ability::Subject#permit?</code>.</p></li>
+      <li><p>Grant and revoke abilities via the subject (<code>subject.grant ...</code>,
+      <code>subject.revoke ...</code>). This also helps maintain hooks and overrides.</p></li>
+      <li><p>Don't hack one-offs. If you're asking any question like "can this
+      thing do something to this other thing?" make sure you're doing it
+      via abilities. If the question isn't answered properly via abs,
+      give more information by overriding subject hooks. If <em>that</em> doesn't
+      work, file a bug. Abilities should be the single source of truth
+      for access control.</p></li>
+      <li>
+      <p>Extract nouns, not verbs. Having nothing but <code>:read</code>, <code>:write</code>, and
+      <code>:admin</code> actions can feel restrictive, but that feeling is often
+      an indication of a missing noun. For example, instead of adding an
+      <code>:admin_billing</code> action we added an <code>organization.billing</code> object
+      and hung abilities off of it.</p>
+
+      <p>If you extract a non-ActiveRecord model as a "permissionable" object, be
+        sure that when it's deleted (however that may happen), the associated
+        abilities are cleared as well.</p>
+      </li>
+      <li><p>Don't cache ability results. If abilities are slow it's a bug.</p></li>
+      </ul><h2>
+      <a name="running-the-abilities-transitions" class="anchor" href="#running-the-abilities-transitions"><span class="octicon octicon-link"></span></a>Running the abilities transitions</h2>
+
+      <p>Did you just fix a bug that wasn't generating abilities correctly? Sweeeet. Now
+      you need to backfill that fix to all existing permissions.</p>
+
+      <p>If your change is sweeping enough, you may want to just drop all of the existing
+      abilities data and start from scratch. If so, you'll need to truncate the
+      abilities tables before running the transitions. You can also just run the
+      transitions without truncating since they are designed to be idempotent and
+      optimized to not re-generate existing abilities; only abilities that need to be
+      inserted/updated will be generated.</p>
+
+      <h3>
+      <a name="turn-off-all-abilities-science-experiments" class="anchor" href="#turn-off-all-abilities-science-experiments"><span class="octicon octicon-link"></span></a>Turn off all abilities science experiments</h3>
+
+      <p>Before doing any truncate or transition, disable all experiments that hit the
+      abilities table on the
+      <a href="https://github.com/stafftools/science">science dashboard</a>.</p>
+
+      <h3>
+      <a name="truncating-the-abilities-tables" class="anchor" href="#truncating-the-abilities-tables"><span class="octicon octicon-link"></span></a>Truncating the abilities tables</h3>
+
+      <p><strong>Be sure all abilities science experiments are turned off before truncating.
+      Attempting a truncate while the table is still being accessed can bring down
+      production.</strong></p>
+
+      <p>Once you're ready to truncate, give a shout to @github/mysql. <strong>You'll need
+      them to keep an eye on the truncates and be ready to jump in and kill them
+      if anything goes amiss.</strong> Once @github/mysql gives you the go ahead, jump
+      into the Ops room and run the following truncate commands individually,
+      waiting for each truncate to finish before starting the next:</p>
+
+      <pre><code>/mysql truncate ability_activities
+      /mysql truncate ability_derivations
+      /mysql truncate abilities
+      </code></pre>
+
+      <h3>
+      <a name="running-the-transitions" class="anchor" href="#running-the-transitions"><span class="octicon octicon-link"></span></a>Running the transitions</h3>
+
+      <p>The transitions take a while to finish, so run them on a screen. We use divvy
+      to parallelize the transition runs; be sure you're running these on a staff
+      carpathia machine (i.e., not aux1) if you're running with a bunch of workers.
+      The transitions are slightly order-dependent: the<code>org_abilities_transition</code>
+      needs to be run first; once that finishes the other two can be run in any order.</p>
+
+      <pre><code>$ ssh aux1.rs.github.com
+      abilibuddy@aux1:~$ gh-screen
+      [ in screen ]
+      abilibuddy@aux1:~$ ssh -t github-staff3-cp1-prd.iad.github.net
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/org_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/user_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/repo_abilities_transition.rb
+      </code></pre>
+
+      <p>The transitions all use replication throttling to reduce their impact on mysql
+      load, but it's always a good idea to keep an eye on
+      <a href="https://github.com/stafftools/graphs/mysql">the mtop dashboard</a> while these are
+      running.</p>
+
+      <h3>
+      <a name="turn-abilities-science-back-on" class="anchor" href="#turn-abilities-science-back-on"><span class="octicon octicon-link"></span></a>Turn abilities science back on</h3>
+
+      <p>Re-enable the abilities experiments on the
+      <a href="https://github.com/stafftools/science">science dashboard</a> to see if you really
+      fixed things :)</p></article>
+    </div>
+
+    <div class="after">
+      <article class="markdown-body entry-content" itemprop="mainContentOfPage"><h1>
+      <a name="abilities" class="anchor" href="#abilities"><span class="octicon octicon-link"></span></a>Abilities</h1>
+
+      <p><strong>Abilities are a work in progress. The code doesn't use them consistently. Talk to one of the @github/abilibuddies before you start using 'em.</strong></p>
+
+      <p>The <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/ability.rb">abilities</a> API offers a consistent way to model authorization. Abilities also store membership for organizations, teams, and repositories. See <a href="https://github.com/github/github/pull/6980">PR #6980</a> for the original discussion and implementation and <a href="https://github.com/github/github/pull/13599">PR #13599</a> for a significant later refactoring. <a href="https://github.com/github/github/pull/15032">PR #15032</a> adds a rewritten cascade and ancestor tracking.</p>
+
+      <p>Please also read the TomDoc on <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/ability.rb">Ability</a> and its modules. There are a lot of useful filters, helper methods, and hooks.</p>
+
+      <h2>
+      <a name="concepts" class="anchor" href="#concepts"><span class="octicon octicon-link"></span></a>Concepts</h2>
+
+      <p>An ability is the combination of <strong>actor</strong>, an <strong>action</strong>, and a <strong>subject</strong>. A model can also be a <strong>connector</strong>, which is both an actor and a subject. In code, actors include the <code>Ability::Actor</code> mixin and subjects include <code>Ability::Subject</code>. Connectors include <code>Ability::Connector</code>. Some examples from <code>github/github</code>:</p>
+
+      <ul>
+      <li>Users are actors,</li>
+      <li>Repositories are subjects, and</li>
+      <li>Organizations and teams are connectors.</li>
+      </ul><p>An ability's <strong>action</strong> indicates what level of control an actor has over a subject. There are only three types of actions: <code>:read</code>, <code>:write</code>, and <code>:admin</code>. Each action includes any "less powerful" actions, so <code>:admin</code> implies both <code>:write</code> and <code>:read</code> ability.</p>
+
+      <p>Actors, subjects, and connectors are all participants. A <strong>participant</strong> is identified by its <code>ability_id</code> and <code>ability_type</code>.</p>
+
+      <h3>
+      <a name="kinds-of-abilities" class="anchor" href="#kinds-of-abilities"><span class="octicon octicon-link"></span></a>Kinds of abilities</h3>
+
+      <p>The simplest possible ability is a <strong>direct ability</strong>. A direct ability grants an actor the right to perform a certain level of action on a subject. This is also how membership is encoded: A <strong>member</strong> is another way to describe an actor with direct ability on a subject. For example:</p>
+
+      <ul>
+      <li>A user is a member of a team</li>
+      <li>A user is a member of an organization</li>
+      <li>A user is a member of a repository</li>
+      <li>A team is a member of a repository</li>
+      </ul><p>An ability that isn't explicitly granted to an actor is an <strong>indirect ability</strong>. When a connector is involved in a direct ability, it grants matching indirect abilities to its own actors. For example:</p>
+
+      <ul>
+      <li>A user is a member of a team that is a member of a repository. The user has an indirect ability on the repository, but isn't a <em>member</em>.</li>
+      </ul><p>Indirect abilities may also exist if a subject has dependents. A <strong>dependent</strong> is a model "owned" by a subject. For example, organizations have team and repository dependents. An actor with admin ability on a subject automatically has a indirect admin ability on its dependents.</p>
+
+      <p>An actor can act on a subject in a few other situations too:</p>
+
+      <ul>
+      <li>The actor is acting on itself,</li>
+      <li>The subject explicitly permits the actor to do something, or</li>
+      <li>The subject allows a default level of ability for all actors.</li>
+      </ul><h3>
+      <a name="priorities" class="anchor" href="#priorities"><span class="octicon octicon-link"></span></a>Priorities</h3>
+
+      <p>An actor can only have one <em>direct</em> ability on a subject, but it's possible (common, even) for an actor to have many <em>indirect</em> abilities on the same subject. The ability with the highest <code>action</code> value always "wins," no matter whether it's direct or indirect.</p>
+
+      <p>An ability's <strong>priority</strong> explains why it was created. All direct abilities are have a <code>:direct</code> priority. Indirect abilities are <code>:indirect</code> except for admin abilities cascaded to dependents, which are <code>:admin_on_owner</code>.</p>
+
+      <h3>
+      <a name="cascades-and-indirect-abilities" class="anchor" href="#cascades-and-indirect-abilities"><span class="octicon octicon-link"></span></a>Cascades and indirect abilities</h3>
+
+      <p>When a direct ability is granted, the ability system also grants indirect abilities based on related abilities on the actor or subject. This is a transitive relationship: if there is a direct ability from <code>B-&gt;C</code> and a new ability from <code>A-&gt;B</code> is created, then an indirect ability from <code>A-&gt;C</code> is created
+      as well.</p>
+
+      <p>Indirect abilities can't be managed directly, and are created or revoked automatically as direct abilities are changed. For example, if either the direct
+      abilities from <code>A-&gt;B</code> or <code>B-&gt;C</code> are revoked, the indirect ability from <code>A-&gt;C</code> is revoked as well (the "chain" is broken).</p>
+
+      <p>The <code>action</code> for an indirect ability depends on the ability of the grant on the subject. For example, if <code>A-(write)-&gt;B-&gt;(read)-&gt;C</code>, the resulting indirect ability will be <code>A-(read)-&gt;C</code>. Similarly, <code>A-(read)-&gt;B-&gt;(write)-C</code> results in <code>A-(write)-&gt;C</code>.</p>
+
+      <p>Indirect abilities use the <code>Ability::Derivation</code> model to track these relationships. For the previous example, the <code>A-&gt;C</code> ability will include two ancestry entries linking it to both <code>A-&gt;B</code> and <code>B-&gt;C</code>.</p>
+
+      <h4>
+      <a name="subject-subject-cascades" class="anchor" href="#subject-subject-cascades"><span class="octicon octicon-link"></span></a>Subject-&gt;Subject cascades</h4>
+
+      <p>Permissions are cascaded "downward" from an ability's subject to the subject's
+      direct subjects. For example:</p>
+
+      <ol>
+      <li>Team is granted an ability on Repository</li>
+      <li>User is granted an ability on Team</li>
+      <li>Because Team (the subject) has an ability on Repository (its subject), User is granted an indirect ability on Repository.</li>
+      </ol><pre><code>+------+           2  3
+      | User |-----------+--+-
+      +------+           |  .
+                         |  .
+      +------+        1  v  .
+      | Team |--------+-----.-
+      +------+        |     .
+                      |     .
+      +------------+  v     v
+      | Repository |----------
+      +------------+
+      </code></pre>
+
+      <p>Two ancestry items are stored along with the indirect grant:</p>
+
+      <ul>
+      <li>The indirect ability's parent, that is, the direct ability that initiated the
+      cascade: ability 2 is the initial direct grant.</li>
+      <li>The direct ability between Team and Repository that allowed the cascade to
+      continue "downward" to Repository: ability 1.</li>
+      </ul><p>This establishes both abilities 1 and 2 as being "ancestors" of ability 3, so if either is revoked, then ability 3 will be revoked as well.</p>
+
+      <h4>
+      <a name="actor-actor-cascades" class="anchor" href="#actor-actor-cascades"><span class="octicon octicon-link"></span></a>Actor-&gt;Actor cascades</h4>
+
+      <p>Similarly, abilities are cascaded "upward" to direct actors on an ability's actor. For example:</p>
+
+      <ol>
+      <li>User is granted an ability on Team</li>
+      <li>Team is granted an ability on Repository</li>
+      <li>Because User has an ability on Team (the actor), it is also granted an
+      indirect ability on Repository.</li>
+      </ol><pre><code>+------+        1     3
+      | User |--------+-----+-
+      +------+        |     .
+                      |     .
+      +------+        v  2  .
+      | Team |-----------+--.-
+      +------+           |  .
+                         |  .
+      +------------+     v  v
+      | Repository |----------
+      +------------+
+      </code></pre>
+
+      <p>Again, two ancestry items are stored for indirect ability 3:</p>
+
+      <ul>
+      <li>The "parent", the direct grant which started the cascade: ability 2.</li>
+      <li>The related direct ability that allowed the cascade to continue "upward":
+      ability 1.</li>
+      </ul><h4>
+      <a name="explicit-child-cascades" class="anchor" href="#explicit-child-cascades"><span class="octicon octicon-link"></span></a>Explicit child cascades</h4>
+
+      <p>Admin abilities can be cascaded to an explicitly-defined list of dependents. To enable this, you can override two methods on any <code>Ability::Subject</code>. For example, paraphrased from <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/organization/ability_dependency.rb">Organization's Ability code</a>: When <code>:admin</code> is granted on <code>Organization</code>, the ability is cascaded to the organization's repositories and teams.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">dependents?</span>
+        <span class="kp">true</span>
+      <span class="k">end</span>
+
+      <span class="k">def</span> <span class="nf">dependents</span>
+        <span class="n">repositories</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span> <span class="o">+</span> <span class="n">teams</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Abilities created from explicit lists of dependents will always be indirect. The only ancestor of these indirect dependent abilities will be the "parent" ability since that is the only ability dependents can be cascaded from.</p>
+
+      <h4>
+      <a name="ancestor-stealing-for-efficient-cascades" class="anchor" href="#ancestor-stealing-for-efficient-cascades"><span class="octicon octicon-link"></span></a>"Ancestor stealing" for efficient cascades</h4>
+
+      <p>As an example, here is a sequence of grants on a hierarchy of actors and subjects. In order to calculate an indirect ability through multiple levels the ability system must look at each direct ability and recursively propagate the original ability. When the direct ability 4 is created, indirect ability 5 is created because of ability 1, and then (working "downward") indirect ability 6 is created by way of ability 1 <em>and</em> 2.</p>
+
+      <p>This diagram and the following differ only in how ability 6 is created: via recursive descent of the direct ability tree, or via an optimization we're calling "ancestor stealing".</p>
+
+      <pre><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom
+                           |  .  .        cascaded via ability 1
+                           |  .  .     +------------------------------------+
+      +-----+     1     3  v  .  .     |             Derivations            |
+      | Top |-----+-----+-----.--.-    |------------------------------------|
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 2 (parent)  |
+                  |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+      +--------+  v  2  .     v  .     4. Direct: Actor -&gt; Top
+      | Middle |-----+--.--------.-    5. Indirect: Actor -&gt; Middle
+      +--------+     |  .        .        cascaded via ability 1
+                     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+      +--------+     v  v        v     |  ability: 5, ancestor: 1 (cascade) |
+      | Bottom |-------------------    +------------------------------------+
+      +--------+                       6. Indirect: Actor -&gt; Bottom
+                    +------------------&gt;  cascaded via ability 2 via ability 1
+                    |                  +------------------------------------+
+       Created via traversal of        |  ability: 6, ancestor: 4 (parent)  |
+       ability 1 followed by           |  ability: 6, ancestor: 2 (cascade) |
+       ability 2 (recursive descent)   |  ability: 6, ancestor: 1 (cascade) |
+                                       +------------------------------------+
+      </code></pre>
+
+      <p>The ability system uses a shortcut to give us the same indirect abilities and ancestry information as a recursive descent without having to explicitly traverse the entire tree of direct grants. Instead, it only examines the first level of related grants, <em>including indirect grants</em>, and copies the ancestry information of any indirect grant it encounters.</p>
+
+      <p>Here, when cascading ability 4, abilities only looks at the grants on <code>Top</code>, which are the direct ability 1 and the indirect ability 3. This results in two new indirect grants:</p>
+
+      <ul>
+      <li><p>Ability 5: based on direct ability 1. Since ability 1 is a direct grant, the   indirect grant saves its parent (4) and ability 1 as its only related ancestor.</p></li>
+      <li><p>Ability 6: based on indirect ability 3. Because 3 is indirect, we simply copy all of the ancestors from ability 3, and add our own parent (ability 4) as an   additional entry. The ancestry of ability 3 is the same as what we would have generated had we recursively descended ability 1 and 2, so this saves us the trouble of actually doing it.</p></li>
+      </ul><pre><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom cascaded via 1
+                           |  .  .     +------------------------------------+
+                           |  .  .     |             Derivations            |
+      +-----+     1     3  v  .  .     |------------------------------------|
+      | Top |-----+-----+-----.--.-    |  ability: 3, ancestor: 2 (parent)  |
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+                  |     .     .  .     4. Direct: Actor -&gt; Top
+      +--------+  v  2  .     v  .     5. Indirect: Actor -&gt; Middle
+      | Middle |-----+--.--------.-       cascaded via ability 1
+      +--------+     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+                     |  .        .     |  ability: 5, ancestor: 1 (cascade) |
+      +--------+     v  v        v     +------------------------------------+
+      | Bottom |-------------------    6. Indirect: Actor -&gt; Bottom
+      +--------+                          cascaded via indirect ability 3
+                                       +------------------------------------+
+                                       |  ability: 6, ancestor: 4 (parent)  |
+                 +--------------------&gt;|  ability: 6, ancestor: 2 (cascade) |
+                 |                     |  ability: 6, ancestor: 1 (cascade) |
+        "Ancestor stealing":           +------------------------------------+
+        Ability 6 writes its parent
+        as an ancestor, then copies all
+        ancestors of Ability 3, in this
+        case abilities 1 and 2.
+      </code></pre>
+
+      <h2>
+      <a name="cookbook" class="anchor" href="#cookbook"><span class="octicon octicon-link"></span></a>Cookbook</h2>
+
+      <p>Want to actually use this stuff? Here's a bunch of examples. All examples assume that the <code>dat</code> console helper is available.</p>
+
+      <h3>
+      <a name="making-an-actor" class="anchor" href="#making-an-actor"><span class="octicon octicon-link"></span></a>Making an actor</h3>
+
+      <p>Turn any model into an actor by including the <code>Ability::Actor</code> module. Abilities requires a String <code>ability_type</code> and Fixnum <code>ability_id</code> for identity. This is optimized for ActiveRecord models, so it defaults to <code>self.class.name</code> and <code>self.id</code>. Override <code>ability_id</code> and <code>ability_type</code> to control identity yourself.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Once your model is an actor you can ask it if it's capable of action on a subject:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Widget</span><span class="o">.</span><span class="n">first</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; probably false</span>
+      </pre></div>
+
+      <h3>
+      <a name="making-a-subject" class="anchor" href="#making-a-subject"><span class="octicon octicon-link"></span></a>Making a subject</h3>
+
+      <p>Turning a model into a subject is remarkably similar:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>Like actors, subjects have a <code>ability_id</code> and a <code>ability_type</code>. <code>Ability::Subject</code> has a large and powerful set of hooks: See "<a href="#customizing-the-lifecycle">Customizing the lifecycle</a>" below for details.</p>
+
+      <h3>
+      <a name="granting-abilities" class="anchor" href="#granting-abilities"><span class="octicon octicon-link"></span></a>Granting abilities</h3>
+
+      <p>When you <strong>grant</strong> a ability, you're creating a direct ability for an actor to perform an action on a subject. Granting an ability may also cause a cascade of indirect grants. For instance, granting a User ability on a Team will also grant all of the Team's abilities to the User.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">grant</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">),</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <h3>
+      <a name="checking-abilities" class="anchor" href="#checking-abilities"><span class="octicon octicon-link"></span></a>Checking abilities</h3>
+
+      <p>Need to know whether or not an actor can perform an action on a subject? Use <code>can?</code>, which just gives you a thumbsup/down.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">repo</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like a little more information about the ability, <code>Ability::Actor.ability</code> will hand you back the "best" Ability between an actor and subject.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">ability</span> <span class="o">=</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">ability</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; #&lt;Ability...&gt;</span>
+      </pre></div>
+
+      <p>Given an Ability instance, you can ask the same question as <code>can?</code> above. <code>Ability::Actor#can?</code>.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">ability</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <h3>
+      <a name="revoking-abilities" class="anchor" href="#revoking-abilities"><span class="octicon octicon-link"></span></a>Revoking abilities</h3>
+
+      <p>Revoking removes an actor's <em>direct</em> ability to act on a subject. Any <em>indirect</em> abilities between actor and subject are ignored. To remove them, revoke the related direct ability.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">revoke</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill all of an <em>actor's</em> direct abilities, use <code>Ability::Actor.clear</code>. ActiveRecord models automatically clean up associated abilities when they're destroyed.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill all of a <em>subject's</em> grants, use <code>Ability::Subject.clear</code>.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre></div>
+
+      <p>If you'd like to kill every direct Ability that involves a participant, <em>no matter whether the participant is an actor or subject</em>, use <code>Ability.clear</code>.</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="no">Ability</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/orgs-next"</span><span class="p">)</span>
+      </pre></div>
+
+      <h3>
+      <a name="listing-direct-actors" class="anchor" href="#listing-direct-actors"><span class="octicon octicon-link"></span></a>Listing direct actors</h3>
+
+      <p>Abilities control access, but they're also useful when a subject has a list of members or collaborators. For example, here's how to get an Array of collaborators for a repository:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, #&lt;Team:...&gt;, ...]</span>
+      </pre></div>
+
+      <p>Boom, no need for a separate table. And access control will never be out of sync with membership. The result can optionally be constrained by type:</p>
+
+      <div class="highlight highlight-ruby"><pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, ...]</span>
+      </pre></div>
+
+      <p>Ability has a powerful set of scopes to help you out.</p>
+
+      <h3>
+      <a name="listing-subjects" class="anchor" href="#listing-subjects"><span class="octicon octicon-link"></span></a>Listing subjects</h3>
+
+      <p>As with listing actors for a subject, you can work with an actor's abilities directly if necessary:</p>
+
+      <pre><code>repos = dat("rick").
+        abilities(:type =&gt; Repository).direct.map &amp;:subject
+      repos = dat("rick").
+        abilities(:type =&gt; Repository).indirect.map &amp;:subject
+      </code></pre>
+
+      <h3>
+      <a name="customizing-the-lifecycle" class="anchor" href="#customizing-the-lifecycle"><span class="octicon octicon-link"></span></a>Customizing the lifecycle</h3>
+
+      <p><code>Ability::Subject</code> is chock full of hooks. Here are a few ways to use them.</p>
+
+      <h4>
+      <a name="only-github-staff-can-have-ability-on-my-instances" class="anchor" href="#only-github-staff-can-have-ability-on-my-instances"><span class="octicon octicon-link"></span></a>"Only GitHub staff can have ability on my instances."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">grant?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="n">actor</span><span class="o">.</span><span class="n">is_a?</span><span class="p">(</span><span class="no">User</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">actor</span><span class="o">.</span><span class="n">staff?</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>This method returns <code>true</code> by default.</p>
+
+      <h4>
+      <a name="im-a-public-repository-everybody-can-read-me" class="anchor" href="#im-a-public-repository-everybody-can-read-me"><span class="octicon octicon-link"></span></a>"I'm a public repository. Everybody can read me."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">permit?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="k">super</span> <span class="o">||</span> <span class="p">(</span><span class="kp">public</span><span class="p">?</span> <span class="o">&amp;&amp;</span> <span class="n">action</span> <span class="o">==</span> <span class="ss">:read</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <p>This method returns <code>Ability.can?(actor, action, self)</code> by default.</p>
+
+      <h4>
+      <a name="tell-me-when-an-ability-is-directly-granted-on-me" class="anchor" href="#tell-me-when-an-ability-is-directly-granted-on-me"><span class="octicon octicon-link"></span></a>"Tell me when an ability is directly granted on me."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">granted</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">send_welcome_email</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <h4>
+      <a name="tell-me-when-a-direct-ability-on-me-is-revoked" class="anchor" href="#tell-me-when-a-direct-ability-on-me-is-revoked"><span class="octicon octicon-link"></span></a>"Tell me when a direct ability on me is revoked."</h4>
+
+      <div class="highlight highlight-ruby"><pre><span class="k">def</span> <span class="nf">revoked</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">bust_dem_caches</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre></div>
+
+      <h2>
+      <a name="idioms-and-lessons-learned" class="anchor" href="#idioms-and-lessons-learned"><span class="octicon octicon-link"></span></a>Idioms and lessons learned</h2>
+
+      <ul>
+      <li><p>Ask about abilities via the actor (<code>actor.can? :read, subject</code>) but modify abilities behavior in the subject. This helps make sure hooks and overrides work correctly. Avoid direct calls to <code>Ability.can?</code> or <code>Ability::Subject#permit?</code>.</p></li>
+      <li><p>Grant and revoke abilities via the subject (<code>subject.grant ...</code>, <code>subject.revoke ...</code>). This also helps maintain hooks and overrides.</p></li>
+      <li><p>Don't hack one-offs. If you're asking any question like "can this thing do something to this other thing?" make sure you're doing it via abilities. If the question isn't answered properly via abs, give more information by overriding subject hooks. If <em>that</em> doesn't work, file a bug. Abilities should be the single source of truth for access control.</p></li>
+      <li><p>Extract nouns, not verbs. Having nothing but <code>:read</code>, <code>:write</code>, and <code>:admin</code> actions can feel restrictive, but that feeling is often an indication of a missing noun. For example, instead of adding an <code>:admin_billing</code> action add an <code>organization.billing</code> object and hang abilities off of it.</p></li>
+      </ul><blockquote>
+      <p>If you extract a non-ActiveRecord model as a an actor or subject, be sure that when it's deleted (however that may happen), the associated abilities are destroyed as well.</p>
+      </blockquote>
+
+      <ul>
+      <li>Don't cache ability results. If abilities are slow it's a bug.</li>
+      </ul><h2>
+      <a name="running-the-abilities-transitions" class="anchor" href="#running-the-abilities-transitions"><span class="octicon octicon-link"></span></a>Running the abilities transitions</h2>
+
+      <p>Did you just fix a bug that wasn't generating abilities correctly? Sweeeet. Now you need to backfill that fix to all existing permissions.</p>
+
+      <p>If your change is sweeping enough, you may want to just drop all of the existing abilities data and start from scratch. If so, you'll need to truncate the abilities tables before running the transitions. You can also just run the transitions without truncating since they are designed to be idempotent and optimized to not re-generate existing abilities; only abilities that need to be inserted/updated will be generated.</p>
+
+      <h3>
+      <a name="turn-off-all-abilities-science-experiments" class="anchor" href="#turn-off-all-abilities-science-experiments"><span class="octicon octicon-link"></span></a>Turn off all abilities science experiments</h3>
+
+      <p>Before doing any truncate or transition, disable all experiments that hit the abilities table on the
+      <a href="https://github.com/stafftools/science">science dashboard</a>.</p>
+
+      <h3>
+      <a name="truncating-the-abilities-tables" class="anchor" href="#truncating-the-abilities-tables"><span class="octicon octicon-link"></span></a>Truncating the abilities tables</h3>
+
+      <p><strong>Be sure all abilities science experiments are turned off before truncating. Attempting a truncate while the table is still being accessed can bring down production.</strong></p>
+
+      <p>Once you're ready to truncate, give a shout to @github/mysql. <strong>You'll need them to keep an eye on the truncates and be ready to jump in and kill them if anything goes amiss.</strong> Once @github/mysql gives you the go ahead, jump into the Ops room and run the following truncate commands individually, waiting for each truncate to finish before starting the next:</p>
+
+      <pre><code>/mysql truncate ability_activities
+      /mysql truncate ability_derivations
+      /mysql truncate abilities
+      </code></pre>
+
+      <h3>
+      <a name="running-the-transitions" class="anchor" href="#running-the-transitions"><span class="octicon octicon-link"></span></a>Running the transitions</h3>
+
+      <p>The transitions take a while to finish, so run them on a screen. We use divvy to parallelize the transition runs; be sure you're running these on a staff carpathia machine (i.e., not aux1) if you're running with a bunch of workers. The transitions are slightly order-dependent: the<code>org_abilities_transition</code> needs to be run first; once that finishes the other two can be run in any order.</p>
+
+      <pre><code>$ ssh aux1.rs.github.com
+      abilibuddy@aux1:~$ gh-screen
+      [ in screen ]
+      abilibuddy@aux1:~$ ssh -t github-staff3-cp1-prd.iad.github.net
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/org_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/user_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/repo_abilities_transition.rb
+      </code></pre>
+
+      <p>The transitions all use replication throttling to reduce their impact on mysql load, but it's always a good idea to keep an eye on <a href="https://github.com/stafftools/graphs/mysql">the mtop dashboard</a> while these are running.</p>
+
+      <h3>
+      <a name="turn-abilities-science-back-on" class="anchor" href="#turn-abilities-science-back-on"><span class="octicon octicon-link"></span></a>Turn abilities science back on</h3>
+
+      <p>Re-enable the abilities experiments on the <a href="https://github.com/stafftools/science">science dashboard</a> to see if you really fixed things :)</p></article>
+    </div>
+
+    <div class="diff markdown-body">
+
+<article class="markdown-body entry-content changed" itemprop="mainContentOfPage"><h1 class="vicinity">
+      <a name="abilities" class="anchor" href="#abilities"><span class="octicon octicon-link"></span></a>Abilities</h1>
+<div class="vicinity changed"><p><del><strong>Abilities are a work in progress. The code doesn't use them consistently. Talk to a friend on the @github/ability team before you start using 'em.</strong></del><ins><strong>Abilities are a work in progress. The code doesn't use them consistently. Talk to one of the @github/abilibuddies before you start using 'em.</strong></ins></p></div>
+<div class="vicinity changed"><p>The <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/ability.rb">abilities</a> API <del>provides</del><ins>offers</ins> a <del>unified and encapsulated</del><ins>consistent</ins> way to model authorization<del> on github.com</del>. Abilities also <del>provide generalized</del><ins>store</ins> membership for organizations, teams, and repositories. See <a href="https://github.com/github/github/pull/6980">PR #6980</a> for the original discussion and implementation and <a href="https://github.com/github/github/pull/13599">PR #13599</a> for a significant later refactoring. <a href="https://github.com/github/github/pull/15032">PR #15032</a> adds a rewritten cascade and ancestor tracking.</p></div>
+<div class="vicinity changed"><p>Please also read the TomDoc on <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/ability.rb">Ability</a><del>, </del><del><a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability/actor.rb">Ability::Actor</a></del><del>, and </del><del><a href="/github/github/blob/c2da0d5327484fe5d5e3b58104f1cca75e33f3eb/app/models/ability/subject.rb">Ability::Subject</a></del><del>. There are a lot of useful ActiveRecord scopes</del><ins> and its modules. There are a lot of useful filters</ins>, helper methods, and hooks.</p></div>
+<h2 class="vicinity"> <a name="concepts" class="anchor" href="#concepts"><span class="octicon octicon-link"></span></a>Concepts</h2>
+<div class="changed"><p>An ability is the combination of <strong>actor</strong>, an <strong>action</strong>, and a <strong>subject</strong>. A model can also be a <strong>connector</strong>, which is both an actor and a subject. In code, actors include the <code>Ability::Actor</code> mixin and subjects include <code>Ability::Subject</code>. Connectors include <code>Ability::Connector</code>. Some examples from <del>the </del><del><code>github/github</code></del><del> domain model</del><ins><code>github/github</code></ins>:</p></div>
+<ul class="vicinity">
+<li>Users are actors,</li> <li>Repositories are subjects, and</li> <li>Organizations and teams are connectors.</li> </ul>
+<div class="expandable unchanged">
+<p>An ability's <strong>action</strong> indicates what level of control an actor has over a subject. There are only three types of actions: <code>:read</code>, <code>:write</code>, and <code>:admin</code>. Each action includes any "less powerful" actions, so <code>:admin</code> implies both <code>:write</code> and <code>:read</code> ability.</p>
+<p>Actors, subjects, and connectors are all participants. A <strong>participant</strong> is identified by its <code>ability_id</code> and <code>ability_type</code>.</p>
+<h3> <a name="kinds-of-abilities" class="anchor" href="#kinds-of-abilities"><span class="octicon octicon-link"></span></a>Kinds of abilities</h3>
+<p>The simplest possible ability is a <strong>direct ability</strong>. A direct ability grants an actor the right to perform a certain level of action on a subject. This is also how membership is encoded: A <strong>member</strong> is another way to describe an actor with direct ability on a subject. For example:</p>
+<ul>
+<li>A user is a member of a team</li> <li>A user is a member of an organization</li> <li>A user is a member of a repository</li> <li>A team is a member of a repository</li> </ul>
+</div>
+<p class="vicinity">An ability that isn't explicitly granted to an actor is an <strong>indirect ability</strong>. When a connector is involved in a direct ability, it grants matching indirect abilities to its own actors. For example:</p>
+<div class="changed"><ul><li class="changed">A user is a member of a team<span class="changed"> </span><del>the team</del><ins>that</ins> is a member of a repository<span class="changed">. </span><del>so</del><ins>The</ins> user has an indirect ability on the repository<ins>, but isn't a </ins><ins><em>member</em></ins><ins>.</ins>
+</li></ul></div>
+<p class="vicinity">Indirect abilities may also exist if a subject has dependents. A <strong>dependent</strong> is a model "owned" by a subject. For example, organizations have team and repository dependents. An actor with admin ability on a subject automatically has a indirect admin ability on its dependents.</p>
+<div class="expandable unchanged">
+<p>An actor can act on a subject in a few other situations too:</p>
+<ul>
+<li>The actor is acting on itself,</li> <li>The subject explicitly permits the actor to do something, or</li> <li>The subject allows a default level of ability for all actors.</li> </ul>
+</div>
+<h3 class="vicinity"> <a name="priorities" class="anchor" href="#priorities"><span class="octicon octicon-link"></span></a>Priorities</h3>
+<div class="changed"><p>An actor can only have one <em>direct</em> ability on a subject, but it's possible (common, even) for an actor to have many <em>indirect</em> abilities <ins>on the same subject</ins>. The ability with the highest <code>action</code> value always "wins," no matter whether it's direct or indirect.</p></div>
+<p class="vicinity">An ability's <strong>priority</strong> explains why it was created. All direct abilities are have a <code>:direct</code> priority. Indirect abilities are <code>:indirect</code> except for admin abilities cascaded to dependents, which are <code>:admin_on_owner</code>.</p>
+<div class="expandable unchanged">
+<h3> <a name="cascades-and-indirect-abilities" class="anchor" href="#cascades-and-indirect-abilities"><span class="octicon octicon-link"></span></a>Cascades and indirect abilities</h3>
+<p>When a direct ability is granted, the ability system also grants indirect abilities based on related abilities on the actor or subject. This is a transitive relationship: if there is a direct ability from <code>B-&gt;C</code> and a new ability from <code>A-&gt;B</code> is created, then an indirect ability from <code>A-&gt;C</code> is created as well.</p>
+<p>Indirect abilities can't be managed directly, and are created or revoked automatically as direct abilities are changed. For example, if either the direct abilities from <code>A-&gt;B</code> or <code>B-&gt;C</code> are revoked, the indirect ability from <code>A-&gt;C</code> is revoked as well (the "chain" is broken).</p>
+<p>The <code>action</code> for an indirect ability depends on the ability of the grant on the subject. For example, if <code>A-(write)-&gt;B-&gt;(read)-&gt;C</code>, the resulting indirect ability will be <code>A-(read)-&gt;C</code>. Similarly, <code>A-(read)-&gt;B-&gt;(write)-C</code> results in <code>A-(write)-&gt;C</code>.</p>
+</div>
+<p class="vicinity">Indirect abilities use the <code>Ability::Derivation</code> model to track these relationships. For the previous example, the <code>A-&gt;C</code> ability will include two ancestry entries linking it to both <code>A-&gt;B</code> and <code>B-&gt;C</code>.</p>
+<del><p>Abilities are cascaded in three ways:</p></del><ul class="vicinity removed">
+<li>From an ability's subject "downward" to anything the subject has direct abilities on</li> <li>From an actor "upward" to anyone who has direct abilities on that actor</li> <li>Explicitly-defined dependents of a subject</li> </ul>
+<h4 class="vicinity"> <a name="subject-subject-cascades" class="anchor" href="#subject-subject-cascades"><span class="octicon octicon-link"></span></a>Subject-&gt;Subject cascades</h4>
+<div class="expandable unchanged">
+<p>Permissions are cascaded "downward" from an ability's subject to the subject's direct subjects. For example:</p>
+<ol>
+<li>Team is granted an ability on Repository</li> <li>User is granted an ability on Team</li> <li>Because Team (the subject) has an ability on Repository (its subject), User is granted an indirect ability on Repository.</li> </ol>
+<pre><code>+------+           2  3
+      | User |-----------+--+-
+      +------+           |  .
+                         |  .
+      +------+        1  v  .
+      | Team |--------+-----.-
+      +------+        |     .
+                      |     .
+      +------------+  v     v
+      | Repository |----------
+      +------------+
+      </code></pre>
+<p>Two ancestry items are stored along with the indirect grant:</p>
+<ul>
+<li>The indirect ability's parent, that is, the direct ability that initiated the cascade: ability 2 is the initial direct grant.</li> <li>The direct ability between Team and Repository that allowed the cascade to continue "downward" to Repository: ability 1.</li> </ul>
+<p>This establishes both abilities 1 and 2 as being "ancestors" of ability 3, so if either is revoked, then ability 3 will be revoked as well.</p>
+<h4> <a name="actor-actor-cascades" class="anchor" href="#actor-actor-cascades"><span class="octicon octicon-link"></span></a>Actor-&gt;Actor cascades</h4>
+<p>Similarly, abilities are cascaded "upward" to direct actors on an ability's actor. For example:</p>
+<ol>
+<li>User is granted an ability on Team</li> <li>Team is granted an ability on Repository</li> <li>Because User has an ability on Team (the actor), it is also granted an indirect ability on Repository.</li> </ol>
+<pre><code>+------+        1     3
+      | User |--------+-----+-
+      +------+        |     .
+                      |     .
+      +------+        v  2  .
+      | Team |-----------+--.-
+      +------+           |  .
+                         |  .
+      +------------+     v  v
+      | Repository |----------
+      +------------+
+      </code></pre>
+<p>Again, two ancestry items are stored for indirect ability 3:</p>
+<ul>
+<li>The "parent", the direct grant which started the cascade: ability 2.</li> <li>The related direct ability that allowed the cascade to continue "upward": ability 1.</li> </ul>
+</div>
+<h4 class="vicinity"> <a name="explicit-child-cascades" class="anchor" href="#explicit-child-cascades"><span class="octicon octicon-link"></span></a>Explicit child cascades</h4>
+<div class="changed"><p>Admin abilities can be cascaded to an explicitly-defined list of dependents. To enable this, you can override two methods on <del>a Subject</del><ins>any </ins><ins><code>Ability::Subject</code></ins>. For example, paraphrased from <a href="/github/github/blob/e7e7d7ab89f8127b8f76396e5fadfe6dbb2270df/app/models/organization/ability_dependency.rb">Organization's Ability code</a>: When <code>:admin</code> is granted on <code>Organization</code>, the ability is cascaded to the organization's repositories and teams.</p></div>
+<pre class="vicinity"><span class="k">def</span> <span class="nf">dependents?</span>
+        <span class="kp">true</span>
+      <span class="k">end</span>
+
+      <span class="k">def</span> <span class="nf">dependents</span>
+        <span class="n">repositories</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span> <span class="o">+</span> <span class="n">teams</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="ss">:select</span> <span class="o">=&gt;</span> <span class="ss">:id</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre>
+<div class="expandable unchanged">
+<p>Abilities created from explicit lists of dependents will always be indirect. The only ancestor of these indirect dependent abilities will be the "parent" ability since that is the only ability dependents can be cascaded from.</p>
+<h4> <a name="ancestor-stealing-for-efficient-cascades" class="anchor" href="#ancestor-stealing-for-efficient-cascades"><span class="octicon octicon-link"></span></a>"Ancestor stealing" for efficient cascades</h4>
+<p>As an example, here is a sequence of grants on a hierarchy of actors and subjects. In order to calculate an indirect ability through multiple levels the ability system must look at each direct ability and recursively propagate the original ability. When the direct ability 4 is created, indirect ability 5 is created because of ability 1, and then (working "downward") indirect ability 6 is created by way of ability 1 <em>and</em> 2.</p>
+<p>This diagram and the following differ only in how ability 6 is created: via recursive descent of the direct ability tree, or via an optimization we're calling "ancestor stealing".</p>
+<pre><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom
+                           |  .  .        cascaded via ability 1
+                           |  .  .     +------------------------------------+
+      +-----+     1     3  v  .  .     |             Derivations            |
+      | Top |-----+-----+-----.--.-    |------------------------------------|
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 2 (parent)  |
+                  |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+      +--------+  v  2  .     v  .     4. Direct: Actor -&gt; Top
+      | Middle |-----+--.--------.-    5. Indirect: Actor -&gt; Middle
+      +--------+     |  .        .        cascaded via ability 1
+                     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+      +--------+     v  v        v     |  ability: 5, ancestor: 1 (cascade) |
+      | Bottom |-------------------    +------------------------------------+
+      +--------+                       6. Indirect: Actor -&gt; Bottom
+                    +------------------&gt;  cascaded via ability 2 via ability 1
+                    |                  +------------------------------------+
+       Created via traversal of        |  ability: 6, ancestor: 4 (parent)  |
+       ability 1 followed by           |  ability: 6, ancestor: 2 (cascade) |
+       ability 2 (recursive descent)   |  ability: 6, ancestor: 1 (cascade) |
+                                       +------------------------------------+
+      </code></pre>
+<p>The ability system uses a shortcut to give us the same indirect abilities and ancestry information as a recursive descent without having to explicitly traverse the entire tree of direct grants. Instead, it only examines the first level of related grants, <em>including indirect grants</em>, and copies the ancestry information of any indirect grant it encounters.</p>
+</div>
+<p class="vicinity">Here, when cascading ability 4, abilities only looks at the grants on <code>Top</code>, which are the direct ability 1 and the indirect ability 3. This results in two new indirect grants:</p>
+<div class="changed"><ul>
+<li class="changed">
+<del>Ability 5: based on direct ability 1. Since ability 1 is a direct grant, the indirect grant saves its parent (4) and ability 1 as its only related ancestor.</del><ins><p>Ability 5: based on direct ability 1. Since ability 1 is a direct grant, the indirect grant saves its parent (4) and ability 1 as its only related ancestor.</p></ins>
+</li>
+<li class="changed">
+<del>Ability 6: based on indirect ability 3. Because 3 is indirect, we simply copy all of the ancestors from ability 3, and add our own parent (ability 4) as an additional entry. The ancestry of ability 3 is the same as what we would have generated had we recursively descended ability 1 and 2, so this saves us the trouble of actually doing it.</del><ins><p>Ability 6: based on indirect ability 3. Because 3 is indirect, we simply copy all of the ancestors from ability 3, and add our own parent (ability 4) as an additional entry. The ancestry of ability 3 is the same as what we would have generated had we recursively descended ability 1 and 2, so this saves us the trouble of actually doing it.</p></ins>
+</li>
+</ul></div>
+<pre class="vicinity"><code>+-------+            4  5  6     1. Direct: Top -&gt; Middle
+      | Actor |------------+--+--+-    2. Direct: Middle -&gt; Bottom
+      +-------+            |  .  .     3. Indirect: Top -&gt; Bottom cascaded via 1
+                           |  .  .     +------------------------------------+
+                           |  .  .     |             Derivations            |
+      +-----+     1     3  v  .  .     |------------------------------------|
+      | Top |-----+-----+-----.--.-    |  ability: 3, ancestor: 2 (parent)  |
+      +-----+     |     .     .  .     |  ability: 3, ancestor: 1 (cascade) |
+                  |     .     .  .     +------------------------------------+
+                  |     .     .  .     4. Direct: Actor -&gt; Top
+      +--------+  v  2  .     v  .     5. Indirect: Actor -&gt; Middle
+      | Middle |-----+--.--------.-       cascaded via ability 1
+      +--------+     |  .        .     +------------------------------------+
+                     |  .        .     |  ability: 5, ancestor: 4 (parent)  |
+                     |  .        .     |  ability: 5, ancestor: 1 (cascade) |
+      +--------+     v  v        v     +------------------------------------+
+      | Bottom |-------------------    6. Indirect: Actor -&gt; Bottom
+      +--------+                          cascaded via indirect ability 3
+                                       +------------------------------------+
+                                       |  ability: 6, ancestor: 4 (parent)  |
+                 +--------------------&gt;|  ability: 6, ancestor: 2 (cascade) |
+                 |                     |  ability: 6, ancestor: 1 (cascade) |
+        "Ancestor stealing":           +------------------------------------+
+        Ability 6 writes its parent
+        as an ancestor, then copies all
+        ancestors of Ability 3, in this
+        case abilities 1 and 2.
+      </code></pre>
+<div class="expandable unchanged">
+<h2> <a name="cookbook" class="anchor" href="#cookbook"><span class="octicon octicon-link"></span></a>Cookbook</h2>
+<p>Want to actually use this stuff? Here's a bunch of examples. All examples assume that the <code>dat</code> console helper is available.</p>
+<h3> <a name="making-an-actor" class="anchor" href="#making-an-actor"><span class="octicon octicon-link"></span></a>Making an actor</h3>
+<p>Turn any model into an actor by including the <code>Ability::Actor</code> module. Abilities requires a String <code>ability_type</code> and Fixnum <code>ability_id</code> for identity. This is optimized for ActiveRecord models, so it defaults to <code>self.class.name</code> and <code>self.id</code>. Override <code>ability_id</code> and <code>ability_type</code> to control identity yourself.</p>
+<pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span>
+      <span class="k">end</span>
+      </pre>
+<p>Once your model is an actor you can ask it if it's capable of action on a subject:</p>
+<pre><span class="no">Widget</span><span class="o">.</span><span class="n">first</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; probably false</span>
+      </pre>
+<h3> <a name="making-a-subject" class="anchor" href="#making-a-subject"><span class="octicon octicon-link"></span></a>Making a subject</h3>
+<p>Turning a model into a subject is remarkably similar:</p>
+<pre><span class="k">class</span> <span class="nc">Widget</span> <span class="o">&lt;</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">Base</span>
+        <span class="kp">include</span> <span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span>
+      <span class="k">end</span>
+      </pre>
+<p>Like actors, subjects have a <code>ability_id</code> and a <code>ability_type</code>. <code>Ability::Subject</code> has a large and powerful set of hooks: See "<a href="#customizing-the-lifecycle">Customizing the lifecycle</a>" below for details.</p>
+<h3> <a name="granting-abilities" class="anchor" href="#granting-abilities"><span class="octicon octicon-link"></span></a>Granting abilities</h3>
+<p>When you <strong>grant</strong> a ability, you're creating a direct ability for an actor to perform an action on a subject. Granting an ability may also cause a cascade of indirect grants. For instance, granting a User ability on a Team will also grant all of the Team's abilities to the User.</p>
+<pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">grant</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">),</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+<h3> <a name="checking-abilities" class="anchor" href="#checking-abilities"><span class="octicon octicon-link"></span></a>Checking abilities</h3>
+<p>Need to know whether or not an actor can perform an action on a subject? Use <code>can?</code>, which just gives you a thumbsup/down.</p>
+</div>
+<pre class="vicinity"><span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span><span class="p">,</span> <span class="n">repo</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+<div class="changed"><p>If you'd like a little more information about the ability, <code>Ability::Actor.ability</code> will hand you back the <del>correct Ability for</del><ins>"best" Ability between</ins> an actor and subject.</p></div>
+<pre class="vicinity"><span class="n">ability</span> <span class="o">=</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span><span class="o">.</span><span class="n">ability</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; #&lt;Ability...&gt;</span>
+      </pre>
+<div class="expandable unchanged">
+<p>Given an Ability instance, you can ask the same question as <code>can?</code> above. <code>Ability::Actor#can?</code>.</p>
+<pre><span class="n">ability</span><span class="o">.</span><span class="n">can?</span> <span class="ss">:read</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+</div>
+<h3 class="vicinity"> <a name="revoking-abilities" class="anchor" href="#revoking-abilities"><span class="octicon octicon-link"></span></a>Revoking abilities</h3>
+<div class="changed"><p>Revoking removes an actor's <del>direct ability to act on a subject. If you try to revoke permissions when only an indirect ability exists, you'll receive an error</del><ins><em>direct</em></ins><ins> ability to act on a subject. Any </ins><ins><em>indirect</em></ins><ins> abilities between actor and subject are ignored. To remove them, revoke the related direct ability</ins>.</p></div>
+<pre class="vicinity"><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">revoke</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+<div class="changed"><p>If you'd like to kill all of an <em>actor's</em> direct abilities, use <code>Ability::Actor.clear</code>. <del>You might do this when a user is deleted</del><ins>ActiveRecord models automatically clean up associated abilities when they're destroyed</ins>.</p></div>
+<pre class="vicinity"><span class="no">Ability</span><span class="o">::</span><span class="no">Actor</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"rick"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+<div class="changed"><p>If you'd like to kill all of a <em>subject's</em> grants, use <code>Ability::Subject.clear</code>.<del>You might do this when a repository is deleted.</del></p></div>
+<pre class="vicinity"><span class="no">Ability</span><span class="o">::</span><span class="no">Subject</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span>
+      <span class="c1"># =&gt; true</span>
+      </pre>
+<div class="expandable unchanged">
+<p>If you'd like to kill every direct Ability that involves a participant, <em>no matter whether the participant is an actor or subject</em>, use <code>Ability.clear</code>.</p>
+<pre><span class="no">Ability</span><span class="o">.</span><span class="n">clear</span> <span class="n">dat</span><span class="p">(</span><span class="s2">"github/orgs-next"</span><span class="p">)</span>
+      </pre>
+</div>
+<h3 class="vicinity"> <a name="listing-direct-actors" class="anchor" href="#listing-direct-actors"><span class="octicon octicon-link"></span></a>Listing direct actors</h3>
+<div class="vicinity changed"><p>Abilities control access, but they're also useful when a subject has a list of members or collaborators. <ins>For example, here's how to get an Array of collaborators for a repository:</ins></p></div>
+<del><p>For example, here's how to get an Array of collaborators for a repository:</p></del><pre class="vicinity"><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, #&lt;Team:...&gt;, ...]</span>
+      </pre>
+<div class="expandable unchanged">
+<p>Boom, no need for a separate table. And access control will never be out of sync with membership. The result can optionally be constrained by type:</p>
+<pre><span class="n">dat</span><span class="p">(</span><span class="s2">"github/linguist"</span><span class="p">)</span><span class="o">.</span><span class="n">direct_actors</span><span class="p">(</span><span class="no">User</span><span class="p">)</span>
+      <span class="c1"># =&gt; [#&lt;User:...&gt;, ...]</span>
+      </pre>
+<p>Ability has a powerful set of scopes to help you out.</p>
+<h3> <a name="listing-subjects" class="anchor" href="#listing-subjects"><span class="octicon octicon-link"></span></a>Listing subjects</h3>
+<p>As with listing actors for a subject, you can work with an actor's abilities directly if necessary:</p>
+<pre><code>repos = dat("rick").
+        abilities(:type =&gt; Repository).direct.map &amp;:subject
+      repos = dat("rick").
+        abilities(:type =&gt; Repository).indirect.map &amp;:subject
+      </code></pre>
+<h3> <a name="customizing-the-lifecycle" class="anchor" href="#customizing-the-lifecycle"><span class="octicon octicon-link"></span></a>Customizing the lifecycle</h3>
+<p><code>Ability::Subject</code> is chock full of hooks. Here are a few ways to use them.</p>
+<h4> <a name="only-github-staff-can-have-ability-on-my-instances" class="anchor" href="#only-github-staff-can-have-ability-on-my-instances"><span class="octicon octicon-link"></span></a>"Only GitHub staff can have ability on my instances."</h4>
+<pre><span class="k">def</span> <span class="nf">grant?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="n">actor</span><span class="o">.</span><span class="n">is_a?</span><span class="p">(</span><span class="no">User</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">actor</span><span class="o">.</span><span class="n">staff?</span>
+      <span class="k">end</span>
+      </pre>
+<p>This method returns <code>true</code> by default.</p>
+<h4> <a name="im-a-public-repository-everybody-can-read-me" class="anchor" href="#im-a-public-repository-everybody-can-read-me"><span class="octicon octicon-link"></span></a>"I'm a public repository. Everybody can read me."</h4>
+<pre><span class="k">def</span> <span class="nf">permit?</span><span class="p">(</span><span class="n">actor</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>
+        <span class="k">super</span> <span class="o">||</span> <span class="p">(</span><span class="kp">public</span><span class="p">?</span> <span class="o">&amp;&amp;</span> <span class="n">action</span> <span class="o">==</span> <span class="ss">:read</span><span class="p">)</span>
+      <span class="k">end</span>
+      </pre>
+<p>This method returns <code>Ability.can?(actor, action, self)</code> by default.</p>
+<h4> <a name="tell-me-when-an-ability-is-directly-granted-on-me" class="anchor" href="#tell-me-when-an-ability-is-directly-granted-on-me"><span class="octicon octicon-link"></span></a>"Tell me when an ability is directly granted on me."</h4>
+<pre><span class="k">def</span> <span class="nf">granted</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">send_welcome_email</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre>
+<h4> <a name="tell-me-when-a-direct-ability-on-me-is-revoked" class="anchor" href="#tell-me-when-a-direct-ability-on-me-is-revoked"><span class="octicon octicon-link"></span></a>"Tell me when a direct ability on me is revoked."</h4>
+<pre><span class="k">def</span> <span class="nf">revoked</span><span class="p">(</span><span class="n">ability</span><span class="p">)</span>
+        <span class="n">bust_dem_caches</span> <span class="n">ability</span><span class="o">.</span><span class="n">actor</span>
+      <span class="k">end</span>
+      </pre>
+</div>
+<h2 class="vicinity"> <a name="idioms-and-lessons-learned" class="anchor" href="#idioms-and-lessons-learned"><span class="octicon octicon-link"></span></a>Idioms and lessons learned</h2>
+<ul class="vicinity added">
+<li><p>Ask about abilities via the actor (<code>actor.can? :read, subject</code>) but modify abilities behavior in the subject. This helps make sure hooks and overrides work correctly. Avoid direct calls to <code>Ability.can?</code> or <code>Ability::Subject#permit?</code>.</p></li> <li><p>Grant and revoke abilities via the subject (<code>subject.grant ...</code>, <code>subject.revoke ...</code>). This also helps maintain hooks and overrides.</p></li> <li><p>Don't hack one-offs. If you're asking any question like "can this thing do something to this other thing?" make sure you're doing it via abilities. If the question isn't answered properly via abs, give more information by overriding subject hooks. If <em>that</em> doesn't work, file a bug. Abilities should be the single source of truth for access control.</p></li> <li><p>Extract nouns, not verbs. Having nothing but <code>:read</code>, <code>:write</code>, and <code>:admin</code> actions can feel restrictive, but that feeling is often an indication of a missing noun. For example, instead of adding an <code>:admin_billing</code> action add an <code>organization.billing</code> object and hang abilities off of it.</p></li> </ul>
+<ins><blockquote> <p>If you extract a non-ActiveRecord model as a an actor or subject, be sure that when it's deleted (however that may happen), the associated abilities are destroyed as well.</p> </blockquote></ins><div class="vicinity changed"><ul>
+<li class="removed"><p>Ask about abilities via the actor (<code>actor.can? :read, subject</code>). This helps us make sure hooks and overrides work correctly. Avoid direct calls to <code>Ability.can?</code> or <code>Ability::Subject#permit?</code>.</p></li>
+<li class="removed"><p>Grant and revoke abilities via the subject (<code>subject.grant ...</code>, <code>subject.revoke ...</code>). This also helps maintain hooks and overrides.</p></li>
+<li class="removed"><p>Don't hack one-offs. If you're asking any question like "can this thing do something to this other thing?" make sure you're doing it via abilities. If the question isn't answered properly via abs, give more information by overriding subject hooks. If <em>that</em> doesn't work, file a bug. Abilities should be the single source of truth for access control.</p></li>
+<li class="removed"> <p>Extract nouns, not verbs. Having nothing but <code>:read</code>, <code>:write</code>, and <code>:admin</code> actions can feel restrictive, but that feeling is often an indication of a missing noun. For example, instead of adding an <code>:admin_billing</code> action we added an <code>organization.billing</code> object and hung abilities off of it.</p> <p>If you extract a non-ActiveRecord model as a "permissionable" object, be sure that when it's deleted (however that may happen), the associated abilities are cleared as well.</p> </li>
+<li class="changed">
+<del><p>Don't cache ability results. If abilities are slow it's a bug.</p></del><ins>Don't cache ability results. If abilities are slow it's a bug.</ins>
+</li>
+</ul></div>
+<h2 class="vicinity"> <a name="running-the-abilities-transitions" class="anchor" href="#running-the-abilities-transitions"><span class="octicon octicon-link"></span></a>Running the abilities transitions</h2>
+<div class="expandable unchanged">
+<p>Did you just fix a bug that wasn't generating abilities correctly? Sweeeet. Now you need to backfill that fix to all existing permissions.</p>
+<p>If your change is sweeping enough, you may want to just drop all of the existing abilities data and start from scratch. If so, you'll need to truncate the abilities tables before running the transitions. You can also just run the transitions without truncating since they are designed to be idempotent and optimized to not re-generate existing abilities; only abilities that need to be inserted/updated will be generated.</p>
+<h3> <a name="turn-off-all-abilities-science-experiments" class="anchor" href="#turn-off-all-abilities-science-experiments"><span class="octicon octicon-link"></span></a>Turn off all abilities science experiments</h3>
+<p>Before doing any truncate or transition, disable all experiments that hit the abilities table on the <a href="https://github.com/stafftools/science">science dashboard</a>.</p>
+<h3> <a name="truncating-the-abilities-tables" class="anchor" href="#truncating-the-abilities-tables"><span class="octicon octicon-link"></span></a>Truncating the abilities tables</h3>
+<p><strong>Be sure all abilities science experiments are turned off before truncating. Attempting a truncate while the table is still being accessed can bring down production.</strong></p>
+<p>Once you're ready to truncate, give a shout to @github/mysql. <strong>You'll need them to keep an eye on the truncates and be ready to jump in and kill them if anything goes amiss.</strong> Once @github/mysql gives you the go ahead, jump into the Ops room and run the following truncate commands individually, waiting for each truncate to finish before starting the next:</p>
+<pre><code>/mysql truncate ability_activities
+      /mysql truncate ability_derivations
+      /mysql truncate abilities
+      </code></pre>
+<h3> <a name="running-the-transitions" class="anchor" href="#running-the-transitions"><span class="octicon octicon-link"></span></a>Running the transitions</h3>
+<p>The transitions take a while to finish, so run them on a screen. We use divvy to parallelize the transition runs; be sure you're running these on a staff carpathia machine (i.e., not aux1) if you're running with a bunch of workers. The transitions are slightly order-dependent: the<code>org_abilities_transition</code> needs to be run first; once that finishes the other two can be run in any order.</p>
+<pre><code>$ ssh aux1.rs.github.com
+      abilibuddy@aux1:~$ gh-screen
+      [ in screen ]
+      abilibuddy@aux1:~$ ssh -t github-staff3-cp1-prd.iad.github.net
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/org_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/user_abilities_transition.rb
+      abilibuddy@github-staff3-cp1-prd:~$ divvy -n 10
+      /data/github/current/lib/github/transitions/repo_abilities_transition.rb
+      </code></pre>
+<p>The transitions all use replication throttling to reduce their impact on mysql load, but it's always a good idea to keep an eye on <a href="https://github.com/stafftools/graphs/mysql">the mtop dashboard</a> while these are running.</p>
+<h3> <a name="turn-abilities-science-back-on" class="anchor" href="#turn-abilities-science-back-on"><span class="octicon octicon-link"></span></a>Turn abilities science back on</h3>
+<p>Re-enable the abilities experiments on the <a href="https://github.com/stafftools/science">science dashboard</a> to see if you really fixed things :)</p>
+</div></article>
+
+    </div>
+  </div>
+
+</body>
+</html>

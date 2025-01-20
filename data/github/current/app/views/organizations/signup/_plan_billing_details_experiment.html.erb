@@ -1,0 +1,296 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  read_only ||= false
+  email_error = view.organization.try(:errors) && view.organization.errors[:billing_email]
+  billing_hint = []
+  if GitHub.billing_enabled?
+    billing_hint += ["We’ll send receipts to this inbox."]
+  end
+
+  trade_screening_error_data = if view.standard_terms_of_service?
+    trade_screening_cannot_proceed_error_data(target: current_user)
+  else
+    nil
+  end
+%>
+<%= form_for view.organization,
+            :url => view.billing_action_path,
+            html: {class: "new-org-billing-form js-braintree-encrypt"},
+            "data-braintree-key" => GitHub.braintree_client_side_encryption_key do |f| %>
+
+    <%# Referral tracking  %>
+    <% if params[:ref_page] %><input type="hidden" name="ref_page" value="<%= CGI.unescape(params[:ref_page]) %>"><% end %>
+    <% if params[:ref_cta] %><input type="hidden" name="ref_cta" value="<%= CGI.unescape(params[:ref_cta]) %>"><% end %>
+    <% if params[:ref_loc] %><input type="hidden" name="ref_loc" value="<%= CGI.unescape(params[:ref_loc]) %>"><% end %>
+
+    <%# Coupon %>
+    <% if params[:coupon] %>
+      <input type="hidden" name="coupon" value="<%= params[:coupon] %>">
+    <% end %>
+
+    <%# Plan selection %>
+    <input type="hidden" name="organization[plan]" value="<%= view.plan.name %>" <%= test_selector("org-new-plan-input") %>>
+
+    <%# Organization name selection %>
+    <input type="hidden" name="organization[profile_name]" id="organization_profile_name" value="<%= view.organization.name %>" <%= test_selector("org-new-name-input") %>>
+    <input type="hidden" name="organization[login]" value="<%= view.organization.display_login %>" <%= test_selector("org-new-login-input") %>>
+    <input type="hidden" name="organization[company_name]" value="<%= view.organization.company_name %>" <%= test_selector("org-new-company_name-input") %>>
+    <input type="hidden" name="terms_of_service_type" value="<%= view.terms_of_service %>" <%= test_selector("org-new-tos-input")%>>
+
+  <div class="d-md-flex gutter-md" <%= test_selector("signup-with-data-collection") %>>
+    <div class="col-md-7" <%= test_selector("duration-summary") %>>
+      <%# First row: heading and duration toggle %>
+      <%= render(Billing::Settings::Upgrade::SectionComponent.new(title: "How often do you want to be billed?", icon: :clock)) do |component| %>
+        <% component.with_body do %>
+          <%= render partial: "billing_settings/billing_cycle", locals: { account: view.organization, selected_duration: view.plan_duration } %>
+          <% if view.plan_duration == "year" %>
+            <div class="mt-3 d-flex flex-row">
+              <%= render(Primer::Beta::Octicon.new(:"tag", size: :small, color: :accent, pt: 1)) %>
+              <p class="f6 ml-2 col-md-8"> <%= render Pricing::AnnualDiscountNoticeComponent.new(plan: view.plan) %></p>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <%# Second row: plan and number of users %>
+      <div class="position-relative pl-5 pb-5">
+        <div class="position-absolute top-0 bottom-0 border-left color-border-default left-0 mt-1 ml-1">
+          <span class="position-absolute top-0 left-0 color-bg-default p-3 mt-n1 ml-n3"></span>
+          <span class="position-relative mt-2 ml-n2">
+            <%= render(Primer::Beta::Octicon.new(icon: :people, color: :muted)) %>
+          </span>
+        </div>
+
+        <h2 class="h3">How many seats do you want to include?</h2>
+
+        <%= render(Billing::Settings::Upgrade::StepperComponent.new(
+            type: :plan_upgrade,
+            seats: params[:seats] || 1,
+            min: 1,
+            max: 300,
+            current_url: model_org_seats_path( plan_duration: view.current_plan_duration, coupon: view.coupon, new_plan: view.plan),
+            form: "new_organization",
+            name: "organization[seats]",
+            min_error_message: "You need at least 1 seat to support your organization",
+            max_error_message: "Please contact us at https://github.com/enterprise/contact for pricing and purchasing information.",
+          )) do |stepper| %>
+          <% stepper.with_remove_seat_control(
+            data: analytics_click_attributes(
+              category: "Create Organization",
+              action: "click to decrease seats number",
+              label: "ref_cta:decrease seats number;ref_loc:organization_create"
+            )
+          ) %>
+          <% stepper.with_input(
+            data: analytics_click_attributes(
+              category: "Account Create",
+              action: "click on seats input",
+              label: "ref_cta:seats input;ref_loc:account_create"
+            )
+          ) %>
+          <% stepper.with_add_seat_control(
+            data: analytics_click_attributes(
+              category: "Organization Create",
+              action: "click to increase seats number",
+              label: "ref_cta:increase seats number;ref_loc:organization_create"
+            )
+          ) %>
+        <% end %>
+        <p><%= "On #{branded_plan_name(view.plan)}, each seat costs #{casual_currency(view.plan_unit_price)} per #{view.plan_duration}." %></p>
+      </div>
+
+      <div class="position-relative pl-5 pb-5">
+        <div class="position-absolute top-0 bottom-0 border-left color-border-default left-0 mt-1 ml-1">
+          <span class="position-absolute top-0 left-0 color-bg-default p-3 mt-n1 ml-n3"></span>
+          <span class="position-relative mt-2 ml-n2">
+            <%= render(Primer::Beta::Octicon.new(icon: "organization", color: :muted)) %>
+          </span>
+        </div>
+        <h2 class="h3">Billing information</h2>
+        <% if trade_screening_error_data.present? %>
+          <div class="border-top py-3">
+            <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+              <%= render(Primer::Alpha::Banner.new(icon: trade_screening_error_data[:icon], scheme: trade_screening_error_data[:scheme])) do %>
+                <h5 class="h5">
+                  You can't proceed at this time
+                </h5>
+                <div class="ml-5" <%= test_selector("trade-screening-message") %>>
+                  <%= trade_screening_error_data[:message] %>
+                </div>
+              <% end %>
+            <% else %>
+              <%= render(Primer::Beta::Flash.new(scheme: trade_screening_error_data[:scheme])) do %>
+                <h5 class="h5">
+                  <%= render(Primer::Beta::Octicon.new(trade_screening_error_data[:icon])) %>
+                  You can't proceed at this time
+                </h5>
+                <div class="ml-5" <%= test_selector("trade-screening-message") %>>
+                  <%= trade_screening_error_data[:message] %>
+                </div>
+              <% end %>
+            <% end %>
+          </div>
+        <% else %>
+           <% if view.can_edit_billing_information? %>
+              <div class="float-right js-edit-user-personal-profile-wrapper">
+                <div class="btn f6 js-edit-user-personal-profile" type="button">
+                  Edit
+                </div>
+              </div>
+            <% end %>
+          <div class="js-profile-summaries <%= class_names("d-flex flex-md-row flex-sm-column mb-3", "mb-sm-0" => view.has_valid_trade_screening_record?, "mt-3" => view.standard_terms_of_service?) %>" style="row-gap: 8px;">
+            <% if view.standard_terms_of_service? && view.has_valid_trade_screening_record? %>
+               <div class="col-6 mb-auto d-flex flex-items-center">
+                <%= render GitHub::AvatarComponent.new(actor: current_user, size: 48, mr: 2) %>
+                <ul class="list-style-none lh-condensed mb-2" style="min-height: 48px;">
+                  <li class="pb-1 text-bold"><%= current_user.safe_profile_name %></li>
+                  <li class="text-small color-fg-muted">Personal account</li>
+                </ul>
+              </div>
+            <% end %>
+            <div class="col-6 text-sm-right lh-condensed">
+              <%= render Billing::Settings::NameAddressSummaryComponent.new(
+                profile: view.has_valid_trade_screening_record? ? view.trade_screening_record : nil,
+                is_new_org: true,
+                wrapper_class: "js-billing-information-summary-wrapper"
+              ) %>
+            </div>
+          </div>
+          <div class="js-name-address-collection-wrapper" <%= view.has_valid_trade_screening_record? ? "hidden" : "" %>>
+            <% if view.standard_terms_of_service? %>
+              <div <%= test_selector("billing-information-prompt") %> class="mt-3">
+                <%= render(Primer::Beta::Flash.new(scheme: :default, spacious: true, icon: "info", mb: 3)) do %>
+                  <%= render Primer::Beta::Text.new(tag: :span, font_size: :normal, pt: 1) do %>
+                    An organization owner's personal billing information must be linked with this organization.
+                  <% end %>
+                  <%= render(Primer::Beta::Link.new(
+                    href: "#{GitHub.help_url(skip_enterprise: true)}/articles/link-your-biling-info-to-org",
+                    target: "_blank",
+                    scheme: :default,
+                    hidden: true,
+                    underline: false,
+                    classes: "Link--inTextBlock",
+                  )) { ("Learn more") } %>
+                <% end %>
+              </div>
+              <div class="d-flex flex-items-center mb-3">
+                <%= render GitHub::AvatarComponent.new(actor: current_user, size: 48, mr: 2) %>
+                <div>
+                  <ul class="list-style-none lh-condensed mb-2" style="min-height: 48px;">
+                    <li class="text-bold pb-1">
+                      <%= current_user.safe_profile_name %>
+                    </li>
+                    <li class="color-fg-muted text-small">
+                      Personal account
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            <% end %>
+            <%= render Billing::Settings::NameAddressFormInputsComponent.new(
+              profile: view.trade_screening_record,
+              target: view.organization,
+              payment_flow_loaded_from: "ORGANIZATION_SIGNUP",
+              show_org_fields: view.github_customer_terms?,
+              email_component_args: {
+                target: view.organization,
+                label: "#{org_contact_email_label} email",
+                hint: safe_join(billing_hint),
+                error: email_error.any? && "#{org_contact_email_label} email " + email_error.first,
+                disabled: org_transform?,
+                data: analytics_click_attributes(
+                  category: "Signup funnel team payment",
+                  action: "form input",
+                  label: "text:Billing email;"
+                ),
+                test_selector: "signup-billing-email"
+              }
+            ) %>
+
+            <div class="form-group pt-1">
+              <%= submit_tag "Continue to payment method", class: "btn btn-primary width-full mt-2 text-center", name: 'billing_info_submit_btn', id: "submit_personal_profile" %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <% if trade_screening_error_data.blank? && view.can_add_payment_method? %>
+        <div class="position-relative pl-5 pb-5 js-org-payment-method-wrapper">
+          <div class="position-absolute top-0 bottom-0 border-left color-border-default left-0 mt-1 ml-1">
+            <span class="position-absolute top-0 left-0 color-bg-default p-3 mt-n1 ml-n3"></span>
+            <span class="position-relative mt-2 ml-n2">
+              <%= render(Primer::Beta::Octicon.new(icon: "credit-card", color: :muted)) %>
+            </span>
+          </div>
+
+          <h2 class="h3">Payment method</h2>
+          <div data-login="<%= view.organization.display_login %>" class= "<%= view.payment_method_css %>">
+            <%= f.fields_for :credit_card do |c| %>
+              <%=
+                render partial: "organizations/signup/payment_methods", locals: {
+                  organization: view.organization,
+                  owner: current_user,
+                  coupon: view.coupon,
+                  form: c,
+                  f: f,
+                  orgs_data_collection_enabled: true,
+                  account_screening_profile: view.trade_screening_record(ignore_user_record: true),
+                  terms_of_service: view.terms_of_service,
+                }
+              %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+
+      <% unless trade_screening_error_data.present? %>
+        <div class="js-awaiting-payment border-top py-3 mt-2" <%= "hidden" if view.needs_valid_payment_method? %> data-toggle-plan-upgrade-visibility="true">
+          <%# Submit %>
+          <div class="SignUpContinueActions mx-4 mx-md-0">
+            <div class="form-group pt-1">
+              <%= render partial: "signup/button", locals: {
+                text: view.button_text,
+                type: "submit",
+                custom_classes: "js-purchase-button js-submit-billing",
+                data: analytics_click_attributes(
+                  category: "Next Customize your setup",
+                  action: "click to customize your setup",
+                  label: "ref_page:#{request.fullpath};ref_cta:#{view.button_text};ref_loc:team_payment",
+                ),
+                test_selector: "signup-billing-complete-button"
+              } %>
+            </div>
+          </div>
+          <p class="f6 color-fg-muted mt-3">By clicking &ldquo;<%= view.call_to_action_text %>&rdquo;, you agree to our
+            <a href="<%= site_terms_path %>" target="_blank" rel="noopener noreferrer" class="Link--inTextBlock js-tos-link">Terms of Service</a>
+            <a href="<%= site_corp_terms_path %>" target="_blank" rel="noopener noreferrer" class="Link--inTextBlock js-corp-tos-link d-none">Corporate Terms of Service</a> and
+            <a class="Link--inTextBlock" href="<%= site_privacy_path %>" target="_blank" rel="noopener noreferrer">Privacy Statement</a><span data-wording="on behalf of" class="js-company-name-text"></span>. We’ll occasionally send you account-related emails.
+          </p>
+        </div>
+      <% end %>
+    </div>
+
+    <div class='col-md-5'>
+      <%= render partial: "billing_settings/order_preview_dynamic_seats", locals: { view: view } %>
+
+      <aside aria-label="Testimonial" class="my-5">
+        <span class="f00-light text-mono color-fg-accent">&#8220;</span>
+        <figure class="mx-0 mt-n4">
+          <blockquote class="f4 color-fg-muted mb-3">
+            CI/CD with GitHub Actions allows us to build, test, and deploy right from GitHub. We’ve reduced build time from 80 to 10 minutes.
+          </blockquote>
+          <figcaption class="d-flex flex-items-center">
+            <span class="mr-3">
+              <%= render(Primer::Beta::Avatar.new(src: image_path("modules/marketing/testimonial-pinterest-jon-parise.jpg"), size: 40, alt: "Jon Parise")) %>
+            </span>
+            <div class="lh-condensed">
+              <strong class="d-block h4">Jon Parise</strong>
+              <span class="f6 color-fg-muted">Engineering Architect at Pinterest</span>
+            </div>
+          </figcaption>
+        </figure>
+      </aside>
+    </div>
+  </div>
+<% end %>

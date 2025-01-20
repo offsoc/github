@@ -1,0 +1,452 @@
+#!/bin/bash
+# Author: fletchto99
+
+set -e
+
+# The root dir passed to the test
+ROOT_DIR="$(pwd)/"
+SCRIPT_NAME="script/safety-checks"
+
+# The command used to change/view configurations
+CONFIG_CMD="git config"
+
+# The config keys which we check, Must be updated when new tests are added
+FAIL_FAST_KEY="test.failfast"
+CHECK_ESLINT_KEY="test.checkeslint"
+CHECK_TESTRB_KEY="test.checktestrb"
+CHECK_FOCUS_KEY="test.checkfocus"
+CHECK_RUBOCOP_KEY="test.checkrubocop"
+CHECK_BINDINGPRY_KEY="test.checkbindingpry"
+CHECK_BYEBUG_KEY="test.checkbyebug"
+CHECK_DEBUGGER_KEY="test.checkdebugger"
+
+# String variables used to relay information to the user upon completion
+ERRORS=""
+RESTORE_COMMAND=""
+
+# Boolean variables to track state
+CLEANEDUP=0 # Used to ensure cleanup is only run once
+RUN_RELATED_TESTS=0 # Used to determine if there are any .rb files staged
+EXIT_EARLY=0 # Track if there was an early exit
+FINISHED_CLEANLY=0 # Track if we finished cleanly (i.e. no ctrl+c was run)
+
+test() {
+  # Check enabled Tests
+  FAIL_FAST=$($CONFIG_CMD --get $FAIL_FAST_KEY || echo "true")
+  ESLINT_CHECK=$($CONFIG_CMD --get $CHECK_ESLINT_KEY || echo "true")
+  TESTRB_CHECK=$($CONFIG_CMD --get $CHECK_TESTRB_KEY || echo "true")
+  FOCUS_CHECK=$($CONFIG_CMD --get $CHECK_FOCUS_KEY || echo "true")
+  RUBOCOP_CHECK=$($CONFIG_CMD --get $CHECK_RUBOCOP_KEY || echo "true")
+  BINDINGPRY_CHECK=$($CONFIG_CMD --get $CHECK_BINDINGPRY_KEY || echo "true")
+  BYEBUG_CHECK=$($CONFIG_CMD --get $CHECK_BYEBUG_KEY || echo "true")
+  DEBUGGER_CHECK=$($CONFIG_CMD --get $CHECK_DEBUGGER_KEY || echo "true")
+
+  echo "Running tests on modified files!"
+
+  # We store the working branch incase the user
+  # switches branches during the process, this
+  # will make error recovery simple
+  BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+  # If we're running in `--staged-only` mode there is much more work
+  # done to ensure the tests are only run against the staged files
+  # furthermore, we want to have error recovery to ensure any unstaged
+  # changes are not lost during the process. Originally I thought
+  # about using `git stash` however that doesn't store the state of
+  # the index, so when unstaged changes are stashed and then popped
+  # there's the possibility for conflicts to arise which we cannot have
+  if [ $1 = "true" ]; then
+    # When freezing the repo in its current state we will only freeze
+    # the index when there are actually staged contents. If nothing is
+    # actually going to be committed then there's no need to run the tests
+    #
+    # the test cases don't actually run against deleted files (currently)
+    STAGED_COUNT=$(git diff --name-only --cached | wc -l | sed 's/^ *//;s/ *$//')
+
+    # Similar to above but we use LS file to determine which files
+    # have been modified/added but not staged, if any. This will affect
+    # how we treat unstated files later on
+    UNSTAGED_COUNT=$(git ls-files --exclude-standard --others --modified | wc -l | sed 's/^ *//;s/ *$//')
+
+    # If there's nothing staged we probably shouldn't be committing
+    # If a commit needs to occur `--no-verify --allow-empty` can be
+    # used
+    if [ $STAGED_COUNT -eq 0 ]; then
+      tput setaf 1;
+      echo "No files were staged to be committed."
+      echo "If you intend to have an empty commit"
+      echo "then you can disable the pre-commit hook"
+      echo -e "by using the --no-verify parameter when committing\n"
+      echo "Note: This will prevent all pre-commit"
+      echo "hooks from running"
+      tput sgr0;
+
+      # We're exiting early, so no rollback is needed
+      EXIT_EARLY=1
+      exit 1;
+    fi
+
+    echo "Saving index status..."
+
+    tput setaf 1;
+    echo "------------------------------------"
+    echo "Should this fail, any changes will be stored in temporary commits"
+    echo "You can restore your changes with:"
+
+    # --no-verify is used here to prevent this pre-commit hook check
+    # from being run on this commit. We use --quite to keep the output
+    # readable for the end user. Any unexpected output is handled by
+    # trapping unexpected exits and interrupts
+    git commit --quiet --no-verify -m "Staged changes for safety checks"
+
+    # We store the commit SHA-1 of where the staged files were "frozen"
+    # enabling us to easily restore them later. We store the SHA-1 in
+    # this instance variable in case the developer somehow makes a
+    # secondary commit while the script is running.
+    STAGED_SHA=$(git rev-parse HEAD)
+
+    if [ $UNSTAGED_COUNT -gt 0 ]; then
+      # Repeat the same process, now for the unstaged files. This will allow
+      # us to run tests against the files which are staged to be committed,
+      # we do so by checking out the $STAGED_SHA later on.
+      git add -A
+      git commit --quiet --no-verify -m "Unstaged changes for safety checks"
+      UNSTAGED_SHA=$(git rev-parse HEAD)
+    fi
+
+    # By this point the user's git log looks something like this:
+    # UNSTAGED_SHA    - "Unstaged changes for safety checks" <- HEAD now points here
+    # STAGED_SHA      - "Staged changes for safety checks"
+    # HEAD_BEFORE_SHA - "Last commit before safety check run" <- HEAD was here at start
+    #
+    # To roll back at this point all that needs to be done is
+    # 1. Checkout the branch (HEAD will point to UNSTAGED_SHA)
+    # 2. Move the HEAD commit (UNSTAGED_SHA) to the unstaged
+    #    files using git reset --mixed. This will move the
+    #    HEAD to point to STAGED_SHA
+    # 3. Move the HEAD commit (STAGED_SHA) to the staged
+    #    files using git reset --soft. This will move the
+    #    HEAD to point to HEAD_BEFORE_SHA, back to the
+    #    state everything was in
+    #
+    # In the case that there were no unstaged files, step 2 can be skipped
+
+    # Build the command which would be used to restore the branch and tell
+    # the user the command in case the error handling & cleanup fails. The
+    # command is built according to the rules in the comment above
+    RESTORE_COMMAND="git checkout --quiet $BRANCH"
+    if [ "$UNSTAGED_SHA" != "" ]; then
+      RESTORE_COMMAND="$RESTORE_COMMAND && git reset --quiet --mixed $UNSTAGED_SHA~1"
+    fi
+    if [ "$STAGED_SHA" != "" ]; then
+      RESTORE_COMMAND="$RESTORE_COMMAND && git reset --quiet --soft $STAGED_SHA~1"
+    fi
+
+    tput bold 1;
+    echo ${RESTORE_COMMAND//--quiet/""}
+    tput sgr0;
+    tput setaf 1;
+    echo "------------------------------------"
+    tput sgr0;
+
+    # To run the tests on the files check out the STAGED_SHA which contains
+    # the commit with only the files staged to be committed. This will put us
+    # into a detached head state which is easily recoverable as noted above.
+    git checkout $STAGED_SHA --quiet
+
+    # Any files we should be running tests against can be found in the
+    # `$FILES` variable. `git diff-tree` allows us to get the names of
+    # all the files modified in a specific commit, referenced by its
+    # SHA-1 hash. We also apply the ACMRT filters to ensure we're only
+    # looking at added, copied, modified, renamed, or modifiers changed
+    #
+    # There's no need to run tests against files being deleted
+    FILES=$(git diff-tree --no-commit-id --name-only -r $STAGED_SHA --diff-filter ACMRT)
+  else
+    # The much easier approach of running tests against all modified files,
+    # excluding those which are queued to be deleted. This lists all files
+    # and removes the status codes, leaving us with only the paths to the
+    # files which  require testing
+    FILES=$(git status --porcelain | grep -ovE "^D" | sed s/^...//)
+  fi
+
+  # Iterate over files
+  # Checks kind of follow this flow:
+  # 1. Check file extension
+  # 2. For checks within extension:
+  #    - Determine if check is enabled
+  #    - Tell the user the command which is being run for the test
+  #    - Setup a `$CHECK` variable with the results of the test command
+  # 3. If the result of the test is a fail, usually denoted by:
+  #    if [ "$CHECK" != "" ]; then
+  #    Record the error by appending it to the `$ERRORS` variable and
+  #    notify the user of the specific error
+  # 4. Check if fail fast is enabled, and if so break out of the loop
+  for file in $FILES
+  do
+    # We've matched on a javascript file
+    if [ "${file: -3}" == ".js" ]; then
+      if [ "$DEBUGGER_CHECK" = true ]; then
+        echo "Running debugger check for $file"
+        # We're looking for lines which _only_ contain the word debugger
+        # and whitespace characters (awk is actually used to remove the
+        # whitespace before the check... could be optimized)
+        CHECK=($(cat $ROOT_DIR$file | awk '{$1=$1};1' | grep -nxi "debugger" | cut -f1 -d:))
+        if [ "$CHECK" != "" ]; then
+          ERROR="debugger found in $file on line(s): $(IFS=$','; echo "${CHECK[*]}")"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+      fi
+
+      if [ "$ESLINT_CHECK" = true ]; then
+        echo "Running bin/eslint $file"
+        # Simply call eslint from the root dir
+        CHECK=$($ROOT_DIR"bin/eslint" $ROOT_DIR$file)
+        if [ "$CHECK" != "" ]; then
+          ERROR="bin/eslint failed for $file"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+      fi
+    fi
+
+    # We've matched a ruby test file
+    if [ "${file: -8}" == "_test.rb" ]; then
+      RUN_RELATED_TESTS=1
+      if [ "$FOCUS_CHECK" = true ]; then
+        echo "Running focus check for $file"
+        # We're looking for lines which _only_ contain the word focus
+        # and whitespace characters (awk is actually used to remove the
+        # whitespace before the check... could be optimized)
+        CHECK=($(cat $ROOT_DIR$file | awk '{$1=$1};1' | grep -nxi "focus" | cut -f1 -d:))
+        if [ "$CHECK" != "" ]; then
+          ERROR="Focus found in $file on line(s): $(IFS=$','; echo "${CHECK[*]}")"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+      fi
+    fi
+
+    # We've matched a ruby file
+    if [ "${file: -3}" == ".rb" ]; then
+      RUN_RELATED_TESTS=1
+      if [ "$BINDINGPRY_CHECK" = true ]; then
+        echo "Running binding.pry check for $file"
+        # We're looking for lines which _only_ contain the word binding.pry
+        # and whitespace characters (awk is actually used to remove the
+        # whitespace before the check... could be optimized)
+        CHECK=($(cat $ROOT_DIR$file | awk '{$1=$1};1' | grep -nxi "binding.pry" | cut -f1 -d:))
+        if [ "$CHECK" != "" ]; then
+          ERROR="binding.pry found in $file on line(s): $(IFS=$','; echo "${CHECK[*]}")"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+      fi
+
+      if [ "$BYEBUG_CHECK" = true ]; then
+        echo "Running byebug check for $file"
+        # We're looking for lines which _only_ contain the word byebug
+        # and whitespace characters (awk is actually used to remove the
+        # whitespace before the check... could be optimized)
+        CHECK=($(cat $ROOT_DIR$file | awk '{$1=$1};1' | grep -nxi "byebug" | cut -f1 -d:))
+        if [ "$CHECK" != "" ]; then
+          ERROR="byebug found in $file on line(s): $(IFS=$','; echo "${CHECK[*]}")"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+      fi
+
+      if [ "$RUBOCOP_CHECK" = true ]; then
+        echo "Running bin/rubocop $file"
+        # This script relies on exit codes
+        set +e
+        CHECK=$("$ROOT_DIR"bin/rubocop $ROOT_DIR$file 2>/dev/null);
+        if [ $? -ne 0 ]; then
+          ERROR="bin/rubocop failed for $file"
+          if [ "$ERRORS" != "" ]; then
+            ERRORS="$ERRORS\n$ERROR"
+          else
+            ERRORS="$ERROR"
+          fi
+          tput setaf 1; echo "$ERROR"; tput sgr0;
+          if [ "$FAIL_FAST" = true ]; then
+            break
+          fi
+        fi
+        set -e
+      fi
+    fi
+  done
+
+  if [ "$ERRORS" == "" ] || [ "$FAIL_FAST" = false ]; then
+    if [ "$TESTRB_CHECK" = true ] && [ "$RUN_RELATED_TESTS" -eq 1 ]; then
+      # Determine if there were any failed tests
+      echo "Running related tests (bin/rails test_changes)"
+
+      if [ "$FAIL_FAST" = true ]; then
+        TESTOPTS="--fail-fast"
+      fi
+
+      # This script relies on exit codes
+      set +e
+
+      CHECK=$("$ROOT_DIR"bin/rails test_changes ${TESTOPTS} 2>/dev/null);
+      # We have > 1 lines if all tests passed or there were no tests to run
+      if [ $? -ne 0 ]; then
+        ERROR="bin/rails test_changes failed"
+        if [ "$ERRORS" != "" ]; then
+          ERRORS="$ERRORS\n$ERROR"
+        else
+          ERRORS="$ERROR"
+        fi
+        tput setaf 1; echo "$ERROR"; tput sgr0;
+      fi
+
+      set -e
+    fi
+
+    FINISHED_CLEANLY=1
+  fi
+}
+
+# This function is used to reapply the changes in the event that we're working
+# on only staged files. It also informs the user if any errors were encountered
+reapply_changes() {
+  if [ $CLEANEDUP -eq 0 ] && [ $EXIT_EARLY -eq 0 ]; then
+    # The CLEANEDUP var is used to ensure we only attempt to re-apply the
+    # changes once. In the case of a script interrupt we'll get a SIGINT
+    # followed by a SIGEXIT since this script will try to exit
+    CLEANEDUP=1
+
+    # If we're using `--staged-only` we need to reapply the frozen commits
+    if [ "$RESTORE_COMMAND" != "" ]; then
+      echo "Re-applying changes!"
+      eval $RESTORE_COMMAND
+      echo -e "Changes successfully re-applied\n\n"
+    fi
+
+    # Informs the user if any errors were found
+    if [ "$ERRORS" != "" ]; then
+      echo
+      echo "The following errors were found:"
+      tput setaf 1
+      echo -e "$ERRORS"
+      tput sgr0
+      echo
+      echo "Please fix the errors before committing."
+      exit 1
+    elif [ $FINISHED_CLEANLY -eq 0 ]; then
+      tput setaf 1;
+      echo -e "\nscript/safety-checks was interrupted! Aborting commit."
+      echo    "If you wish to commit without using safety-checks please"
+      echo    "add --no-verify to the commit (note: this will disable"
+      echo    "all pre-commit hooks)"
+      tput sgr0;
+      exit 1
+    else
+      # We add some space to ensure the user can clearly see
+      # the result of the actual commit going through
+      echo -e "All pre-commit checks passed!\n\n"
+    fi
+  fi
+}
+
+setup_options() {
+  # Sets all missing config options to true
+  $CONFIG_CMD $FAIL_FAST_KEY "true"
+  $CONFIG_CMD $CHECK_ESLINT_KEY "true"
+  $CONFIG_CMD $CHECK_TESTRB_KEY "true"
+  $CONFIG_CMD $CHECK_FOCUS_KEY "true"
+  $CONFIG_CMD $CHECK_RUBOCOP_KEY "true"
+  echo "Config keys added to .git/config under the [test] section"
+}
+
+create_hook() {
+  # When creating the hook we append / create the  `pre-commit` hook
+  # file and place it in git hooks directory. The pre-commit hook
+  # is actually just a shim to call this script from the scripts dir
+  read -p "Would you like to add this to your pre-commit hook file? (y/n) " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    PRECOMMIT_PATH="${ROOT_DIR}.git/hooks/pre-commit"
+    printf "
+if [ -e ${SCRIPT_NAME} ]; then\n\
+  echo \"Running pre-commit checks\"\n\
+   ${SCRIPT_NAME} --staged-only\n\
+else\n\
+  echo \"${SCRIPT_NAME} not found! Skipping pre-commit tests...\"\n\
+fi\n\
+    " >> "${PRECOMMIT_PATH}"
+    chmod +x "${PRECOMMIT_PATH}"
+    echo "Added to ${PRECOMMIT_PATH}"
+  fi
+}
+
+help() {
+  echo "${SCRIPT_NAME} [--create-hook] [--help] [--setup-options] [--staged-only]"
+  echo "Options:"
+  echo "    (--create-hook / -c)   Creates a pre-commit hook which runs"
+  echo "                           all tests against staged files only"
+  echo "    (--staged-only / -s)   Runs all tests against only staged files"
+  echo "    (--setup-options / -o) Sets the options in the gitconfig to be"
+  echo "                           able to toggle tests"
+  echo "    (--help / -h)          Shows this message"
+  echo ""
+  echo "Running with no parameters runs the tests against all modified"
+  echo "files, including those which are new and unstaged"
+}
+
+trap reapply_changes SIGHUP SIGINT SIGTERM INT EXIT
+
+# The main logic, where $1 is the first parameter passed to the script
+# If no paramaters are passed then the script will test against all
+# of the modified files
+if [ "$1" = "--create-hook" ] || [ "$1" = "-c" ]; then
+  create_hook
+elif [ "$1" = "--setup-options" ] || [ "$1" = "-o" ]; then
+  setup_options
+elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  help
+else
+  if [ "$1" = "--staged-only" ] || [ "$1" = "-s" ]; then
+    test "true"
+  else
+    test "false"
+  fi
+fi

@@ -1,0 +1,174 @@
+#!/bin/bash
+#/ Usage: ghe-import-mssql [-h]
+#/
+#/ This command can only be run on the primary mssql node.
+#/
+#/ Imports the backups taken with ghe-export-mssql.  The backup files must
+#/ be staged in the /data/user/mssql/backups folder.
+#/
+#/ OPTIONS:
+#/   -s | --status <n>  Display restore progress every <n> percent.
+#/   -h | --help        Show this message.
+#/
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+
+# Default options.
+stats=
+
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+fail() {
+    (>&2 echo "${1}")
+    exit 1
+}
+
+# Process command line arguments.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 2
+            ;;
+        -s|--stats)
+            stats="$2"
+            shift
+            shift
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+ensure_mssql_primary
+
+# Perform the import.
+rel_path="../backups" # Relative path to backup folder (within MS SQL container)
+path="/data/user/mssql/backups" # Absolute path to backup folder (on GHES appliance)
+additional_options=""
+
+# Create lists of starting DBs to see if there's any we need to delete at the end
+guid_regex="\w\w\w\w\w\w\w\w-\w\w\w\w-\w\w\w\w-\w\w\w\w-\w\w\w\w\w\w\w\w"
+starting_partition_dbs=$(ghe-mssql-console -y -r -q "SELECT name from sys.databases WHERE name LIKE '%________-____-____-____-____________'" | grep "$guid_regex")
+
+# We will create a list of restored DBs as we go
+restored_dbs=""
+
+if [ -n "$stats" ]; then
+    if [[ ! "$stats" =~ ^[0-9]+$ ]] || [[ "$stats" -lt 1 ]] || [[ "$stats" -gt 100 ]]; then
+        fail "-s argument is out of range (min: 1, max: 100, actual: $stats)"
+    fi
+
+    additional_options+=", STATS = $stats"
+fi
+
+# Sort the list by timestamp so the last backup is restored first
+backup_files_sorted=$(sudo find "$path" -name "*.bak" |
+while read -r file; do
+    filename=`basename "$file" .bak`
+    timestamp=$(cut -d '@' -f2 <<< "$filename" | tr -d T)
+    echo "$timestamp,$file"
+done |
+sort -n -t , -r -k1 |
+awk -F , '{print $2}')
+
+# Restoring a full-cluster backup is done onto an already setup cluster. This means the `/etc/github/cluster` file exists on the restore target.
+# Restoring an HA backup is done onto a standalone instance. This means no `/etc/github/cluster` file exists.
+if [ -f /etc/github/cluster ]; then
+  # If we're restoring a full-cluster backup, MSSQL has setup an high availability group.
+  # We need to drop this group before we can alter the tables that are part of this group.
+  echo "Turning off mssql replication on all nodes"
+  ghe-cluster-each --serial --role mssql -- /usr/local/share/enterprise/ghe-import-mssql-remove-replication
+fi
+
+for file in $backup_files_sorted
+do
+    filename=$(basename "$file" .bak)
+    name=$(cut -d '@' -f1 <<< "$filename")
+    timestamp=$(cut -d '@' -f2 <<< "$filename")
+
+    echo "Restoring database $name"
+    echo "Switching to single user mode..."
+    ghe-mssql-console -y -q "IF EXISTS(SELECT * FROM sys.databases WHERE name='$name') ALTER DATABASE [$name] SET SINGLE_USER WITH ROLLBACK IMMEDIATE"
+
+    echo "Restoring full backup..."
+    ghe-mssql-console -y -q "RESTORE DATABASE [$name] FROM DISK=N'$rel_path/$filename.bak' WITH REPLACE, NORECOVERY $additional_options"
+
+    diff_count=`sudo find "$path" -name "$name@*.diff" | wc -l`
+    if [ "$diff_count" -gt 1 ]; then
+        fail "Found multiple differential backups for $name"
+    fi
+
+    if [ "$diff_count" -eq 1 ]; then
+        diff_file=`sudo find "$path" -name "$name@*.diff" | head -1`
+        filename=`basename "$diff_file" .diff`
+
+        echo "Restoring differential backup..."
+        ghe-mssql-console -y -q "RESTORE DATABASE [$name] FROM DISK=N'$rel_path/$filename.diff' WITH NORECOVERY $additional_options"
+    fi
+
+    echo "Restoring transaction log backups..."
+    last_log=`sudo find "$path" -name "$name@*.log" | sort | tail -1`
+
+    sudo find "$path" -name "$name@*.log" | sort |
+    while read log_file; do
+        filename=`basename "$log_file" .log`
+        timestamp=`cut -d '@' -f2 <<< "$filename"`
+        sql_timestamp="${timestamp:0:4}-${timestamp:4:2}-${timestamp:6:5}:${timestamp:11:2}:${timestamp:13:2}"
+        with_options="WITH NORECOVERY"
+
+        if [ "$file" = "$last_log" ]; then
+            with_options+=", STOPATMARK=N'GheBackupMark' AFTER '$sql_timestamp'"
+        fi
+
+        echo "Applying transaction log backup with timestamp $sql_timestamp..."
+        ghe-mssql-console -y -q "RESTORE LOG [$name] FROM DISK=N'$rel_path/$filename.log' $with_options $additional_options"
+    done
+
+    echo "Recovering the database..."
+    ghe-mssql-console -y -q "RESTORE DATABASE [$name] WITH RECOVERY"
+
+    echo "Enabling multi user mode..."
+    ghe-mssql-console -y -q "ALTER DATABASE [$name] SET MULTI_USER"
+
+    echo "Successfully recovered $name!"
+
+    # save to a list
+    restored_dbs=$(echo -e "$restored_dbs\n$name")
+done
+
+# Check to see if there are any old partition DBs that we need to delete
+restored_config_dbs=$(echo "$restored_dbs" | grep Configuration || true)
+restored_partition_dbs=$(echo "$restored_dbs" | grep "$guid_regex" || true)
+
+for starting_partition_db in $starting_partition_dbs
+do
+    if ! grep -qi "$starting_partition_db" <<< "$restored_partition_dbs"; then
+        echo "Detected that $starting_partition_db existed before but was not restored"
+
+        # Partition DB name should look like Mps_4f1ad629-87fb-4960-84ea-386e4568bc60, grab service name from first half before _
+        service=$(echo "$starting_partition_db" | awk -F'_' '{print $1}')
+
+        # Make a couple safeguard checks to make sure some valid data did get restored before deleting old DBs
+        if ! grep -qi "$service" <<< "$restored_config_dbs"; then
+            echo "$service service didn't restore its config DB, not cleaning up old partition DB"
+            continue
+        fi
+
+        if ! grep -qi "$service" <<< "$restored_partition_dbs"; then
+            echo "$service service didn't restore any partition DBs, not cleaning up old partition DB"
+            continue
+        fi
+
+        echo "Deleting old partition DB: $starting_partition_db..."
+        ghe-mssql-console -y -r -q "DROP DATABASE [$starting_partition_db]"
+    fi
+done

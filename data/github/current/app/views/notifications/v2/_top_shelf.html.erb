@@ -1,0 +1,100 @@
+<%# erblint:counter FlashMigrationCounter 1 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%
+  locals = ensure_local_vars(local_assigns, {
+    required: [],
+    optional: [:extra_classes],
+    defaults: {
+      extra_classes: ""
+    },
+    view: "notifications/v2/top_shelf"
+  })
+%>
+
+<% if GitHub.flipper[:notifications_async_top_shelf].enabled?(current_user) %>
+  <%= render(Notifications::TopShelfComponent.new(extra_classes: locals[:extra_classes])) %>
+<% else %>
+  <% if !notification_referrer %>
+    <%# we didn't find one, but it's possible the JavaScript will want to load a shelf asynchronously using this %>
+    <include-fragment class="js-notification-shelf-include-fragment" data-base-src="<%= GitHub.url %><%= notification_shelf_path %>"></include-fragment>
+  <% elsif notification_referrer != :conditional_access_error %>
+    <%
+      content_css_classes = class_names(
+        "d-flex flex-justify-between",
+        {
+          "notification-read": !notification_referrer[:is_unread] && !notification_referrer[:is_archived],
+          "notification-unread": notification_referrer[:is_unread],
+          "notification-archived": notification_referrer[:is_archived],
+          "notification-unsubscribed": ["unsubscribed", "list_ignored"].include?(notification_referrer[:subscription_status]),
+          "notification-starred": notification_referrer[:is_starred],
+        }
+      )
+
+      notifications_path = notifications_path(
+        before: params[:notifications_before].presence,
+        after: params[:notifications_after].presence,
+        query: params[:notifications_query].presence,
+      )
+      back_to_notifications_url = "#{GitHub.url}#{notifications_path}"
+    %>
+
+    <div
+      class="notifications-v2 notification-shelf js-notification-shelf js-notification-top-shelf js-sticky js-position-sticky top-0 flash flash-full mt-0 border-top-0 overflow-x-hidden <%= locals[:extra_classes] %>"
+      style="position: sticky;"
+      id="notification-shelf"
+      data-turbo-permanent
+      <%= test_selector("notification-top-shelf") %>
+    >
+      <div
+        class="<%= content_css_classes %>"
+        data-notification-id="<%= notification_referrer[:id] %>"
+      >
+        <a href="<%= back_to_notifications_url %>"
+          class="js-notifications-back-to-inbox btn btn-sm mr-2"
+          aria-label="Return to notifications">
+            &#8592;
+            <span class="d-md-none">Notifications</span>
+            <span class="d-none d-md-inline">Back to notifications</span>
+        </a>
+
+        <ul class="d-flex flex-items-center list-style-none d-md-none">
+          <%=
+            render(
+              partial: "notifications/v2/actions/item_actions",
+              locals: {
+                include_read_actions: true,
+                include_hotkeys: false,
+                inbox_redirect: true,
+                notification_id: notification_referrer[:id],
+                list_is_ignored: notification_referrer[:subscription_status] == "list_ignored",
+                show_button_text: false,
+                button_classes: "btn-sm"
+              }
+            )
+          %>
+        </ul>
+        <ul class="flex-items-center list-style-none d-none d-md-flex">
+          <%=
+            render(
+              partial: "notifications/v2/actions/item_actions",
+              locals: {
+                include_read_actions: true,
+                include_hotkeys: true,
+                inbox_redirect: true,
+                notification_id: notification_referrer[:id],
+                list_is_ignored: notification_referrer[:subscription_status] == "LIST_IGNORED",
+                show_button_text: true,
+                button_classes: "btn-sm"
+              }
+            )
+          %>
+          <li>
+            <button class="btn-octicon js-flash-close" type="button" aria-label="Close notification controls">
+              <%= primer_octicon(:x) %>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
+  <% end %>
+<% end %>

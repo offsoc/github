@@ -1,0 +1,372 @@
+#!/usr/bin/env safe-ruby
+# typed: strict
+# frozen_string_literal: true
+
+require "optparse"
+require "uri"
+require "json"
+
+require_relative "../packages/docs/app/models/docs_url_config"
+
+require "faraday"
+
+
+extend T::Sig
+
+ConfigHashType = T.type_alias { T::Hash[String, String] }
+
+DESCRIPTION = <<~DOCS
+This CLI script helps you add links from the UI to https://docs.github.com.
+When you provide a docs URL the script verifies it, and helps you define a unique identifier.
+The URL and chosen identifier are added to the config JSON file, `config/docs-urls.json`.
+Then you can reference the docs URL, from some source code,
+with an *identifier* rather than a *hard-coded URL*.
+
+See https://thehub.github.com/epd/engineering/products-and-services/dotcom/docs-urls/
+DOCS
+
+sig { params(args: T::Array[String]).returns(T::Hash[Symbol, T.untyped]) }
+def parse_args(args)
+  options = {}
+  OptionParser.new do |opts|
+    opts.banner = "Usage: script/add-docs-url [OPTIONS] URL [IDENTIFIER]"
+
+    opts.on("-f", "--force", "Don't test the URL for validity") do
+      options[:force] = true
+    end
+
+    opts.on("-d", "--dry-run", "Don't actually save the change to the JSON file") do
+      options[:dry_run] = true
+    end
+
+    opts.on("-h", "--help", "Prints this help") do
+      puts opts
+      puts ""
+      puts DESCRIPTION
+      exit 0
+    end
+
+    opts.parse!(args)
+  end
+
+  if args.length >= 1
+    options[:url] = args[0]
+  end
+  if args.length == 2
+    options[:identifier] = args[1]
+  end
+
+  options
+end
+
+sig { params(url: String).returns(T::Boolean) }
+def full_url?(url)
+  !url.match(/\s/) && url.start_with?("http") && (url =~ URI::regexp) == 0
+end
+
+sig { params(url: String, times: Integer).returns(Faraday::Response) }
+def head_with_follow(url, times = 0)
+  # TODO: Make this, if CI is true, much more patient.
+  response = T.cast(T.unsafe(Faraday).head(url), Faraday::Response)
+  if response.status >= 300 && response.status < 400
+    raise RuntimeError, "Too many redirects (#{times}) for #{url})" if times > 5
+    uri = URI.parse(url)
+    domain = uri.host
+    next_url = response.headers["location"]
+    unless next_url.start_with?("https://")
+      next_url = "https://#{domain}#{next_url}"
+    end
+    # If all the redirect does is to inject the `/en/` prefix, then we can ignore
+    # logging out about it.
+    if next_url.gsub("/en/", "/") != url
+      puts colorize("Following redirect: #{next_url}", "cyan")
+    end
+    return head_with_follow(next_url, times + 1)
+  end
+  response
+end
+
+class HttpGetError < RuntimeError; end
+class HttpNotFoundError < HttpGetError; end
+class InputError < RuntimeError; end
+
+sig { params(url: String, ignore_404: T::Boolean).returns(String) }
+def get_final_url(url, ignore_404: false)
+  # We extract the possible hash and keep it for after the URL
+  # has been tested with HTTP.
+  # We can't use
+  hash = url.split("#").length > 1 ? "##{url.split("#", 2)[1]}" : ""
+
+  response = head_with_follow(url)
+  if response.status == 404
+    # There might be an distinction between actually allowing this and
+    # it being a typo.
+    unless ignore_404
+      raise HttpNotFoundError, "#{url} does not exist (404)"
+    end
+  else
+    unless response.status == 200
+      raise HttpGetError, "GET #{url} resulted in a #{response.status} response"
+    end
+  end
+  response.env.url.to_s + hash
+end
+
+sig { params(string: String, color: String, options: T::Hash[Symbol, T.untyped]).returns(String) }
+def colorize(string, color, options = {})
+  background = options[:background] || options[:bg]
+  style = options[:style].to_s
+  offsets = %w[gray red green yellow blue magenta cyan white]
+  styles = %w[normal bold dark italic underline xx xx invert xx strikethrough]
+  start = background ? 40 : 30
+  color_code = start + (offsets.index(color.to_s) || 8)
+  style_code = styles.index(style) || 0
+  "\e[#{style_code};#{color_code}m#{string}\e[0m"
+end
+
+sig { params(hash: T::Hash[String, T.untyped]).returns(T::Hash[String, String]) }
+def sort_hash(hash)
+  sorted_keys = hash.keys.sort
+  Hash[sorted_keys.map { |key| [key, hash[key]] }]
+end
+
+class AddDocsURLConfigurer
+  extend T::Sig
+  include GitHub::Memoizer
+
+  class InvalidURLError < RuntimeError; end
+  class InvalidIdentifierError < RuntimeError; end
+
+
+  sig { params(url: T.nilable(String), identifier: T.nilable(String), force: T::Boolean, dry_run: T::Boolean).void }
+  def initialize(url: nil, identifier: nil, force: false, dry_run: false)
+    @url = url
+    @identifier = identifier
+    @force = force
+    @dry_run = dry_run
+    # The reason this is overrideable with an optional env var is for end-to-end testing
+    @config_file = T.let(ENV["DOCS_URLS_CONFIG_PATH"] || DocsUrlConfig::DOCS_URLS_CONFIG_PATH, String)
+  end
+
+  sig { void }
+  def append_to_config_file
+    fail RuntimeError, "url is required" if @url.blank?
+    fail RuntimeError, "identifier is required" if @identifier.blank?
+    pathname = pathname_from_absolute_url(@url)
+    puts colorize("Time to put '#{@identifier}' => '#{pathname}' into #{@config_file}", "cyan")
+    if @dry_run
+      puts colorize("*DRY-RUN MODE* Not editing the file", "yellow")
+    else
+      config = load_config
+      config[@identifier] = pathname
+      File.open(@config_file, "w") do |f|
+        f.write(JSON.pretty_generate(sort_hash(config)))
+        f.write("\n")
+      end
+      puts colorize("New identifier '#{@identifier}' stored. ✨", "green", style: :bold)
+      puts "You can now use this identifier in your code to link to the article:\n"
+      puts colorize("   href=\"<%= docs_url \"#{@identifier}\" %>\"", "white", style: :italic)
+      puts "\nAwesome! 🚀"
+    end
+  end
+
+  sig { params(absolute_url: String).returns(String) }
+  def pathname_from_absolute_url(absolute_url)
+    uri = URI.parse(absolute_url)
+    pathname = T.cast(uri.path, String)
+    pathname = strip_starts(pathname)
+    if uri.fragment.to_s.present?
+      pathname += "##{uri.fragment}"
+    end
+    pathname
+  end
+
+  sig { params(pathname: String).returns(String) }
+  def strip_starts(pathname)
+    parts = pathname.split("/")
+    while parts[0].to_s.empty? || parts[0] == "en" || parts[0].to_s.start_with?("enterprise-cloud@", "enterprise-server@")
+      parts.shift
+    end
+    # this is so that when joined back as a string, it always starts with a `/`
+    parts.unshift("")
+    parts.join("/")
+  end
+
+  sig { returns(ConfigHashType) }
+  memoize def load_config
+    T.cast(JSON.parse(File.read(@config_file)), ConfigHashType)
+  end
+
+  TARGET_DOMAIN = T.let(URI.parse(T.let(GitHub::Config::DOCS_BASE_URL, String)).hostname.to_s, String)
+
+  sig { params(url: String).void }
+  def validate_url(url)
+    # Domain has to be docs.github.com
+    uri = URI.parse(url)
+    domain = uri.host
+    unless domain == TARGET_DOMAIN
+      raise InvalidURLError, "Domain must be #{TARGET_DOMAIN}, got '#{domain}'"
+    end
+
+    # The URL can't already exist in the config
+    uri = pathname_from_absolute_url(url)
+    load_config.each do |identifier, value|
+      if value == uri
+        raise InvalidURLError, "URL '#{uri}' already exists in the config (with the identifier '#{identifier}')"
+      end
+    end
+
+  end
+
+  sig { params(identifier: String).void }
+  def validate_identifier(identifier)
+    # Can't contain spaces
+    if identifier =~ /\s/
+      raise InvalidIdentifierError, "Identifier cannot contain spaces"
+    end
+
+    # The identifier can't already exist in the config
+    if load_config[identifier]
+      raise InvalidIdentifierError, "Identifier '#{identifier}' already exists in the config (pointing to #{load_config[identifier]})"
+    end
+  end
+
+  sig { returns(String) }
+  def make_default_identifier
+    fail RuntimeError, "URL is required" unless @url
+    uri = URI.parse(@url)
+    pathname = uri.path
+    raise RuntimeError, "pathname is nil" if pathname.nil?
+    fragment = uri.fragment
+    pathname = strip_starts(pathname)
+    path_parts = pathname.split("/")
+    namespace = path_parts[1]
+    key_words = path_parts[-1].to_s.split("/")
+
+    suggestion = "#{namespace}/#{key_words.join("-")}"
+    if !uri.fragment.nil? && !uri.fragment.to_s.empty?
+      suggestion += "-#{fragment}"
+    end
+    suggestion
+  end
+
+  sig { returns(T::Boolean) }
+  def ci?
+    ENV["CI"] == "true" || ENV["CI"] == "1"
+  end
+
+  sig { void }
+  def interactive_get_url
+    puts "Paste or type in the URL to docs.github.com you want to use"
+    puts "For example: https://docs.github.com/en/get-started/quickstart/hello-world"
+    puts "Or: /get-started/quickstart/hello-world"
+    print colorize("URL: ", "white", style: :bold)
+    url = gets.strip
+    unless url.empty?
+      @url = url
+    end
+  end
+
+  sig { void }
+  def interactive_get_identifier
+    if ci?
+      warn colorize("Interactive mode is not supported in CI", "red")
+      exit 1
+    end
+    puts "\n"
+    puts "Enter an appropriate (and short) identifier for this URL"
+    puts "This is what you'll reference in the source code and it won't need to change with the URL"
+    puts "Recommended to use a slash like 'namespace/key-words'"
+    print colorize("Identifier (default: '#{make_default_identifier}'): ", "white", style: :bold)
+    ARGV.clear
+    identifier = gets
+    identifier = identifier.strip
+    if identifier.empty?
+      @identifier = make_default_identifier
+    else
+      @identifier = identifier
+    end
+  end
+
+  sig { void }
+  def absolutify_url
+    if @url.nil?
+      raise RuntimeError, "@url is nil"
+    end
+    if !full_url?(@url)
+      unless @url.start_with?("/")
+        @url = "/#{@url}"
+      end
+      @url = "https://docs.github.com#{@url}"
+    elsif URI.parse(@url).host != "docs.github.com"
+      raise InvalidURLError, "Host has to be docs.github.com, not '#{URI.parse(@url).host}'"
+    end
+  end
+
+  sig { void }
+  def run
+    if @url.nil?
+      interactive_get_url
+      if @url.nil? # Still!? That means the input in the interactive was an empty string
+        warn colorize("Fine! Be that way.", "yellow")
+        exit 1
+      end
+    end
+
+    begin
+      absolutify_url
+    rescue InvalidURLError => e
+      warn colorize(e.to_s, "red")
+      exit 2
+    end
+
+    begin
+      @url = get_final_url(@url)
+    rescue HttpNotFoundError => e
+      if @force
+        @url = get_final_url(@url, ignore_404: true)
+        puts colorize("Ignoring the fact that #{@url} is a 404 Not Found", "yellow")
+      else
+        warn colorize("If you use --force you can ignore this. Perhaps you know that the URL *will* be working soon.", "yellow")
+        warn colorize(e.to_s, "red")
+        exit 5
+      end
+    rescue HttpGetError => e
+      warn colorize(e.to_s, "red")
+      exit 3
+    end
+
+    begin
+      validate_url(@url)
+    rescue InvalidURLError => e
+      warn colorize(e.to_s, "red")
+      exit 4
+    end
+
+    if @identifier.nil?
+      begin
+        interactive_get_identifier
+      rescue Interrupt => e
+        warn colorize("Fine. Bye!", "yellow")
+        exit 5
+      end
+    end
+
+    if @identifier.nil?
+      raise RuntimeError, "still no @identifier"
+    end
+
+    begin
+      validate_identifier(@identifier)
+    rescue InvalidIdentifierError => e
+      warn colorize(e.to_s, "red")
+      exit 6
+    end
+
+    append_to_config_file
+  end
+end
+
+options = parse_args(ARGV)
+configer = AddDocsURLConfigurer.new(**options)
+configer.run

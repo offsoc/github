@@ -1,0 +1,102 @@
+<% if repos.length > 0 %>
+  <div class="Box">
+    <ul class="d-table col-12">
+      <li class="Box-header py-2 d-flex flex-items-center flex-justify-between">
+        <div class="col-12 d-table-cell text-left">
+          <span class="text-bold"><%= pluralize(total_repos_count, "repository") %></span>
+        </div>
+      </li>
+      <% repos.each_with_index do |repo_item, i| %>
+        <li class="Box-row py-2 d-flex flex-items-center flex-justify-between">
+          <%#
+            A call to `repository_path` invokes the method in app/helpers/url_helper.rb
+            which expects a repo object. We need the underlying path helper from Rails,
+            so call the version from Rails.application.routes.url_helpers
+          %>
+          <% repo_path = Rails.application.routes.url_helpers.repository_path(user_id: current_organization.display_login, repository: repo_item[:name]) %>
+
+          <% link_id = "ghas-org-list-repo-#{i}-link" %>
+          <% truncate_at = 56 %>
+          <% truncated_repo_name = repo_item[:name].truncate(truncate_at) %>
+          <div class="col-7 d-table-cell">
+            <%= render Primer::Beta::Octicon.new(icon: "repo", display: :inline_block) %>
+            <a id="<%= link_id %>" class="Link--muted" href="<%= repo_path %>">
+              <span class="color-fg-default text-bold"><%= truncated_repo_name %></span>
+            </a>
+            <% if repo_item[:name].length > truncate_at %>
+              <%= render(Primer::Alpha::Tooltip.new(for_id: link_id, type: :description, text: repo_item[:name], direction: :ne)) %>
+            <% end %>
+          </div>
+          <div class="d-table-cell">
+            <span class="color-fg-muted text-right">
+              <%= pluralize(repo_item[:committer_count], "active committer") %>
+            </span>
+          </div>
+          <div class="d-table-cell">
+            <span class="color-fg-muted text-right">
+              <%= pluralize(repo_item[:unique_committer_count], "unique committer") %>
+            </span>
+          </div>
+          <% if repo_item[:unique_committer_count] <= 0 %>
+            <% licenses_affected = "Disabling GitHub Advanced Security will not affect your license usage." %>
+          <% elsif repo_item[:unique_committer_count] == 1 %>
+            <% licenses_affected = "Disabling GitHub Advanced Security will make 1 additional license available." %>
+          <% else %>
+            <% licenses_affected = "Disabling GitHub Advanced Security will make #{repo_item[:unique_committer_count]} additional licenses available." %>
+          <% end %>
+          <%= render(Primer::Experimental::ActionMenu.new(menu_id: "ghas-repository-actions-menu")) do |component| %>
+            <% component.with_trigger(icon: "kebab-horizontal", text: "Show options", id: "ghas-repository-actions-menu-open-#{repo_item[:name]}", "aria-label": "GHAS repository actions") %>
+            <% if org_billing_manageable?(current_organization) %>
+              <% component.with_item(tag: :a, href: org_download_repository_active_committers_path(repo_id: repo_item[:name]), id: "ghas-repository-actions-menu-item-download-csv-#{i}") { "Download CSV report" } %>
+              <% component.with_item(is_divider: true, id: "ghas-repository-actions-menu-divider-#{i}") %>
+            <% end %>
+            <% component.with_item(
+              tag: :button,
+              type: "button",
+              id: "ghas-repository-actions-menu-disable-ghas-#{i}",
+              is_dangerous: true,
+              value: "open-disable-ghas-modal",
+              "data-octo-click": "repo_ghas",
+              "data-show-dialog-id": "dialog-remove-ghas-from-repository-#{repo_item[:id]}",
+              "data-target": "modal-dialog.remove-repository-button") do %>
+                Disable GitHub Advanced Security
+              <% end %>
+          <% end %>
+
+          <%= render Primer::Alpha::Dialog.new(
+              title: "Remove from GitHub Advanced Security?",
+              id: "dialog-remove-ghas-from-repository-#{repo_item[:id]}",
+              size: :small
+          ) do |d| %>
+            <% form_with(
+              url: update_repository_ghas_settings_path(user_id: current_organization.display_login, repository: repo_item[:name]),
+              method: :put
+            ) do %>
+              <% d.with_header(variant: :large, show_divider: true) %>
+              <%= d.with_body(mt: 2) do %>
+                <p>Disabling GitHub Advanced Security will also disable secret scanning and code scanning on this repository.</p>
+                <p id="licenses-affected-<%= repo_item[:name] %>"><%= licenses_affected %></p>
+                <input type="hidden" name="advanced_security_enabled" value="0">
+              <% end %>
+              <%= d.with_footer(show_divider: true) do %>
+                <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit)) { "Remove repository" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+  <% unless hide_pagination %>
+    <div class="paginate-container pt-3">
+      <%= will_paginate repos, class: "pagination js-advanced-security-entities-pagination", renderer: AdvancedSecurityEntitiesLinkRenderer %>
+      <p class="text-center mt-2 float-right">
+        <%= render(Primer::Beta::Spinner.new("aria-label": "Loading...", hidden: true, size: :small, "data-pager-loading": "")) %>
+      </p>
+    </div>
+  <% end %>
+<% else %>
+  <p class="text-italic pt-2">
+    This organization has no repositories using GitHub Advanced Security licenses.
+  </p>
+<% end %>

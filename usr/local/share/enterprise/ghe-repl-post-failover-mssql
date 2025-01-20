@@ -1,0 +1,47 @@
+#!/bin/bash
+#/ Usage: ghe-repl-post-failover-mssql [-h]
+#/
+# This script should be called after completing a failover of a cluster that is running actions
+# This script should NOT be use with a simple HA cluster
+#/
+#/ OPTIONS:
+#/   -h | --help     Show this message.
+#/
+
+set -e
+
+usage() {
+  grep '^#/' <"$0" |cut -c 4-
+  exit 2
+}
+
+# show usage if -h is passed
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+    esac
+done
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-repl-lib
+. ghe-repl-lib
+
+# repl_role will be set for HA (and not in full cluster), and this should only be use in full cluster
+if [ "$(repl_role)" != "standalone" ]; then
+  echo "Error: ghe-mssql-repl-lib should only be used in full cluster and not in HA" >&2
+  exit 1
+fi
+
+# Run ghe-repl-stop-mssql on all mssql replicas
+ghe-cluster-each --role mssql --serial -- ". /usr/local/share/enterprise/ghe-mssql-repl-lib && [[ \$(mssql_instance_replica_participation) = replica ]] && /usr/local/share/enterprise/ghe-repl-stop-mssql"
+
+# Run ghe-repl-start-mssql on all mssql replicas
+ghe-cluster-each --role mssql --serial -- ". /usr/local/share/enterprise/ghe-mssql-repl-lib && [[ \$(mssql_instance_replica_participation) = replica ]] && sudo -u admin /usr/local/share/enterprise/ghe-repl-start-mssql"

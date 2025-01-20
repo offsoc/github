@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Generate a Dockerfile.golden-slim
+#
+# This is generated dynamically to ensure each copy is
+# split to a new layer to allow parallel downloads later.
+#
+# Usage: generate-dockerfile-golden-slim image-to-copy-from:latest
+#
+require "open3"
+
+def vendor_paths(image)
+  paths = run_command(
+    "find", "/workspace/github/vendor", "-maxdepth", "1", "-mindepth", "1",
+    image: image
+  ).split("\n").map(&:strip)
+
+  if paths.empty?
+    STDERR.puts  "No vendor paths found in the golden builder image (#{image})!"
+    STDERR.puts run_command("ls", "-lah", "/workspace/github/vendor", image: image)
+    STDERR.puts `docker image ls`
+    exit 1
+  else
+    paths
+  end
+end
+
+def run_command(entrypoint, *arguments, image:)
+  out, status = Open3.capture2("docker", "run", "--rm", "--entrypoint", entrypoint, image, *arguments)
+
+  if status.success?
+    out
+  else
+    raise "Error occurred while running #{entrypoint} in #{image} docker image"
+  end
+end
+
+#
+# Do the work
+#
+copy_from_image = ARGV.first || raise("Must provide image to copy from")
+vendor_copy_commands = vendor_paths(copy_from_image).map do |path|
+  %Q[COPY --chown=build:build --from=#{copy_from_image} "#{path}" "#{path}"]
+end
+
+puts <<~DOCKERFILE
+  FROM alpine:latest
+  # Create build user and group with UID/GID matching agents
+  RUN addgroup --system --gid 1000 build && adduser --system --ingroup build --uid 1000 build
+
+  RUN mkdir -p /workspace/github/vendor
+  RUN chown -R build:build /workspace/github
+
+  # Copy .bundle, which includes checksums created during bootstrap
+  #{vendor_copy_commands.join("\n")}
+  COPY --chown=build:build --from=#{copy_from_image} /workspace/github/.bundle /workspace/github/.bundle
+  COPY --chown=build:build --from=#{copy_from_image} /workspace/github/.git /workspace/github/.git
+
+  WORKDIR /workspace/github
+  ENTRYPOINT ["tail", "-f", "/dev/null"]
+DOCKERFILE

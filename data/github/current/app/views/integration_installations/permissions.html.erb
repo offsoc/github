@@ -1,0 +1,178 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%# view is instance of IntegrationInstallations::SuggestionsView %>
+<% page_info \
+  :title => "Installing #{@integration.name}", :class => "color-bg-subtle", hide_marketplace_retargeting_notice: true, hide_marketplace_pending_installations_notice: true
+%>
+
+<div class="integrations-auth-wrapper">
+  <div class="CircleBadge CircleBadge--medium mx-auto mb-4" style="<%= view.logo_background_color_style_rule %>">
+    <%= oauth_application_logo(@integration, 50, :class => "CircleBadge-icon" )%>
+  </div>
+
+  <h2 class="f2 mb-4 text-center text-normal"><%= view.caption %> <%= render(Primer::Beta::Link.new(href: gh_app_url(@integration, current_user))) { @integration.name } %></h2>
+
+  <div class="Box p-4 color-shadow-small" data-hpc>
+    <p class="f4 border-bottom pb-2 mb-4">
+      <%= view.caption %> on your <%= view.account_type %> <%= view.target.safe_profile_name %>
+      <%= avatar_for(view.target, 20, :class => 'target-avatar avatar float-right position-relative', :style => 'top:3px;' ) %>
+    </p>
+
+    <% if view.installation_request_available? %>
+      <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+        <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+          <%= profile_link(view.installation_request.requester) %>
+          <%= view.installation_request_verb %> installation of this GitHub App
+          <%= time_ago_in_words_js(view.installation_requested_at) %>
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+          <%= profile_link(view.installation_request.requester) %>
+          <%= view.installation_request_verb %> installation of this GitHub App
+          <%= time_ago_in_words_js(view.installation_requested_at) %>
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <% if view.skip_requestable_repositories? %>
+      <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+        <%= render(Primer::Alpha::Banner.new(scheme: :warning)) do %>
+          Installation requests have been automatically disabled. Please contact
+          an organization administrator directly and have them install this App on your behalf.
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+          Installation requests have been automatically disabled. Please contact
+          an organization administrator directly and have them install this App on your behalf.
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <div>
+      <%= form_tag gh_app_installations_path(@integration, current_user), class: "js-integrations-install-form", :'data-max-repos' => IntegrationInstallationsController::MAX_REPOSITORIES_ON_INITIAL_INSTALL do %>
+        <%= hidden_field_tag "target_id", view.target.id %>
+        <%= hidden_field_tag "target_type", view.target.class.to_s %>
+        <%= hidden_field_tag "request_id", @installation_request.id if view.installation_request_available? %>
+        <%= hidden_field_tag "version_id", view.integration.latest_version.id %>
+        <%= hidden_field_tag "integration_fingerprint", view.integration.fingerprint %>
+
+        <div class="form-group">
+          <% if !view.installable? && !view.requestable? %>
+            <%= render partial: "integration_installations/not_actionable_reason", locals: { reason: view.not_actionable_reason, view: view } %>
+          <% else %>
+            <% if view.repository_installation_required? %>
+              <p class="f4 border-bottom pb-2 mb-4" id="repository-selection">
+                for these repositories:
+              </p>
+              <%= render "integration_installations/select_repositories", view: view %>
+            <% else %>
+              <%= hidden_field_tag "install_target", "none" %>
+            <% end %>
+          <% end %>
+        </div>
+
+        <% if view.installable? || view.requestable? %>
+          <% access_group_view = Integrations::AccessGroupingsView.new(integration: @integration, target: view.target) %>
+
+          <% if access_group_view.permissions.any? %>
+            <p class="f4 border-bottom pb-2 mb-4">
+              with these permissions:
+            </p>
+
+            <div class="form-group integrations-permissions-group settings-next">
+              <%=
+                render partial: "integration_installations/requested_permissions_list",
+                  locals: {
+                    access_group_view: access_group_view,
+                  }
+              %>
+            </div>
+
+            <hr class="my-4">
+          <% end %>
+
+          <% if access_group_view.user_permissions.any? %>
+            <div class="f4">User permissions</div>
+            <% if view.integration.can_request_oauth_on_install? %>
+              <p class="text-small pb-2 mb-2">
+                Installing and authorizing <%= @integration.name %> immediately grants these permissions on your account: <strong><%= current_user.display_login %></strong>.
+              </p>
+              <% if view.multi_user_install? %>
+                <p class="text-small border-bottom pb-2 mb-4">
+                  These permissions will also be requested and authorized as needed on an individual-user basis.
+                </p>
+              <% end %>
+            <% else %>
+              <p class="text-small border-bottom pb-2 mb-4">
+                <%= @integration.name %> can also request users' permission to the following resources. These permissions will be requested and authorized on an individual-user basis.
+              </p>
+            <% end %>
+
+
+            <div class="form-group integrations-permissions-group settings-next">
+              <ul>
+                <% if access_group_view.read_access(user_permissions_only: true) %>
+                  <li class="integrations-permission"><%= primer_octicon(:check, color: :success, mr: 1) %>
+                    <%= access_group_view.read_access(user_permissions_only: true) %>
+                  </li>
+                <% end -%>
+
+                <% if access_group_view.write_access(user_permissions_only: true) -%>
+                  <li class="integrations-permission"><%= primer_octicon(:check, color: :success, mr: 1) %>
+                    <%= access_group_view.write_access(user_permissions_only: true) %>
+                  </li>
+                <% end -%>
+              </ul>
+            </div>
+
+            <hr class="my-4">
+          <% end %>
+
+          <% if access_group_view.permissions.none? && access_group_view.user_permissions.none? %>
+            <p class="f4 border-bottom pb-2 mb-4">
+              This app will have <strong>read</strong> access to <strong>public</strong> resources
+            </p>
+          <% end %>
+        <% end %>
+
+        <% if view.installable? || view.requestable? %>
+          <%= render Primer::ButtonComponent.new("data-octo-click": "install_integration", "data-octo-dimensions": "marketplace_listing_id:#{ view.marketplace_listing_id },came_from_marketplace:#{ view.came_from_marketplace? },paid_marketplace_plan_purchased:#{ view.paid_marketplace_plan_purchased? }", "data-ga-click": "Integrations, integration installed, marketplace_listing_id:#{ view.marketplace_listing_id };came_from_marketplace:#{ view.came_from_marketplace? };paid_marketplace_plan_purchased:#{ view.paid_marketplace_plan_purchased? }", scheme: :primary, px: 4, float: :left, mr: 2, classes: "js-integrations-install-form-submit", "data-disable-with": view.disabled_caption, type: :submit) do %>
+            <%= view.caption %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if view.installation_request_available? %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Reject",
+            title: "Are you sure you want to reject this installation request?",
+            button_class: "btn btn-danger"
+        } do %>
+          <div class="Box-body">
+          <p>
+            <%= profile_link(view.installation_request.requester) %>
+            requested installation of <%= @integration.name %>. Are you sure you want to reject this request?
+          </p>
+          <% unless view.installation_suggestion_available? %>
+            <%= button_to('Reject', gh_cancel_app_integration_installation_request_url(@installation_request, current_user), method: "delete", class: "btn btn-block btn-danger mt-2") %>
+          <% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= link_to "Cancel", view.cancel_path, :class => "btn btn-invisible" %>
+      <% end %>
+    </div>
+
+    <% if view.installable? %>
+      <% if view.integration.can_request_oauth_on_install? %>
+        <p class="integrations-setup-note color-fg-muted text-small">
+          Next: you'll be redirected to <strong class="color-fg-default"><%= view.integration.callback_url %></strong>
+        </p>
+      <% elsif view.integration.additional_setup_required? %>
+        <p class="integrations-setup-note color-fg-muted text-small">
+          Next: you’ll be directed to the GitHub App’s site to complete setup.
+        </p>
+      <% end %>
+    <% end %>
+  </div>
+</div>

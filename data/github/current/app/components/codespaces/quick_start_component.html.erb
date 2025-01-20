@@ -1,0 +1,144 @@
+<%= render(Primer::Box.new(display: :flex, justify_content: :center, id: :codespace_quick_start, p: 5, w: :full)) do %>
+  <div class="d-flex flex-column flex-items-stretch" style="max-width: 480px">
+    <div class="mb-6">
+      <h1 class="m-0 text-normal">
+        <% if is_resumable? %>
+        Resume codespace
+        <% else %>
+        Create codespace
+        <% end %>
+      </h1>
+      <p class="color-fg-muted">
+        Get started with development in the cloud from an existing repository or a template.
+        <%= render(Primer::Beta::Link.new(href: "https://docs.github.com/github/developing-online-with-codespaces", underline: true)) { "Find out more about codespaces." } %>
+      </p>
+    </div>
+    <%= render Codespaces::UnauthorizedOrganizationsComponent.new(
+        classes: "Box mb-2",
+        cap_filter:,
+        billable_owner:,
+      ) %>
+    <%= render Codespaces::CreateNoticeFlashErrorComponent.new(
+        billable_owner:,
+        user: current_user,
+        repository:,
+        base_image_unavailable:,
+        machine_type_unavailable:,
+        closed_pull_request:,
+        system_arguments: { mb: 4 }
+      ) if !is_resumable? && creations_should_be_disabled? %>
+    <%= render(Primer::Beta::BorderBox.new(mb: 3)) do |component| %>
+      <% component.with_body(display: :flex) do %>
+        <div><%= avatar_for(repository.owner, 30, class: "CircleBadge-icon avatar") %></div>
+        <div class="d-flex flex-column">
+          <span>
+            <a class="color-fg-default" href="<%= repository.permalink %>"
+                data-repository-hovercards-enabled <%= safe_data_attributes(hovercard_data_attributes_for_repository(repository)) %>
+            >
+              <%= repository.name_with_display_owner %>
+            </a>
+          </span>
+          <span><%= repository.description %></span>
+        </div>
+      <% end %>
+    <% end %>
+    <% if is_resumable? %>
+      <%= render(Primer::Beta::BorderBox.new) do |component| %>
+        <% component.with_row(display: :flex, direction: :column) do %>
+          <span class="text-bold mb-1">Previous session found</span>
+          <span class="color-fg-muted mb-3">
+            You recently used a codespace created from this repository. Would you like to resume it or create a new one?
+          </span>
+          <%= render(Primer::Beta::BorderBox.new) do |component| %>
+            <% component.with_body do %>
+              <div class="d-flex flex-justify-between flex-items-center">
+                <%= link_to quickstart_codespace.display_name, quickstart_codespace, class: "Link--primary no-underline" %>
+                <div class="d-flex flex-items-center">
+                  <span class="text-small color-fg-muted">Last used <%= time_ago_in_words(quickstart_codespace.last_used_at) %> ago</span>
+                  <%= render Codespaces::ActionDropdownComponent.new(
+                    codespace: quickstart_codespace,
+                    allow_codespace_interaction: true,
+                    allow_change_machine_type: true,
+                    needs_fork_to_push: false,
+                  ) %>
+                </div>
+              </div>
+              <div class="d-flex flex-justify-start">
+                <%= render Codespaces::RefComponent.new(
+                  codespace: quickstart_codespace,
+                  show_branch_icon: false,
+                  link_to_repo: false) %>
+              </div>
+            <% end %>
+          <% end %>
+        <% end %>
+        <% component.with_footer(display: :flex, justify_content: :space_between) do %>
+          <%= render(Primer::Beta::Button.new(tag: :a, href: advanced_options_link)) { "Create a new one" } %>
+          <%= render(Primer::Beta::Button.new(tag: :a, scheme: :primary, href: resume_url, data: { **resume_tracking_attributes })) do %>
+            Resume <span class="d-none d-sm-inline">this codespace</span>
+          <% end %>
+        <% end %>
+      <% end %>
+    <% else %>
+      <new-codespace data-allow-update-url="true" data-replace-remote-form-target data-no-submit-on-create=true>
+      <%= render(Primer::Beta::BorderBox.new(container: :sm)) do |component| %>
+        <% component.with_row(display: :flex, direction: :column) do %>
+          <% if auto_init? %>
+            <span class="text-bold mb-1">Start coding</span>
+            <span class="color-fg-muted mb-3">
+              Add a README file and start coding in a secure, configurable, and dedicated development environment.
+            </span>
+          <% else %>
+            <span class="text-bold mb-1">No codespace to resume</span>
+            <span class="color-fg-muted mb-3">
+              You don't have a codespace matching these settings. You can continue to create a new one or customize your settings.
+            </span>
+          <% end %>
+        <% end %>
+        <% if !creations_should_be_disabled? && (secrets_component = render(Codespaces::AdvancedOptions::DeclarativeSecretsTextComponent.new(codespace: quickstart_codespace))) && secrets_component.present? %>
+          <% component.with_row(display: :flex, direction: :column) do %>
+            <%= secrets_component %>
+          <% end %>
+        <% end %>
+        <% component.with_footer(display: :flex, justify_content: :space_between) do %>
+          <%= render(Primer::Beta::Link.new(href: advanced_options_link, classes: "btn")) { "Change options" } unless auto_init %>
+          <% if creations_should_be_disabled? %>
+            <%= render Primer::Beta::Button.new(disabled: true) do %>
+              Create <span class="d-none d-sm-inline">new codespace</span>
+            <% end %>
+          <% else %>
+            <%= form_with model: quickstart_codespace, class: class_names("js-toggle-hidden-codespace-form", {"js-open-in-vscode-form": open_directly_in_a_non_web_editor?}), data: { action: "pollvscode:new-codespace#pollForVscode" } do |f| %>
+              <%= f.hidden_field :template_repository_id %>
+              <%= f.hidden_field :repository_id %>
+              <% if quickstart_codespace.pull_request %>
+                <%= f.hidden_field :pull_request_id %>
+              <% else %>
+                <%= f.hidden_field :ref %>
+              <% end %>
+              <%= f.hidden_field :devcontainer_path %>
+              <%= hidden_field_tag(:secrets_data, nil, data: { target: "new-codespace.declarativeSecretsHash"}) %>
+              <%= hidden_field_tag(:open_in_deeplink, true) if open_directly_in_a_non_web_editor? %>
+              <%= hidden_field_tag(:auto_init, auto_init) if auto_init? %>
+              <%= f.button class: "btn btn-primary js-toggle-hidden", data: { **click_tracking_attributes } do %>
+                Create <span class="d-none d-sm-inline">new codespace</span>
+              <% end%>
+              <span class="js-toggle-hidden" hidden> <%#= TODO: maybe instead of relying on js-toggle-hidden can show if loading state in js form is true etc. %>
+                <%= render Codespaces::LoadingButtonComponent.new(action: :create, btn_class: "btn btn-primary") %>
+              </span>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <%= render(Primer::Beta::BorderBox.new(container: :sm, hidden: true, data: { target: "new-codespace.loadingVscode", platform: "vscode" })) do |component| %>
+        <% component.with_row(display: :flex, direction: :column) do %>
+          <poll-include-fragment data-target="get-repo.vscodePoller new-codespace.vscodePoller create-button.vscodePoller">
+            <h5 class="lh-condensed mb-3">Launching Visual Studio Code<span class="AnimatedEllipsis" data-hide-on-error></span></h5>
+            <p class="color-fg-muted" data-hide-on-error>Your codespace will open once ready.</p>
+            <p class="color-fg-muted" data-show-on-error hidden>There was a problem preparing your codespace, please try again.</p>
+          </poll-include-fragment>
+        <% end %>
+      <% end if open_directly_in_a_non_web_editor? %>
+      </new-codespace>
+    <% end %>
+  </div>
+<% end %>

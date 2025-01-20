@@ -1,0 +1,77 @@
+#!/bin/bash
+#/ Usage: ghe-copy-authorized-keys
+#/
+#/ Copies /data/user/common/authorized_keys to /home/admin/.ssh/ if the file exists.
+#/
+#/ OPTIONS:
+#/   -r                 Reverse mode, copy /home/admin/.ssh/authorized_keys to /data/user/common
+#/   -h                 Show this message
+#/   -v                 Run with verbose output
+#/   -a                 Override path of /home/admin/.ssh/authorized_keys
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  echo Run this script as the root user. >&2
+  exit 1
+}
+
+usage() {
+  grep '^#/' <"$0" | cut -c 4-
+}
+
+HOME_AUTHORIZED_KEYS="/home/admin/.ssh/authorized_keys"
+
+while getopts "rhva:" OPTION; do
+  case $OPTION in
+    r)
+      reverse=1
+      ;;
+    h)
+      usage
+      exit 2
+      ;;
+    v)
+      set -x
+      ;;
+    a)
+      HOME_AUTHORIZED_KEYS=$OPTARG
+      ;;
+    ?)
+      usage
+      exit
+      ;;
+  esac
+done
+
+
+
+if [ -z "$reverse" ]; then
+  if [ -f "/data/user/common/authorized_keys" ]; then
+    path=$(mktemp "${TMPDIR:-/tmp}/authorized_keys.XXXXXXXX")
+    cp /data/user/common/authorized_keys $path
+    chmod 600 $path
+    chown admin:admin $path
+    mv $path "$HOME_AUTHORIZED_KEYS"
+    setfacl -m u:ghes-manage-agent:rw-x /home/admin/.ssh/
+    setfacl -Rm u:ghes-manage-agent:rw-x /home/admin/.ssh/authorized_keys
+    echo "Copied /data/user/common/authorized_keys to $HOME_AUTHORIZED_KEYS"
+    exit 0
+  else
+    echo "/data/user/common/authorized_keys could not be found"
+    exit 1
+  fi
+else
+  if [ -f "$HOME_AUTHORIZED_KEYS" ]; then
+    path=$(mktemp "${TMPDIR:-/tmp}/authorized_keys.XXXXXXXX")
+    cp $HOME_AUTHORIZED_KEYS $path
+    chmod 660 $path
+    chown git:git $path
+    mv $path /data/user/common/authorized_keys
+    setfacl -m u:ghes-manage-agent:rw /data/user/common/authorized_keys
+    echo "Copied $HOME_AUTHORIZED_KEYS to /data/user/common/authorized_keys"
+    exit 0
+  else
+    echo "$HOME_AUTHORIZED_KEYS could not be found"
+    exit 1
+  fi
+fi

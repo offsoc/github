@@ -1,0 +1,122 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<% page_info :title => 'Fine-grained Personal Access Tokens', :selected_link => :access_tokens %>
+<% requesting_access = current_grant_request.nil? && !ProgrammaticAccessGrantRequest.approvable_by?(current_target, current_user) %>
+
+<% content = capture do %>
+  <% beta_version = PersonalAccessTokensController::BETA_VERSION %>
+  <div class="settings-next">
+    <% if flash[:new_access] %>
+      <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+        <%= render(Primer::Alpha::Banner.new(mb: 2)) do %>
+          <p>Make sure to copy your token now as you will not be able to see it again.</p>
+
+          <div class="input-group">
+            <input class="form-control color-bg-inset text-mono" id="new-access-token" type="text" placeholder="Access token" aria-label="Access token" disabled value="<%= flash[:new_access]["token"] %>">
+            <span class="input-group-button">
+              <%= render(Primer::Beta::ClipboardCopy.new(for: "new-access-token", "aria-label": "Copy token", tabindex: "0", role: "button", classes: "btn", "data-copy-feedback": "Copied!", test_selector: "token-copy-link")) %>
+            </span>
+          </div>
+
+        <% end %>
+      <% else %>
+        <%= render(Primer::Beta::Flash.new(mb: 2)) do %>
+          <p>Make sure to copy your token now as you will not be able to see it again.</p>
+
+          <div class="input-group">
+            <input class="form-control color-bg-inset text-mono" id="new-access-token" type="text" placeholder="Access token" aria-label="Access token" disabled value="<%= flash[:new_access]["token"] %>">
+            <span class="input-group-button">
+              <%= render(Primer::Beta::ClipboardCopy.new(for: "new-access-token", "aria-label": "Copy token", tabindex: "0", role: "button", classes: "btn", "data-copy-feedback": "Copied!", test_selector: "token-copy-link")) %>
+            </span>
+          </div>
+
+        <% end %>
+      <% end %>
+    <% end %>
+
+    <%= render "personal_access_tokens/token_form", token: token %>
+
+    <div class="clearfix mb-1">
+      <p class="float-left">Created <span class="text-semibold text-italic"><%= human_expiration_date(token.created_at) %></span>.</p>
+
+      <div class="float-right">
+        <%= render partial: "personal_access_tokens/delete_token_dialog", locals: { token: token } %>
+      </div>
+    </div>
+
+    <div class="clearfix">
+      <p class="float-left">
+        <include-fragment src="<%= settings_user_access_token_expiration_path(token) %>">
+          <span class="color-fg-muted" data-hide-on-error>Loading expiration ...</span>
+          <span class="color-fg-danger" data-show-on-error hidden>Sorry, something went wrong.</span>
+        </include-fragment>
+      </p>
+
+      <%= render(Primer::Beta::Button.new(size: :small, scheme: :danger, float: :right, tag: :a, href: regenerate_user_access_token_path)) do %>
+        Regenerate token
+      <% end %>
+    </div>
+
+    <% if !current_grant_request && !current_grant %>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h3, font_size: 3, text_weight: :emphasized, id: "resource_owner_subheading") do %>
+            Access details
+        <% end %>
+      <% end %>
+
+      <%= render(Primer::Beta::Flash.new(icon: :key)) { "This token only has access to public resources currently." } %>
+
+      <%= render "personal_access_tokens/select_organizations", current_target: current_target %>
+
+      <div class="js-cap-resolved">
+        <include-fragment src="<%= user_access_token_select_access_path(id: token.id, target_name: current_target.display_login) %>">
+          <%= render partial: "personal_access_tokens/loading", locals: { hidden: false } %>
+        </include-fragment>
+      </div>
+
+      <%= render partial: "personal_access_tokens/errors" %>
+      <%= render partial: "personal_access_tokens/loading" %>
+
+    <% else %>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h3, font_size: 3, text_weight: :emphasized, id: "resource_owner_subheading") do %>
+          <% if current_target.organization? %>
+            Access on the <%= render GitHub::AvatarComponent.new(actor: current_target, size: 16, classes: "avatar-small", ml: 1) %> <%= link_to current_target.display_login, user_path(current_target), class: "Link--inTextBlock" %> organization
+          <% else %>
+            Access on <%= render GitHub::AvatarComponent.new(actor: current_target, size: 16, classes: "avatar-small", ml: 1) %> <%= link_to current_target.display_login, user_path(current_target), class: "Link--inTextBlock" %>
+          <% end %>
+        <% end %>
+
+        <% component.with_actions do %>
+          <% if current_grant_request %>
+            <div class="d-flex flex-justify-start">
+              <%= render(Primer::Beta::Button.new(size: :small, classes: %w[js-toggle-grant-form js-grant-summary-action])) { "Show requested access" } %>
+              <%= render(Primer::Beta::Button.new(hidden: true, size: :small, scheme: :default, classes: %w[js-toggle-grant-summary js-grant-form-action])) { "Show current access" } %>
+            </div>
+          <% else %>
+            <%= render(Primer::Beta::Button.new(size: :small, classes: %w[js-toggle-grant-form js-grant-summary-action])) { "Edit" } %>
+
+            <div class="d-flex flex-justify-start">
+              <% save_message = requesting_access ? "Request update" : "Update" %>
+              <%= render(Primer::Beta::Button.new(hidden: true, size: :small, mr: 1, scheme: :primary, type: :submit, classes: "js-grant-form-action", form: "programmatic-access-grant-form")) { save_message } %>
+              <%= render(Primer::Beta::Button.new(hidden: true, size: :small, scheme: :default, classes: %w[js-toggle-grant-summary js-grant-form-action js-grant-reload])) { "Cancel" } %>
+            </div>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if current_grant_request %>
+        <%= render "personal_access_tokens/cancel_request_flash", token: token %>
+        <%= render "personal_access_tokens/request_summary", repositories_view: repositories_view, permissions_view: permissions_view %>
+      <% else %>
+        <%= render "personal_access_tokens/grant_form", repositories_view: repositories_view, permissions_view: permissions_view, requesting_access: requesting_access %>
+      <% end %>
+
+      <%= render "personal_access_tokens/grant_summary" %>
+    <% end %>
+  </div>
+<% end %>
+
+<%= render layout: "settings/developer_settings" do %>
+  <%= content %>
+<% end %>

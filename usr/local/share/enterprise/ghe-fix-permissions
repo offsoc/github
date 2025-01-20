@@ -1,0 +1,264 @@
+#!/bin/bash
+set -e
+
+[ "$(whoami)" = "root" ] || {
+  exec sudo -u root "$0" "$@"
+  exit 1
+}
+
+set_chmod_if_exists() {
+  local mode="$1"
+  local path="$2"
+  if [ -e "$path" ]; then
+    chmod "$mode" "$path"
+  fi
+}
+
+glob_exists() {
+  local glob="$1"
+  [ -n "$(shopt -s nullglob; echo $glob )" ]
+}
+
+find /data/user -mindepth 1 -maxdepth 1 -type d ! -name tmp ! -name common ! -name hookshot ! -name patch ! -name config-apply -exec chmod 700 {} \;
+
+# Restrict access to /etc/github/configapply.json because it contains authentication data
+chown admin:admin /etc/github/configapply.json
+chmod 0660 /etc/github/configapply.json
+
+# Restrict access to Nomad job files
+find /etc/nomad-jobs -type f -name '*.hcl' -exec chmod 0660 {} \;
+
+# Remove any previous ACL on /data/user/common, to tighten up
+# permissions on appliances upgraded from 2.13 and earlier to
+# 2.14+.
+setfacl --remove-all /data/user/common
+
+chown -R admin:admin /data/user/common
+chmod 2775 /data/user/common
+setfacl -m d:u::6,d:g::6,d:o::0 /data/user/common
+setfacl -m u:enterprise-manage:rwx,d:u:enterprise-manage:rw /data/user/common
+setfacl -m u:ghes-manage-agent:rwx,d:u:ghes-manage-agent:rw /data/user/common
+# gateway needs access to HMAC secret
+setfacl -m u:ghes-manage-gateway:rx,d:u:ghes-manage-gateway:r /data/user/common
+
+(GLOBIGNORE=*/ssh_host_*key*; getfacl -d -p /data/user/common | setfacl --set-file=- /data/user/common/*)
+
+
+# ghe-config-apply and ghe-config-apply/config-file-history
+if [ ! -d /data/user/common/ghe-config-apply/config-file-history ]; then
+  mkdir -p /data/user/common/ghe-config-apply/config-file-history
+fi
+chown -R admin:admin /data/user/common/ghe-config-apply
+chmod -R 2775 /data/user/common/ghe-config-apply
+chown -R admin:admin /data/user/common/ghe-config-apply/config-file-history
+chmod -R 2775 /data/user/common/ghe-config-apply/config-file-history
+sudo find /data/user/common/ghe-config-apply/config-file-history/ -type f -exec chmod 660 {} +
+
+if [ -f /data/user/common/cluster.conf ]; then
+  chmod 0644 /data/user/common/cluster.conf
+fi
+
+if [ -f /data/user/common/enterprise.ghl ]; then
+  setfacl -m u:git:r /data/user/common/enterprise.ghl
+fi
+
+if [ -f /data/user/common/idp.crt ]; then
+  setfacl -m u:git:r /data/user/common/idp.crt
+fi
+
+if [ -f /data/user/common/saml-sp.p12 ]; then
+  setfacl -m u:git:r /data/user/common/saml-sp.p12
+fi
+
+if [ -d /data/user/es8-auditlog-migration ]; then
+  chown -R elasticsearch:elasticsearch /data/user/es8-auditlog-migration
+fi
+
+if [ -d /var/log/es8-auditlog-migration ]; then
+  chown -R elasticsearch:elasticsearch /var/log/es8-auditlog-migration
+fi
+
+if glob_exists "/data/user/common/ssh_host*"; then
+  chown babeld:babeld /data/user/common/ssh_host*
+  setfacl -b /data/user/common/ssh_host*
+  chmod 0660 /data/user/common/ssh_host*
+fi
+
+# babeld config goes here.
+mkdir -p /data/babeld/shared
+chown -R babeld:babeld /data/babeld/shared
+
+if [ -f /data/user/common/wireguard.key ]; then
+  setfacl --remove-all /data/user/common/wireguard.key
+  chown root:root /data/user/common/wireguard.key
+  chmod 0600 /data/user/common/wireguard.key
+fi
+
+# Running as the git user
+for svc in mail-replies pages-lua; do
+  if glob_exists "/data/$svc/*/.app-config/env.d"; then
+    chown -R git:git /data/$svc/*/.app-config/env.d
+    chmod -R u=rwX,go= /data/$svc/*/.app-config/env.d
+  fi
+done
+
+# git user owns these files
+chown -R git:git /data/github/shared
+mkdir -p /data/github/current/log
+chown -R git:git /data/github
+
+# _chrony user owns /var/log/chrony and files
+chown -R _chrony:_chrony /var/log/chrony
+
+# Running as their own user
+for svc in enterprise-manage alive pages dependency-graph-api dependency-snapshots-api codeload alambic; do
+  if glob_exists "/data/$svc/*/.app-config/env.d" ; then
+    chown -R $svc:$svc /data/$svc/*/.app-config/env.d
+    chmod -R u=rwX,go= /data/$svc/*/.app-config/env.d
+  fi
+done
+
+for fixme in git-import; do
+  if [ -d /data/$fixme/shared ]; then
+    chown -R git:git /data/$fixme/shared/env.d
+    chmod -R u=rwX,go= /data/$fixme/shared/env.d
+  fi
+done
+
+if [ -d /data/user/tmp/pages ]; then
+  find /data/user/tmp/pages -not -user pages -print0 -or -not -group pages -print0 | xargs -r -0 chown pages:pages
+fi
+
+# Redis
+chown redis:redis -R /etc/redis
+
+# Consul; same lines as `chroot-prepare-ghe.sh`
+chown -R consul:consul /etc/consul.d /etc/consul-template.d
+set_chmod_if_exists o-r /etc/consul.d/server/config.hcl
+
+chown -R nomad:nomad /etc/nomad.d
+set_chmod_if_exists o-r /etc/nomad.d/config.hcl
+
+usermod -aG docker admin
+usermod -aG docker nomad
+
+set_chmod_if_exists 0644 /data/user/version
+set_chmod_if_exists 1777 /data/user/tmp
+
+chown -R admin:admin /home/admin/.ssh
+chmod 755 /home/admin
+chmod 700 /home/admin/.ssh
+set_chmod_if_exists 0600 /home/admin/.ssh/id_rsa
+set_chmod_if_exists 0600 /home/admin/.ssh/id_ed25519
+
+setfacl -m u:ghes-manage-agent:rw-x /home/admin/.ssh/
+setfacl -Rm u:ghes-manage-agent:rw-x /home/admin/.ssh/authorized_keys
+
+if [ -f /data/user/common/authorized_keys ]; then
+  setfacl -m u:git:r /data/user/common/authorized_keys
+  setfacl -m u:ghes-manage-agent:rw /data/user/common/authorized_keys
+fi
+
+chown -R root:root /etc/wireguard
+chmod 0600 /etc/wireguard/tun0.conf
+
+# Actions
+# Add `actions` user to the `mssql` group so Actions containers can access XEvent logs produced by `mssql` container
+usermod -aG mssql actions
+
+if [ -d /data/user/mssql ]; then
+  chown -R mssql:mssql /data/user/mssql
+  chmod g+x /data/user/mssql
+fi
+
+if [ -d /data/user/actions ]; then
+  # Best effort update owner, can fail sporadically on short-lived temp files
+  chown -R -f actions:actions /data/user/actions || true
+
+  # Nomad needs to mount the certificates/ folder, which needs +rx on the parent folder
+  setfacl -m u:nomad:rx /data/user/actions
+  setfacl -m u:admin:rx /data/user/actions
+
+  # Admin needs certs and states for HA syncing (see ghe-cluster-config-update)
+  if [ -d /data/user/actions/certificates ]; then
+    setfacl -m u:admin:rx -R /data/user/actions/certificates
+  fi
+
+  if [ -d /data/user/actions/states ]; then
+    setfacl -m u:admin:rx -R /data/user/actions/states
+  fi
+fi
+
+if [ -d /data/user/minio ]; then
+  chown -R minio:minio /data/user/minio
+fi
+
+if [ -d /etc/collectd/conf.d ]; then
+  chmod -R u=rw,go= /etc/collectd/conf.d
+fi
+
+# actions-console needs to read actions storage secrets
+set_chmod_if_exists 0600 /etc/nomad-jobs/actions/secrets.json
+if [ -f /etc/nomad-jobs/actions/secrets.json ]; then
+  setfacl -m u:actions:r /etc/nomad-jobs/actions/secrets.json
+fi
+
+set_chmod_if_exists 0600 /etc/nomad-jobs/packages/secrets.json
+set_chmod_if_exists 0600 /etc/nomad-jobs/packages-v2/secrets.json
+
+
+# codeload config goes here.
+mkdir -p /data/codeload/shared
+chown -R codeload:codeload /data/codeload/shared
+chmod 700 /data/codeload/shared
+
+if [ -d /data/user/codeload_archives ]; then
+  chown -R codeload:codeload /data/user/codeload_archives
+  chmod 0700 /data/user/codeload_archives
+fi
+
+if [ -d /etc/elasticsearch ]; then
+  chown -R elasticsearch:elasticsearch /etc/elasticsearch
+fi
+
+# Dependency Graph
+mkdir -p /var/log/dependency-graph-api-env
+chown -R dependency-graph-api:dependency-graph-api /var/log/dependency-graph-api-env
+
+if [ -d /etc/telegraf ] && id -u telegraf &> /dev/null; then
+  chown -R telegraf:telegraf /etc/telegraf
+fi
+
+# ghes-manage-agent 
+mkdir -p /data/ghes-manage-agent/current
+chown -R ghes-manage-agent:ghes-manage-agent /data/ghes-manage-agent/current
+
+if [ ! -d /data/ghes-manage-agent/current/log ]; then
+  mkdir -p /data/ghes-manage-agent/current/log
+  chown -R ghes-manage-agent:ghes-manage-agent /data/ghes-manage-agent/current/log
+fi
+
+# Ensure enterprise-manage has user access to ghes-manage agent directory to be able to read login attempts file
+setfacl -m u:enterprise-manage:rx,d:u:enterprise-manage:rx /data/ghes-manage-agent/current/log
+
+#Ensure ghes-manage-agent has access to Docker sock
+setfacl -m "user:ghes-manage-agent:rw" /var/run/docker.sock
+
+if [ -d /home/admin/.config/gh ]; then
+  chown -R admin:admin /home/admin/.config/gh
+  set_chmod_if_exists 0600 /home/admin/.config/gh/ghes.yml
+fi
+
+if [ ! -f /data/user/common/maintenance_mode_message.txt ]; then
+  touch /data/user/common/maintenance_mode_message.txt
+fi
+
+setfacl -m u:git:r /data/user/common/maintenance_mode_message.txt
+
+# config-apply
+sudo mkdir -p /data/user/config-apply
+sudo chown admin:admin /data/user/config-apply
+sudo chmod -R 775 /data/user/config-apply
+
+# fluent-bit
+/usr/local/share/enterprise/ghe-fluent-bit-fix-permissions

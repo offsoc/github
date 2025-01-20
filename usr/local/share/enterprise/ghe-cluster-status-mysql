@@ -1,0 +1,108 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-mysql [-hjnv]
+#/
+#/ Check the status of the MySQL service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+
+start_output "mysql"
+
+mysql_node_query() {
+  ssh_node "$1" "sudo mysql --connect_timeout $CONNECT_TIMEOUT --user root github_enterprise -s -r -e '$2;'"
+}
+
+check_failover() {
+  local mysql_master=$1
+  local mysql_has_error=$2
+
+  if orchestrator_enabled ; then
+    if json_output=$(/usr/local/share/enterprise/ghe-orchestrator-client -c api -path audit-recovery/ghe 2>/dev/null); then
+      # Check successful output
+      failover_result=$(jq -re '[.[] | select( .IsSuccessful == true )] | max_by(.RecoveryEndTimestamp) | [.SuccessorKey.Hostname, .AnalysisEntry.AnalyzedInstanceKey.Hostname, .RecoveryEndTimestamp] | join(" ")' <<< $json_output)
+      if [ -n "${failover_result// }" ]; then
+        read new_primary old_primary failover_timestamp <<< $failover_result
+        failover_retention_timestamp=$(date +"%Y-%m-%dT%TZ" -d "-1 day")
+        # double check if old_primary already recovered as a replica
+        old_master_status=$(mysql_node_query "$old_primary" "SHOW SLAVE STATUS \\G" 2>/dev/null || true)
+        if [ -n "$old_master_status" ]; then
+          return
+        fi
+        # only display mysql-failover warning if within 24 hours or there are other mysql errors/warnings
+        if "$mysql_has_error" || [[ "$failover_timestamp" > "$failover_retention_timestamp" ]]; then
+          check_result "$new_primary" "mysql-failover" "warn" "Last failover: $old_primary (Old Master) -> $new_primary (New Master), Timestamp: $failover_timestamp"
+        fi
+      fi
+    else
+      check_result "$mysql_master" "mysql-failover" "warn" "Orchestrator not ready yet, failover status could not be determined"
+    fi
+  fi
+}
+
+mysql_has_error=false
+num_replicas=0
+mysql_master=$(ghe-config cluster.mysql-master)
+
+for hostname in $(ghe-cluster-nodes -r mysql); do
+  if [ "$hostname" = "$mysql_master" ]; then
+    master_status=$(mysql_node_query "$hostname" "SHOW MASTER STATUS \\G" || true)
+    if [ -n "$master_status" ]; then
+      check_result "$hostname" "mysql-master" "ok"
+    else
+      check_result "$hostname" "mysql-master" "error" "Master status could not be determined"
+      mysql_has_error=true
+    fi
+  else
+    num_replicas=$(( num_replicas + 1 ))
+    repl_status=$(mysql_node_query "$hostname" "SHOW SLAVE STATUS \\G" 2>/dev/null || true)
+
+    if [ -n "$repl_status" ]; then
+      io_running=$(echo "$repl_status" | grep "Slave_IO_Running:" | awk '{ print $2 }')
+      sql_running=$(echo "$repl_status" | grep "Slave_SQL_Running:" | awk '{ print $2 }')
+      delay=$(echo "$repl_status" | grep "Seconds_Behind_Master:" | awk '{ print $2 }')
+
+      if [ "$io_running" = "No" ] || [ "$sql_running" = "No" ] || [ "$delay" = "NULL" ]; then
+        check_result "$hostname" "mysql-replication" "error" "MySQL replication link is down"
+        mysql_has_error=true
+        continue
+      fi
+
+      replica_info="MySQL replication delay is ${delay}s"
+      if [ "$delay" -gt 120 ]; then
+        check_result "$hostname" "mysql-replication" "error" "$replica_info"
+        mysql_has_error=true
+      elif [ "$delay" -gt 0 ]; then
+        check_result "$hostname" "mysql-replication" "warn" "$replica_info"
+      else
+        check_result "$hostname" "mysql-replication" "ok" "MySQL replication is in sync"
+      fi
+    else
+      check_result "$hostname" "mysql-replication" "error" "MySQL replication is not setup"
+      mysql_has_error=true
+    fi
+  fi
+done
+if [ $num_replicas -lt 1 ]; then
+  check_result "cluster" "mysql-replication" "warn" "No replica found"
+fi
+
+check_failover "$mysql_master" "$mysql_has_error"
+
+end_output "mysql"

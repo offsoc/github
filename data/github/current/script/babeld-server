@@ -1,0 +1,41 @@
+#!/bin/sh
+
+
+if [ "${GITHUB_USE_DOCKER:-"0"}" -eq 1 ]; then
+  cd $(dirname $0)/..
+
+  trap 'docker-compose stop babeld-server' EXIT HUP INT QUIT PIPE TERM
+  docker-compose up babeld-server
+else
+  BABELD_BIN="vendor/babeld/babeld"
+  # This is necessary so babeld can talk to github internal
+  # api on localhost
+  export API_INTERNAL_BABELD_HMAC_KEY="octocat"
+
+  if [ -n "$CODESPACES" ]; then
+    bindaddr=""
+  else
+    bindaddr="--bind-addr 127.0.0.1"
+  fi
+
+  until [ -x $BABELD_BIN ]; do
+    if [ "$BABELD_BIN" != "1" ]; then
+      echo "Run 'script/build-babeld' to setup babeld."
+      BABELD_BIN=1
+    fi
+    sleep 60
+  done
+
+  cd $(dirname $BABELD_BIN)
+
+  if [ -n "$MULTI_TENANT_ENTERPRISE" ]; then
+    mt_flag="--multi-tenant"
+  else
+    mt_flag=""
+  fi
+
+  trap 'kill $PID' EXIT HUP INT QUIT PIPE TERM
+  ./$(basename $BABELD_BIN) ${bindaddr} ${mt_flag} --ssh-host-key-file ./ssh_host_key.dev --ssh-dss-host-key-file ./dss_host_key.dev "$@" &
+  PID=$!
+  wait
+fi

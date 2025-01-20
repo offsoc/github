@@ -1,0 +1,134 @@
+# This file varies slightly from the standard unicorn-api nginx.conf
+# It is a envsubst template that is placed at /etc/nginx/nginx.conf
+# All the other nginx config files are located in /etc/nginx/conf.d/,
+# the include directives have been updated. Other notes are inline.
+env KUBE_POD_NAME;
+env GRAPHQL_MIRROR_REQUESTS;
+worker_processes 6;
+pid /nginx-pidfile/nginx.pid;
+
+events {
+    worker_connections 1024;
+    use epoll;
+    accept_mutex off;
+}
+
+http {
+    include /etc/nginx/conf.d/mime.types;
+    include /etc/nginx/conf.d/logging.conf;
+    include /etc/nginx/conf.d/gzip.conf;
+
+    default_type application/octet-stream;
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_disable msie6;
+
+    # X-Real-IP is set by haproxy so we should be able to trust it
+    set_real_ip_from 0.0.0.0/0;
+    real_ip_header X-Real-IP;
+
+    upstream unicorn {
+        server unix:/sockets/unicorn.sock fail_timeout=0;
+    }
+
+    # The official internal resolver, required to resolve the api server location
+    resolver 10.127.5.10;
+
+    # The location of the mirror, when off please set to "0.42.42.42 down"
+    # The down keyword will tell nginx to just give up on this upstream and
+    # avoids any potential issues resolving this address (which would prevent
+    # nginx from starting)
+    upstream mirror {
+        server api.github.com:443;
+    }
+
+    map $uri $gh_error_page_502 {
+        default     /502.json;
+        /graphql    /502-graphql.json;
+    }
+
+    server{
+        listen 8081;
+        location /stats {
+            stub_status;
+        }
+
+        location /status {
+            return 200;
+        }
+    }
+
+    # This is a cheat to set $mirror_backend to the envvar (via envsubst)
+    # on every request.
+    # If, later, we want to sample a % of requests, set the % less than 100
+    split_clients $remote_addr $mirror_backend {
+        100% ${GRAPHQL_MIRROR_REQUESTS};
+        * "";
+    }
+
+    server {
+        listen 80 default_server;
+        include /etc/nginx/conf.d/large_file_uploads.conf;
+        include /etc/nginx/conf.d/error_pages.conf;
+        include /etc/nginx/conf.d/github_prod.conf;
+        include /etc/nginx/conf.d/fallback.conf;
+
+        root /assets/public;
+
+        location / {
+            include /etc/nginx/conf.d/proxy.conf;
+            set_by_lua $KUBE_POD_NAME 'ngx.header["X-GLB-Log-Append"] = (ngx.header["X-GLB-Log-Append"] or "") .. " kube_pod_name=\\"" .. os.getenv("KUBE_POD_NAME") .. "\\""';
+            add_header Vary "Accept-Encoding, Accept, X-Requested-With" always;
+            add_header X-GitHub-Backend Kubernetes always;
+
+            # Set the Mirror Header on all requests from this pod, value is 0 or 1
+            # $IS_MIRRORED_REQUEST is ignored and only here to satisfy the lua
+            # signature
+            set_by_lua_block $IS_MIRRORED_REQUEST {
+               ngx.req.set_header("X-GitHub-Mirrored-Request", (os.getenv("GRAPHQL_MIRROR_REQUESTS") or "0"))
+            }
+
+            # Always mirror the request, we'll throw it away later if we don't
+            # want it
+            mirror /mirror;
+            mirror_request_body on;
+
+            if (!-f $request_filename) {
+                proxy_pass http://unicorn;
+            }
+        }
+
+        # Handle all mirror requests
+        location = /mirror {
+            # Only NGINX can route to this, a user cannot via their path
+            internal;
+
+            proxy_set_header        Host api.github.com;
+            proxy_set_header        X-Real-IP $remote_addr;
+            proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header        X-Forwarded-Proto https;
+            proxy_set_header        X-Forwarded-Host $Host;
+
+            # `if` is dangerous, this is one of the few "safe" usages
+            if ($mirror_backend != "1") {
+                return 400;
+            }
+
+            proxy_pass https://mirror$request_uri;
+        }
+
+        location /robots.txt {
+            alias /assets/public/api_robots.txt;
+        }
+
+        location /502-graphql.json {
+            sub_filter "###REQUEST_ID###" "$http_x_github_request_id";
+            sub_filter_types application/json;
+            add_header Access-Control-Expose-Headers "ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, Deprecation, Sunset" always;
+            add_header Access-Control-Allow-Origin "*" always;
+            add_header Vary "Accept-Encoding, Accept, X-Requested-With" always;
+            add_header X-GitHub-Backend Kubernetes always;
+        }
+    }
+}

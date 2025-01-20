@@ -1,0 +1,256 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-haproxy-config
+data:
+  haproxy.cfg: |
+    global
+      user root
+      group root
+      daemon
+      maxconn 1024
+      tune.bufsize 65536
+      tune.pipesize 262144
+      tune.ssl.maxrecord 1370
+
+      pidfile /var/run/haproxy.pid
+      stats socket /var/run/haproxy.sock
+
+      log /var/run/syslogng/socket local0
+
+    ##
+    # TCP proxies
+
+    defaults tcp
+      mode tcp
+      maxconn 10240
+      balance leastconn
+
+      # never fail on address resolution
+      default-server init-addr last,libc,none
+
+      # timeouts
+      timeout client 120s
+      timeout connect 10s
+      timeout tunnel 10m
+      timeout tarpit 30s
+      timeout client-fin 5s
+      timeout server-fin 5s
+
+      # logging
+      log global
+      option tcplog
+      log-format "now=%t client_ip=%ci client_port=%cp frontend_transport=%ft frontend_ip=%fi frontend_port=%fp backend=%b backend_server=%s tw=%Tw tc=%Tc tt=%Tt term_state=%ts bytes=%B actconn=%ac feconn=%fc beconn=%bc srv_conn=%sc retries=%rc srv_queue=%sq be_queue=%bq fc_rtt=%[fc_rtt] fc_rttvar=%[fc_rttvar] fc_unacked=%[fc_unacked] fc_sacked=%[fc_sacked] fc_retrans=%[fc_retrans] fc_fackets=%[fc_fackets] fc_lost=%[fc_lost] fc_reordering=%[fc_reordering]"
+
+    frontend ssh
+      bind 0.0.0.0:22 accept-proxy
+      default_backend babeld_ssh
+
+    frontend git
+      bind 0.0.0.0:9418 defer-accept accept-proxy
+      default_backend babeld_git
+
+    # Need fqdn and resolvers so that DNS works before the service is active
+    backend babeld_ssh
+      server babeld git.${KUBE_NAMESPACE}.svc.cluster.local:3035 resolvers kubedns init-addr last,libc,none check inter 5s
+
+    backend babeld_git
+      server babeld git.${KUBE_NAMESPACE}.svc.cluster.local:3034 resolvers kubedns init-addr last,libc,none check inter 5s
+
+    ##
+    # HTTP proxies
+
+    defaults http
+      mode http
+      balance leastconn
+      option redispatch
+
+      # never fail on address resolution
+      default-server init-addr last,libc,none
+
+      # logging
+      log global
+
+      option httplog
+      no option dontlognull
+      option log-health-checks
+      option log-separate-errors
+
+      option forwardfor
+      option http-server-close
+
+      unique-id-header X-GitHub-Request-Id
+      unique-id-format %{+X}o\ %ci:%pid:%rt:%Ts
+      log-format "now=%t client_ip=%ci client_port=%cp frontend_transport=%ft frontend_ip=%fi frontend_port=%fp backend=%b backend_server=%s tq=%Tq tw=%Tw tc=%Tc tr=%Tr tt=%Tt status=%ST bytes=%B req_cookie=%CC res_cookie=%CS term_state=%tsc actconn=%ac feconn=%fc beconn=%bc srv_conn=%sc retries=%rc srv_queue=%sq be_queue=%bq res_headers='%{+Q}hsl' host_header=%[capture.req.hdr(0)] user_agent=%[capture.req.hdr(1)] ssl_version=%sslv ssl_ciphers=%sslc fastly_client_ip=%[capture.req.hdr(2)] requested_with=%[capture.req.hdr(3)] origin=%[capture.req.hdr(4)] referer=%[capture.req.hdr(5)] accept=%[capture.req.hdr(6)] fastly_ssl=%[capture.req.hdr(7)] forwarded_protocol=%[capture.req.hdr(8)] method=%HM path=%HP query='%HQ' uri=%HU http_version=%HV request_id=%ID fc_rtt=%[fc_rtt] fc_rttvar=%[fc_rttvar] fc_unacked=%[fc_unacked] fc_sacked=%[fc_sacked] fc_retrans=%[fc_retrans] fc_fackets=%[fc_fackets] fc_lost=%[fc_lost] fc_reordering=%[fc_reordering]"
+
+      # timeouts
+      timeout client 120s
+      timeout connect 10s
+      timeout server 2m
+      timeout queue 1m
+      timeout tunnel 1m
+      timeout http-keep-alive 10s
+      timeout http-request 15s
+      timeout tarpit 30s
+      timeout client-fin 5s
+      timeout server-fin 5s
+
+      errorfile 400 /etc/haproxy/errors/400/github400.http
+      errorfile 403 /etc/haproxy/errors/400/github403.http
+      errorfile 408 /dev/null # this causes haproxy to close the connection on a 408 rather than sending a error page, helps with Chrome pre-connect related unicorns
+      errorfile 500 /etc/haproxy/errors/500/github500.http
+      errorfile 502 /etc/haproxy/errors/500/github502.http
+      errorfile 503 /etc/haproxy/errors/500/github503.http
+      errorfile 504 /etc/haproxy/errors/500/github504.http
+
+    # Incoming requests to this port can be addressing these services:
+    #
+    # - web + api, routed to the github service
+    # - git, routed to the babeld service
+    # - svn, routed to the babeld service
+    #
+    # We need to disambiguate them and route to the correct backend service running
+    # on k8s in the same namespace as this router.
+    #
+    # This does not receive requests directly from user agent clients, it should
+    # itself be behind an ELB or GLB. The config here is restricted to port 80
+    # disambiguation.
+    #
+    # By detecting the svn and git requests we can make the unicorns the
+    # default backend.
+    frontend http
+      bind 0.0.0.0:80 defer-accept
+
+      # nginx ingress sets X-Real-IP for us, so we
+      # do not need to manually do so
+      http-request del-header Client-IP
+      http-request del-header X-Forwarded-For
+      http-request del-header X-Forwarded-Host
+      http-request del-header X-Forwarded-Port
+      http-request del-header X-Forwarded-Server
+      http-request del-header X-Forwarded-Ssl
+      http-request del-header X-Forwarded-Scheme
+
+      # sets unique request id in responses
+      http-response set-header X-GitHub-Request-Id %ID
+
+      # Force this for now, eventually we'll want an ELB with a HTTP backend
+      # that sets this for us
+      http-request set-header X-Forwarded-Proto https
+
+      ##
+      # Routing ACLs
+
+      # user agent matchers
+      acl ua_git hdr_reg(User-Agent) -i ^(git|JGit)/
+      acl ua_svn hdr_reg(User-Agent) -i ^SVN
+
+      # path matchers
+      acl dot_git           path_reg -i /(.*)/(.*)\.git/
+      acl dot_git_2         path_reg -i (.*)\.git/(.*)
+      acl slash_gist        path_beg -i /gist
+
+      ## these two acls are for routing git requests to the babeld_http backend
+      acl uri_service   url_reg -i ^(/|//)([^\/]*)(/|//)([^\/]*)\.git(/|//)info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack path_reg -i ^(/|//)([^\/]*)(/|//)([^\/]*)\.git(/|//)git-(upload|receive)-pack$
+
+      ## these two are used for determining which git requests need to be rewritten to have a .git
+      acl uri_service_no_dot_git   url_reg -i ^/([^\/]*)/([^\/]*)/info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack_no_dot_git path_reg -i ^/([^\/]*)/([^\/]*)/git-(upload|receive)-pack$
+
+      acl uri_service_no_dot_git_dotgit   url_reg -i ^/([^\/]*)/([^\/]*)(github\.com|github\.io)/info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack_no_dot_git_dotgit path_reg -i ^/([^\/]*)/([^\/]*)(github\.com|github\.io)/git-(upload|receive)-pack$
+
+      ## these two are for git requests without .git and a '//' which seems to be an issue in some git 1.7.1 clients
+      acl uri_service_no_dot_git_double_slash_1   url_reg -i ^/([^\/]*)/([^\/]*)//info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack_no_dot_git_double_slash_1 path_reg -i ^/([^\/]*)/([^\/]*)//git-(upload|receive)-pack$
+
+      acl uri_service_no_dot_git_double_slash_2   url_reg -i ^//([^\/]*)/([^\/]*)/info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack_no_dot_git_double_slash_2 path_reg -i ^//([^\/]*)/([^\/]*)/git-(upload|receive)-pack$
+
+      acl uri_service_no_dot_git_double_slash_3   url_reg -i ^/([^\/]*)//([^\/]*)/info/refs\?service=git-(upload|receive)-pack$
+      acl uri_git_pack_no_dot_git_double_slash_3 path_reg -i ^/([^\/]*)//([^\/]*)/git-(upload|receive)-pack$
+
+      # acl for gist.githubusercontent.com url containing /raw(/.*)
+      # needs to match the following sorts of URLs:
+      #
+      #  https://gist.githubusercontent.com/:login/:id/raw/
+      #  https://gist.githubusercontent.com/:login/:id/raw
+      #  https://gist.githubusercontent.com/:id/raw/
+      #  https://gist.githubusercontent.com/:login/:id/raw/:whatever
+      #  https://gist.github.com/raw/:id/:whatever
+      #  https://gist.github.com/raw/:id/
+      #  https://gist.github.com/raw/:id
+      #
+      # To describe this regex in hooman, we:
+      #
+      #   1. look for 0 or more segments at the beginning of the line that:
+      #      a. start with 1 or more / characters
+      #      b. followed by 1 or more non-/ characters
+      #   2. look for /raw
+      #   3. look for 0 or more segments that:
+      #      a. start with 1 or more / characters
+      #      b. followed by 1 or more non-/ characters
+      #   4. look for any number of trailing / characters at the end of the string
+      #
+      #   Need to make changes? I recommend testing this out in Ruby:
+      #
+      #   irb >> paths = %w(/:login/:id/raw /:id/raw /:login/:id/raw/:whatever/:lol /raw/:id /raw/:id/:whatever ////raw////:id//:whatever)
+      #   irb >> paths.delete_if { |p| p =~ regexp }
+      #   irb >> paths.empty?
+      #
+      #   if paths is not empty, the content of paths are those that did not match the regexp
+      #
+      #   to get the regexp in Ruby, copy-and-paste the regexp below and wrap it with an opening and trailing /
+      acl uri_raw path_reg -i ^(\/+[^\/]+)*\/+raw(\/+[^\/]+)*\/*$
+
+      ## these two replaces rewrite git requests to have a .git with a single '/' rather than '//'
+      http-request replace-path ^\/([^\/]*)\/([^\/]*)\/\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_1 dot_git
+      http-request replace-path ^\/([^\/]*)\/([^\/]*)\/\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_1
+
+      http-request replace-path ^\/\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_2 dot_git
+      http-request replace-path ^\/\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_2
+
+      http-request replace-path ^\/([^\/]*)\/\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_service_no_dot_git_double_slash_3 dot_git
+      http-request replace-path ^\/([^\/]*)\/\/([^\/]*)\/(.*)$ /\1/\2/\3 if uri_git_pack_no_dot_git_double_slash_3
+
+      ## these two replacements rewrite git requests to have a .git on the repo name
+      ## this one is last so that it can fix all the above slash based corner cases as well as others
+      http-request replace-path ^\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2.git/\3 if uri_service_no_dot_git !dot_git
+      http-request replace-path ^\/([^\/]*)\/([^\/]*)\/(.*)$ /\1/\2.git/\3 if uri_git_pack_no_dot_git !dot_git
+
+      ## these two replacement rewrite requests with .github.com or .github.io in the repo name
+      http-request replace-path ^(.*)\/(.*)\/(.*)\/(.*) \1.git/\2/\3/\4 if ua_git uri_service_no_dot_git_dotgit
+      http-request replace-path ^(.*)\/(.*)\/(.*) \1.git/\2/\3 if ua_git uri_git_pack_no_dot_git_dotgit
+
+      ##
+      # Routing Decisions
+
+      use_backend babeld_svn  if ua_svn
+      use_backend babeld_http if uri_service or uri_git_pack
+      default_backend unicorn
+
+    frontend stats
+      bind 0.0.0.0:8086
+      stats uri /
+      stats hide-version
+
+    frontend health
+      bind 0.0.0.0:8087
+      log-format "frontend=health"
+      http-request return status 200
+
+    backend babeld_http
+      server babeld git.${KUBE_NAMESPACE}.svc.cluster.local:3033 resolvers kubedns init-addr last,libc,none check inter 5s
+
+    backend babeld_svn
+      server babeld git.${KUBE_NAMESPACE}.svc.cluster.local:3036 resolvers kubedns init-addr last,libc,none check inter 5s
+
+    backend unicorn
+      option httpchk
+      http-check send meth GET uri /status ver HTTP/1.1 hdr Host "$UNICORN_HOSTNAME" hdr User-Agent LBCheck-k8s-router
+      server proxy unicorn.${KUBE_NAMESPACE}.svc.cluster.local:8080 resolvers kubedns init-addr last,libc,none check inter 5s
+
+    resolvers kubedns
+      parse-resolv-conf
+      accepted_payload_size 8192

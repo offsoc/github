@@ -1,0 +1,63 @@
+name: Nightly CI to test integration with latest Linguist
+
+on:
+  workflow_dispatch:
+    
+  schedule:
+  - cron: "30 18 * * *"
+
+jobs:
+  run:
+    name: Nightly CI - Ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ruby: [ '3.2', '3.1', '3.0', '2.7' ]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+
+    - name: Get linguist
+      id: linguist
+      run: |
+        git clone https://github.com/github/linguist.git ../linguist
+        cd ../linguist
+        echo "::set-output name=sha::$(git rev-parse HEAD)"
+
+    - name: Initialize linguist
+      run: |
+        cd ../linguist
+        bundle install
+        bundle exec rake samples
+
+    - name: Set up environment
+      run: |
+        bundle config gemfile Gemfile.nightly-ci
+        script/bootstrap -d
+
+    - name: Run tests
+      run: bundle exec rake test
+
+    - name: Run functional tests
+      run: bundle exec rake functional_test
+
+    - name: Post to slack on failure
+      if: failure()
+      uses: 8398a7/action-slack@v3.9.1
+      with:
+        status: ${{ job.status }}
+        fields: repo,message,author,action,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Create issue on failure
+      if: failure()
+      uses: imjohnbo/issue-bot@v3.3.0
+      with:
+        title: Linguist Nightly build failed on linguist commit=${{ steps.linguist.outputs.sha }}
+        body: |
+          Nightly CI failed at workflow run - https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        labels: "linguist-integration-failure"

@@ -1,0 +1,81 @@
+#!/usr/bin/env ruby
+#/ Usage: cycle <signal> <pidfile>...
+#/ Kill processes identified by <pidfile>s such that one of the processes
+#/ remains up at all times. This is used to restart process pairs like
+#/ smoke-proxy, git-proxy, etc. in order to ensure there's no disruption by
+#/ both processes being down at the same time.
+
+# Show usage message with --help or bad argv arity
+if ARGV.include?("--help") || ARGV.length < 2
+  system "grep ^#/ <'#{__FILE__}' |cut -c4-"
+  exit 2
+end
+
+# Shift off the kill signal
+signal = ARGV.shift.sub("-", "")
+
+# Reads a pid from a file and returns as an integer; returns nil when the
+# file doesn't exist or is empty.
+def readpid(file)
+  if File.exist?(file)
+    pid = File.read(file).strip.to_i
+    pid == 0 ? nil : pid
+  end
+end
+
+# Print notice
+def notice(message)
+  require File.expand_path("../../config/basic", __FILE__)
+  require "github"
+  warn "notice: #{message}"
+end
+
+# Make sure that at least two processes are currently running. Otherwise,
+# bail out just to be safe - we don't want to kill a sole process.
+pids = ARGV.sort.map { |pidfile| readpid(pidfile) }
+if pids.compact.size < 2
+  warn "#{File.basename(__FILE__)}: refusing to kill single process."
+  exit 1
+end
+
+# Run over the pidfiles, killing each process and waiting for it to come back
+# up with a valid new pid in the pidfile.
+$stdout.sync = true if $stdin.tty?
+while pidfile = ARGV.shift
+  pid = readpid(pidfile)
+  printf "%s [%5d]: ", File.basename(pidfile), pid
+
+  if pid.nil?
+    printf "not running.\n"
+    next
+  end
+
+  # kill the process and wait for the new one to come up
+  start = Time.now
+  warned = false
+  killed = false
+  Process.kill(signal, pid)
+  while (newpid = readpid(pidfile)).nil? || newpid == pid
+    printf "." if $stdin.tty?
+    sleep 1
+
+    # warn when the process hasn't cycled for 6 hours; give up and send a
+    # KILL when the process is still running after 12 hours. if its somehow
+    # still around five minutes after the KILL just bail out.
+    if !warned && Time.now - start > (6 * 60 * 60)
+      notice("can't cycle #{File.basename(pidfile)}, pid=#{pid} after 6 hours. could be stuck.")
+      warned = true
+    elsif !killed && Time.now - start > ((12 * 60 * 60) - (5 * 60))
+      notice("can't cycle #{File.basename(pidfile)}, pid=#{pid} after 12 hours. sending KILL.")
+      Process.kill("KILL", pid)
+      killed = true
+    elsif Time.now - start > (12 * 60 * 60)
+      notice("can't cycle #{File.basename(pidfile)}, pid=#{pid} at all. not responding to KILL. bailing...")
+      exit 1
+    end
+  end
+  printf " OK\n"
+
+  # give the new process a moment to come up
+  sleep 3 if ARGV.any?
+end

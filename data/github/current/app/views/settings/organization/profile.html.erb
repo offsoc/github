@@ -1,0 +1,242 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<% page_info responsive: false, title: "General Organization Settings", selected_link: :organization_profile %>
+
+<%= render layout: "orgs/settings/layout" do %>
+  <%= render Primer::Beta::Subhead.new(mb: 0) do |component| %>
+    <% component.with_heading(tag: :h2, id: "organization_profile_label") do %>General<% end %>
+  <% end %>
+
+  <% if current_organization.archived? %>
+    <%= render(Primer::Beta::Text.new(tag: :p, mt: 3)) do %>
+      Most organization settings are hidden for an archived organization. This organization must be unarchived to change them.
+    <% end %>
+  <% else %>
+    <waiting-form>
+      <%= form_for current_organization, url: organization_path(current_organization), method: :put,
+          html: {
+            novalidate: "novalidate",
+            "aria-labelledby": "organization_profile_label",
+            "data-target": "waiting-form.form",
+            data: test_selector_hash("org-settings-profile-form")
+          } do |f| %>
+        <div class="gutter clearfix d-flex flex-shrink-0">
+          <div class="col-8">
+            <dl class="form-group">
+              <dt><%= f.label :profile_name, "Organization display name" %></dt>
+              <dd><%= f.text_field :profile_name %></dd>
+            </dl>
+            <dl class="form-group">
+              <dt><%= f.label :profile_email, "Email (will be public)" %></dt>
+              <dd><%= f.text_field :profile_email, :type => "email" %></dd>
+            </dl>
+            <dl class="form-group">
+              <dt><%= f.label :profile_bio, "Description"%></dt>
+              <dd class="js-length-limited-input-container position-relative">
+                <text-expander keys="@ :" data-emoji-url="<%= emoji_suggestions_path %>" data-mention-url="<%= user_suggestions_path %>">
+                  <%= f.text_field :profile_bio,
+                      class: "js-length-limited-input",
+                      "data-input-max-length": Profile::BIO_MAX_LENGTH,
+                      "data-warning-text": "{{remaining}} remaining"
+                  %>
+                </text-expander>
+                <p class="js-length-limited-input-warning user-profile-bio-message d-none"></p>
+              </dd>
+            </dl>
+            <dl class="form-group">
+              <dt><%= f.label :profile_blog, "URL" %></dt>
+              <dd><%= f.text_field :profile_blog, :type => "url" %></dd>
+            </dl>
+            <dl class="form-group">
+              <dt><label>Social accounts</label></dt>
+              <dd><%= render(Profiles::SocialAccountsEditComponent.new(this_user: current_organization)) %></dd>
+            </dl>
+            <dl class="form-group">
+              <dt><%= f.label :profile_location, "Location" %></dt>
+              <dd>
+                <%= render partial: "settings/organization/profile_location", locals: { f: f, current_org_location: current_organization.profile_location} %>
+              </dd>
+            </dl>
+            <dl class="form-group">
+              <% if current_organization_for_member_or_billing.business.nil? %>
+                <dt><%= f.label :billing_email, safe_join([org_contact_email_label, " email ", content_tag(:small, "(Private)")]) %></dt>
+                <dd>
+                  <%= f.text_field :billing_email, :type => "email" %>
+                  <div><p class="note">
+                    Add more billing email recipients in the <a class="Link--inTextBlock" href="<%= settings_org_billing_path(current_organization) %>">billing page</a>.
+                  </p></div>
+                </dd>
+              <% else %>
+                <% unless current_organization.enterprise_managed_user_enabled? %>
+                  <dt><%= f.label :billing_email, safe_join([org_contact_email_label, " email ", content_tag(:small, "(Private)")]) %></dt>
+                  <dd><%= f.text_field :billing_email, :type => "email" %></dd>
+                <% end %>
+              <% end %>
+            </dl>
+            <dl class="form-group">
+              <dt><%= f.label :gravatar_email, safe_join(["Gravatar email ", content_tag(:small, "(Private)")]) %></dt>
+              <dd><%= f.text_field :gravatar_email, :type => "email" %></dd>
+            </dl>
+            <% if GitHub.sponsors_enabled? %>
+              <% current_organization.build_organization_profile unless current_organization.organization_profile %>
+              <%= f.fields_for :organization_profile, include_id: false do |org_profile_fields| %>
+                <%=
+                  org_profile_fields.text_group(
+                    safe_join(["Sponsors update email ", content_tag(:small, "(Private)")]),
+                    :sponsors_update_email,
+                    hint: "The developers and organizations that your organization sponsors can send you updates to this email.",
+                    data: test_selector_hash("profile-sponsors-update-email-edit"),
+                  )
+                %>
+              <% end %>
+            <% end %>
+            <% if GitHub.achievements_enabled? && feature_enabled_globally_or_for_current_user?(:achievements_opt_out_private_tracking) %>
+              <%= render "settings/organizations/achievements" %>
+            <% end %>
+            <%= spamurai_form_signals %>
+            <%= render Primer::Beta::Button.new(
+              type: :submit,
+              scheme: :primary,
+              "data-target": "waiting-form.submit",
+              "data-action": "click:waiting-form#submitPolitely"
+            ).with_content("Update profile") %>
+          </div>
+
+          <%= file_attachment_tag(
+              model: :avatars,
+              input: "avatar-upload-input",
+              class: "js-upload-avatar-image is-default col-4",
+              :"data-alambic-owner-id" => current_organization.id,
+              :"data-alambic-owner-type" => current_organization.class.base_class.name,
+              :"data-alambic-organization" => current_organization.id) do %>
+            <%= render partial: "settings/avatar", locals: { owner: current_organization, input_id: "avatar-upload-input" } %>
+          <% end %>
+        </div>
+      <% end %>
+    </waiting-form>
+  <% end %>
+
+  <%= render(Settings::Sponsors::ConnectPatreonComponent.new(sponsor: current_organization)) %>
+  <%= render(Settings::Sponsors::DisconnectPatreonComponent.new(sponsor: current_organization)) %>
+  <%= render(Sponsors::PatreonEnablementComponent.new(
+    sponsorable: current_organization,
+    location: Sponsors::PatreonEnablementComponent::Location::AccountSettings,
+  )) %>
+  <%= render(Sponsors::NoPublishedPatreonTierWarningComponent.new(
+    sponsorable: current_organization,
+    location: Sponsors::NoPublishedPatreonTierWarningComponent::Location::AccountSettings,
+  )) %>
+
+  <%= render :partial => "settings/developer_program", :locals => { :current_context => current_organization } %>
+
+  <%= render(Organizations::Settings::TermsOfServiceComponent.new(organization: current_organization, user: current_user)) %>
+
+  <%= render Primer::Beta::Subhead.new(mt: 5, hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2, danger: true) do %>Danger zone<% end %>
+  <% end %>
+
+  <div class="Box Box--danger">
+    <div class="Box-row clearfix">
+      <% if current_organization.spammy? && !current_organization.spammy_renaming_overridden? %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>Rename organization<% end %>
+        <div class="listgroup-item-title">Rename organization</div>
+        <div class="listgroup-item-body">Please <a class="Link--inTextBlock" href="<%= contact_path(:form => {:subject => "Can’t rename organization #{current_organization.display_login}" }) %>">contact us</a> if you’d like to rename your organization.</div>
+
+      <% elsif current_organization.archived_or_archiving? %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>Rename organization<% end %>
+        <div class="listgroup-item-title">Rename organization</div>
+        <div class="listgroup-item-body">This organization cannot be renamed because it is archived.</div>
+
+      <% else %>
+        <% if current_organization.renaming? %>
+          <p>Your organization is being renamed. This may take a few minutes.</p>
+        <% else %>
+          <div class="float-left">
+            <div class="listgroup-item-title">Rename organization</div>
+            <div class="listgroup-item-body">Renaming your organization can have <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/renaming-an-organization/">unintended side effects</a>.</div>
+          </div>
+
+          <%= render(Primer::Alpha::Dialog.new(
+            id: "rename-org-dialog",
+            size: :medium_portrait,
+            title: "Rename your organization?"
+          )) do |dialog| %>
+            <% dialog.with_header(show_divider: true) %>
+            <% dialog.with_show_button(
+              scheme: :danger,
+              mt: 1,
+              float: :right
+            ) { "Rename organization" } %>
+            <% dialog.with_body do %>
+              <%= render(Primer::Beta::Flash.new(scheme: :danger, icon: "alert", my: 3)) do %>
+                Unexpected bad things will happen if you don’t read this!
+              <% end %>
+              <ul class="mb-3 ml-3">
+                <li>We <strong>will</strong> create redirects for your repositories (web and git access).</li>
+                <li>You will need to update your local repositories to point to the new location.</li>
+                <li>Renaming may take a few minutes to complete.</li>
+              </ul>
+
+              <%= form_tag org_rename_path(current_organization), method: :put do %>
+                <p>
+                  <input type="text" name="login" class="form-control input-block" value="<% if GitHub.organization_namespacing_enabled? %><%= current_organization.display_login.split('_').first %><% else %><%= current_organization.display_login %><% end %>" aria-label="Enter a new name" autofocus>
+                </p>
+                <%= spamurai_form_signals %>
+                <%= render Primer::Beta::Button.new(
+                  mt: 3,
+                  type: :submit,
+                  block: true,
+                  scheme: :danger,
+                  "data-disable-with": ""
+                ) do %>Change organization’s name<% end %>
+              <% end %>
+            <% end %>
+          <% end %>
+
+        <% end %>
+      <% end %>
+    </div>
+
+    <%= render partial: "settings/organization/archive", locals: { current_user: current_user, current_organization: current_organization }%>
+
+    <div class="Box-row">
+      <% cannot_delete_reason = current_organization.cannot_delete_reason(current_user) %>
+      <% if cannot_delete_reason == :spammy %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>Delete organization<% end %>
+        <div class="listgroup-item-title">Delete this organization</div>
+        <div class="listgroup-item-body">Please <a class="Link--inTextBlock" href="<%= contact_path(:form => {:subject => "Can’t delete organization #{current_organization.display_login}" }) %>">contact us</a> if you’d like to delete your organization.</div>
+      <% elsif cannot_delete_reason == :repo_deletion_not_allowed %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>Delete organization<% end %>
+        <div class="listgroup-item-title">Delete this organization</div>
+        <div class="listgroup-item-body">Users cannot delete organizations containing repositories on this appliance.</div>
+        <div class="listgroup-item-body">To delete this organization please contact your site administrator.</div>
+      <% elsif cannot_delete_reason == :sponsorable %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>
+          Delete organization
+        <% end %>
+        <div class="listgroup-item-title">Delete this organization</div>
+        <div class="listgroup-item-body" <%= test_selector("block-sponsorable-org-delete") %>>
+          Before you can delete this organization, you must unpublish its Sponsors profile. This can
+          be done from the <%= link_to(
+            "Sponsors Dashboard settings page",
+            sponsorable_dashboard_settings_path(current_organization),
+          class: "Link--inTextBlock") %>.
+        </div>
+      <% elsif cannot_delete_reason == :sponsors_listing_not_deletable %>
+        <%= render Primer::Beta::Button.new(float: :right, mt: 1, disabled: true) do %>Delete organization<% end %>
+        <div class="listgroup-item-title">Delete this organization</div>
+        <div class="listgroup-item-body" <%= test_selector("block-sponsors-listing-org-delete") %>>
+          Because this organization has received sponsorships through GitHub Sponsors, you must
+          <a
+            class="Link--inTextBlock"
+            href="<%= contact_path(
+              form: { subject: "Can’t delete organization #{current_organization.display_login} due to Sponsors"
+            }) %>"
+          >contact us</a> if you’d like to delete your organization.</div>
+      <% else %>
+        <%= render Organizations::DeleteOrganizationDialogComponent.new(organization: current_organization) %>
+        <div class="listgroup-item-title">Delete this organization</div>
+        <div class="listgroup-item-body">Once deleted, it will be gone forever. Please be certain.</div>
+      <% end %>
+    </div>
+  </div>
+<% end %>

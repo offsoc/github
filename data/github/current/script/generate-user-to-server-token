@@ -1,0 +1,68 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require "optparse"
+
+unless Rails.env.development?
+  $stderr.puts "generate-user-to-server-token is only available in development environments."
+  exit 42
+end
+
+options = { handle: "monalisa" }
+parser = OptionParser.new do |parser|
+  parser.banner = "Usage: generate-user-to-server-token [options]"
+
+  parser.on("-c", "--client-id=CLIENT_ID", String, "Client ID of App to generate authorization for") do |v|
+    options[:client_id] = v
+  end
+
+  parser.on("-u", "--user=USER_HANDLE", String, "User login to authorize. Defaults to monalisa") do |v|
+    options[:handle] = v
+  end
+
+  parser.on("-v", "--[no-]verbose", "Run verbosely") do |v|
+    $generate_verbosely = v
+    options[:verbose] = v
+  end
+
+  parser.on("-h", "--help", "Prints this help") do
+    puts parser
+    exit
+  end
+end
+
+parser.parse!
+
+unless %i(client_id handle).all? { |opt| options.key?(opt) }
+  puts "You must speficy a client_id and handle"
+  parser.parse("-h")
+end
+
+def say(msg)
+  if $generate_verbosely
+    puts msg
+  end
+end
+
+def found_or_error(rec, type:, opt:)
+  if rec
+    say "Creating authorization for #{rec}"
+  else
+    puts "Could not find a #{type} with handle: #{options[opt]}"
+    parser.parse("-h")
+  end
+end
+
+user = User.find_by(login: options[:handle])
+found_or_error(user, type: "user", opt: :handle)
+
+integration = Integration.find_by(key: options[:client_id])
+found_or_error(integration, type: "integration", opt: :client_id)
+
+access = integration.grant(user)
+token = access.reset_token
+
+puts token
+
+# vim: set ft=ruby:

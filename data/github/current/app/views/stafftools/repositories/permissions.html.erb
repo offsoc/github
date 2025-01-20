@@ -1,0 +1,157 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info title: "#{current_repository.name_with_owner} - Permissions" %>
+<div class="site-admin-unboxed">
+  <% if current_repository.anonymous_git_access_available? %>
+    <div class="site-admin-subhead ruleless">
+      <h2 class="site-admin-subhead-heading">
+        Anonymous Git read access
+      </h2>
+    </div>
+
+    <% if current_repository.anonymous_git_access_enabled? %>
+      <p>Unauthenticated Git operations <strong>can</strong> read the contents of this repository.</p>
+      <p>Anyone with network access to GitHub Enterprise will be able to read the code in this repository.</p>
+    <% else %>
+      <p>Unauthenticated Git operations <strong>cannot</strong> read the contents of this repository.</p>
+      <p>Authenticaticated access to GitHub Enterprise is required to read the code in this repository.</p>
+    <% end %>
+
+    <% if current_repository.fork? %>
+      <p>Forks inherit the anonymous Git read access settings of the upstream or parent repository.</p>
+    <% else %>
+      <% if current_repository.anonymous_git_access_locked? %>
+        <p>
+          The anonymous Git read access setting is <strong>locked</strong> and can only be changed by site administrators.
+        </p>
+      <% end %>
+      <p>
+        The anonymous Git read access setting can be changed from the <a class="Link--inTextBlock" href="<%= admin_stafftools_repository_path(current_repository.owner, current_repository) %>">admin page</a>.
+      </p>
+    <% end %>
+  <% end %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">
+      Default permission
+    </h2>
+  </div>
+
+  <% if @org.default_repository_permission != :none %>
+    <p>
+      By default all <strong>@<%= @org %></strong> members have
+      <strong><%= @org.default_repository_permission_name %></strong>
+      access to all repositories owned by the organization.
+    </p>
+    <p>
+      This setting does not apply to <%= outside_collaborators_verbiage(@org) %>.
+    </p>
+  <% else %>
+    <p>
+      Members of <strong>@<%= @org %></strong> do not have access to any of
+      the organization’s repositories by default.
+    </p>
+  <% end %>
+
+  <div class="site-admin-subhead">
+    <h2 class="site-admin-subhead-heading">
+      Individual permissions
+    </h2>
+  </div>
+
+  <p>
+    These users have been given access to this repository via a direct
+    collaborator grant, through a team membership or because they are an
+    owner on the organization.  If a user has multiple grants, the
+    <strong>most permissive</strong> one is listed.
+  </p>
+
+  <turbo-frame id="permissions-user-list" data-turbo-action="advance">
+    <div class="Box Box--condensed mt-3">
+      <div class="Box-header d-flex flex-items-center">
+
+        <div class="flex-auto">
+          <%= form_tag gh_permissions_stafftools_repository_path(current_repository), method: :get, data: { turbo: true } do %>
+              <input type="hidden" name="ability" value="<%= params[:ability] %>">
+              <input class="form-control" type="text" placeholder="Filter username" name="username" value="<%= params[:username] %>" aria-label="Username">
+              <%= render Primer::ButtonComponent.new(type: :submit) do %>Search<% end %>
+          <% end %>
+        </div>
+
+        <%= render(Primer::Alpha::SegmentedControl.new(size: :small, aria: { label: "Filter users by ability" }, test_selector: "ability_filter")) do |c| %>
+          <%= c.with_item(
+            tag: :a,
+            label: "Any Ability",
+            href: "?#{request.query_parameters.slice(:username).merge({ability: 'read'}).to_query}",
+            selected: params[:ability].blank? || params[:ability] == "read"
+          ) %>
+          <%= c.with_item(
+            tag: :a,
+            label: "Write",
+            href: "?#{request.query_parameters.slice(:username).merge({ability: 'write'}).except(:page).to_query}",
+            selected: params[:ability] == "write"
+          ) %>
+          <%= c.with_item(
+            tag: :a,
+            label: "Admin",
+            href: "?#{request.query_parameters.slice(:username).merge({ability: 'admin'}).except(:page).to_query}",
+            selected: params[:ability] == "admin"
+          ) %>
+        <% end %>
+
+      </div>
+
+      <% if @users.present? %>
+    <table class="site-admin-table border-0 mt-2 mb-2">
+      <% @users.each do |user| %>
+        <tr id="user-permission-<%= user.id %>">
+          <td>
+            <%= link_to user, stafftools_user_path(user) %>
+          </td>
+          <td>
+            <%= user.profile_name %>
+          </td>
+          <td class="text-right">
+            <% ability = @abilities[user] %>
+            <small class="permissions-<%= ability.try(:action) || ability.try(:name) %>">
+              <% if ability %>
+                <%= ability.try(:action) || ability.try(:name) %> via
+                <% if ability.try(:grandparent) %>
+                  <% subject = ability.grandparent.subject %>
+                  <% if subject.is_a? Team %>
+                    <%= link_to "@#{subject}", gh_stafftools_team_path(subject) %>
+                  <% else %>
+                    <%= ability.grandparent.subject %>
+                  <% end %>
+                <% elsif ability.is_a?(Role) || ability.actor == user && (ability.try(:subject) || ability.try(:target)) == current_repository %>
+                  <% if ability.try(:indirect?) %>
+                    org admin
+                  <% else %>
+                    direct collaborator
+                  <% end %>
+                <% else %>
+                  <strong>unknown ability</strong>
+                <% end %>
+              <% else %>
+                <strong>no ability found</strong>
+              <% end %>
+            </small>
+          </td>
+        </tr>
+      <% end %>
+    </table>
+
+      <% else %>
+        <p class="text-center mt-3 mb-3">
+          No users.
+        </p>
+      <% end %>
+
+    </div>
+    <% if @users.present? %>
+      <div class="paginate-container">
+        <%= will_paginate @users, :params => request.query_parameters.slice(:ability, :page, :username).merge({:user_id => params[:user_id], :repository => params[:repository]}) %>
+      </div>
+    <% end %>
+  </turbo-frame>
+</div>

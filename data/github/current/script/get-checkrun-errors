@@ -1,0 +1,44 @@
+#!/bin/bash
+
+set -e
+start_time=$(date +%s)
+
+help() {
+   echo "Given a branch, scans annotations from check run failures and prints affected files."
+   echo
+   echo "Usage: get-checkrun-errors [-b branch] [-h]"
+   echo "Options:"
+   echo "-b     Specify the branch to check. (Defaults to the current branch)"
+   echo "-h     Print this help message."
+   echo
+}
+
+BRANCH=$(git rev-parse --symbolic-full-name --abbrev-ref HEAD)
+
+while getopts "b:h" arg; do
+  case "$arg" in
+    b)
+      BRANCH="${OPTARG}"
+      ;;
+    h | *)
+      help
+      exit
+      ;;
+  esac
+done
+
+echo -e "Fetching files with check run annotation errors for branch '${BRANCH}'. This may take a few minutes...\n"
+CHECK_RUN_IDS=$(gh api repos/github/github/commits/$BRANCH/check-runs \
+  --paginate \
+  --jq '.check_runs | map(select(.conclusion == "failure")) | map(select(.output.annotations_count > 0)) | .[].id' |\
+  sort -u) &&\
+
+FAILED_PATHS=$(for i in $CHECK_RUN_IDS; do
+    gh api repos/github/github/check-runs/$i/annotations --jq '.[] | .path'
+  done)
+
+echo -e $FAILED_PATHS | tr ' ' '\n' | sort -u
+
+end_time=$(date +%s)
+elapsed=$(( end_time - start_time ))
+echo -e "\n get-checkrun-errors took $elapsed seconds"

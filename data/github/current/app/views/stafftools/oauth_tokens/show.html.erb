@@ -1,0 +1,246 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info :title => "OAuth token - #{this_user}",
+             :selected_link => :oauth_tokens %>
+
+<div class="boxed-group">
+  <h3>
+    OAuth Access Token Details
+  </h3>
+  <div class="boxed-group-inner clearfix">
+    <p>
+      <div class="clearfix summary">
+        <dl>
+          <dt>ID</dt>
+          <dd>
+            <%= @access.id %>
+              &ndash;
+              <%= stafftools_selected_link_to "Search audit logs",
+                        stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where data.oauth_access_id == '#{@access.id}'" : "data.oauth_access_id:#{@access.id}") %>
+          </dd>
+        </dl>
+        <% if @access.personal_access_token? %>
+          <dl>
+            <dt>Type</dt>
+            <dd>Personal token</dd>
+          </dl>
+          <dl>
+            <dt>Description</dt>
+            <dd><%= @access.description %></dd>
+          </dl>
+          <dl>
+            <dt>Expiration</dt>
+            <dd><%= @access.expires_at || "No Expiration" %></dd>
+          </dl>
+        <% elsif @access.integration_application_type? %>
+          <dl>
+            <dt>Type</dt>
+            <dd>Third party integration access</dd>
+          </dl>
+          <dl>
+            <dt>Integration</dt>
+            <dd>
+              <%= link_to @access.safe_app.name, stafftools_user_app_path(@access.safe_app.owner, @access.safe_app), class: "Link--inTextBlock" %>
+              <% if @access.safe_app.synchronized_dotcom_app? %>
+                | This app is syncrhonized from GitHub.com.
+                <%= link_to "View on GitHub.com", @access.safe_app.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+              <% end %>
+            </dd>
+          </dl>
+        <% else %>
+          <dl>
+            <dt>Type</dt>
+            <dd>Third party app token</dd>
+          </dl>
+          <dl>
+            <dt>Application</dt>
+            <dd>
+              <%= link_to @access.safe_app.name,
+                          stafftools_user_application_path(@access.safe_app.user, @access.safe_app.id) %>
+            </dd>
+          </dl>
+        <% end %>
+        <dl>
+          <dt>Token</dt>
+          <dd>
+            <% if @access.token_last_eight.nil? %>
+              nil
+            <% else %>
+              <code>
+                <%= ("*"*32) + @access.token_last_eight %>
+              </code>
+            <% end %>
+          </dd>
+        </dl>
+        <dl>
+          <dt>Hashed Token</dt>
+          <dd>
+            <% if @access.token_last_eight.nil? %>
+              nil
+            <% else %>
+              <code>
+                <%= @access.hashed_token %>
+              </code>
+            <% end %>
+          </dd>
+        </dl>
+        <dl>
+          <dt>Created</dt>
+          <dd><%= @access.created_at %></dd>
+        </dl>
+        <dl>
+          <dt>Last access</dt>
+          <dd>
+            <% if @access.accessed_at %>
+              within <%= distance_of_time_in_words(OauthAccess::ACCESS_THROTTLING) %> of <%= @access.last_access_date %>
+            <% else %>
+              never
+            <% end %>
+          </dd>
+        </dl>
+        <dl>
+          <dt>Scopes</dt>
+          <dd><%= @access.scopes.any? ? @access.access_level.to_sentence : "none" %>
+            <%= " (permissions are inherited from the integration)" if @access.integration_application_type? %>
+          </dd>
+        </dl>
+        <dl>
+          <% if @access.integration_application_type? %>
+            <dt>Integration version</dt>
+            <dd><%= @access.authorization.integration_version_number %> <%= @access.authorization.outdated? ? "(token permissions may be behind the current integration)" : nil %> </dd>
+            <dt>User permissions from integration</dt>
+            <dd><%= user_integration_permissions(@access) %></dd>
+          <% else %>
+            <dt>Access level</dt>
+            <dd><%= descriptions_for_scopes(@access.scopes).join ", " %></dd>
+          <% end %>
+        </dl>
+        <dl>
+          <dt>Public keys</dt>
+          <dd>
+            <% if @access.authorization.present? %>
+              <%= @access.authorization.public_keys.size %>
+            <% else %>
+              0
+            <% end %>
+          </dd>
+        </dl>
+        <dl>
+          <dt>Fingerprint</dt>
+          <dd><%= @access.fingerprint || "nil" %></dd>
+        </dl>
+        <dl>
+          <dt>Note</dt>
+          <dd><%= @access.note || "nil" %></dd>
+        </dl>
+        <dl>
+          <dt>Note URL</dt>
+          <dd><%= @access.note_url || "nil" %></dd>
+        </dl>
+      </div>
+    </p>
+
+    <hr>
+
+    <h4>Compare</h4>
+    <%= form_for @access, :method => :put, :url => compare_stafftools_user_oauth_token_path do |form| %>
+      <p>Compare a compromized token to this one to see if they match.</p>
+      <div class="hfields">
+        <dl class="form-group">
+          <dt><%= label_tag :compromized_token, "Compromized Token" %></dt>
+          <dd>
+            <%= text_field_tag :compromized_token, nil, :class => "input-lg" %>
+          </dd>
+        </dl>
+
+        <%= render Primer::Beta::Button.new(type: :submit) do %>Compare<% end %>
+      </div>
+    <% end %>
+
+    <hr>
+
+    <h4>Revoke</h4>
+
+    <%= render(Primer::Experimental::Dialog.new(
+      dialog_id: "revoke-dialog",
+      header_variant: :large,
+      width: :large,
+      title: "Revoke token?",
+      form_url: stafftools_user_oauth_token_path(this_user, @access),
+      form_method: :delete
+    )) do |c| %>
+      <% c.with_show_button(
+        color: :danger,
+        classes: "boxed-action"
+      ) do |s| %>
+        Revoke
+      <% end %>
+      <% c.with_body do %>
+        <%= render(Primer::Beta::Flash.new(scheme: :warning)) { "Woah there! This action cannot be undone." } %>
+        <p>
+          <% if @access.personal_access_token? %>
+            This token will no longer have access to
+            <strong>@<%= this_user %></strong>’s data.
+          <% else %>
+            This token for <strong><%= @access.application.name %></strong> will
+            no longer have access to <strong>@<%= this_user %></strong>’s data.
+            However, other valid tokens for this application will continue to
+            have access unless the application’s authorization is revoked.
+          <% end %>
+        </p>
+      <% end %>
+      <% c.with_button(
+        data: { "close-dialog-id": "revoke-dialog" }
+      ) { "Cancel" } %>
+      <% c.with_button(
+        type: :submit,
+        scheme: :danger,
+        data: { "disable-with": "" }
+      ) { "Revoke token" } %>
+    <% end %>
+
+    <p>
+      Revoke this token.
+    </p>
+
+    <hr>
+    <h4>Authorized Organizations</h4>
+
+    <%= render(Primer::Beta::BorderBox.new(padding: :condensed)) do |component| %>
+      <% if @access.credential_authorizations.any? %>
+        <%- @access.credential_authorizations.preload(:organization).find_each do |credential_auth| %>
+          <% next if credential_auth.organization.nil? %>
+          <% component.with_row(align_items: :center, display: :flex) do %>
+            <div class="text-bold flex-auto">
+              <%= credential_auth.organization.name %>
+            </div>
+
+            <% if credential_auth.organization.restricts_oauth_applications? %>
+              <div class="flex-justify-end mr-2">
+                <%= render Primer::Beta::Label.new(scheme: :info, title: "Label: OAP Enabled") do %>
+                  OAP Access Granted
+                <% end %>
+              </div>
+            <% end %>
+
+            <div class="flex-justify-end">
+              <% if credential_auth.active? %>
+                <%= render(Primer::Beta::Label.new(scheme: :primary, title: "Label: SAML Enforced")) { "SAML Authorized" } %>
+              <% else %>
+                <%= render(Primer::Beta::Label.new(scheme: :secondary, title: "Label: Credential revoked by #{ credential_auth.revoked_by }")) { "Revoked" } %>
+              <% end %>
+            </div>
+
+          <% end %>
+        <% end %>
+      <% else %>
+        <% component.with_row(align_items: :center, display: :flex) do %>
+          <div class="flex-auto">
+            This token has not been granted access to any organizations which have OAP or SAML enabled.
+          </div>
+        <% end %>
+      <% end %>
+    <% end %>
+  </div>
+</div>

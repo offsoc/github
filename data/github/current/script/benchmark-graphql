@@ -1,0 +1,77 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+ENV["FASTDEV"] = "1"
+require "benchmark/ips"
+require "stackprof"
+puts "Loading the app..."
+require_relative "../config/environment"
+
+module GraphQLBenchmark
+  extend self
+
+  # Use VERSION=... to add an extra tag to the output files
+  VERSION = GraphQL::VERSION + (ENV["VERSION"] ? "-#{ENV["VERSION"]}" : "")
+  ME = User / "hubot"
+
+  PULL_REQUEST = GitHub::Resources.find_by_url("github/linguist#3336")
+
+  def query_layout
+    PlatformHelper::PlatformClient.query(
+      Views::Layouts::Application::Root,
+      context: { viewer: ME },
+      variables: {
+        shouldIncludeNotificationsSidebar: true,
+      },
+    )
+  end
+
+  def query_all
+    query_layout
+  end
+
+  # Use TIME=60 to use a longer duration for benchmark
+  BENCHMARK_TIME = (ENV["TIME"] || 10).to_i
+
+  def run_benchmark
+    puts "Starting benchmark (#{BENCHMARK_TIME}s)..."
+    report = Benchmark.ips do |x|
+      x.time = BENCHMARK_TIME
+      x.report("pr commits") { query_pr_commits }
+      x.report("layout") { query_layout }
+    end
+
+    output = report.entries.map { |e| "#{e.label}: #{e.ips}\n" }.join
+    File.write("tmp/graphql-#{VERSION}-ips.txt", output)
+  end
+
+  def run_stackprof
+    puts "Stackprof ..."
+
+    output = "tmp/stackprof-graphql-#{VERSION}.dump"
+    StackProf.run(mode: :cpu, out: output) do
+      query_all
+    end
+    puts output
+  end
+
+  def run(benchmark:, stackprof:)
+    puts "Benchmarking GraphQL @ #{VERSION}"
+    benchmark && run_benchmark
+    stackprof && run_stackprof
+  end
+end
+
+# Specify which tasks to run with:
+# - BENCHMARK=1
+# - RUBY_PROF=1
+#
+# Or, run all.
+tasks = {
+  benchmark: !!ENV["BENCHMARK"],
+  stackprof: !!ENV["STACKPROF"],
+}
+run_all = !tasks.values.any?
+tasks.each_key { |k| tasks[k] ||= run_all }
+
+GraphQLBenchmark.run(tasks)

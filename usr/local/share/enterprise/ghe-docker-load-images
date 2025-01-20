@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+. /usr/local/share/enterprise/ghe-actions-lib
+
+load_processes=$(grep -c -e "processor" /proc/cpuinfo)
+load_commands=()
+
+if [ -d "/data/docker-images" ]; then
+  declare -A files
+  declare -A images
+  for i in $(docker image ls --no-trunc --format '{{ .Repository }}:{{ .Tag }}#{{ .ID }}'); do
+    images["$i"]=1
+  done
+
+  for file in /data/docker-images/*.tar; do
+    files["$file"]=1
+    basename="$(basename "$file")"
+    file_name="${basename%.*}"
+    image_with_tag="$(echo "$file_name" | cut -d "#" -f 1)"
+    id="$(echo "$file_name" | cut -d "#" -f 2)"
+    image="$(echo "$image_with_tag" | cut -d ":" -f 1 | sed -r 's/-/_/g')"
+    tag="$(echo "$image_with_tag" | cut -d ":" -f 2)"
+
+    # load valid images that aren't already loaded
+    tag_file="/data/docker-image-tags/${image}_image_tag"
+    id_file="/data/docker-image-tags/${image}_image_id"
+
+    if [ -f "$tag_file" ]; then
+      tag_contents="$(cat "$tag_file")"
+
+      # get the image sha256 ID from id_file, if if does not exist then we won't match on it
+      if [ -f "$id_file" ]; then
+        id_contents="$(cat "$id_file")"
+      else
+        id_contents='<none>'
+        id='<none>'
+      fi
+
+      if [ "$tag" == "$tag_contents" ] && [ "$id" == "$id_contents" ]; then
+        unset files["$file"] # we want to keep this file
+        if [ -z "${images[$file_name]:-}" ]; then
+          load_commands+=("docker image load --input \"$file\"")
+        else
+          unset images["$file_name"] # we want to keep this image
+        fi
+      fi
+    fi
+  done
+
+  # Load docker images
+  parallel.moreutils -j "$load_processes" -- "${load_commands[@]}"
+
+  # remove dead containers
+  docker container prune -f
+
+  # remove images which are no longer needed
+  for i in "${!images[@]}"; do
+    image_id_without_sha256=$(echo "$i" | cut -d "#" -f 2 | cut -d ":" -f 2)
+    docker image rm "$image_id_without_sha256" || true
+  done
+
+  # remove files which are no longer needed
+  for file in "${!files[@]}"; do
+    rm -f "$file"
+  done
+fi

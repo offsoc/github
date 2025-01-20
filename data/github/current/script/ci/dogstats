@@ -1,0 +1,69 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+$LOAD_PATH << File.expand_path("../../../test", __FILE__)
+
+require "optparse"
+require "test_helpers/github_test/stats"
+
+def print_usage
+  puts <<~HELP
+    Usage:
+      #{$PROGRAM_NAME} COMMAND NAME [VALUE] [TAG_NAME:TAG_VALUE ...]
+
+    Commands:
+      histogram       Send a histogram value to Datadog
+      timing_since    Send duration since value (provided as unix timestamp)
+      increment       Increment a counter on Datadog
+
+    Examples:
+      #{$PROGRAM_NAME} timing_since my_metric_name 1590076672 job_name:foo host:localhost
+      #{$PROGRAM_NAME} histogram some_number 1234 job_name:foo host:localhost
+
+    Send metrics to Datadog in CI. If you need another metric type, feel free to
+    add it to #{__FILE__}.
+  HELP
+end
+
+def bail(message = nil)
+  STDERR.puts message if message
+  print_usage
+  exit 1
+end
+
+def parse(arguments, require_value: true)
+  options = {}
+  options[:type] = arguments.shift
+  options[:name] = arguments.shift
+
+  if require_value
+    begin
+      value = arguments.shift
+      options[:value] = Integer(value)
+    rescue ArgumentError
+      bail("Value not a number: #{value}")
+    end
+  end
+
+  bail("Type and name not provided") unless options[:type] && options[:name]
+
+  options[:tags] = arguments
+  options
+end
+
+case ARGV.first
+when "timing_since"
+  options = parse(ARGV)
+  duration = Time.now.to_i - options[:value]
+  GitHubTest.dogstats.distribution(options[:name], duration, tags: options[:tags])
+when "histogram"
+  options = parse(ARGV)
+  GitHubTest.dogstats.histogram(options[:name], options[:value], tags: options[:tags])
+when "distribution"
+  options = parse(ARGV)
+  GitHubTest.dogstats.distribution(options[:name], options[:value], tags: options[:tags])
+when "increment"
+  options = parse(ARGV, require_value: false)
+  GitHubTest.dogstats.increment(options[:name], tags: options[:tags])
+else
+  print_usage
+end

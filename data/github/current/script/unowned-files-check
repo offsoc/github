@@ -1,0 +1,52 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+if ARGV[0] == "--help"
+  puts "\nUsage:\n"
+  puts "  check-owners <base-ref> <head-ref>\n"
+  puts "Example:\n"
+  puts "  check-owners master HEAD"
+  exit 0
+end
+
+base_ref, head_ref = nil
+if ARGV.length != 2
+  puts "Using default refs of master...HEAD"
+  base_ref = "master"
+  head_ref = "HEAD"
+else
+  base_ref = ARGV[0]
+  head_ref = ARGV[1]
+end
+
+staged_files = `git diff --name-only --diff-filter=d --staged`.lines.map(&:chomp)
+unstaged_files = `git diff --name-only --diff-filter=d`.lines.map(&:chomp)
+committed_files = `git diff --name-only --diff-filter=d #{base_ref}...#{head_ref}`.lines.map(&:chomp)
+any_unowned = false
+
+no_matches_vendor_path = "vendor/serviceowners/serviceowners_cache.json"
+
+{ "staged" => staged_files, "unstaged" => unstaged_files, "committed" => committed_files }.each do |type, files|
+
+  unowned = Set.new
+  files.each do |file|
+    if !File.foreach(no_matches_vendor_path).grep(/^"#{file}",/).any?
+      unowned << file
+    end
+  end
+
+  if unowned.any?
+    puts "\n\nUnowned #{type} files\n===================="
+    unowned.each { |f| puts f }
+    any_unowned = true
+  end
+end
+
+if any_unowned
+  puts "\nSERVICEOWNERS: found unmatched files that need a matching SERVICEOWNERS line added."
+  puts "  - Edit SERVICEOWNERS and add these files to a service"
+  puts "  - Run bin/generate-service-files.rb"
+else
+  puts "All good! No unowned files in your branch."
+end
+exit any_unowned ? 1 : 0

@@ -1,0 +1,64 @@
+#!/bin/bash
+#/ Usage: script/alive-server
+#/
+#/ Runs the alive service.
+
+
+# This is the new, containerized way to run alive. We will return in the near future and
+# make this branch the only codepath and delete the else statement.
+if [[ "$DX_EDGE" = true ]] && [[ "$DX_FEATURE_SUBPROJECT_CONTAINERS" = true ]]; then
+  SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  source $SCRIPT_DIR/dx/lib/subproject-containers
+
+  SUBPROJECT_VERSION=$(subproject_version "alive")
+  echo "alive version $SUBPROJECT_VERSION"
+
+  # Ensure we clean up any existing containers, and remove after shutdown.
+  cleanup_docker() {
+    echo "Stopping alive..."
+    docker stop alive || true
+    exit 0
+  }
+
+  trap cleanup_docker EXIT INT QUIT TERM HUP
+
+  docker stop alive &> /dev/null || true
+  docker rm alive &> /dev/null || true
+
+  # Run the service.
+  docker run -d --rm --name alive --network host --entrypoint "/go/bin/alive-local" \
+    -e ALIVE_ADDR=127.0.0.1:3002 \
+    -e ALIVE_FE_INTERNAL_ADDR=127.0.0.1:6060 \
+    -e ALIVE_KAFKA_BROKERS=127.0.0.1:9092 \
+    -e ALIVE_KAFKA_VERSION=1.1.1 \
+    -e ALIVE_AUTHZD_ENDPOINT=http://127.0.0.1:8091 \
+    -e ALIVE_FE_ORIGINS='github.localhost,github.localhost:*,*.ghe.localhost,*.ghe.localhost:*' \
+    -e ALIVE_SECRETS=2554d23ebb5f6e12bfa0b39e64df2886 \
+    -e ALIVE_ENCRYPTION_KEYS=a1epVZRjhoXUUnml9+EJLA== \
+    -e ALIVE_FE_SHUTDOWN_TIME=3s \
+    -e ALIVE_PRESENCE_ENABLED=true \
+    -e ALIVE_REDIS=redis://127.0.0.1:6379/4 \
+    -e ALIVE_RUN_MULTIPLE=true \
+    -e ALIVE_ROUTER_INTERNAL_ADDR=:6062 \
+    "ghcr.io/github/alive/alive-local:$SUBPROJECT_VERSION"
+
+
+  docker logs --follow alive & # Put 'docker logs' in the background and wait so that bash signal traps work.
+  wait # Any signal at this point should result in a call to cleanup_docker().
+else
+  # This is the old way to run alive by building it in place and running the binary. We will
+  # delete this codepath in the near future.
+  SCRIPT=$(dirname "$0")
+  SCRIPT_DIR=$(realpath "$SCRIPT")
+  ALIVE_BIN="vendor/alive/alive-local"
+  until [ -x $ALIVE_BIN ]; do
+    if [ "$ALIVE_NOTICE" != "1" ]; then
+      echo "Run 'script/build-subproject alive' to setup alive."
+      ALIVE_NOTICE=1
+    fi
+    sleep 1
+  done
+  . "$SCRIPT_DIR/alive-server-dev-env"
+  exec $ALIVE_BIN
+fi
+

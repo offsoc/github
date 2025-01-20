@@ -1,0 +1,315 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+
+<%= f.hidden_field :id, :id => 'release_id' %>
+<%= f.hidden_field :draft, :id => 'release_draft' %>
+
+<% if marketplace_view.show_form? && marketplace_view.potential_marketplace_action? && !marketplace_view.action_package_listed_to_marketplace? %>
+  <%= render partial: "releases/action_marketplace", locals: { f: f, release: @release, view: marketplace_view } %>
+<% end %>
+
+<div class="form-group mt-0 js-release-tag"
+  data-url="<%= "#{repository_path(current_repository)}/tags/check" %>"
+  data-existing-id="<%= f.object.id || "none" %>">
+  <div class="d-flex">
+    <div class="position-relative mr-1 js-release-check-tag" id="tag-list">
+      <%= render Refs::PickerComponent.new(
+        tag_name: f.object.exposed_tag_name,
+        repository: current_repository,
+        mode: :selector,
+        header: "Choose a tag",
+        placeholder: "Find or create a new tag",
+        autofocus: !marketplace_view.show_form?,
+        hide_footer: true,
+        can_create: true,
+        input_object_name: :release,
+        input_field_name: :tag_name) do |c| %>
+        <% c.with_summary f.object.exposed_tag_name.presence || "Choose a tag", display: :block %>
+      <% end %>
+    </div>
+
+    <div class="d-inline-block mr-1 js-release-target-wrapper js-release-check-tag" hidden>
+      <details class="details-reset details-overlay d-md-inline-block ml-md-1 mr-md-1 ">
+        <%= render Primer::ButtonComponent.new(tag: :summary, display: :block) do %>
+          <%= primer_octicon(:"git-branch", mr: 1) %>
+          <i>Target:</i>
+          <span class="flex-auto ml-1" data-menu-button><%= f.object.abbreviated_target_commitish.dup.force_encoding(::Encoding::UTF_8).scrub! %></span>
+          <span class="dropdown-caret ml-2"></span>
+        <% end %>
+
+        <details-menu class="SelectMenu SelectMenu--hasFilter"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+          <tab-container class="SelectMenu-modal">
+            <div class="SelectMenu-header">
+              <span class="SelectMenu-title">Pick a branch or recent commit</span>
+            </div>
+
+            <filter-input class="SelectMenu-filter" aria-owns="filter-list-branches">
+              <input
+                type="text"
+                class="SelectMenu-input form-control"
+                placeholder="Filter branches…"
+                aria-label="Filter branches"
+                data-filter-placeholder-input
+                autofocus>
+            </filter-input>
+            <div class="SelectMenu-tabs" role="tablist">
+              <button type="button" class="SelectMenu-tab" data-filter-placeholder="Filter branches…" role="tab" aria-selected="true">Branches</button>
+              <button type="button" class="SelectMenu-tab" data-filter-placeholder="Filter recent commits…" role="tab">Recent Commits</button>
+            </div>
+            <% target_commitish = f.object.target_commitish %>
+            <div class="SelectMenu-list" role="tabpanel" id="filter-list-branches" data-tab-container-no-tabstop>
+              <ul data-filter-list role="menu" aria-label="Branches">
+                <% current_repository.heads.each do |branch| -%>
+                  <li tabindex="-1">
+                    <label class="SelectMenu-item" tabindex="0" role="menuitemradio" aria-checked="<%= target_commitish == branch.name_for_display %>">
+                      <%= f.radio_button :target_commitish, branch.name_for_display, hidden: true %>
+                      <%= primer_octicon(:check, classes: 'SelectMenu-icon SelectMenu-icon--check') %>
+                      <span data-menu-button-text><%= branch.name_for_display %></span>
+                    </label>
+                  </li>
+                <% end -%>
+              </ul>
+              <div class="SelectMenu-blankslate" data-filter-empty-state hidden>No results found.</div>
+            </div>
+
+            <div class="SelectMenu-list" role="tabpanel" id="filter-list-tags" data-tab-container-no-tabstop hidden>
+              <ul data-filter-list role="menu" aria-label="Recent commits">
+                <% f.object.target_commits(10).each do |commit| -%>
+                  <li tabindex="-1" >
+                    <label tabindex="0" class="SelectMenu-item" role="menuitemradio" aria-checked="<%= target_commitish == commit.oid %>">
+                      <%= f.radio_button :target_commitish, commit.oid, hidden: true %>
+                      <%= primer_octicon(:check, classes: 'SelectMenu-icon SelectMenu-icon--check') %>
+                      <span><span data-menu-button-text data-filter-item-text><%= commit.abbreviated_oid %></span><br><%= commit.short_message_text %> @ <%= time_ago_in_words_js commit.authored_date %></span>
+                    </label>
+                  </li>
+                <% end -%>
+              </ul>
+              <div class="SelectMenu-blankslate" data-filter-empty-state hidden>No results found.</div>
+            </div>
+          </tab-container>
+        </details-menu>
+      </details>
+    </div>
+
+    <div class="d-flex flex-self-end gap-1">
+      <div id="prev-tag-picker" <%= "hidden" unless f.object.published? %>>
+        <%= render Refs::PickerComponent.new(
+          tag_name: nil,
+          repository: current_repository,
+          mode: :selector,
+          header: "Select previous tag to compare",
+          placeholder: "Find previous tag",
+          autofocus: !marketplace_view.show_form?,
+          hide_footer: true,
+          input_object_name: :release,
+          input_field_name: :previous_tag_name) do |c| %>
+          <% c.with_summary "auto", show_icon = false, prefix: "Previous tag: " %>
+        <% end %>
+      </div>
+
+      <%= render(Primer::Beta::Button.new(
+        id: "generate-notes-btn",
+        type: :button,
+        classes: "js-generate-release-notes",
+        data: {repo_url: repository_path(current_repository).to_s},
+        aria: {disabled: "true"},
+        )) do |c| %>
+        <% c.with_tooltip(id: "generate-notes-tooltip", type: :description, text: "Select a valid tag to automatically add the Markdown for all the merged pull requests from this diff and contributors of this release", direction: :s) %>
+        <%= render Primer::Beta::Spinner.new size: :small, id: "generate-icon-loading", hidden: true %>
+        <%= render Primer::Beta::Octicon.new icon: "check", color: :success, id: "generate-icon-succeed", hidden: true %>
+        <%= render Primer::Beta::Octicon.new icon: "x", color: :danger, id: "generate-icon-failed", hidden: true %>
+        <span id="generate-btn-txt">Generate release notes</span>
+      <% end %>
+    </div>
+  </div>
+
+  <div aria-live="polite" class="mt-2">
+    <p class="note js-tag-status-message" data-state="loading" <%= "hidden" if params[:tag].blank? %>>
+      <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+      Loading tag information&hellip;
+    </p>
+
+    <p class="note js-tag-status-message" data-state="empty" <%= "hidden" unless params[:tag].blank? %>>
+      Choose an existing tag, or create a new tag when you publish this release.
+    </p>
+
+    <p class="is-success js-tag-status-message text-bold h4" data-state="valid" hidden><%= render(Primer::Beta::Octicon.new(icon: "check")) %> Existing tag</p>
+
+    <p class="is-error js-tag-status-message text-bold h4" data-state="invalid" hidden><%= render(Primer::Beta::Octicon.new(icon: "x")) %> Invalid tag name</p>
+    <p class="js-tag-status-message" data-state="invalid" hidden>We can’t create a tag with this name. Take a look at the suggestions in the sidebar for example tag names.</p>
+
+    <p class="is-error js-tag-status-message text-bold h4" data-state="branch_exists" hidden><%= render(Primer::Beta::Octicon.new(icon: "x")) %> Branch with this tag name already exists </p>
+    <p class="js-tag-status-message" data-state="branch_exists" hidden>Creating a tag with the same name as a branch can cause ambiguity when selecting refs.  The tag will still be created when this release is published.</p>
+
+    <p class="js-tag-status-message is-error text-bold h4" data-state="duplicate" hidden><%= render(Primer::Beta::Octicon.new(icon: "x")) %> Duplicate tag name</p>
+    <p class="js-tag-status-message note" data-state="duplicate" hidden>This tag already has release notes. Would you like to
+    <%= render(Primer::Beta::Link.new(href: "#", classes: "js-edit-release-link Link--inTextBlock")) { "edit the existing notes" } %>?</p>
+
+    <p class="note js-tag-status-message" data-state="pending" hidden>
+      Excellent! This tag will be created from the target when you publish this release.
+    </p>
+  </div>
+</div>
+
+<div class="form-group">
+  <div class="d-flex d-md-block">
+    <%= f.text_field :name, :placeholder => "Release title", "aria-label" => "Enter release title", class: "js-quick-submit flex-auto mr-0" %>
+  </div>
+</div>
+
+<div class="form-group">
+  <input type="hidden" id="generated_notes_state" name="generated_notes_state" value="initial">
+  <div class="js-length-limited-input-container">
+    <%= render(Comments::PreviewableCommentFormComponent.new(
+      body: @release.body,
+      field_name: "release[body]",
+      input_max_length: Releases::Public::BODY_CHAR_LIMIT,
+      max_length_warning_text: "{{remaining}} remaining",
+      placeholder: "Describe this release",
+      preview_path: preview_release_path(current_repository.owner.display_login, current_repository.name),
+      required: false,
+      size: :large,
+      current_repository: current_repository,
+      subject: @release,
+      textarea_id: "release_body",
+      label: "Release description"
+    )) %>
+    <p class="js-length-limited-input-warning d-none color-fg-danger"></p>
+    <div id="form-error-alert" class="comment-form-error js-comment-form-error" role="alert" hidden></div>
+    <div class="py-3 px-2 my-2 border color-border-attention color-bg-attention rounded js-release-body-warning" role="alert" hidden></div>
+  </div>
+</div>
+
+<%
+  binaries_populated = @release.release_assets.any?
+  container_css = binaries_populated ? "is-populated" : "not-populated"
+%>
+
+<% if @release.package_versions.any? %>
+  <ul class="color-bg-default list-style-none uploaded-files js-releases-field <%= container_css %>">
+    <% package_versions = [@release.package_versions].flatten -%>
+    <%= render :partial => "releases/registry_package_version", :collection => package_versions %>
+  </ul>
+<% end %>
+
+<ul class="color-bg-default list-style-none uploaded-files js-releases-field <%= container_css %>">
+  <% release_assets = [ReleaseAsset.new, @release.release_assets].flatten -%>
+  <%= render :partial => "releases/release_asset", :collection => release_assets %>
+</ul>
+
+<%= file_attachment_tag(model: :releases, input: "releases-upload", class: "drop-target js-upload-release-file is-default releases-file-attachment", :"data-upload-repository-id" => current_repository.id) do |upload_enabled| %>
+  <label class="releases-file-attachment-label py-3 f5 border-dashed text-normal drag-and-drop d-flex flex-justify-center flex-items-center drop-target-label position-relative" style="height: 65px">
+    <input type="file" multiple id="releases-upload" class="sr-only show-on-focus color-bg-subtle py-3 width-full text-center">
+    <span class="default position-relative text-center">
+      <% if upload_enabled %>
+        <span class="color-bg-subtle position-absolute top-0 left-0 width-full height-full rounded-2" style="pointer-events: none;"></span>
+        <span
+          class="position-relative pr-2"
+          style="pointer-events: none;"
+          aria-describedby="duplicate-filename-message failed-process-request-message bad-file-message file-too-big-message empty-file-message"
+        >
+          <%= primer_octicon(:"arrow-down", height: 32, vertical_align: :middle, color: :muted) %>
+          Attach binaries by dropping them here or selecting them.
+        </span>
+      <% else %>
+        File uploads are not available right now.
+      <% end %>
+    </span>
+    <span class="loading">
+      <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :middle)) %>
+      Uploading your release now&hellip;
+    </span>
+    <span class="error duplicate-filename" id="duplicate-filename-message">
+      An attachment with that filename already exists.
+      <span class="drag-and-drop-error-info">
+        <span class="btn-link manual-file-chooser-text">Try a different file.</span>
+      </span>
+    </span>
+    <span class="error bad-file" id="bad-file-message">
+      We don’t support that file type.  Try zipping it.
+      <span class="drag-and-drop-error-info">
+        <span class="btn-link manual-file-chooser-text">Try another file.</span>
+      </span>
+    </span>
+    <span class="error too-big" id="file-too-big-message">
+      Yowza, that’s a big file.
+      <span class="drag-and-drop-error-info">
+        <span class="btn-link manual-file-chooser-text">Try again</span> with a file smaller than 2GB.
+      </span>
+    </span>
+    <span class="error empty" id="empty-file-message">
+      This file is empty.
+      <span class="drag-and-drop-error-info">
+        <span class="btn-link manual-file-chooser-text">Try again</span> with a file that’s not empty.
+      </span>
+    </span>
+    <span class="error failed-request" id="failed-process-request-message">
+      Something went really wrong, and we can’t process that file.
+      <span class="drag-and-drop-error-info">
+        <span class="btn-link manual-file-chooser-text">Try another file.</span>
+      </span>
+    </span>
+  </label>
+  <div class="position-relative border-0 color-bg-default upload-progress">
+    <div class="position-absolute top-0 height-full upload-meter js-upload-meter"></div>
+  </div>
+<% end %>
+
+<div class="form-checkbox unchecked">
+  <label>
+    <%= f.check_box :prerelease, class: "js-prerelease-checkbox" %>
+  Set as a pre-release
+  </label>
+  <span class="note">
+    <%= f.object.prerelease? && f.object.published? ? "This release is labeled as non-production ready." : "This release will be labeled as non-production ready" %>
+  </span>
+</div>
+
+<% has_releases = Releases::Public.published_releases_for_repository?(current_repository.id) %>
+<% if has_releases %>
+  <div class="form-checkbox">
+    <input type="hidden" id="is_stored_latest" name="is_stored_latest" value="0">
+    <label>
+      <% is_stored_latest = f.object == current_repository.repository_latest_release&.release %>
+      <% nonprerelease_draft = f.object.draft? && !f.object.prerelease? %>
+      <% checked = is_stored_latest || f.object.id.blank? || nonprerelease_draft %>
+      <%= f.check_box :make_latest, {class: "js-latest-release-checkbox", disabled: is_stored_latest || f.object.prerelease?, checked: checked}, true, false %>
+      Set as the latest release
+    </label>
+    <span class="note">
+      <%= "This release #{is_stored_latest ? "is" : "will be"} labeled as the latest for this repository." %>
+    </span>
+  </div>
+<% end %>
+
+<% if f.object.can_link_discussion? %>
+  <%= render partial: "releases/discussion_linking", locals: { f: f, release: @release } %>
+<% end %>
+
+<hr>
+
+<% never_pushed = current_repository.empty? -%>
+<% if never_pushed || f.object.new_record? || f.object.draft? -%>
+  <%= content_tag(:button, "Publish release", :class => "btn btn-primary js-publish-release", :type => "submit", "data-disable-with" => "Publishing…", :disabled => !!never_pushed) %>
+
+  <% button_opts = {:class => "btn js-save-draft", :type => "submit"} %>
+  <% button_opts[:class] += " tooltipped tooltipped-s" if never_pushed %>
+  <% button_opts["aria-label"] = "You can’t publish releases for an empty repository." if never_pushed %>
+  <%= content_tag(:button, button_opts) do %>
+    <span class="js-save-draft-button-state" data-state="default">
+      Save draft
+    </span>
+    <span class="js-save-draft-button-state" role="status" data-state="saved" hidden>
+      Saved!
+    </span>
+    <span class="js-save-draft-button-state" role="status" data-state="saving" hidden>
+      <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :text_bottom)) %>
+      Saving release…
+    </span>
+    <span class="color-fg-danger js-save-draft-button-state" role="status" data-state="failed" hidden>
+      Saving draft failed. Try again?
+    </span>
+  <% end %>
+<% else -%>
+  <%= render Primer::ButtonComponent.new(scheme: :primary, classes: "js-publish-release", type: :submit, "data-disable-with": "Updating&hellip;") do %>Update release<% end %>
+<% end -%>

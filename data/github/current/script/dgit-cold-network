@@ -1,0 +1,65 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require File.expand_path("../../config/environment", __FILE__)
+require "github/dgit/cold_storage_sql"
+require "terminal-table"
+
+GitRPC.timeout = 30.minutes.to_i
+GitHub.load_activerecord
+Failbot.disable    # suppress failbot reporting of unhandled exceptions
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} <freeze|thaw|never-cold|write-heavy|read-heavy> nwo"
+  exit 1
+end
+
+usage unless ARGV.length == 2
+
+mode = ARGV[0].downcase
+
+nwo = ARGV[1]
+repo_id, network_id, root_id, is_wiki = GitHub::DGit::Routing::lookup_repo(nwo)
+# is it found?
+unless repo_id && network_id
+  $stderr.puts "#{nwo} not found"
+  exit 1
+end
+
+begin
+  case mode
+  when "never-cold"
+    if GitHub::DGit::ColdStorage.is_network_cold?(network_id)
+      $stderr.puts "#{nwo} is already cold - thaw first"
+      exit 1
+    end
+    GitHub::DGit::ColdStorage.mark_network_never_cold(network_id)
+    puts "`#{nwo}` marked as never cold"
+
+  when "freeze"
+    if GitHub::DGit::ColdStorage.is_network_cold?(network_id)
+      $stderr.puts "#{nwo} is already cold"
+      exit 1
+    end
+    if !GitHub::DGit::ColdStorage::mark_network_cold(network_id)
+      $stderr.puts "Failed to mark #{nwo} cold"
+    end
+    puts "#{nwo} marked cold - check progress with `.spokes dat #{nwo}`"
+
+  when "write-heavy"
+    GitHub::DGit::ColdStorage.set_network_storage_state(network_id, 3)
+    puts "`#{nwo}` marked as write-heavy"
+
+  when "read-heavy"
+    GitHub::DGit::ColdStorage.set_network_storage_state(network_id, 4)
+    puts "`#{nwo}` marked as read-heavy"
+
+  else
+    usage
+  end
+
+rescue GitHub::DGit::ReplicaRepairError => e
+  $stderr.puts "Could not #{mode} #{nwo}: #{e}"
+  exit 1
+end

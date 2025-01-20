@@ -1,0 +1,127 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+
+<% allow_org_invite_metered = (!this_business.metered_ghec_trial? && !this_business.metered_plan?) || current_user.feature_enabled?(:metered_ghe_allow_volume_transfers) %>
+
+<div class="d-flex flex-items-center flex-justify-between mb-3">
+  <div class="d-flex flex-justify-between flex-column-reverse width-full mb-3 mb-lg-0 mb-md-0">
+    <%= form_tag enterprise_organizations_path(this_business),
+      method: :get,
+      "data-autosearch-results-container": "business-organizations-list" do %>
+      <div class="auto-search-group">
+        <input class="form-control width-full input-contrast auto-search-input js-member-filter-field"
+          type="text"
+          name="query"
+          value="<%= params[:query] %>"
+          placeholder="Find an organization…"
+          aria-label="Find an organization…"
+          autocomplete="off"
+          data-throttled-autosubmit>
+        <%= render Primer::Beta::Octicon.new(icon: "search") %>
+        <%= render(Primer::Beta::Spinner.new(size: :small, classes: "spinner")) %>
+      </div>
+    <% end %>
+  </div>
+
+  <% if this_business.owner?(current_user) && !this_business.downgraded_to_free_plan? %>
+    <div class="ml-3 flex-justify-between width-full">
+      <div class="float-right">
+        <% if GitHub.business_organization_invitations_available? && !this_business.enterprise_managed_user_enabled? && allow_org_invite_metered %>
+          <%= render(Primer::Beta::Button.new(
+            tag: :a,
+            href: new_enterprise_organization_invitation_path(this_business),
+            test_selector: "invite-org-button")) { "Invite organization" } %>
+        <% end %>
+        <% if this_business.trial_org_creation_limit_reached? %>
+          <%= render Primer::Alpha::Dialog.new(
+            id: "trial-org-creation-limit-reached",
+            size: :medium,
+            title: "Upgrade to Enterprise to create more organizations",
+          ) do |dialog| %>
+            <% dialog.with_show_button do %>
+              New organization
+            <% end %>
+            <%= dialog.with_body do %>
+              You can only create 3 organizations as part of your trial in
+              <strong><%= this_business.name %></strong>. To create more new organizations, you must
+              first upgrade the trial by <%= buying_enterprise_flavor %>.
+            <% end %>
+            <%= dialog.with_footer do %>
+              <%= render(Primer::Beta::Button.new(
+                data: { "close-dialog-id": "trial-org-creation-limit-reached" }
+              )) { "Cancel" } %>
+              <%= render(Primer::Beta::Button.new(
+                tag: :a,
+                scheme: :primary,
+                href: billing_settings_upgrade_enterprise_path(this_business)
+              )) { "#{buy_enterprise_flavor}" } %>
+            <% end %>
+          <% end %>
+        <% else %>
+          <%= render(Primer::Beta::Button.new(
+            tag: :a,
+            scheme: show_onboarding_experience?(this_business) ? :default : :primary,
+            href: new_enterprise_organization_path(this_business))) { "New organization" } %>
+        <% end %>
+      </div>
+
+      <% if GitHub.business_organization_invitations_available? && !this_business.enterprise_managed_user_enabled? %>
+        <div class="float-right<% if responsive? %> d-none d-lg-block<% end %>">
+          <% pending_organizations_count =
+            this_business.organization_invitations.with_status(:created).count +
+            this_business.organization_invitations.with_status(:accepted).count %>
+          <% if pending_organizations_count > 0 %>
+            <%= render(Primer::Beta::Button.new(
+              tag: :a,
+              href: pending_organizations_enterprise_path(this_business),
+              mr: 1,
+              test_selector: "pending-org-invitations-button")) { "#{pending_organizations_count} pending" } %>
+          <% end %>
+
+          <% if GitHub.flipper[:enterprise_idp_provisioning].enabled?(this_business) %>
+            <% orphaned_orgs_count = this_business.orphaned_organizations.count %>
+            <% if orphaned_orgs_count > 0 %>
+              <%= link_to \
+                "#{orphaned_orgs_count} unowned",
+                enterprise_unowned_organizations_path(this_business),
+                class: "btn btn-danger mr-2" %>
+            <% end %>
+          <% end %>
+        </div>
+
+        <% if responsive? %>
+          <div class="<% if (pending_organizations_count || orphaned_orgs_count) > 0 %>d-lg-none mr-2<% else %>d-none<% end %>">
+            <details class="details-reset details-overlay dropdown position-relative">
+              <summary class="btn width-full text-center">
+                <%= primer_octicon(:"kebab-horizontal", color: :muted, "aria-label": "More options") %>
+              </summary>
+
+              <details-menu class="dropdown-menu dropdown-menu-se project-small-menu-dropdown width-full right-0" style="min-width: 170px !important; left: auto !important;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                <ul>
+                  <% pending_organizations_count =
+                    this_business.organization_invitations.with_status(:created).count +
+                    this_business.organization_invitations.with_status(:accepted).count %>
+                  <% if pending_organizations_count > 0 %>
+                    <li class="py-1">
+                      <%= link_to "#{pending_organizations_count} pending", pending_organizations_enterprise_path(this_business), class: "btn-link dropdown-item" %>
+                    </li>
+                  <% end %>
+                  <% if GitHub.flipper[:enterprise_idp_provisioning].enabled?(this_business) %>
+                    <% orphaned_orgs_count = this_business.orphaned_organizations.count %>
+                    <% if orphaned_orgs_count > 0 %>
+                      <li class="py-1">
+                        <%= link_to \
+                          "#{orphaned_orgs_count} unowned",
+                          enterprise_unowned_organizations_path(this_business),
+                          class: "btn-link dropdown-item" %>
+                      </li>
+                    <% end %>
+                  <% end %>
+                </ul>
+              </details-menu>
+            </details>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+  <% end %>
+</div>

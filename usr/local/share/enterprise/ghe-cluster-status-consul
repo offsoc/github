@@ -1,0 +1,126 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-consul [-v]
+#/ Indicate whether `consul-replicate` is successfully replicating data between Consul datacenters
+
+# This is vaguely a copy-pasta of ghe-repl-consul
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-commons
+source /usr/local/share/enterprise/lib/ghe-commons
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+check_cluster_consul_replication() {
+  # any node in primary cluster
+  mysql_master="$(ghe-config cluster.mysql-master)"
+  primary_dc="$(ghe-config "cluster.$mysql_master.datacenter")"
+
+  replica_node="$(ghe-config cluster.mysql-master-replica)"
+  replica_dc="$(ghe-config "cluster.$replica_node.datacenter")"
+
+  primary_nodes="$(ghe-cluster-nodes -d "$primary_dc")"
+  replica_nodes="$(ghe-cluster-nodes -d "$replica_dc")"
+
+  # check consul on primary
+  check_consul_cluster_status "$primary_nodes"
+
+  # check consul on replica
+  check_consul_cluster_status "$replica_nodes"
+
+  # check consul-replicate is inactive in primary datacenter
+  check_consul_replicate_status_inactive "$primary_nodes"
+
+  replica_consul_server_nodes="$(ghe-cluster-nodes -d "$replica_dc" -r consul)"
+
+  # check consul-replicate is active in replica datacenter on consul servers
+  check_consul_replicate_status_active "$replica_consul_server_nodes"
+
+  local primary_ip replica_ip
+
+  mapfile -t primary_array <<< "$primary_nodes"
+  primary_ip="$(ghe-config "cluster.${primary_array[0]}.ipv4")"
+
+  mapfile -t replica_array <<< "$replica_nodes"
+  replica_ip="$(ghe-config "cluster.${replica_array[0]}.ipv4")"
+
+  # check consul kv synchronization
+  check_consul_kv_replication "$primary_ip" "$replica_ip"
+}
+
+check_consul_cluster_status(){
+  nodes=$1
+
+  for ip in $nodes; do
+    ssh_cmd "$ip" systemctl is-active --quiet consul > /dev/null || {
+      check_result "$ip" "consul-status" "error" "Consul is not active"
+    }
+  done
+
+  # note: this is executed over ssh, and so we need to escape the single and double quotes
+  #       in order to preserve the syntax on the ssh target box
+  # shellcheck disable=SC1083
+  if [ "$(ssh_cmd "$ip" consul-cli status leader  --template \'{{ eq . \"\" }}\')" = "true" ]; then
+    check_result "$ip" "consul-status" "error" "cluster lost leadership"
+  fi
+}
+
+check_consul_replicate_status_inactive() {
+  nodes="$1"
+
+  for ip in $nodes; do
+    ! ssh_cmd "$ip" systemctl is-active --quiet consul-replicate || {
+      check_result "$ip" "consul-replicate" "error" "Consul-Replicate is Active"
+    }
+  done
+}
+
+check_consul_replicate_status_active() {
+  nodes="$1"
+
+  # Check to ensure consul-replicate is running on at least one node in the secondary cluster
+  for ip in $nodes; do
+    ssh_cmd "$ip" systemctl is-active --quiet consul-replicate && {
+      # consul-replicate found, exit early
+      return
+    }
+  done
+
+  # None of the nodes are running consul replicate, so report an error
+  check_result "all-replica-nodes" "consul-replicate" "error" "Consul-Replicate is not Active"
+}
+
+check_consul_kv_replication(){
+  local uuid
+  uuid=$(cat /data/user/common/uuid)
+  local key="ghe/consul_test_key_${uuid}"
+  local value=consul-$RANDOM
+
+  primary_ip="$1"
+  replica_ip="$2"
+
+  ssh_cmd "$primary_ip" consul-cli kv write "$key" "$value" || {
+    check_result "$ip" "consul-kv" "error" "Error inserting into kv"
+  }
+
+  for ((try=0; try<10; try++)); do
+    replicated_value=$(ssh_cmd "$replica_ip" consul-cli kv read "$key")
+    if [ "$value" == "$replicated_value" ]; then
+      break
+    else
+      if [ "$try" -eq 9 ] ; then
+        check_result "$ip" "consul-kv" "error" "Error reading from replicated kv"
+      fi
+      sleep 1
+    fi
+  done
+}
+
+
+start_output "consul"
+
+check_cluster_consul_replication || true
+
+end_output "consul"

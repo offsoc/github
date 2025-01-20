@@ -1,0 +1,160 @@
+#!/usr/share/rbenv/versions/current/bin/ruby
+# frozen_string_literal: true
+require "json"
+
+if `whoami`.chomp != "root"
+  exec "sudo", "-u", "root", $0, *ARGV
+  STDERR.puts "Run this script as the root user."
+  exit 1
+end
+
+def disk_usage(dev)
+  dev.include?("/dev/") ? `blockdev --getsize64 #{dev}`.to_i : `df -P '#{dev}' | tail -n 1 | awk '{print $2}'`.to_i * 1024
+end
+
+def check_result(check, checks = CHECKS)
+  c = checks[check]
+  if c.size == 1
+    c.first == true
+  elsif c[1].instance_of?(Array)
+    c[1].include? c.first
+  else
+    c.first >= c[1] * (c[2] || 1)
+  end
+end
+
+def check_message_shell(check, checks = CHECKS)
+  result = check_result(check, checks)
+  result ? "success" : "FAILED"
+end
+
+def check_message_cluster_role(check, checks = CLUSTER_CHECKS)
+  result = check_result(check, checks)
+  result ? nil : "#{check}: #{checks[check][1]}GB required (#{checks[check][0] / GB}GB found)"
+end
+
+PLATFORM = `. /etc/github/enterprise-release && echo $RELEASE_PLATFORM`.chomp
+GB = (1024**3)
+BLOCKDEV_FS = `grep " /data/user " /proc/mounts | awk '{print $1}'`.chomp
+BLOCKDEV_CAPACITY_VALUE = disk_usage(PLATFORM == "docker" || PLATFORM == "podman" ? "/data/user" : BLOCKDEV_FS)
+ROOTDEV_CAPACITY_VALUE = disk_usage("/")
+MEMORY_VALUE = File.exist?("/proc/meminfo") ? File.read("/proc/meminfo").scan(/MemTotal:\s+(\d+)/).flatten.first.to_i * 1024 : 0
+DEV_MODE = File.exist?("/etc/github/devmode") || PLATFORM == "lxc" || PLATFORM == "podman"
+STORAGE_FIND_ERROR = File.exist?("/tmp/ghe-storage-find-error") ? File.read("/tmp/ghe-storage-find-error").strip : ""
+ACTIONS_ENABLED = `ghe-config app.actions.enabled`.chomp == "true"
+PACKAGES_ENABLED = `ghe-config app.packages.enabled`.chomp == "true"
+file = File.read("/etc/minimum-system-requirements.json")
+system_requirements = JSON.parse(file)
+
+def get_requirements_after_tolerance(system_requirements, mode)
+  requirements = {}
+  memory = get_single_requirement(system_requirements, mode, "memory")
+  requirements[:memory] = memory unless memory.nil?
+  blockdev_capacity = get_single_requirement(system_requirements, mode, "blockdev_capacity")
+  requirements[:blockdev_capacity] = blockdev_capacity unless blockdev_capacity.nil?
+  rootdev_capacity = get_single_requirement(system_requirements, mode, "rootdev_capacity")
+  # because the disk_usage("/") is only calculating one partition of root storage, therefore /2 to validate the rootdev_capacity
+  requirements[:rootdev_capacity] = rootdev_capacity/2 unless rootdev_capacity.nil?
+  return requirements
+end
+
+def get_single_requirement(system_requirements, mode, requirement)
+  if system_requirements[mode].include?(requirement)
+    required = system_requirements[mode][requirement]["required"]
+    if system_requirements[mode][requirement].include?("tolerance")
+      required = required - system_requirements[mode][requirement]["tolerance"]
+      return required
+    end
+  end
+  return nil
+end
+
+CHECK_REQUIREMENTS = {
+  default: get_requirements_after_tolerance(system_requirements, "default"),
+  default_actions_enabled: get_requirements_after_tolerance(system_requirements, "default_actions_enabled"),
+  dev: get_requirements_after_tolerance(system_requirements, "dev"),
+  docker: get_requirements_after_tolerance(system_requirements, "docker"),
+  cluster: get_requirements_after_tolerance(system_requirements, "cluster"),
+  cluster_web: get_requirements_after_tolerance(system_requirements, "cluster_web"),
+  cluster_job: get_requirements_after_tolerance(system_requirements, "cluster_job"),
+  cluster_pages: get_requirements_after_tolerance(system_requirements, "cluster_pages"),
+  cluster_storage: get_requirements_after_tolerance(system_requirements, "cluster_storage"),
+  cluster_git: get_requirements_after_tolerance(system_requirements, "cluster_git"),
+  cluster_mysql: get_requirements_after_tolerance(system_requirements, "cluster_mysql"),
+  cluster_redis: get_requirements_after_tolerance(system_requirements, "cluster_redis"),
+  cluster_elasticsearch: get_requirements_after_tolerance(system_requirements, "cluster_elasticsearch"),
+  cluster_memcache: get_requirements_after_tolerance(system_requirements, "cluster_memcache"),
+  cluster_metrics: get_requirements_after_tolerance(system_requirements, "cluster_metrics"),
+  cluster_consul: get_requirements_after_tolerance(system_requirements, "cluster_consul")
+}
+if `ghe-config app.actions.enabled`.chomp == "true"
+  requirements = CHECK_REQUIREMENTS[:default_actions_enabled]
+else
+  requirements = CHECK_REQUIREMENTS[:default]
+end
+requirements.merge!(CHECK_REQUIREMENTS[:docker]) if PLATFORM == "docker"
+requirements.merge!(CHECK_REQUIREMENTS[:dev]) if DEV_MODE
+
+CHECKS = {
+  blockdev_mounted: [File.exist?("/data/user/version")],
+  memory: [MEMORY_VALUE, requirements[:memory], GB],
+  blockdev_capacity: [BLOCKDEV_CAPACITY_VALUE, requirements[:blockdev_capacity], GB],
+  rootdev_capacity: [ROOTDEV_CAPACITY_VALUE, requirements[:rootdev_capacity], GB],
+}
+
+if ENV["CLUSTER_ROLE"]
+  cluster_requirements = requirements.merge(CHECK_REQUIREMENTS["cluster_#{ENV["CLUSTER_ROLE"]}".to_sym])
+  cluster_requirements.merge!(CHECK_REQUIREMENTS[:dev]) if DEV_MODE
+else
+  cluster_requirements = requirements.merge(CHECK_REQUIREMENTS[:cluster])
+  cluster_requirements.merge!(CHECK_REQUIREMENTS[:dev]) if DEV_MODE
+end
+
+CLUSTER_CHECKS = {
+  memory: [MEMORY_VALUE, cluster_requirements[:memory], GB],
+  blockdev_capacity: [BLOCKDEV_CAPACITY_VALUE, cluster_requirements[:blockdev_capacity], GB],
+  rootdev_capacity: [ROOTDEV_CAPACITY_VALUE, cluster_requirements[:rootdev_capacity], GB],
+}
+
+blockdev_checks = check_result(:blockdev_mounted) && check_result(:blockdev_capacity)
+vm_checks = check_result(:memory) && check_result(:rootdev_capacity)
+CHECKS_ALL_PASSED = blockdev_checks && vm_checks
+cluster_checks = check_result(:memory, CLUSTER_CHECKS) && check_result(:blockdev_mounted) && check_result(:blockdev_capacity, CLUSTER_CHECKS) && check_result(:rootdev_capacity, CLUSTER_CHECKS)
+CLUSTER_CHECKS_ALL_PASSED = cluster_checks
+
+json = {}
+CHECKS.keys.each do |k|
+  json[k] = check_result(k)
+end
+File.open("/data/enterprise-manage/current/public/ghe-preflight-check-status.json", "w") do |f|
+  f.puts JSON.pretty_generate json
+end
+
+if ENV["CLUSTER_ROLE"]
+  puts [
+    check_message_cluster_role(:blockdev_capacity),
+    check_message_cluster_role(:rootdev_capacity),
+    check_message_cluster_role(:memory)
+  ].compact.join(", ")
+  exit CLUSTER_CHECKS_ALL_PASSED ? 0 : 1
+end
+
+if ENV["PREFLIGHT_SHELL"]
+  out = [
+    ["PREFLIGHT_BLOCKDEV_MOUNTED", check_message_shell(:blockdev_mounted)],
+    ["PREFLIGHT_BLOCKDEV_CAPACITY", check_message_shell(:blockdev_capacity)],
+    ["PREFLIGHT_ROOTDEV_CAPACITY", check_message_shell(:rootdev_capacity)],
+    ["PREFLIGHT_MEMORY", check_message_shell(:memory)]
+  ]
+  out << ["PREFLIGHT_PASSED", CHECKS_ALL_PASSED ? 1 : 0]
+  out.each do |o|
+    puts o.join("=")
+  end
+end
+
+if !defined?(PREFLIGHT_HTML)
+  if ENV["PREFLIGHT_CLUSTER"]
+    exit CLUSTER_CHECKS_ALL_PASSED ? 0 : 1
+  end
+  exit CHECKS_ALL_PASSED ? 0 : 1
+end

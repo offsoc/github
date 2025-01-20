@@ -1,0 +1,147 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+
+my $max_diff_size = parse_size('150K');
+my $max_total_size = parse_size('2M');
+my $max_diff_lines = undef;
+my $max_total_lines = undef;
+my $current_total_lines = 0;
+my $current_total_size = 0;
+my $add_trailer = 0;
+my $USAGE =<<'EOF';
+usage: condense-diff [options] <git-cmd> [git-args]
+--max-diff-size       maximum size of a single file's diff
+--max-diff-lines      maximum number of lines in a single file's diff
+--max-total-size      maximum size of all diff output
+--max-total-lines     maximum number of lines in all diff output
+--add-trailer         add a trailing null byte at the end of each file's diff
+--current-total-lines number of total lines to assume we're starting with
+--current-total-size  number of total bytes to assume we're starting with
+EOF
+
+# Disable output buffering on STDOUT
+$| = 1;
+
+# We must stop processing when we get to the git-cmd
+# which will have arbitrary options after it.
+Getopt::Long::Configure(qw(require_order));
+GetOptions(
+  'max-diff-size=s' => sub { $max_diff_size = parse_size($_[1]) },
+  'max-diff-lines=i' => \$max_diff_lines,
+  'max-total-size=s' => sub { $max_total_size = parse_size($_[1]) },
+  'max-total-lines=i' => \$max_total_lines,
+  'add-trailer!' => \$add_trailer,
+  'current-total-lines=i' => \$current_total_lines,
+  'current-total-size=s' => sub { $current_total_size = parse_size($_[1]) },
+) or die $USAGE;
+
+@ARGV or die $USAGE;
+open(my $git, "-|", qw(git), @ARGV)
+  or die "unable to start git: $!\n";
+
+my $diff_lines = 0;
+my $total_lines = $current_total_lines;
+my $diff_size = 0;
+my $total_size = $current_total_size;
+my $added = 0;
+my $deleted = 0;
+my ($in_diff, $skipping, $skipping_reason);
+my @diff;
+
+while(<$git>) {
+  if ($in_diff && /^[-+ @\\]/) {
+    $added++ if /^\+/;
+    $deleted++ if /^-/;
+
+    if (!$skipping) {
+      $diff_size += length;
+      $total_size += length;
+      $diff_lines++;
+      $total_lines++;
+
+      if ($diff_size > $max_diff_size || (defined $max_diff_lines && $diff_lines > $max_diff_lines)) {
+        @diff = ();
+        $skipping = 1;
+        $skipping_reason = $diff_size > $max_diff_size ? "size" : "line";
+        $total_size -= $diff_size;  # don't count skipped diffs against total
+        $total_lines -= $diff_lines;
+        next;
+      }
+      if (defined $max_total_lines && $total_lines > $max_total_lines) {
+        @diff = ();
+        print_max_lines_message();
+        flush_diff();
+        last;
+      }
+      if ($total_size > $max_total_size) {
+        @diff = ();
+        print_max_size_message();
+        flush_diff();
+        last;
+      }
+
+      push @diff, $_;
+    }
+
+    next;
+  }
+
+  flush_diff() if $in_diff;
+  print;
+
+  if (/^\+\+\+ (.*)/) {
+    $in_diff = 1;
+  }
+}
+flush_diff();
+
+# propagate git's exit code
+close($git);
+exit $? >> 8;
+
+sub flush_diff {
+  print @diff;
+  print "Omitting $added additions, $deleted deletions due to $skipping_reason limit.\n"
+    if $skipping;
+
+  print "\x00\n"
+    if $add_trailer && $diff_size > 0;
+
+  @diff = ();
+  $skipping = 0;
+  $skipping_reason = "";
+  $diff_size = 0;
+  $diff_lines = 0;
+  $added = $deleted = 0;
+  $in_diff = 0;
+}
+
+sub parse_size {
+  local $_ = shift;
+  /^(\d+)([kmg]?)/i
+    or die "invalid size: $_\n";
+  my $n = $1;
+  my $unit = lc($2);
+  if ($unit ne '') {
+    $n *= 1024;
+    if ($unit ne 'k') {
+      $n *= 1024;
+      if ($unit ne 'm') {
+        $n *= 1024;
+      }
+    }
+  }
+  return $n;
+}
+
+# The caller and some unit tests care about the format of these messages.
+# Do not change them without first looking at the output of
+# git grep 'maximum.*exceeded'
+sub print_max_size_message {
+  print "Truncating diff: maximum diff size exceeded.\n";
+}
+sub print_max_lines_message {
+  print "Truncating diff: maximum number of lines exceeded.\n";
+}

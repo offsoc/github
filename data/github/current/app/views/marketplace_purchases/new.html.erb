@@ -1,0 +1,193 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%
+  bullets = selected_plan.bullets.order(:id).first(4)
+
+  other_plans = listing.listing_plans.
+    with_published_state.
+    order("marketplace_listing_plans.yearly_price_in_cents").
+    first(100)
+
+  current_subscription_item = subscription_item
+
+  already_purchased = current_subscription_item.present?
+  if already_purchased
+    current_plan = current_subscription_item.subscribable
+  end
+
+  needs_oap = account.organization? &&
+    account.restricts_oauth_applications? &&
+    listing.listable_is_oauth_application? &&
+    !account.allows_oauth_application?(listing.listable)
+
+  formatted_per_unit_price = casual_currency(order_preview_view.per_unit_change_price)
+  owned_organizations = current_user.owned_organizations.order(:id).first(200)
+
+  installation_account = account.business? ? organization : account
+  account_name = account.business? ? account.slug : account.display_login
+  installation_account_name = account.business? ? organization&.display_login : account.display_login
+%>
+
+<% page_info \
+  title: "Review your order · GitHub Marketplace",
+  container_xl: true,
+  richweb: {
+    title: "Review your order - GitHub Marketplace",
+    url: request.original_url,
+    description: "GitHub integrates with hundreds of tools that help you and your team build software better, together.",
+  }
+%>
+
+<div class="py-6">
+  <div class="container-lg p-responsive">
+    <% if already_purchased %>
+      <h1 class="f1 mb-4">Edit your plan</h1>
+    <% else %>
+      <h1 class="f1 mb-4">Review your order</h1>
+    <% end %>
+    <div class="clearfix">
+      <div class="col-md-6 pr-md-6 float-md-left mb-md-0">
+        <div class="d-flex flex-items-center">
+          <div class="d-flex mr-2">
+            <span class="pr-2">Account: </span>
+            <img src="<%= installation_account.primary_avatar_url(96) %>" alt="" width="24" height="24" class="<%= avatar_class_names(installation_account) %>">
+          </div>
+          <details class="details-reset details-overlay select-menu position-relative">
+            <summary class="text-small"><%= installation_account_name %><span class="dropdown-caret ml-1"></span></summary>
+            <details-menu class="mt-2 dropdown-menu dropdown-menu-se f6" style="overflow:visible; width: 260px;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+              <a href="<%= marketplace_order_path(plan_id: selected_plan.global_relay_id, quantity: quantity, account: current_user.display_login) %>" class="dropdown-item" role="menuitem">
+                <img alt="" class="<%= avatar_class_names(current_user) %> mr-1" height="20" src="<%= current_user.primary_avatar_url(96) %>" width="20">
+                <%= current_user.safe_profile_name %>
+              </a>
+              <% owned_organizations.each do |org| %>
+                <a href="<%= marketplace_order_path(plan_id: selected_plan.global_relay_id, account: org.display_login, quantity: quantity) %>" class="dropdown-item" role="menuitem">
+                  <img alt="" class="<%= avatar_class_names(org) %> mr-1" height="20" src="<%= org.primary_avatar_url(96) %>" width="20">
+                  <%= org.safe_profile_name %>
+                </a>
+              <% end %>
+            </details-menu>
+          </details>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <%= render(Primer::Beta::Heading.new(tag: :h2, mb: 3, mt: 6)) { "Order summary" } %>
+      </div>
+    </div>
+    <div class="clearfix">
+      <div class="col-md-6 pr-md-6 float-md-left mb-4 mb-md-0">
+        <div class="color-bg-default rounded-bottom-2 color-shadow-large mb-3 border">
+          <div class="width-full color-bg-accent-emphasis pt-1"></div>
+          <div class="p-4">
+            <div class="float-right pl-3<% if already_purchased %> mt-2<% end %>">
+              <div style="background-color: #<%= listing.bgcolor %>" class="CircleBadge CircleBadge--small box-shadow-none">
+                <img src="<%= listing.primary_avatar_url(140) %>" class="CircleBadge-icon" alt="<%= listing.name %> logo preview">
+              </div>
+            </div>
+            <div class="lh-condensed color-fg-muted text-small<% if already_purchased %> mb-2<% end %>">
+              <%= listing.name %>
+            </div>
+            <% if already_purchased %>
+              <details class="select-menu mb-3 details-reset details-overlay">
+                <%= render Primer::ButtonComponent.new(tag: :summary, classes: "select-menu-button") do %>
+                  <span data-menu-button><%= selected_plan.name %> <% if selected_plan.global_relay_id == current_plan.global_relay_id %><i>(current plan)</i><% end %></span>
+                <% end %>
+
+                <details-menu class="select-menu-modal position-absolute" style="z-index: 99;"><%# erblint:disable Primer::Accessibility::DetailsMenuMigration %>
+                  <div class="select-menu-header">
+                    <span class="select-menu-title">Plans</span>
+                  </div>
+                  <div class="select-menu-list">
+                    <% other_plans.each do |plan| %>
+                      <a href="<%= marketplace_order_path(listing_slug: listing.slug, plan_id: plan.global_relay_id, account: installation_account_name) %>" class="select-menu-item" aria-checked="<%= plan.id == selected_plan.id %>" role="menuitemradio">
+                        <%= primer_octicon(:check, classes: "select-menu-item-icon") %>
+                        <div class="select-menu-item-text">
+                          <span class="select-menu-item-heading">
+                            <span data-menu-button-text><%= plan.name %></span> <% if plan.global_relay_id == current_plan.global_relay_id %>(current plan)<% end %>
+                          </span>
+                          <% unless plan.direct_billing? %>
+                            <span class="f5">
+                              <%= casual_currency plan.monthly_price_in_dollars %>
+                              <span class="text-small"><% if plan.per_unit %>per&nbsp;<%= plan.unit_name %><% end %>/&nbsp;month</span>
+                            </span>
+                          <% end %>
+                          <span class="description"><%= plan.description %></span>
+                        </div>
+                      </a>
+                    <% end %>
+                  </div>
+                </details-menu>
+              </details>
+
+            <% else %>
+              <h2 class="f2 text-normal lh-condensed mb-2 "><%= selected_plan.name %></h2>
+            <% end %>
+
+            <p class="mb-3 lh-condensed"><%= selected_plan.description %></p>
+            <ul class="list-style-none mb-4">
+              <% bullets.each do |bullet| %>
+                <li class="mb-1"><%= primer_octicon(:check, mr: 2, color: :success) %><%= bullet.value %></li>
+              <% end %>
+            </ul>
+            <% unless selected_plan.direct_billing? %>
+              <div class="border-top pt-2 mb-2 d-flex flex-md-items-center flex-justify-between">
+                <% if selected_plan.per_unit %>
+                  <div>
+                    <input data-url="<%= marketplace_order_preview_path(listing_slug: listing.slug, plan_id: selected_plan.global_relay_id, account: organization&.display_login) %>" class="form-control input-contrast mr-2 js-marketplace-order-quantity" type="number" value="<%= quantity %>" name="qty" id="qty" min="1" max="100000" style="width:60px" autocomplete="off"> <label for="qty" class="d-block d-md-inline text-normal"><%= selected_plan.unit_name.capitalize %>(s) in this plan</label>
+                  </div>
+                <% end %>
+                <div class="d-flex flex-md-items-center">
+                    <span class="f2 pr-2"><%= formatted_per_unit_price %></span>
+                    <span class="text-small color-fg-muted lh-condensed-ultra d-block mt-2 mt-md-0">
+                      <% if selected_plan.per_unit %>
+                        per <%= selected_plan.unit_name.downcase %><br>
+                      <% end %>
+                      / <%= subscription.plan_duration.downcase %>
+                    </span>
+                </div>
+              </div>
+            <% end %>
+            <% if already_purchased && selected_plan.global_relay_id == current_plan.global_relay_id %>
+              <% if current_subscription_item.authorization_required?(current_user) %>
+                <p class="pt-2 text-small">
+                  <% install_params = { listing_slug: listing.slug, subscription_item_id: current_subscription_item.global_relay_id } %>
+                  <% if needs_oap %>
+                    <% install_params[:grant_oap] = true %>
+                    The <%= organization.display_login %> organization has enabled OAuth App Access restrictions.
+                  <% end %>
+                  To complete this installation, you must
+                  <a href="<%= install_marketplace_listing_path(install_params) %>" class="text-bold">grant this app access</a>
+                  to <%= "the #{organization.display_login} organization’s data and" if needs_oap %> your GitHub account.
+                </p>
+              <% elsif needs_oap %>
+                <p class="pt-2 text-small">
+                  The <%= organization.display_login %> organization has enabled OAuth App Access restrictions.
+                  You must grant <%= listing.name %> access to the <%= organization.display_login %>
+                  organization’s data.
+                </p>
+
+                <%= form_tag org_set_application_approval_state_path(organization.display_login, listing.listable_id, :state => "approved"), :method => :put, :class => "mb-2" do %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, variant: :small) do %>Grant<% end %>
+                <% end %>
+              <% end %>
+
+              <div class="d-lg-flex flex-justify-between border-top pt-2">
+                <%= form_tag subscription_item_path(current_subscription_item.global_relay_id), class: "lh-condensed", method: :delete do %>
+                  <input type="hidden" name="redirect_to" id="redirect_to" class="d-none" value="<%= marketplace_listing_path(listing.slug) %>" >
+                  <%=
+                    marketplace_plan_cancel_button(
+                      on_free_trial: current_subscription_item.on_free_trial?,
+                      next_billing_date: account.next_billing_date.to_time(:utc),
+                      options: { class: "btn-link text-small Link--secondary m-0 lh-condensed" }
+                    )
+                  %>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 pl-md-6 float-md-left js-marketplace-order-preview">
+        <%= render "marketplace_purchases/order_preview", agreement: agreement, listing: listing, account: account, organization: organization, view: order_preview_view %>
+      </div>
+    </div>
+  </div>
+</div>

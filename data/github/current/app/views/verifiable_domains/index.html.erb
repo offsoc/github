@@ -1,0 +1,105 @@
+<% page_info verifiable_domains_page_info_hash(owner) %>
+
+<% render_layout = \
+  case owner
+  when Business
+    ->(&blk) {
+      render(layout: "businesses/layout",
+        locals: {
+          business: this_business,
+          title: "Verified & approved domains",
+          container_attributes: "itemscope itemtype='http://schema.org/Business'"
+        }, &blk)
+    }
+  when Organization
+    ->(&blk) { render(layout: "orgs/settings/layout", &blk) }
+  end
+%>
+
+<%= render_layout.call do %>
+  <div data-hpc>
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>
+        <%= verifiable_domains_header_text(owner) %>
+      <% end %>
+      <% component.with_actions do %>
+        <%= link_to "Add a domain", owner_domain_path_for_action(action: :new, owner: owner), class: "mt-1 btn btn-sm btn-primary", "data-pjax" => true %>
+      <% end %>
+    <% end %>
+    <p>
+      <% verified_tag = render Primer::Beta::Label.new(tag: :span, scheme: :success, title: "Label: Verified") do %>
+        Verified
+      <% end %>
+      <%= verifiable_domains_owner_description(owner, verified_tag) %>
+    </p>
+
+    <% if verifiable_domains.any? %>
+      <div class="Box">
+        <ul>
+          <% verifiable_domains.each do |domain| %>
+            <%= render VerifiableDomains::DomainComponent.new owner: owner, domain: domain %>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+
+    <% if show_verifiable_domains_notification_restrictions?(owner) %>
+      <% notification_restrictions_enabled_by_policy = verifiable_domains_notification_restrictions_enabled_by_policy?(owner) %>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h2) do %>Notification preferences<% end %>
+        <% if GitHub.smtp_enabled? && notification_restrictions_enabled_by_policy %>
+          <% component.with_actions(classes: "note") do %>
+            <%= render Primer::Beta::Octicon.new(icon: "shield-lock") %>
+            This setting has been
+            <%= link_to "required by enterprise administrators", GitHub.business_accounts_help_url, class: "Link--inTextBlock" %>.
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% if GitHub.smtp_enabled? %>
+        <p <%= test_selector "notification-restriction-settings" %>>
+          You may choose to limit distribution of email-based GitHub notifications to users who have a verified email
+          address for one or more of the approved or verified domains.
+          When this preference is enabled and saved, GitHub notifications will no longer be sent to email addresses that
+          do not belong to an approved or verified domain.
+        </p>
+
+        <include-fragment
+          src="<%= notification_restrictions_path_for(owner) %>"
+          loading="lazy">
+          Loading...
+          <%= render(Primer::Beta::Spinner.new(size: :small)) %>
+        </include-fragment>
+
+        <% if owner.is_a?(Business) %>
+          <div class="mt-3">
+            <%= render Primer::Beta::Octicon.new(icon: "eye", color: :accent) %>
+            <%= render(Primer::Alpha::Dialog.new(
+              size: :large,
+              title: "Notification preferences",
+              id: "notification-preferences-dialog"
+            )) do |dialog| %>
+              <% dialog.with_show_button(
+                scheme: :link,
+                font_size: 6,
+              ) { "View your organizations' current notification preferences" } %>
+              <% dialog.with_header(show_divider: true) %>
+              <% dialog.with_body do %>
+                <include-fragment
+                  src="<%= enterprise_organizations_setting_path(this_business, "restrict_notification_delivery") %>">
+                  <%= render(Primer::Beta::Spinner.new(my: 3, mx: :auto, display: :block)) %>
+                </include-fragment>
+              <% end %>
+            <% end %>
+            <span class="f6"> without the enterprise's preferences.</span>
+          </div>
+        <% end %>
+      <% else %>
+        <p <%= test_selector "smtp-not-configured" %>>
+          <%= primer_octicon(:info) %>
+          SMTP must be configured to enable email-based notification restrictions.
+        </p>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

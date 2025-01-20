@@ -1,0 +1,106 @@
+<%# erblint:counter DeprecatedComponentsCounter 2 %>
+<%# view is an instance of Oauth::AuthorizeView %>
+<% page_info responsive: false, :title => "Connection with #{view.application.name}", :selected_link => :settings_user_authorized_apps %>
+
+<% content = capture do %>
+  <div class="oauth-application-info">
+    <div class="settings-next">
+      <div class="flash-messages" <%= test_selector("spammy_flash_alert") %>>
+        <% if GitHub.flipper[:alert_on_spammy_apps].enabled? && view.application.spammy? %>
+          <%= render(Primer::Alpha::Banner.new(scheme: :danger)) do %>
+            The owner of this application has been marked as spammy.
+          <% end %>
+        <% end %>
+
+        <% if view.application.suspended? %>
+          <%= render(Primer::Alpha::Banner.new(scheme: :danger)) do %>
+            This application has been suspended.
+          <% end %>
+        <% end %>
+      </div>
+
+    <%= render :partial => "oauth_applications/application_header", :locals => { :view => view }  %>
+      <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+        <% component.with_heading(tag: :h2) do %>Permissions<% end %>
+        <% if Apps::Internal.capable?(:oauth_authorizations_revocable_by_user, app: view.application) %>
+          <% component.with_actions do %>
+            <%= render layout: "shared/details_dialog", locals: {
+              button_text: "Revoke access",
+              button_class: "btn btn-sm btn-danger",
+              title: "Are you sure you want to revoke authorization?"
+            } do %>
+              <% if GitHub.flipper[:banner_migration].enabled?(current_user) %>
+                <%= render Primer::Alpha::Banner.new(scheme: :warning, full: true) do %>
+                  <%= view.application.name %> will no longer be able to access the GitHub API. You cannot undo this action.
+                <% end %>
+              <% else %>
+                <%= render Primer::Beta::Flash.new(scheme: :warning, full: true) do %>
+                  <%= view.application.name %> will no longer be able to access the GitHub API. You cannot undo this action.
+                <% end %>
+              <% end %>
+
+              <% if view.authorization.public_keys.size > 0 %>
+                <div class="Box-body overflow-auto">
+                  <p>The following SSH keys created by this application will also be deleted.</p>
+                  <ul class="ml-3">
+                    <% view.authorization.public_keys.each do |public_key| %>
+                    <li>
+                      <strong><%= public_key.title %></strong><br>
+                      <code><%= public_key.fingerprint %></code>
+                    </li>
+                    <% end %>
+                  </ul>
+                </div>
+              <% end %>
+              <div class="Box-footer">
+                <%= form_tag settings_oauth_authorization_path(view.application.key), :method => :delete do %>
+                  <%= render Primer::ButtonComponent.new(type: :submit, block: true, scheme: :danger, "data-disable-with": "Revoking…") do %>
+                    I understand, revoke access
+                  <% end %>
+                <% end %>
+              </div>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <%= scopes_description_list(view.authorization.scopes) %>
+
+      <p class="text-small color-fg-muted mt-3">
+        <% if GitHub.oauth_application_policies_enabled? %>
+          Applications act on your behalf to access your data based on the
+          permissions you grant them. Organizations control which applications are
+          allowed to access their private data. Applications you authorize will
+          always have access to public data in your organizations.
+          <a class="Link--inTextBlock" href="<%= docs_url "organizations/about-oauth-app-access-restrictions" %>">Read about third-party access.</a>
+        <% else %>
+          Applications act on your behalf to access your data based on the
+          permissions you grant them. Applications you authorize will always have
+          access to public data in your organizations.
+          <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/articles/authorizing-oauth-apps/">Read about third-party access.</a>
+        <% end %>
+      </p>
+
+      <% if request_organization_approval?(user: current_user, application: view.application, scopes: view.authorization.scopes) %>
+        <%= render Primer::Beta::Subhead.new(spacious: true) do |component| %>
+          <% component.with_heading(tag: :h2) do %>Organization access<% end %>
+        <% end %>
+
+        <div class="oauth-org-access-details">
+          <%= render :partial => "oauth/org_access", :locals => { :view => view } %>
+        </div>
+      <% end %>
+    </div>
+
+  </div>
+<% end %>
+
+<% if current_context.is_a?(Organization) %>
+  <%= render layout: "orgs/settings/layout" do %>
+    <%= content %>
+  <% end %>
+<% else %>
+  <%= render layout: "settings/settings" do %>
+    <%= content %>
+  <% end %>
+<% end %>

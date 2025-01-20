@@ -1,0 +1,126 @@
+#!/usr/bin/env safe-ruby-quick
+#/ Usage: git-branch-base-old <head> <base> <root>
+#/ Finds the best comparison base commit for a branch given the name of the base
+#/ branch and the SHA1 of the root commit, taking repeated base merges into
+#/ account. This script embodies the algorithm that was used before 2016-01.
+#/
+#/   <head>   The branch head ref
+#/   <base>   The ref of the branch that <head> was originally based on
+#/   <root>   The SHA1 of the commit where <head> initially started
+
+# This is slightly different from git-merge-base(1) in that it's capable of
+# producing a good base commit *after* a topic branch has been merged. For
+# example, suppose you have a topic branch, "topic", that was originally
+# based on branch "master" at commit A:
+#
+#     o---A---o---o---o---o---o    <- master
+#          \         /
+#           o---o---B---o---o      <- topic
+#
+# Then the command
+#
+#      $ git merge-base topic master
+#
+# would yield commit B. If we instead use git-branch-base-old with
+#
+#      $ git branch-base-old topic master A
+#
+# then we get commit A.
+#
+# Repeated merges from the base branch into the topic branch are also accounted
+# for. For example, assuming a topology where a topic branch is created and
+# then the upstream branch is merged, and then the topic branch is finally
+# merged back into the upstream:
+#
+#     o---A---o---o---B---o---o---M    <- master
+#          \           \         /
+#           o---o---o---o---o---o      <- topic
+#
+# In this case, git-branch-base-old would be executed as follows to
+# find the best base for getting a list of changes on the topic
+# branch:
+#
+#    $ git branch-base-old topic master A
+#    B
+#
+# The base commit B is the most recent commit on master that can act as
+# a base to get a sensible view of changes on topic. Executing any of the
+# following commands shows information about the commits specific to the
+# topic branch:
+#
+#    $ git log B..topic
+#    $ git diff B...topic
+#
+
+require "set"
+
+# Call "git rev-list" with the specified arguments and return an
+# Enumerator over the lines in its output.
+def rev_list(*args)
+  Enumerator.new do |yielder|
+    IO.popen(%w[git rev-list] + args) do |io|
+      io.each do |line|
+        yielder.yield line.chomp
+      end
+    end
+  end
+end
+
+if ARGV.length != 3
+  abort "usage: #{$0} <head> <base> <root>"
+end
+
+head, base, root = ARGV
+
+oid_re = /\A[0-9a-f]{40}\z/
+
+[head, base, root].each do |arg|
+  if !oid_re.match(arg)
+    abort "#{$0}: error: all arguments must be full-length commit OIDs"
+  end
+end
+
+# Find all merges into the branch since original base SHA1 and gather
+# their parent SHA1s. The output from `rev-list --parent' is one-line
+# per merge commit with each parent commit SHA1 separated by spaces:
+#
+#     <merge-commit-sha> <parent1-sha> <parent2-sha> [<parentN-sha>...]
+bases = Set.new
+rev_list("--merges", "--parents", "#{root}..#{head}").each do |line|
+  parents = line.split(" ")
+
+  # We don't want <parent1-sha>, since that commit was already on the
+  # <head> branch before the merge.  We want <parent2-sha> and
+  # subsequent parents, because they represent commits that were
+  # merged *into* the <head> branch.
+  bases.merge(parents[2..-1])
+end
+
+if bases.empty?
+  # There were no merges; it's safe to use the root SHA1 as the base.
+  puts root
+  exit 0
+end
+
+# Because of the way bases was constructed, it probably does not
+# contain root.  But we assume that root is a valid base [1], so give
+# it a chance to be selected again (i.e., if it is newer than any
+# other candidates).
+#
+# [1] After all, it was chosen last time.  Of course, if either of the
+#     branches has been rebased, this assumption need not be true.
+bases.add(root)
+
+# There were merges. Find the most recent merged-in commit that
+# exists on the base branch and output it as the best base. If none
+# of the parent SHA1s exist on the base branch, fall back on the
+# root commit.
+rev_list("--date-order", base, "--not", "#{root}^@").lazy.each do |commit|
+  if bases.include?(commit)
+    puts commit
+    exit 0
+  end
+end
+
+puts root
+exit 0

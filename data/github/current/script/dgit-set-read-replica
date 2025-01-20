@@ -1,0 +1,96 @@
+#!/usr/bin/env ruby
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/routing"
+require "github/dgit"
+require "terminal-table"
+
+GitHub.load_activerecord
+
+def usage
+  $stderr.puts "Usage:"
+  $stderr.puts "  #{$0} nwo dfs-host"
+  $stderr.puts "     - make 'dfs-host' the read replica in its datacenter."
+  $stderr.puts "  #{$0} nwo dfs1=weight dfs2=weight dfs3=weight"
+  $stderr.puts "     - distribute readweights for a repository in a single datacenter."
+  $stderr.puts "       NOTE: it's an error to specify a set of replicas that isn't the"
+  $stderr.puts "       exact set of replicas in a given datacenter."
+  exit 1
+end
+
+usage unless ARGV.size >= 2
+nwo = ARGV.shift
+owner, name = nwo.split("/", 2)
+
+if ARGV.size > 1 && ARGV.count { |a| a =~ /\A\S+=\d+\z/ } == ARGV.size
+  host_weights = Hash[ARGV.map { |kv| h, v = kv.split("="); [GitHub::DGit::Util.long_host(h), v.to_i] }]
+else
+  host_weights = { GitHub::DGit::Util.long_host(ARGV.first) => 100 }
+end
+
+case owner
+when "network"
+  network_id = name.to_i
+  replicas = GitHub::DGit::Routing.all_network_replicas(network_id)
+  abort "Network #{network_id} has no replicas" if replicas.empty?
+when "gist"
+  begin
+    gist_id, repo_name = GitHub::DGit::Routing.lookup_gist_by_reponame(name)
+  rescue GitHub::DGit::RepoNotFound => e
+    abort "Gist #{nwo} not found"
+  end
+  abort "Gist #{nwo} not found" unless gist_id
+  replicas = GitHub::DGit::Routing.all_gist_replicas(gist_id)
+else # NWO
+  begin
+    repo_id, network_id, root_id, wiki = GitHub::DGit::Routing::lookup_repo(nwo)
+  rescue GitHub::DGit::RepoNotFound => e
+    abort "Repo #{nwo} not found"
+  end
+  abort "#{nwo} not found" unless repo_id && network_id
+  replicas = GitHub::DGit::Routing.all_network_replicas(network_id)
+end
+
+replicas_by_host = Hash[replicas.map { |rep| [rep.host, rep] }]
+specified_replicas = []
+host_weights.each_key do |h|
+  if replica = replicas_by_host[h]
+    specified_replicas << replica
+  elsif GitHub::DGit.get_hosts.include?(h)
+    abort "#{nwo} has no replica on #{h}. Actual replicas are #{replicas_by_host.keys.join(", ")}"
+  else
+    abort "#{h} is not a real DGit host"
+  end
+end
+
+datacenters = specified_replicas.map(&:datacenter).uniq
+unless datacenters.size == 1
+  abort "The given hosts #{host_weights.keys.join(",")} are in multiple datacenters. This command can only adjust readweights one datacenter at a time."
+end
+datacenter = datacenters.first
+dc_replicas = replicas.select { |rep| rep.datacenter == datacenter }
+if host_weights.keys.size != 1 && dc_replicas.map(&:host).sort != host_weights.keys.sort
+  abort "Actual replicas of #{nwo} in #{datacenter} are #{dc_replicas.map(&:host).join(", ")}"
+end
+
+class FixedWeightAllocator
+  def initialize(weights)
+    @weights = weights
+  end
+
+  def choose_read_weights(replicas, *)
+    # There's either one weight per host, or one weight total.
+    Hash[replicas.map { |rep| [rep.host, @weights.fetch(rep.host, 0)] }]
+  end
+end
+
+rebalancer =
+  if network_id
+    GitHub::DGit::Rebalancer::Network.new(network_id, replicas: dc_replicas)
+  elsif gist_id
+    GitHub::DGit::Rebalancer::Gist.new(gist_id, replicas: dc_replicas)
+  end
+rebalancer.allocator = FixedWeightAllocator.new(host_weights)
+rebalancer.rebalance
+
+puts "Finished. Run `spokesctl info #{nwo}` to see the result."

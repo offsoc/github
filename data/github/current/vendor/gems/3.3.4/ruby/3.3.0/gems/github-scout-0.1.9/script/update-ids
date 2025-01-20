@@ -1,0 +1,63 @@
+#!/usr/bin/env ruby
+require 'yaml'
+require 'fileutils'
+require 'digest'
+
+def generate_id(programming_stack)
+  Digest::SHA256.hexdigest(programming_stack).to_i(16) % (2**30 - 1)
+end
+
+tech_stacks_raw = File.read('lib/scout/tech_stacks.yml')
+header = tech_stacks_raw.match(/\A(?:^#[^\n]*\n|^[ \t]*\n)+/m)[0]
+tech_stacks = YAML.load(tech_stacks_raw)
+
+if ARGV[0] == "--check"
+  incorrect_ids = []
+  tech_stacks.each do |name, properties|
+    if properties.has_key?('stack_id')
+      if properties['stack_id'] != generate_id(name)
+        incorrect_ids << name
+      end
+    end
+  end
+
+  list = incorrect_ids.map {|n| "  - #{n}"}.join("\n")
+  case incorrect_ids.count
+  when 0
+    puts "No stacks were found with incorrect IDs."
+    exit 0
+  when 1
+    puts "1 stack was found with a incorrect ID:"
+    puts "\n#{list}\n\n"
+    puts "Please remove `stack_id` field for this stack from `tech_stacks.yml`"
+  else
+    puts "#{incorrect_ids.count} stacks were found with incorrect IDs:"
+    puts "\n#{list}\n\n"
+    puts "Please remove `stack_id` field for these stacks from `tech_stacks.yml`"
+  end
+  exit 1
+else
+  updated_stacks = []
+  tech_stacks.each do |name, properties|
+    unless properties.has_key?('stack_id')
+      properties.merge!('stack_id' => generate_id(name))
+      updated_stacks << name
+    end
+  end
+
+  list = updated_stacks.map {|n| "  - #{n}"}.join("\n")
+
+  case updated_stacks.count
+  when 0
+    puts "No stacks were found with missing IDs."
+    exit
+  when 1
+    puts "Updated 1 stack:"
+    puts "\n#{list}\n\n"
+  else
+    puts "Updated #{updated_stacks.count} stacks:"
+    puts "\n#{list}\n\n"
+  end
+
+  File.write('lib/scout/tech_stacks.yml', header + YAML.dump(tech_stacks))
+end

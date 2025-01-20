@@ -1,0 +1,743 @@
+<%# erblint:counter DeprecatedComponentsCounter 12 %>
+<%# `view` is an instance of Stafftools::User::ShowView %>
+<% page_info title: view.page_title %>
+<% user = view.user %>
+
+<% if error_states[:spammy] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :stop) do %>
+    <%= link_to "This account is flagged as spam", Spam.url_for_account_id(user.id) %>
+    <% if spam_flag_timestamp(this_user) %>
+      &ndash; <%= time_ago_in_words spam_flag_timestamp(this_user) %> ago
+    <% end %>
+    <div class="small-spam-reason"><%= autolink_spammy_reason(this_user.spammy_reason) %></div>
+  <% end %>
+<% end %>
+
+<% if error_states[:suspended] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :alert) do %>
+    This account has been suspended
+    <% if view.user.login.end_with?("_admin") && business = Business.soft_deleted_businesses_for(view.user, emu_admin: true).first %>
+      by enterprise deletion of <%= business.slug %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if error_states[:org_transform] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :alert) do %>
+    This account is currently being converted into an organization
+  <% end %>
+<% end %>
+
+<% if error_states[:no_primary_email] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :alert) do %>
+    No primary email address
+  <% end %>
+<% end %>
+
+<% if error_states[:no_verified_email] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :alert) do %>
+    No verified email addresses
+  <% end %>
+<% end %>
+
+<% if error_states[:unverified_keys] %>
+  <%= render Primer::Beta::Flash.new(scheme: :danger, icon: :alert) do %>
+    This account's SSH keys have not been verified by the user
+  <% end %>
+<% end %>
+
+<% if user.deceased? %>
+  <%= render Primer::Beta::Flash.new(scheme: :warning) do %>
+    This user is deceased
+  <% end %>
+<% end %>
+
+<% if view.show_user_notes? %>
+  <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+    <ul class="status-check-list simple">
+      <%= view.staff_note_dormancy %>
+      <%= view.dupe_login %>
+      <%= view.dupe_email %>
+      <%= view.no_primary_email %>
+      <%= view.disabled_repos %>
+      <%= view.reserved_login %>
+    </ul>
+  <% end %>
+<% end %>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>
+    <%= view.account_type_title %> information
+      <span class="Subhead-actions f6">
+      <%= render \
+        partial: "stafftools/accounts/dormancy_indicator",
+        locals: {view: view, icon_type: "dot-fill"} %>
+      </span>
+  <% end %>
+<% end %>
+
+<table class="stafftools-table mb-6">
+  <tr>
+    <th>ID</th>
+    <td><%= user.id %></td>
+  </tr>
+  <% unless user.customer.blank? %>
+    <tr>
+      <th>Customer ID</th>
+      <td><%= user.customer.id %></td>
+    </tr>
+  <% end %>
+  <tr>
+    <th>Created</th>
+    <td><%= view.created_at %></td>
+  </tr>
+  <tr>
+    <th>Last active</th>
+    <td><%= user.last_active %> &ndash;
+        <%= link_to "Check active status", stafftools_user_activity_path(user) %>
+    </td>
+  </tr>
+  <tr>
+    <th>Public profile</th>
+    <td><%= link_to "View profile", user_url_to_main_site(user) %></td>
+  </tr>
+  <% unless user.profile_name.blank? %>
+    <tr>
+      <th>Name</th>
+      <td><%= user.profile_name %></td>
+    </tr>
+  <% end %>
+  <% unless user.profile_pronouns.blank? %>
+    <tr>
+      <th>Pronouns</th>
+      <td>
+        <%= user.profile_pronouns %> –
+        <%= render(Primer::Alpha::Dialog.new(
+          title: "Delete pronouns for #{user}",
+          details_classes: "d-inline",
+        )) do |dialog| %>
+          <% dialog.with_show_button(color: :danger, scheme: :link) { "Remove" } %>
+          <%= form_for(
+            user,
+            url: stafftools_user_pronouns_path(user),
+            method: :delete,
+          ) do |f| %>
+            <div class="Box-body">
+              Are you sure want to remove <%= user.name %>'s pronouns?<br><br>
+            </div>
+            <div class="Box-footer">
+              <%= render Primer::ButtonComponent.new(
+                type: :submit,
+                block: true,
+                scheme: :danger,
+              ) do %>
+                Remove Pronouns
+              <% end %>
+            </div>
+          <% end %>
+        <% end %>
+      </td>
+    </tr>
+  <% end %>
+  <% unless user.profile_email.blank? %>
+    <tr>
+      <th>Profile email</th>
+      <td><%= user.profile_email %></td>
+    </tr>
+  <% end %>
+  <% if user.organization? %>
+    <tr>
+      <th>Org dashboard</th>
+      <td><%= link_to "View dashboard", org_dashboard_url_to_main_site(user) %></td>
+    </tr>
+    <% if GitHub.billing_enabled? %>
+      <tr>
+        <th>Company Name</th>
+        <td><%= view.company_name %></td>
+      </tr>
+    <% end %>
+  <% else %>
+    <tr>
+      <th>Gists</th>
+      <td><%= link_to "View gists", user_gists_url(user, host: GitHub.gist_host_name) %></td>
+    </tr>
+  <% end %>
+  <% if GitHub.storage_cluster_enabled? %>
+    <tr>
+      <th>Disk use</th>
+      <td><%= view.total_disk_usage %></td>
+    </tr>
+    <tr>
+      <th>&nbsp; Git</th>
+      <td>&nbsp; <%= view.git_disk_usage %></td>
+    </tr>
+    <tr>
+      <th>&nbsp; Avatars</th>
+      <td>&nbsp; <%= view.avatar_disk_usage %></td>
+    </tr>
+    <tr>
+      <th>&nbsp; Issue image uploads</th>
+      <td>&nbsp; <%= view.user_asset_disk_usage %></td>
+    </tr>
+  <% else %>
+    <tr>
+      <th>Disk use</th>
+      <td><%= view.git_disk_usage %></td>
+    </tr>
+  <% end %>
+  <% unless user.organization? %>
+  <tr>
+    <th>Using GitHub Desktop</th>
+    <td>
+      <% if user.desktop_app_enabled? %>
+        <%= primer_octicon(:check, classes: "success") %>
+      <% else %>
+        <%= primer_octicon(:x, classes: "error") %>
+      <% end %>
+    </td>
+  </tr>
+<% end %>
+<% unless GitHub.enterprise? %>
+  <tr <%= test_selector("emu-enabled-indicator") %>>
+    <th>Enterprise managed user enabled? (EMU)</th>
+    <td>
+      <% if view.enterprise_managed_user_enabled? %>
+        Yes
+        <% if user.is_first_emu_owner? %>
+          &ndash;
+          first owner account
+        <% end %>
+      <% else %>
+        No
+      <% end %>
+    </td>
+  </tr>
+  <% if user.user? %>
+    <tr <%= test_selector("guest-collaborator-indicator") %>>
+      <th>Guest Collaborator?</th>
+      <td>
+        <% if user.guest_collaborator? %>
+          Yes
+        <% else %>
+          No
+        <% end %>
+      </td>
+    </tr>
+  <% end %>
+  <tr>
+    <th>Exceptions</th>
+    <td><a href="<%= view.sentry_link %>">Search Sentry</a></td>
+  </tr>
+  <tr>
+    <th>Zendesk</th>
+    <td>
+      <%= link_to "Search by username", view.zendesk_user_url %> &ndash;
+      <% unless user.organization? %>
+        <%= link_to "by email", view.zendesk_email_url %>
+      <% end %>
+    </td>
+  </tr>
+  <tr>
+    <th>Education</th>
+    <td>
+      <%= link_to "Search in education admin", view.education_app_user_url, target: "_blank" %>
+    </td>
+  </tr>
+  <tr>
+    <th>Pre-release?</th>
+    <td>
+      <% if view.prerelease_agreement? %>
+        Yes &ndash; agreement signed
+        <% if this_user.organization? && view.prerelease_agreement.actor.present? %>
+          by
+          <%= link_to \
+                view.prerelease_agreement.actor,
+                stafftools_user_path(view.prerelease_agreement.actor),
+                class: "Link--inTextBlock"
+          %>
+        <% end %>
+        on <%= view.prerelease_agreement.created_at.to_date %>
+        &ndash;
+        <small>
+          <%= link_to(
+            "view agreement changelog",
+            "https://github.com/github/help-docs/commits/master/content/dotcom/articles/github-pre-release-program.md",
+            class: "Link--inTextBlock"
+          )
+          %>
+        </small>
+      <% else %>
+        No
+      <% end %>
+    </td>
+  </tr>
+  <% if GitHub.sponsors_enabled? %>
+    <tr>
+      <th>Sponsors member?</th>
+      <td>
+        <% if view.sponsors_listing %>
+          Yes
+          &ndash;
+          <%= link_to "Manage", stafftools_sponsors_member_path(view.user), class: "Link--inTextBlock" %>
+        <% else %>
+          No
+        <% end %>
+      </td>
+    </tr>
+  <% end %>
+  <tr>
+    <th>GDP Member?</th>
+    <td><%= view.developer_program_member %></td>
+  </tr>
+  <tr>
+    <th>Git LFS?</th>
+    <td>
+      <% if user.git_lfs_enabled? %>
+        Yes
+      <% else %>
+        No
+      <% end %>
+      &ndash;
+      <%= link_to "Manage", stafftools_user_large_file_storage_path(user), class: "Link--inTextBlock" %>
+    </td>
+  </tr>
+  <tr>
+    <th>Actions &amp; Packages</th>
+    <td>
+      Yes
+      &ndash;
+      <%= link_to "Manage", stafftools_user_actions_packages_usage_path(user), class: "Link--inTextBlock" %>
+    </td>
+  </tr>
+  <tr>
+    <th>Action Invocation?</th>
+    <td>
+      <% if user.action_invocation_blocked? %>
+        No
+      <% else %>
+        Yes
+      <% end %>
+    </td>
+  </tr>
+  <% if user.organization? %>
+    <tr>
+      <th>Codespaces access setting</th>
+      <td>
+        <%= user.organization_codespaces_user_limit %>
+      </td>
+    </tr>
+    <tr>
+      <th>Codespaces ownership setting</th>
+      <td>
+        <%= user.organization_codespaces_ownership_setting %>
+      </td>
+    </tr>
+    <tr>
+      <th>Codespaces trusted repositories</th>
+      <td>
+        <%= user.codespace_trusted_repositories_access %>
+      </td>
+    </tr>
+  <% end %>
+<% end %>
+</table>
+
+<% unless user.organization? %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2, danger: true) do %>Activity feed<% end %>
+    <% component.with_actions do %>
+      <% if stafftools_action_authorized?(
+        controller: Stafftools::Users::ActivitiesController,
+        action: :destroy
+      ) %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Clear public activity",
+            button_class: "btn btn-danger",
+            title: "Clear public activity feed?",
+        } do %>
+          <div class="Box-body overflow-auto">
+            <p>
+              This will clear <strong>public</strong> events from <%= user %>’s feed completely.
+              There’s no going back. Are you sure you want to do this?
+            </p>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag stafftools_user_activity_path(user, type: :public), method: :delete do %>
+              <%= render Primer::ButtonComponent.new(
+                type: :submit,
+                block: true,
+                scheme: :danger,
+              ) do %>Clear public activity<% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Button.new(
+          tag: :a,
+          scheme: :danger,
+          float: :right,
+          ml: 2,
+          inactive: true,
+          "aria-label": stafftools_not_authorized_text,
+          id: "clear-public-activity"
+          ) do |component| %>
+          <%= component.with_tooltip(text: stafftools_not_authorized_text ) %>
+          Clear public activity
+        <% end %>
+      <% end %>
+      <% if stafftools_action_authorized?(
+        controller: Stafftools::Users::ActivitiesController,
+        action: :destroy
+      ) %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Clear following feed",
+            button_class: "btn btn-danger",
+            title: "Clear following feed?",
+        } do %>
+          <div class="Box-body overflow-auto">
+            <p>
+              This will clear <strong>public and private</strong> events from <%= user %>’s
+              'Following' feed completely.
+              There’s no going back. Are you sure you want to do this?
+            </p>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag stafftools_user_activity_path(user, type: :all), method: :delete do %>
+              <%= render Primer::ButtonComponent.new(
+                type: :submit,
+                block: true,
+                scheme: :danger,
+              ) do %>Clear following feed<% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Button.new(
+          tag: :a,
+          scheme: :danger,
+          inactive: true,
+          "aria-label": stafftools_not_authorized_text,
+          id: "clear-following-activity"
+          ) do |component| %>
+          <%= component.with_tooltip(text: stafftools_not_authorized_text ) %>
+          Clear following feed
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% if stafftools_action_authorized?(
+    controller: Stafftools::Users::ActivitiesController,
+    action: :destroy
+  ) %>
+    <% if view.clear_log_disabled? %>
+      <p class="mb-6">
+        This user has no activity.
+      </p>
+    <% end %>
+  <% else %>
+    <p><%= stafftools_not_authorized_html %></p>
+  <% end %>
+<% end %>
+
+<% if !user.organization? && GitHub.conduit_feed_enabled? %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2, danger: true) do %>For You feed<% end %>
+    <% component.with_actions do %>
+      <% if stafftools_action_authorized?(controller: Stafftools::Users::ForYouFeedsController, action: :destroy) %>
+        <%= render layout: "shared/details_dialog", locals: {
+            button_text: "Clear cache",
+            button_class: "btn btn-danger",
+            title: "Clear cache?",
+        } do %>
+          <div class="Box-body overflow-auto">
+            <p>
+              This will clear this user's feed cache, which will result in the next request for the feed going to Conduit.
+            </p>
+          </div>
+          <div class="Box-footer">
+            <%= form_tag stafftools_user_for_you_feed_path(user), method: :delete do %>
+              <%= render Primer::ButtonComponent.new(
+                type: :submit,
+                block: true,
+                scheme: :danger,
+              ) do %>Clear cache<% end %>
+            <% end %>
+          </div>
+        <% end %>
+      <% else %>
+        <%= render Primer::Beta::Button.new(
+          tag: :a,
+          scheme: :danger,
+          float: :right,
+          ml: 2,
+          inactive: true,
+          "aria-label": stafftools_not_authorized_text,
+          id: "clear-for-you-feed-button"
+          ) do |component| %>
+          <%= component.with_tooltip(text: stafftools_not_authorized_text ) %>
+          Clear cache
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if this_user.organization? %>
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Member privileges<% end %>
+  <% end %>
+
+  <table class="mb-6 stafftools-table">
+    <tr>
+      <th>Base permissions</th>
+      <td>
+        <%= view.default_repository_permission %>
+        <% if this_user.default_repository_permission_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <th>Repository creation</th>
+      <td>
+        <%
+          types = []
+          types << "Public" if this_user.members_can_create_public_repositories?
+          types << "Private" if this_user.members_can_create_private_repositories?
+          types << "Internal" if this_user.members_can_create_internal_repositories?
+        %>
+        <% if types.any? %>
+          <%= types.to_sentence %> — Members of this organization are allowed to create
+          <%= types.to_sentence %> repositories.
+        <% else %>
+          Only owners of this organization can create repositories.
+        <% end %>
+        <% if this_user.members_can_create_repositories_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <th>Repository forking</th>
+      <td>
+        <% if this_user.allow_private_repository_forking? %>
+          Enabled — This organization's private repositories can be forked by users with access.
+        <% else %>
+          Disabled - This organization's private repositories cannot be forked.
+        <% end %>
+        <% if this_user&.business&.allow_private_repository_forking_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <% if !this_user.business&.enterprise_managed_user_enabled? || this_user.business&.feature_enabled?(:emu_repository_policies_enabled) %>
+        <% outside_collaborators_verbiage = outside_collaborators_verbiage(this_user) %>
+        <th><%= outside_collaborators_verbiage.capitalize %></th>
+        <td>
+          <% if this_user.business&.emu_repository_collaborators_enabled? %>
+            Enabled — Admins can invite <%= outside_collaborators_verbiage %> to
+            repositories within this organization.
+          <% else %>
+            Disabled - Admins cannot invite <%= outside_collaborators_verbiage %> to
+            repositories within this organization.
+          <% end %>
+          <% if this_user.business&.members_can_invite_outside_collaborators_policy? %>
+            Policy set on the owning
+            <%= link_to(
+              this_user.business.name,
+              repository_policies_stafftools_enterprise_path(this_user.business),
+              class: "Link--inTextBlock"
+            ) %>
+            enterprise.
+          <% end %>
+        </td>
+      <% end %>
+    </tr>
+    <tr>
+      <th>Pages creation</th>
+      <td>
+        <% if GitHub.enterprise? ||
+          !GitHub.flipper[:private_pages_org_toggle].enabled?(this_user) %>
+          <% if this_user.members_can_create_pages? %>
+            Enabled — Members can publish GitHub Pages sites.
+          <% else %>
+            Enabled — Members cannot publish GitHub Pages sites.
+          <% end %>
+        <% else %>
+          <%
+            pages_types = []
+            pages_types << "Public" if this_user.members_can_create_public_pages?
+            pages_types << "Private" if this_user.org_business_plus_plan? &&
+              this_user.members_can_create_private_pages?
+          %>
+          <% if pages_types.any? %>
+            <%= pages_types.to_sentence %> — Members of this organization can publish
+            <%= pages_types.to_sentence %> GitHub Pages sites.
+          <% else %>
+            Disabled — Members of this organization cannot publish GitHub Pages sites.
+          <% end %>
+        <% end %>
+      </td>
+    </tr>
+  </table>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Admin repository permissions<% end %>
+  <% end %>
+
+  <table class="mb-6 stafftools-table">
+    <tr>
+      <th>Repository visibility change</th>
+      <td>
+        <% if this_user.members_can_change_repo_visibility? %>
+          Enabled — Members with admin permissions can change repository visibilities
+          within this organization.
+        <% else %>
+          Disabled — Members with admin permissions cannot change repository visibilities
+          within this organization.
+        <% end %>
+        <% if this_user&.business&.members_can_change_repo_visibility_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <th>Repository deletion and transfer</th>
+      <td>
+        <% if this_user.members_can_delete_repositories? %>
+          Enabled — Members with admin permissions can delete or transfer repositories
+          within this organization.
+        <% else %>
+          Disabled — Members with admin permissions cannot delete or transfer repositories
+          within this organization.
+        <% end %>
+        <% if this_user&.business&.members_can_delete_repositories_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <th>Issue deletion</th>
+      <td>
+        <% if this_user.members_can_delete_issues? %>
+          Enabled — Members with admin permissions can delete issues in repositories
+          within this organization.
+        <% else %>
+          Disabled — Members with admin permissions cannot delete issues in repositories
+          within this organization.
+        <% end %>
+        <% if this_user&.business&.members_can_delete_issues_policy? %>
+          Policy set on the owning
+          <%= link_to(
+            this_user.business.name,
+            repository_policies_stafftools_enterprise_path(this_user.business),
+            class: "Link--inTextBlock"
+          ) %>
+          enterprise.
+        <% end %>
+      </td>
+    </tr>
+    <tr>
+      <th>Repository comments</th>
+      <td>
+        <% if this_user.display_commenter_full_name_setting_enabled? %>
+          Enabled — Members with admin permissions can see a comment author's profile name
+          in issues and pull requests for private repositories.
+        <% else %>
+          Disabled — Members with admin permissions cannot see a comment author's profile name
+          in issues and pull requests for private repositories.
+        <% end %>
+      </td>
+    </tr>
+  </table>
+
+  <%= render Primer::Beta::Subhead.new do |component| %>
+    <% component.with_heading(tag: :h2) do %>Member team permissions<% end %>
+  <% end %>
+
+  <table class="mb-6 stafftools-table">
+    <tr>
+      <th>Team creation rules</th>
+      <td>
+        <% if this_user.members_can_create_teams? %>
+          Enabled — Any member of the organization can create new teams.
+        <% else %>
+          Disabled — Only organization owners can create new teams.
+        <% end %>
+      </td>
+    </tr>
+  </table>
+
+  <% if GitHub.dependency_graph_enabled? %>
+    <%= render Primer::Beta::Subhead.new do |component| %>
+      <% component.with_heading(tag: :h2) do %>Member organization permissions<% end %>
+    <% end %>
+
+    <table class="mb-6 stafftools-table">
+      <tr>
+        <th>Dependency insights</th>
+        <td>
+          <% if this_user.members_can_view_dependency_insights? %>
+            Enabled — Organization members can view dependency insights.
+          <% else %>
+            Disabled — Only organization owners can view dependency insights.
+          <% end %>
+          <% if this_user&.business&.members_can_view_dependency_insights_policy? %>
+            Policy set on the owning
+            <%= link_to(
+              this_user.business.name,
+              repository_policies_stafftools_enterprise_path(this_user.business),
+              class: "Link--inTextBlock"
+            ) %>
+            enterprise.
+          <% end %>
+        </td>
+      </tr>
+    </table>
+  <% end %>
+<% end %>
+
+<%= render(Stafftools::StaffNotesComponent.new(notable: this_user)) %>
+
+<% if GitHub.billing_enabled? %>
+  <%= render "stafftools/billing_skip_check", billing_entity: user, is_user: true %>
+<% end %>
+
+<% if !user.organization? %>
+  <%= render(
+    "stafftools/users/impersonation",
+    view: create_view_model(Stafftools::User::ImpersonationView, user: view.user),
+  ) %>
+<% end %>

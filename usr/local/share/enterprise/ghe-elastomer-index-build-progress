@@ -1,0 +1,27 @@
+#!/bin/bash
+#/ Usage: ghe-elastomer-index-build-progress
+#/
+#/ Showing the status of elastomer index build progress
+set -e
+
+# Check if the aqueduct job is running
+if ! ghe-nomad-check-job -v -j "aqueduct-lite"; then
+  echo "Warning: The 'aqueduct-lite' job is not running. Please ensure it is running to show the build progress."
+  exit 1
+else
+  elastomer_indices_status=$(cat <<-END
+  Ethon.logger = Logger.new(nil)
+  indices = ElastomerIndexMemo.pluck(:name).delete_if{|i| i.starts_with?('audit_log')}
+  indices.each do |index|
+    puts "Index: #{Search::Chatops::RepairIndex.run(command: 'status', index_name: index)}"
+    job_class = Elastomer.env.lookup_repair_job(index)
+    job = job_class.new(index)
+    puts "Stats for #{index}: #{job.stats}"
+    puts "Progress for #{index}: #{job.progress}"
+  end; nil;
+END
+)
+
+  ## Show index build status for all indices, clean up output by grepping desired output
+  echo "$elastomer_indices_status" | github-env bin/console | grep '^Index\|^-\|^Stats\|^Progress'
+fi

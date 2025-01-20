@@ -1,0 +1,108 @@
+#!/usr/bin/env safe-ruby
+#
+#/ Usage: ghe-saml-mapping-csv <-d|-u> [options]
+#/
+#/ OPTIONS:
+#/   -h, --help               Show this message.
+#/   -r, --no-header          Don't use a header row.
+#/   -o, --stdout             Print output to STDOUT. Optional.
+#/   -i, --stdin              Accept input from STDIN. Optional.
+#/   -f <FILE>, --file <FILE> Path to CSV File. Recommended to be /data/user/tmp. Optional.
+#/   -d, --dump               Dump mappings with login names in CSV format
+#/   -u, --update             Update mappings from CSV data. The expected input
+#/                            format of each row is:
+#/
+#/                            mapping_id, <not_used>, <not_used>, name_id, name_id_format
+#/
+#/   -n, --dry-run            Don't apply the updates (--update only)
+
+require "optparse"
+
+def help!
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+header        = true
+use_stdout    = false
+use_stdin     = false
+dump          = false
+update        = false
+csv_file      = nil
+dry_run       = false
+
+begin
+  OptionParser.new do |opts|
+    opts.on("-r", "--no-header") { header = false }
+    opts.on("-o", "--stdout")    { use_stdout = true }
+    opts.on("-i", "--stdin")     { use_stdin = true }
+    opts.on("-d", "--dump")      { dump = true }
+    opts.on("-u", "--update")    { update = true }
+    opts.on("-n", "--dry_run")   { dry_run = true }
+    opts.on_tail("-h", "--help") { help! }
+    opts.on("-fCSVFILE", "--file CSVFILE") do |f|
+      help! if f.nil?
+      csv_file = f
+    end
+    opts.parse!
+  end
+  rescue OptionParser::InvalidOption, OptionParser::MissingArgument => e
+    STDERR.puts e.message
+    help!
+end
+
+if (dump && update) || (!dump && !update)
+  STDERR.puts "Please select one of --dump or --update options"
+  help!
+end
+
+if update && ((use_stdin && csv_file) || (!use_stdin && !csv_file))
+  STDERR.puts "Please select one of --stdin or --file options"
+  help!
+end
+
+if ARGV.any?
+  STDERR.puts "Unknown arguments: #{ARGV.join(", ")}\n"
+  help!
+end
+
+# silence environment loading warnings
+original_verbosity = $VERBOSE
+$VERBOSE = nil
+require File.expand_path("../../config/environment", __FILE__)
+$VERBOSE = original_verbosity
+
+if dump
+  if use_stdout
+    output_io = STDOUT
+  else
+    date = Time.now.strftime("%Y%m%d%H%M%S")
+    file = csv_file || "/data/user/tmp/saml-mappings-#{date}.csv"
+    puts "Saving list of saml mappings to '#{file}'..."
+    output_io = File.open(file, "w")
+  end
+
+  begin
+    SamlMappingCSVGenerator.new(
+      header: header,
+      output_io: output_io).run
+  rescue SamlMappingCSVGenerator::Error => e
+    abort e.message
+  end
+elsif update
+  if use_stdin
+    input_io = STDIN
+  else
+    puts "Opening list of saml mappings '#{csv_file}'..."
+    input_io = File.open(csv_file, "r")
+  end
+  begin
+    SamlMappingCSVUpdater.new(
+      input_io: input_io, dry_run: dry_run, header: header).run
+  rescue SamlMappingCSVUpdater::Error => e
+    abort e.message
+  end
+end
+
+unless use_stdout
+  puts "Done."
+end

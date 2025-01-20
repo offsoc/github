@@ -1,0 +1,156 @@
+<% active_deployment = merge_queue.active_deployments.first %>
+<% show_queued_to_merge_header = active_deployment.present? || merge_queue.requires_deployments_before_merging? %>
+<% channel = GitHub::WebSocket::Channels.merge_queue(merge_queue) %>
+<% github_owned_repo = current_repository.owner_display_login == "github" %>
+
+<div class="js-socket-channel js-updatable-content"
+       data-channel="<%= live_update_view_channel(channel) %>"
+       data-url="<%= merge_queue_queue_partial_path(
+          merge_queue_branch: merge_queue.branch,
+          id: merge_queue.id,
+          page: page,
+          per_page: per_page
+        ) %>"
+       data-gid="<%= merge_queue.global_relay_id %>">
+  <div class="d-flex flex-column flex-md-row">
+    <div class="col-12 col-md-9" data-hpc>
+
+      <%= render MergeQueues::MergeGroupComponent.new(
+        merge_queue: merge_queue,
+        repository: current_repository,
+        merge_group: active_merge_group,
+      ) %>
+
+      <div>
+        <% if show_queued_to_merge_header %>
+          <h3 class="mb-3">Queued to merge</h3>
+        <% end %>
+
+        <div class="Box">
+          <div class="Box-header table-list-header-toggle states">
+            <span class="selected" <%= test_selector("queue-header-count") %>>
+              <%= render Primer::Beta::Octicon.new(icon: "git-pull-request") %>
+              <%= up_next_entries_for_display.total_entries %> Queued
+            </span>
+          </div>
+          <% if up_next_entries_for_display.present? %>
+            <ul <%= test_selector("queued") %>>
+              <%=
+                render partial: "merge_queue/entries", locals: {
+                  entries: up_next_entries_for_display,
+                  merge_queue: merge_queue,
+                  page: page,
+                }
+              %>
+            </ul>
+          <% else %>
+            <%= render Primer::Beta::Blankslate.new(test_selector: "queued-blankslate", spacious: true) do |c| %>
+              <% c.with_visual_icon(icon: "git-pull-request") %>
+
+              <% c.with_heading(tag: :h2) do %>
+                No pull requests queued for merging.
+              <% end %>
+
+              <% c.with_description do %>
+                Use the "Merge when ready" button on a pull request to add it to the queue.
+              <% end %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    </div>
+    <div class="d-none d-md-block col-md-3 ml-md-5" style="min-width: 230px;">
+      <% if !GitHub.flipper[:hide_merge_queue_time_estimate].enabled?(current_repository) && estimate = merge_queue.next_entry_time_to_merge_in_seconds %>
+        <div class="mb-2">
+          <span class="color-fg-subtle text-bold mb-1 d-block f6">
+            Estimated time to merge
+          </span>
+          <div <%= test_selector("queue-time-to-merge") %>>
+            <%= render Primer::Beta::Octicon.new(icon: "clock", height: 16, mr: 1, color: :subtle, style: "margin-bottom:2px;") %>
+            <span class="f3 text-bold">
+              <%= precise_duration(estimate, simplified: true) %>
+            </span>
+          </div>
+        </div>
+      <% end %>
+
+      <% if (merge_count = recent_merges_histogram.map { |d| d[:count] }.sum) && merge_count.positive? %>
+        <div class="mb-2">
+          <span class="color-fg-subtle text-bold mb-1 d-block f6">
+            <%= recent_merge_histogram_days %> day merge count
+          </span>
+          <span class="d-flex">
+            <span class="f3 text-bold mr-2 no-wrap">
+              <%= render Primer::Beta::Octicon.new(icon: "git-merge", height: 16, mr: 1, color: :subtle, style: "margin-bottom:2px;") %>
+              <%= social_count recent_merges_histogram.map { |d| d[:count] }.sum %>
+            </span>
+            <%
+              width = 142
+              height = 28
+              rect_spacing = width / recent_merge_histogram_days
+              rect_width = rect_spacing / 2
+              merge_count_max = [1, *recent_merges_histogram.map { |d| d[:count] }].max
+            %>
+            <svg
+              aria-hidden="true"
+              width="<%= width %>"
+              height="<%= height %>"
+              viewBox="0 0 <%= width %> <%= height %>"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              class="d-none d-lg-block">
+              <% recent_merges_histogram.each do |day_stats| %>
+                <% rect_height = [(day_stats[:count] * height.to_f / merge_count_max).round, 2].max %>
+                <rect
+                  x="<%= rect_spacing * (recent_merge_histogram_days - day_stats[:days_ago]) %>"
+                  y="<%= height - rect_height %>"
+                  data-merge-count="<%= day_stats[:count] %>"
+                  data-date="<%= day_stats[:date] %>"
+                  width="<%= rect_width %>"
+                  height="<%= rect_height %>"
+                  rx="<%= rect_width / 2 %>"
+                  fill="#28A745"></rect>
+              <% end %>
+            </svg>
+          </span>
+        </div>
+      <% end %>
+
+      <% if estimate || (merge_count && merge_count.positive?) %>
+        <hr>
+      <% end %>
+
+      <div>
+        <% if merge_queue.entries.any? && current_repository.adminable_by?(current_user) %>
+          <%= render(Primer::Alpha::ActionList.new(
+                aria: { label: "Queue options" }
+              )) do |component| %>
+              <% component.with_item(label: "Clear queue", scheme: :danger, content_arguments: { "data-show-dialog-id": "clear-merge-queue-dialog" }) do |item| %>
+                <% item.with_leading_visual_icon(icon: :trash) %>
+              <% end %>
+          <% end %>
+
+          <%= render(Primer::Alpha::Dialog.new(id: "clear-merge-queue-dialog", title: "Clear merge queue")) do |d| %>
+            <%= form_tag(
+              clear_merge_queue_path(user_id: current_repository.owner_display_login, repository: current_repository, merge_queue_branch: merge_queue.branch),
+              method: :delete
+            ) do %>
+              <%= render(Primer::Alpha::Dialog::Body.new) do %>
+                  <p>
+                  Clearing the merge queue will remove all the pull requests from the queue and they will need to be added back manually. This will not alter their code or stop any in-progress check runs or builds in-flight.
+                </p>
+                <p>
+                  Are you sure you want to clear the merge queue? <strong>This action cannot be undone.</strong>
+                </p>
+              <% end %>
+              <%= render(Primer::Alpha::Dialog::Footer.new(show_divider: false)) do %>
+                <%= render(Primer::Beta::Button.new(data: { "close-dialog-id": "clear-merge-queue-dialog" })) { "Cancel" } %>
+                <%= render(Primer::Beta::Button.new(scheme: :danger, type: :submit, "data-disable-with": "Clearing queue...")) { "Yes, clear the queue" } %>
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+</div>

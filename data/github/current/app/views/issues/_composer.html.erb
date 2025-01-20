@@ -1,0 +1,104 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%
+  view ||= Issues::ComposerView.new(issue, current_user)
+
+  title_field_options = {
+    required: true,
+    autofocus: true,
+    autocomplete: 'off',
+    placeholder: 'Title',
+    "aria-labelledby": "issue_title_header",
+    class: class_names(
+      "required title js-session-resumable js-quick-submit js-autofocus-cursor FormControl-input FormControl-large",
+      "valid" => !f.object.title.blank?
+    )
+  }
+%>
+
+<% if issue_template.present? && issue_template&.valid? && !current_repository.owner_blocking?(current_user) %>
+  <h2 class="border-bottom pb-2 mb-2">Issue: <%= issue_template&.name %></h2>
+  <p class="mb-3">
+    <%= issue_template&.about %><%= "." if issue_template&.about =~ /\w\z/ %>
+    If this doesn't look right,
+    <a href="<%= choose_issue_path(issue.repository.owner, issue.repository) %>">
+      choose a different type.
+    </a>
+  </p>
+<% end %>
+
+<div class="timeline-comment-wrapper timeline-new-comment composer composer-responsive">
+  <%= timeline_comment_avatar_for(user: current_user, responsive_hidden: true) %>
+  <% if emu_contribution_blocked? current_repository %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+      <%= emu_contribute_block_warning %>
+    <% end %>
+  <% elsif with_database_error_fallback(fallback: false) { can_interact_with_repo? } && !current_repository.owner_blocking?(current_user) %>
+    <div>
+      <div class="js-slash-command-surface">
+        <%= render(Primer::Beta::Heading.new(tag: :h3, font_size: 4, mb: 2, id: "issue_title_header").with_content("Add a title")) %>
+        <div class="mb-3">
+          <text-expander keys=":" data-emoji-url="<%= emoji_suggestions_path %>" class="position-relative">
+            <%= f.text_field(:title, title_field_options) %>
+          </text-expander>
+        </div>
+
+        <%= hidden_field_tag "issue[body_template_name]", issue.body_template_name %>
+        <% if view.show_body_errors? %>
+          <div class="comment-form-error js-comment-form-error" role="alert">Comment <%= view.body_errors %></div>
+        <% end %>
+        <% if issue_template&.structured? && issue_template&.valid? %>
+          <div class="d-block p-0 p-md-3">
+            <%= render StructuredTemplates::TemplateComponent.new(template: issue_template, templatable: issue) %>
+          </div>
+          <div class="comment-form-error js-comment-form-error" role="alert" <% if issue.errors.empty? %>hidden<% end %>>
+            There was an error creating your issue<%= ": " + issue.errors.full_messages.join(", ").downcase if issue.errors.any? %>.
+          </div>
+        <% end %>
+        <% if issue_template.nil? || issue_template&.blank? || issue_template&.include_body? %>
+          <% issue_body = with_database_error_fallback(fallback: nil) { view.issue_body } %>
+          <%= render(Comments::PreviewableCommentFormComponent.new(
+            body: issue_body,
+            field_name: "issue[body]",
+            textarea_id: "issue_body",
+            required: false,
+            session_resumable: true,
+            subject: issue,
+            size: :large,
+            current_repository: current_repository,
+            slash_commands_enabled: slash_commands_enabled?,
+            slash_commands_surface: SlashCommands::ISSUE_BODY_SURFACE,
+            use_fixed_width_font: current_user.use_fixed_width_font?,
+            tasklist_blocks_enabled: current_repository.owner&.feature_enabled?(:tasklist_block),
+            aria: { describedby: "issue_create_markdown_supported_description" },
+            placeholder: "Add your description here..."
+          )) do |c| %>
+            <% c.with_header(tag: :h3, text: "Add a description") %>
+          <% end %>
+        <% end %>
+
+        <div class="<%= class_names(
+            "flex-items-center flex-justify-end d-none d-md-flex my-3"
+          ) %>">
+          <% if issue_template&.structured? && issue_template&.valid? && current_repository.issue_forms_required_fields_enabled? %>
+            <p class="note d-flex flex-items-center flex-auto">Fields marked with an asterisk (*) are required.</p>
+          <% else %>
+            <% unless issue_template %>
+              <%= render Comments::AddTasksComponent.new(issue, "new_issue", current_user, ml: 0, mr: 2) %>
+            <% end %>
+          <% end %>
+          <%= render Primer::ButtonComponent.new(type: :submit, scheme: :primary, "data-disable-invalid": "", "data-disable-with": "", ml: 2) do %>
+            Submit new issue
+          <% end %>
+        </div>
+      </div>
+    </div>
+  <% else %>
+    <%= render(Primer::Beta::Flash.new(scheme: :warning)) do %>
+      <%= with_database_error_fallback(fallback: "Interaction unavailable - please try again later") { interaction_ban_copy(current_repository, current_user, "open an issue") } %>
+    <% end %>
+  <% end %>
+  <%= render Repositories::ContributorFooterComponent.new(repo: current_repository) %>
+  <% if GitHub.sponsors_enabled? %>
+    <include-fragment src="<%= repo_sponsors_nudge_path(current_repository.owner, current_repository) %>"></include-fragment>
+  <% end %>
+</div>

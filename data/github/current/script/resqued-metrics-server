@@ -1,0 +1,143 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "prometheus_exporter"
+require "prometheus_exporter/server"
+require "resqued/worker_metrics"
+
+options = { poll_interval: 15 }
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: resqued-metrics-server [-D] --http ADDRESS"
+
+  opts.on("--http ADDRESS", "HTTP address:port where metrics will be served") do |v|
+    if v =~ /(.*):(\d+)\z/
+      options[:address] = { bind: $1, port: $2.to_i }
+    else
+      puts "Expected address to be ip:port"
+      puts opts
+      exit 1
+    end
+  end
+
+  # Tests want a smaller poll interval
+  opts.on("--poll-interval N") do |v|
+    options[:poll_interval] = v.to_f
+  end
+
+  # Tests want to isolate their workers from any others that might be running on the machine.
+  opts.on("--magic MAGIC") do |v|
+    options[:magic] = /#{v}/
+  end
+
+  # Tests might be running where metadata isn't available, so hardcode when necessary
+  opts.on("--deployable") do |_v|
+    options[:deployable] = true
+  end
+
+  opts.on("-D", "--[no-]daemon", "Daemonize on startup") do |v|
+    options[:daemonize] = v
+  end
+end
+
+optparse.parse!
+
+if options[:address].nil?
+  puts optparse
+  exit 1
+end
+
+if options[:daemonize]
+  if fork
+    # grandparent
+    exit!
+  end
+  if fork
+    # parent
+    Process.setsid
+    exit!
+  end
+  STDIN.reopen "/dev/null"
+  STDOUT.reopen "/dev/null", "a"
+  STDERR.reopen "/dev/null", "a"
+end
+
+trap(:INT) { exit 0 }
+trap(:TERM) { exit 0 }
+
+server = PrometheusExporter::Server::WebServer.new(**options[:address])
+server.start
+
+aqueduct_workers_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_workers_count", "number of aqueduct workers")
+aqueduct_idle_workers_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_workers_idle_count", "number of aqueduct workers waiting for a job")
+aqueduct_active_workers_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_workers_active_count", "number of aqueduct workers working on a job")
+aqueduct_stale_workers_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_stale_workers_count", "number of aqueduct workers that have been running too long past a shutdown")
+aqueduct_workers_by_state_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_workers_count_by_state", "number of aqueduct workers tagged by state")
+aqueduct_workers_by_shard_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_workers_by_shard", "number of aqueduct workers tagged by backend and shard")
+aqueduct_active_workers_by_shard_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_active_workers_by_shard", "number of active aqueduct workers tagged by backend and shard")
+aqueduct_active_workers_by_queue_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_active_workers_by_queue", "number of active aqueduct workers tagged by queue")
+aqueduct_stalled_listeners_gauge = PrometheusExporter::Metric::Gauge.new("aqueduct_stalled_listeners", "number of stalled listeners")
+
+server.collector.register_metric(aqueduct_workers_gauge)
+server.collector.register_metric(aqueduct_idle_workers_gauge)
+server.collector.register_metric(aqueduct_active_workers_gauge)
+server.collector.register_metric(aqueduct_stale_workers_gauge)
+server.collector.register_metric(aqueduct_workers_by_state_gauge)
+server.collector.register_metric(aqueduct_workers_by_shard_gauge)
+server.collector.register_metric(aqueduct_active_workers_by_shard_gauge)
+server.collector.register_metric(aqueduct_active_workers_by_queue_gauge)
+server.collector.register_metric(aqueduct_stalled_listeners_gauge)
+
+loop do
+  get_procs = Resqued::WorkerMetrics::DEFAULT_GET_PROCS
+  get_metadata = Resqued::WorkerMetrics::DEFAULT_GET_METADATA
+
+  if options[:magic]
+    get_procs = -> { Resqued::WorkerMetrics::DEFAULT_GET_PROCS.call.grep(options[:magic]) }
+  end
+
+  if options[:deployable]
+    get_metadata = -> { { "attributes" => { "github" => { "deployable" => true } } } }
+  end
+
+  metrics = Resqued::WorkerMetrics.new(get_procs: get_procs, get_metadata: get_metadata)
+  results = metrics.generate
+
+  results.aqueduct_workers_by_state.each do |stat|
+    tags = { state: stat.state, listener_state: stat.listener_state, backend: stat.backend }
+    tags.reject! { |_k, v| !v } # prometheus doesn't like nil tags
+    aqueduct_workers_by_state_gauge.observe(stat.count, **tags)
+  end
+
+  aqueduct_idle_workers_gauge.observe(results.aqueduct_idle_workers)
+  aqueduct_active_workers_gauge.observe(results.aqueduct_active_workers)
+  aqueduct_stale_workers_gauge.observe(results.aqueduct_stale_workers)
+
+  tags = {}
+  tags["deployable"] = results.deployable if results.deployable != nil
+  aqueduct_workers_gauge.observe(results.aqueduct_total_workers, **tags)
+
+  aqueduct_stalled_listeners_gauge.observe(results.aqueduct_stalled_listeners)
+
+  results.aqueduct_workers_by_shard.each do |stat|
+    tags = { backend: stat.backend, shard: stat.shard }
+    tags.reject! { |_k, v| !v } # prometheus doesn't like nil tags
+    aqueduct_workers_by_shard_gauge.observe(stat.count, **tags)
+  end
+
+  results.aqueduct_active_workers_by_shard.each do |stat|
+    tags = { backend: stat.backend, shard: stat.shard }
+    tags.reject! { |_k, v| !v } # prometheus doesn't like nil tags
+    aqueduct_active_workers_by_shard_gauge.observe(stat.count, **tags)
+  end
+
+  results.aqueduct_active_workers_by_queue.each do |stat|
+    tags = { queue: stat.queue }
+    tags.reject! { |_k, v| !v } # prometheus doesn't like nil tags
+    aqueduct_active_workers_by_queue_gauge.observe(stat.count, **tags)
+  end
+
+  GC.start # otherwise `ps`'s output sticks around and this process's RSS may try to eat up a big chunk of what's available.
+
+  sleep(options[:poll_interval])
+end

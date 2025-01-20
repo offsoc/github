@@ -1,0 +1,49 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+require "terminal-table"
+
+class MigrateFGPsToCollabTransitionStatus
+  REPO_RESOURCES = [Repository::Resources::ALL_ABILITY_TYPE_PREFIX, Repository::Resources::INDIVIDUAL_ABILITY_TYPE_PREFIX].map do |prefix|
+    Repository::Resources.subject_types.map { |subject_type| "#{prefix}/#{subject_type}" }
+  end.flatten
+  ORG_RESOURCES = Organization::Resources.subject_types.map { |subject_type| "#{Organization::Resources::ABILITY_TYPE_PREFIX}/#{subject_type}" }
+  USER_RESOURCES = User::Resources.subject_types.map { |subject_type| "#{User::Resources::ABILITY_TYPE_PREFIX}/#{subject_type}" }
+
+  ALL_FGPS = REPO_RESOURCES + ORG_RESOURCES + USER_RESOURCES
+
+  HEADERS = ["Remaining", "In Progress", "Migrated", "Failed"]
+
+  def initialize(args)
+    @full_table = args.shift == "full" ? true : false
+    @migrated = Permissions::RoutingTable.migrated
+    @in_progress = Permissions::RoutingTable.in_progress
+    @failed = Permissions::RoutingTable.failed
+  end
+
+  def process
+    @remaining = ALL_FGPS.clone
+    @remaining -= @migrated
+    @remaining -= @in_progress
+    @remaining -= @failed
+
+    if @full_table
+      rows = @remaining.zip(@in_progress, @migrated, @failed)
+      table = Terminal::Table.new(headings: HEADERS, rows: rows)
+      puts table
+    end
+
+    table = Terminal::Table.new(title: "Summary", headings: HEADERS, rows: [[
+      @remaining.count,
+      @in_progress.count,
+      @migrated.count,
+      @failed.count,
+    ]])
+    puts table
+    puts
+    puts "Subject type available for migration: #{@remaining.first}"
+  end
+end
+
+MigrateFGPsToCollabTransitionStatus.new(ARGV).process

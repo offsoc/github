@@ -1,0 +1,129 @@
+# typed: strict
+# frozen_string_literal: true
+
+require "#{Rails.root}/config/environment"
+
+# To learn more about transitions, checkout this documentation on The Hub:
+# https://thehub.github.com/epd/engineering/products-and-services/dotcom/transitions/
+
+# To learn about system role transitions, specifically, checkout this documentation on The Hub:
+# https://thehub.github.com/epd/engineering/products-and-services/authorization/roles-and-fgps/creating-roles-and-fgps/#2-adding-your-roles-and-permissions-to-the-db
+module GitHub
+  module Transitions
+    class <%= class_name %> < Base
+      SYSTEM_ROLES_CONFIG = <<-YAML
+      <%= params[:system_roles_yml] %>
+      YAML
+
+      sig do
+        override.void
+      end
+      def perform
+        config = YAML.load(SYSTEM_ROLES_CONFIG)
+
+        create_roles(config)
+        create_role_permissions(config)
+      end
+
+      private
+
+      sig do
+        params(
+          config: T.untyped
+        ).void
+      end
+      def create_roles(config)
+        affected_rows = 0
+
+        config["system_roles"].each do |name, metadata|
+          log("creating #{name} role") if verbose?
+          if Role.exists?(name: name)
+            log("role #{name} already exists, skipping") if verbose?
+            next
+          end
+
+          base_role_id = Role.find_by(name: metadata["base"])&.id
+
+          target_type = if metadata["target_type"].blank?
+            nil
+          else
+            "#{metadata["target_type"]}"
+          end
+
+          params = {
+            name: name,
+            base_role_id: base_role_id,
+            target_type: target_type
+          }
+
+          if dry_run?
+            log("[dry_run] would create role #{name} with base_role_id #{base_role_id} and target_type #{target_type}")
+          else
+            write_to(model_class: Role) do
+              result_affected_rows = Role.connection.update(Arel.sql(<<-SQL, **params))
+                  INSERT INTO `roles` (name, base_role_id, target_type, created_at, updated_at)
+                  VALUES (:name, :base_role_id, :target_type, now(), now())
+              SQL
+              affected_rows += result_affected_rows
+            end
+          end
+        end
+
+        log("created #{affected_rows} roles") if verbose?
+      end
+
+      sig do
+        params(
+          config: T.untyped
+        ).void
+      end
+      def create_role_permissions(config)
+        affected_rows = 0
+        config["system_roles"].each do |name, metadata|
+          role = Role.find_by(name: name)
+          raise "could not find role #{name}" if role.nil? && !dry_run?
+
+          metadata["permissions"].each do |action|
+            fgp = config["fine_grained_permissions"][action]
+            raise "could not find fgp #{action}" if fgp.nil? && !dry_run?
+
+            log("creating role permission for role #{name} and fgp #{action}") if verbose?
+            if role && RolePermission.exists?(role_id: role.id, action: action)
+              log("role permission for role #{role.name} and fgp #{action} already exists, skipping") if verbose?
+              next
+            end
+
+            params = {
+              role_id: role&.id,
+              action: action
+            }
+
+            if dry_run?
+              log("[dry_run] would create role_permission with params #{params.inspect}")
+            else
+              write_to(model_class: RolePermission) do
+                result_affected_rows = RolePermission.connection.update(Arel.sql(<<-SQL, **params))
+                  INSERT INTO `role_permissions` (role_id, action, created_at, updated_at)
+                  VALUES (:role_id, :action, now(), now())
+                SQL
+                affected_rows += result_affected_rows
+              end
+            end
+          end
+        end
+        log("created #{affected_rows} role_permissions") if verbose?
+      end
+
+    end
+  end
+end
+
+# Run as a single process if this script is run directly
+if $0 == __FILE__
+  # See the transition arguments class for information about standard
+  # arguments and their default values. If you require additional arguments,
+  # pass them via `additional_arguments: %w(foo)` to the `parse` method.
+  args = GitHub::Transitions::Arguments.parse(ARGV)
+
+  GitHub::Transitions::<%= class_name %>.new(args).run
+end

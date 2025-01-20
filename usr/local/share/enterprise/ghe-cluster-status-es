@@ -1,0 +1,101 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-status-es [-hjnv]
+#/
+#/ Check the status of the Elasticsearch service in the cluster.
+#/
+#/ OPTIONS:
+#/   -h | --help      Show this message.
+#/   -j | --json      JSON formatted output.
+#/   -n | --nagios    Nagios formatted output and exit codes.
+#/   -v | --verbose   Show verbose output.
+#/
+set -e
+
+# Show usage.
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c 4-
+  exit 2
+fi
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-cluster-status-common
+source /usr/local/share/enterprise/ghe-cluster-status-common
+
+datacenters(){
+  ghe-config --get-regexp 'cluster.*\.datacenter' | awk '{print $2}' | sort -u || true
+}
+
+is_ha(){
+  ghe-config cluster.ha 2>/dev/null | grep -q true
+}
+
+# Check ES status in each datacenter, if datacenter is missing
+# check all ES instances in cluster.conf
+check_es_in_datacenter(){
+  local datacenter num_nodes curl_output status status_num_nodes
+  datacenter=$1
+
+  if [ -n "$datacenter" ]; then
+    hosts=$(ghe-cluster-nodes -r elasticsearch -d "$datacenter")
+  else
+    hosts=$(ghe-cluster-nodes -r elasticsearch)
+  fi
+
+  if [ -z "$hosts" ]; then
+    return
+  fi
+
+  num_nodes=$(echo "$hosts" | wc -w)
+  for hostname in $hosts; do
+    # We only need to query one node per DC
+    if [ -n "$datacenter" ] && [ "$checked_dc" = "$datacenter" ]; then
+      continue
+    fi
+
+    curl_output=$(curl --connect-timeout "$CONNECT_TIMEOUT" --noproxy '*' "http://$hostname:9200/_cluster/health?pretty" 2>/dev/null || true)
+
+    if [ -z "$curl_output" ]; then
+      check_result "$hostname" "elasticsearch-replication" "error" "No response"
+      continue
+    fi
+
+    checked_dc=$datacenter
+    status=$(echo "$curl_output" | jq -r .status)
+    status_num_nodes=$(echo "$curl_output" | jq -r .number_of_nodes)
+    initializing=$(echo "$curl_output" | jq -r .initializing_shards)
+    unassigned=$(echo "$curl_output" | jq -r .unassigned_shards)
+
+    if [ "$status" = "yellow" ] && [ "$unassigned" -eq 0 ]; then
+      yellow_ok='true'
+    else
+      yellow_ok='false'
+    fi
+
+
+    if [ "$status_num_nodes" = "$num_nodes" ]; then
+      if [ "$status" = "green" ] || [ "$yellow_ok" = "true" ]; then
+        check_result "$hostname" "elasticsearch-replication" "ok" "Elasticsearch cluster is in sync ($initializing shards initializing, $unassigned shards unassigned)"
+      elif [ "$yellow_ok" = "false" ]; then
+        check_result "$hostname" "elasticsearch-replication" "warn" "Elasticsearch cluster is yellow ($initializing shards initializing, $unassigned shards unassigned)"
+      elif [ "$status" = "red" ]; then
+        check_result "$hostname" "elasticsearch-replication" "error" "Elasticsearch cluster is red ($initializing shards initializing, $unassigned shards unassigned)"
+      fi
+    elif [ "$status" = "503" ]; then
+      check_result "$hostname" "elasticsearch-replication" "error" "Elasticsearch link is down"
+    else
+      check_result "$hostname" "elasticsearch-replication" "error" "Unexpected number of nodes. Expected: $num_nodes, found: $status_num_nodes"
+    fi
+  done
+}
+
+start_output "elasticsearch"
+
+dcs=$(datacenters)
+if ! is_ha && [ -n "$dcs" ]; then
+  for dc in $dcs; do
+     check_es_in_datacenter "$dc"
+  done
+else
+  check_es_in_datacenter
+fi
+
+end_output "elasticsearch"

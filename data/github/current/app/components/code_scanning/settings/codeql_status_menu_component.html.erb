@@ -1,0 +1,144 @@
+<%= render(Primer::Experimental::ActionMenu.new(menu_id: "code-scanning-codeql-status-menu", anchor_align: :end, test_selector: "code-scanning-codeql-status-menu")) do |c| %>
+  <% c.with_trigger("aria-label": "More options", px: 2) do %>
+    <%= primer_octicon(:"kebab-horizontal") %>
+  <% end %>
+
+  <% if show_last_scan? %>
+    <% c.with_item(
+      tag: :a,
+      href: codeql_last_scan_url,
+      test_selector: "code-scanning-codeql-status-menu-last-scan-link"
+    ) do |item| %>
+      <% item.with_leading_visual_icon(icon: :log) %>
+      <%= codeql_last_scan_text %>
+    <% end %>
+  <% end %>
+
+  <% if link_to_alerts? %>
+    <% c.with_item(
+      tag: :a,
+      href: "/#{repository.name_with_display_owner}/security/code-scanning",
+      test_selector: "code-scanning-codeql-status-menu-alerts-link"
+    ) do |item| %>
+      <% item.with_leading_visual_icon(icon: "shield-lock") %>
+      View Code Scanning alerts
+    <% end %>
+  <% end %>
+
+  <% if auto_codeql_enabled? %>
+    <% unless auto_codeql_updating? %>
+      <% c.with_item(is_divider: true) %>
+
+      <% c.with_item(
+        tag: :button,
+        type: "button",
+        classes: "",
+        data: { "show-dialog-id": auto_codeql_show_dialog_id, target: "modal-dialog.show-button" }
+      ) do |item| %>
+        <% item.with_leading_visual_icon(icon: :gear) %>
+        View CodeQL configuration
+      <% end %>
+
+      <% c.with_item(
+        tag: :button,
+        type: "button",
+        classes: "",
+        disabled: disabling_auto_codeql_restricted_by_security_configuration,
+        data: { "show-dialog-id": auto_codeql_switch_dialog_id, target: "modal-dialog.show-button" }
+      ) do |item| %>
+        <% item.with_leading_visual_icon(icon: :workflow) %>
+
+        <div style="max-width: 275px">
+          <p class="mt-0 mb-1">Switch to advanced</p>
+
+          <% if disabling_auto_codeql_restricted_by_security_configuration %>
+            <p class="color-fg-muted f6 m-0">Blocked by organization</p>
+          <% else %>
+            <p class="color-fg-muted f6 m-0">Customize your CodeQL configuration via a YAML file checked into the repository.</p>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <% c.with_item(is_divider: true) %>
+
+    <% c.with_item(
+      tag: :button,
+      type: "button",
+      classes: "",
+      is_dangerous: !disabling_auto_codeql_restricted_by_security_configuration,
+      disabled: disabling_auto_codeql_restricted_by_security_configuration,
+      data: { "show-dialog-id": auto_codeql_disable_dialog_id, target: "modal-dialog.show-button" }
+    ) do |item| %>
+      <% item.with_leading_visual_icon(icon: :stop) %>
+      Disable CodeQL
+
+      <% if disabling_auto_codeql_restricted_by_security_configuration %>
+        <p class="color-fg-muted f6 m-0">Blocked by organization</p>
+      <% end %>
+    <% end %>
+  <% elsif codeql_workflow_path.present? %>
+    <% c.with_item(is_divider: true) %>
+
+    <% c.with_item(
+      tag: :a,
+      href: tree_path(codeql_workflow_path, repository.default_branch, repository),
+      test_selector: "code-scanning-codeql-workflow-path"
+    ) do |item| %>
+      <% item.with_leading_visual_icon(icon: :workflow) %>
+      View CodeQL workflow
+    <% end %>
+  <% end %>
+<% end %>
+
+<% if auto_codeql_enabled? %>
+  <%= render Primer::Experimental::Dialog.new(
+    title: "Disable CodeQL?",
+    show_header_divider: false,
+    show_footer_divider: false,
+    header_variant: :large,
+    dialog_id: auto_codeql_disable_dialog_id,
+    width: :large,
+    h: :fit,
+    form_url: destroy_repository_auto_codeql_path(repository.owner, repository),
+    form_method: :delete,
+  ) do |d| %>
+    <% d.with_body do %>
+      <p class="color-fg-default my-2 lh-default">
+        CodeQL will stop analyzing code from this repository. Existing alerts will remain open; you can dismiss them but not close them as fixed, as CodeQL needs to be enabled for that to happen. Existing CodeQL Actions workflows on this repository must be <a class="Link--inTextBlock" href="<%= GitHub.help_url %>/actions/managing-workflow-runs/disabling-and-enabling-a-workflow">manually re-enabled to resume previous analyses</a>.
+      </p>
+    <% end %>
+
+    <% d.with_button(data: { "close-dialog-id": auto_codeql_disable_dialog_id }) { "Cancel" } %>
+    <% d.with_button(
+      type: :submit,
+      scheme: :danger,
+      data: { "disable-with": "Disabling CodeQL...", "submit-dialog-id": auto_codeql_disable_dialog_id }
+      ) { "Disable CodeQL" } %>
+  <% end %>
+
+  <%= render Primer::Experimental::Dialog.new(
+    title: "Switch to a CodeQL workflow?",
+    show_header_divider: false,
+    show_footer_divider: false,
+    header_variant: :large,
+    dialog_id: auto_codeql_switch_dialog_id,
+    width: :large,
+    h: :fit,
+    form_url: destroy_repository_auto_codeql_path(repository.owner, repository, switch: "1"),
+    form_method: :delete,
+  ) do |d| %>
+    <% d.with_body do %>
+      <p class="color-fg-default my-2 lh-default">
+        To switch to a workflow-based configuration, we must disable CodeQL first. CodeQL will stop analyzing code and resume once a valid workflow file is committed to the repository.
+      </p>
+    <% end %>
+
+    <% d.with_button(data: { "close-dialog-id": auto_codeql_switch_dialog_id }) { "Cancel" } %>
+    <% d.with_button(
+      type: :submit,
+      scheme: :danger,
+      data: { "disable-with": "Disabling CodeQL...", "submit-dialog-id": auto_codeql_switch_dialog_id }
+      ) { "Disable CodeQL" } %>
+  <% end %>
+<% end %>

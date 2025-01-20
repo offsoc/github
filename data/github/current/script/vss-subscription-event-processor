@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../config/environment"
+processor = Licensing::Vss::SubscriptionEventProcessor.new
+client = GitHub::AzureServiceBus::SubscriptionClient.new(**Licensing::Vss::SubscriptionEventProcessor.service_bus_config)
+consumer = GitHub::AzureServiceBus::Consumer.new(client: client)
+
+VssSubscriptionEventProcessorError = Class.new(StandardError)
+
+begin
+  GitHub.logger.info("start", { "code.namespace" => processor.class.name })
+  GitHub::AzureServiceBus::Executor.run(processor: processor, consumer: consumer, shutdown_signals: [:INT, :TERM])
+  GitHub.logger.info("finish", { "code.namespace" => processor.class.name })
+rescue => e
+  # rubocop:disable Style/HashSyntax
+  GitHub.logger.error("failed to run stream processor", { "code.namespace" => processor.class.name, exception: e })
+  Failbot.report(VssSubscriptionEventProcessorError.new)
+  raise
+end

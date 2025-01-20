@@ -1,0 +1,278 @@
+# https://github.com/github/kube/blob/master/docs/kubernetes/resources/deployment.md
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: unicorn-api
+    annotations:
+        # Causes Heaven to only return success once all pods in this deployment are
+        # available.
+        heaven.githubapp.com/deploy-requirement: "true"
+        # Transposes all matching values for `image` to refer to the image
+        # corresponding to the SHA deployed at deploy time.
+        heaven.githubapp.com/image-placeholder: "github"
+        heaven.githubapp.com/inject-heaven-env-vars-into-containers: "unicorn"
+        heaven.githubapp.com/allow-cluster-preferences-configmap: "true"
+        # Cluster Preference overrides for tuning clusters or testing new settings
+        # on a per cluster basis
+        heaven.githubapp.com/cluster-preferences: ""
+        # Replaces the master image tag for init containers to a sha256 to prevent the requirement for imagePullPolicy:Always
+        moda.github.net/latest-image-placeholders-for: "geoip"
+        moda.github.net/inject-otel-env-vars-into-containers: "unicorn"
+spec:
+    # This configuration will allocate the following resources
+    # * 48 workers (3 replicas * 16 workers)
+    # * 30 CPU requests (10/Pod * 3 Pods)
+    # * 48Gi memory (16Gi/Pod * 3 Pods)
+    # Bump this number to run more unicorns.
+    replicas: 12
+    # Only keep 2 old replica sets
+    revisionHistoryLimit: 2
+    strategy:
+        # The below options control how many additional pods can be created during
+        # a deploy as well as how many can be unavailable during the process.
+        # https://kubernetes.io/docs/user-guide/deployments/#rolling-update-deployment
+        rollingUpdate:
+            maxSurge: 50%
+            maxUnavailable: 4
+    selector:
+        matchLabels:
+            service: unicorn-api
+            role: production
+            deployGroup: production
+    template:
+        metadata:
+            labels:
+                service: unicorn-api
+                role: production
+                deployGroup: production
+            annotations:
+                ad.datadoghq.com/nginx.checks: |
+                    {
+                      "nginx": {
+                        "instances":[
+                          {
+                            "nginx_status_url": "http://%%host%%:8081/stats"
+                          }
+                        ]
+                      }
+                    }
+                ad.datadoghq.com/unicorn.checks: |
+                    {
+                      "kube_unicorn": {
+                        "instances": [
+                          {
+                            "host_pid": "%%pid%%",
+                            "uid": "%%kube_pod_uid%%",
+                            "worker_regex": "^unicorn .*? worker",
+                            "sockets": ["/build/tmp/sockets/unicorn.sock"]
+                          }
+                        ]
+                      }
+                    }
+                observability.github.com/splunk_index-unicorn: rails
+                observability.github.com/kafka_topic-unicorn: rails
+                fluentbit.io/parser-unicorn: logfmt_sloppy
+                fluentbit.io/exclude-nginx: "true"
+                ad.datadoghq.com/tolerate-unready: "true"
+        spec:
+            dnsPolicy: ClusterFirst
+            securityContext:
+                sysctls:
+                    # net.core.somaxconn is being explcitly set here until we have a generalised pattern
+                    # to set it everywhere.
+                    # for https://github.com/github/github/issues/111813 (api 502 errors)
+                    # as part of https://github.com/github/k8s-net-debug/issues/18 (sysctl regression)
+                    - name: net.core.somaxconn
+                      value: "10240"
+            volumes:
+                - name: nginx-conf
+                  configMap:
+                    name: unicorn-api-nginx-conf
+                - name: nginx-pidfile
+                  emptyDir: {}
+                - name: assets
+                  emptyDir: {}
+                - name: geoip2
+                  emptyDir: {}
+                - name: sockets
+                  emptyDir: {}
+                - name: github-metadata
+                  hostPath:
+                    path: /etc/github/metadata.json
+                - name: ca-certificates
+                  hostPath:
+                    path: /etc/ssl/certs
+                - name: syslog
+                  hostPath:
+                    path: /dev/log
+            restartPolicy: Always
+            containers:
+                - name: nginx
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/docker-nginx
+                  # Prevent container from shutting down before kube-proxy has converged.
+                  lifecycle:
+                    preStop:
+                        exec:
+                            command: ["sleep", "5"]
+                  ports:
+                    - name: http
+                      containerPort: 80
+                      protocol: TCP
+                    - name: stats
+                      containerPort: 8081
+                      protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                        path: /status
+                        port: stats
+                    periodSeconds: 1
+                    failureThreshold: 1
+                  env:
+                    - name: KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                  volumeMounts:
+                    - mountPath: /etc/nginx/
+                      name: nginx-conf
+                    - mountPath: /assets
+                      name: assets
+                      readOnly: true
+                    - mountPath: /sockets
+                      name: sockets
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                - name: unicorn
+                  # Replaced with a SHA-tagged image at deploy time by virtue of the
+                  # `heaven.githubapp.com/image-placeholder` annotation.
+                  image: github
+                  # Each pod runs multiple unicorns as specified in config/unicorn.rb
+                  args: ["bin/unicorn_rails", "-c", "config/unicorn.rb", "-E", "production", "--port", "8080", "config.ru"]
+                  # The amount of resources requested and limiting this pod can and should
+                  # be tweaked over time.
+                  # TODO document how to observe OOM-kills and memory throttling events
+                  lifecycle:
+                    # This preStop hook causes the unicorn to avoid any internal shutdown until such a time
+                    # as nginx deletes its pid file from the shared volume, indicating that it has completed
+                    # gracefully shutting down and quiescing active connections. Only at this point will the
+                    # unicorn process gracefully shut down (there should be no user connections by then).
+                    preStop:
+                        exec:
+                            command: ["inotifywait", "-e", "delete_self", "/nginx-pidfile/nginx.pid"]
+                  resources:
+                    requests:
+                        cpu: 10.0
+                        memory: "16Gi"
+                    limits:
+                        memory: "16Gi"
+                  ports:
+                    - name: http
+                      containerPort: 8080
+                      protocol: TCP
+                  readinessProbe:
+                    initialDelaySeconds: 31
+                    httpGet:
+                        path: /status
+                        port: http
+                  volumeMounts:
+                    - mountPath: /usr/share/GeoIP
+                      name: geoip2
+                    - mountPath: "/build/tmp/sockets"
+                      name: "sockets"
+                    - mountPath: /nginx-pidfile
+                      name: nginx-pidfile
+                    - mountPath: /etc/github/metadata.json
+                      name: github-metadata
+                      readOnly: true
+                    - name: ca-certificates
+                      mountPath: /etc/ssl/certs
+                      readOnly: true
+                    - name: syslog
+                      mountPath: /dev/log
+                      readOnly: true
+                  env:
+                    # By setting `heaven.githubapp.com/inject-app-config-into-containers` to
+                    # `unicorn` above, environment variables from `gh-config github` will
+                    # also be available to this container.
+                    - name: KUBE_DEPLOYMENT_NAME
+                      value: unicorn-api
+                    - name: FAILBOT_BACKEND
+                      value: http
+                    - name: FAILBOT_CONTEXT_KUBE_POD_NAME
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.name
+                    - name: FAILBOT_CONTEXT_KUBE_POD_IP
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: status.podIP
+                    - name: FAILBOT_CONTEXT_KUBE_CLUSTER
+                      valueFrom:
+                        configMapKeyRef:
+                            key: kubernetes_cluster_name
+                            name: kube-cluster-metadata
+                    - name: GH_WORKER_BOOT_DELAY
+                      value: '0'
+                    - name: GH_WRITE_PIDFILE
+                      value: '0'
+                    - name: GH_UNICORN_WORKER_COUNT
+                      value: '16'
+                    # Disable sending data to Graphite/StatsD
+                    - name: GRAPHITE_DISABLED
+                      value: '1'
+                    # each kube node runs a local dd-agent - to send data to it
+                    # we need to explicitly set the node hostname rather than 127.0.0.1
+                    # (which points to the *pod*)
+                    - name: DOGSTATSD_HOST
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: spec.nodeName
+                    - name: GITHUB_CONFIG_ROLE
+                      value: api
+                    - name: KUBE_NAMESPACE
+                      valueFrom:
+                        fieldRef:
+                            fieldPath: metadata.namespace
+                    - name: DOGSTATSD_ADDITIONAL_TAGS
+                      value: "kube_deployment:$(KUBE_DEPLOYMENT_NAME)"
+                    - name: OTEL_SERVICE_NAME
+                      value: github-$(KUBE_DEPLOYMENT_NAME)
+                    - name: CPS_NETWORK_SERVICE_URL
+                      value: "https://cps-network-service-production-eu.githubapp.com/placeholder"
+                  envFrom:
+                    - configMapRef:
+                        name: elasticsearch
+                    - configMapRef:
+                        name: observability-config
+                    - secretRef:
+                        name: vault-secrets
+            initContainers:
+                - name: unicorn-assets
+                  image: github
+                  imagePullPolicy: IfNotPresent
+                  command:
+                    - cp
+                    - "--recursive"
+                    - "--no-preserve=mode"
+                    - "--verbose"
+                    - "/build/public"
+                    - "/assets"
+                  resources:
+                    requests:
+                        cpu: 100m
+                  volumeMounts:
+                    - name: assets
+                      mountPath: "/assets"
+                - name: geoip
+                  image: octofactory.service.private-us-east-1.github.net/moda-artifacts-docker/geoip2:master
+                  imagePullPolicy: IfNotPresent
+                  command:
+                    - sh
+                    - "-c"
+                    - cp /data/geoip2/* /shared-geoip2
+                  resources:
+                    requests:
+                        cpu: 50m
+                  volumeMounts:
+                    - mountPath: "/shared-geoip2"
+                      name: geoip2

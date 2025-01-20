@@ -1,0 +1,68 @@
+#!/bin/bash
+#/
+#/ Run a local copy of Windbeam.
+#/
+#/ This script is used in the CI checks to start up Windbeam in Actions.
+#/ Running it outside of that context would be silly.
+#/
+set -o pipefail
+
+usage () {
+    grep "^#/" <"$0" | cut -c4-
+    exit ${1:-1}
+}
+
+[ "$1" = '--help' ] || [ "$1" = '-h' ] && usage
+
+BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd )/.."
+
+export WINDBEAM_HOME=${WINDBEAM_HOME:-../windbeam}
+if ! [ -f "$WINDBEAM_HOME/ownership.yaml" ]; then
+  echo "Invalid WINDBEAM_HOME. Set it first."
+  exit 1
+fi
+
+cd $WINDBEAM_HOME
+echo "Windbeam bootstrap logs in $PWD/windbeam.log"
+echo "** To check docker container logs:"
+echo "   cd $PWD && docker compose logs -f"
+echo "** To stop services:"
+echo "   cd $PWD && docker compose down -v"
+echo
+
+if [ -z "$CI" ]; then
+  echo "Bootstrapping Windbeam now... (takes ~15 minutes)"
+  script/run-all > windbeam.log 2>&1 &
+else
+   # This only applies to CI.
+   export STAGE_RETRY_INTERVAL=5
+   script/setup
+   docker compose up -d azurite
+   script/coordinator&
+   script/twirp&
+   script/exports&
+fi
+
+function test_service() {
+  curl "$1/_ping" &> /dev/null
+  echo $?
+}
+
+twirp_status=$(test_service localhost:8080)
+exports_status=$(test_service localhost:8181)
+
+counter=0
+# Wait 10 minutes for the services to start.
+until [ $twirp_status -eq 0 ] && [ $exports_status -eq 0 ]; do
+  twirp_status=$(test_service localhost:8080)
+  exports_status=$(test_service localhost:8181)
+
+  counter=$((counter+1))
+  if [ $counter -gt 600 ]; then
+    echo "Windbeam services failed to start. Exiting..."
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "Windbeam services are ready ✅"

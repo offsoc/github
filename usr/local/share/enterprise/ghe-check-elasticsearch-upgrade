@@ -1,0 +1,30 @@
+#!/bin/bash
+#/ Usage: ghe-check-elasticsearch-upgrade
+#/
+#/ Check if background elasticsearch indices upgrades are completed or not.
+
+set -e
+
+# Check if elasticsearch upgrade is completed or not
+if [ -f "/data/user/elasticsearch-upgrade-complete" ]; then
+  echo "Elasticsearch indices upgrade is completed"
+else
+  if systemctl is-active --quiet elasticsearch-upgrade.service ; then
+    echo "elasticsearch-upgrade.service is active, Elasticsearch indices upgrade is not completed yet"
+    for index in code-search users repos gists pull-requests showcases commits projects; do
+      index_status_code=$(curl -qs --head http://localhost:9201/$index -o /dev/null -w '%{http_code}' 2> /dev/null)
+      [ "$index_status_code" = "200" ] || {
+        echo "Failed to fetch $index, got status code: $index_status_code" >&2
+      }
+    done
+  else
+    echo "elasticsearch-upgrade.service is not active, but Elasticsearch indices upgrade is not completed yet."
+    echo "You could run 'systemctl --no-block start elasticsearch-upgrade.service' on MySQL primary node to restart the service."
+    echo "For further assistance, please contact GitHub Enterprise Support team."
+  fi
+  
+  echo "Elasticsearch indices:"
+  curl -s -XGET 'http://localhost:9201/_cat/indices?v'
+
+  exit 1
+fi

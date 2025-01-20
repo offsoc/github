@@ -1,0 +1,144 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-nodes [options]
+#/
+#/ List nodes in the cluster
+#/
+#/ OPTIONS:
+#/  -h | --help                 Print help
+#/  -o | --offline              Include offline nodes
+#/  -i | --ip                   Return host along with IPs.
+#/  -u | --uuid                 Return host along with uuids.
+#/  -r <role> | --role <role>   Only include nodes with specified role
+#/  -d <dc> | --datacenter <dc> Only include nodes within specified datacenter
+#/   --primary                  Return only primary hosts
+#/   --replica                  Return only replica hosts
+#/   --cluster-ha-primary       Return only hosts on primary datacenter and mysql primary on replica datacenter
+#/   --cluster-ha-replica       Return only hosts on replica datacenter without mysql primary on replica datacenter
+#/  -x | --exclude              Exclude local host
+#/   --no-cache                 Exclude cache replicas
+#/
+set -e
+export GHE_LIBDIR="${GHE_LIBDIR:-"/usr/local/share/enterprise/lib"}"
+[ -z "$SKIP_GHE_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-commons"
+[ -z "$SKIP_GHE_CLUSTER_COMMONS" ] &&  source "$GHE_LIBDIR/ghe-cluster-commons"
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+PRINT_HOSTS=
+PRINT_UUIDS=
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long help,offline,ip,uuid,role:,datacenter:,exclude,primary,replica,cluster-ha-primary,cluster-ha-replica,no-cache --options hoiur:d:x -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -o|--offline)
+      OFFLINE_NODES=1
+      ;;
+    -i|--ip)
+      PRINT_IPS=1
+      ;;
+    -u|--uuid)
+      PRINT_UUIDS=1
+      ;;
+    -r|--role)
+      MATCH_ROLE=$2
+      shift
+      ;;
+    -d|--datacenter)
+      DATACENTER_FILTER=$2
+      shift
+      ;;
+    --primary)
+      HA_FILTER=primary
+      ;;
+    --replica)
+      HA_FILTER=replica
+      ;;
+    --cluster-ha-primary)
+      CLUSTER_HA_REPLICA=primary
+      ;;
+    --cluster-ha-replica)
+      CLUSTER_HA_REPLICA=replica
+      ;;
+    -x|--exclude)
+      EXCLUDE_LOCAL_HOST=1
+      ;;
+    --no-cache)
+      EXCLUDE_CACHE=1
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+get_node_ip() {
+  local node_name="$1"
+  if [ -n "$(ghe-config cluster.$node_name.ipv6)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv6")
+  elif [ -n "$(ghe-config cluster.$node_name.ipv4)" ]; then
+    ip=$(ghe-config "cluster.$node_name.ipv4")
+  fi
+  echo $ip
+}
+
+GHE_CLUSTER_FILE=${GHE_CLUSTER_FILE:-/etc/github/cluster}
+if [ ! -f "$GHE_CLUSTER_FILE" ] || [ -z "$(cat $GHE_CLUSTER_FILE)" ]; then
+  echo "Clustering is not configured on this host." >&2
+  exit 1
+fi
+
+hosts=$(ghe-config --get-regexp cluster.*.hostname | cut -d ' ' -f2)
+local_host=$(cat $GHE_CLUSTER_FILE)
+
+for hostname in $hosts; do
+  # Move on if we are excluding local host and this is the local host
+  [ -n "$EXCLUDE_LOCAL_HOST" ] && [ "$hostname" == "$local_host" ] && continue
+  # Exclude cache-server hosts
+  [ -n "$EXCLUDE_CACHE" ] && [ "$(ghe-config "cluster.$hostname.cache-server")" = true ] && continue
+  # Skip this one if we are filtering by role and this host doesn't have the role we are after
+  [ -n "$MATCH_ROLE" ] && [ "$(ghe-config cluster.$hostname.$MATCH_ROLE-server)" != true ] && continue
+  [ -n "$DATACENTER_FILTER" ] && [ "$(ghe-config cluster.$hostname.datacenter)" != "$DATACENTER_FILTER" ] && continue
+  # Exclude this host if it's offline unless we want offline hosts
+  [ -z "$OFFLINE_NODES" ] && [ "$(ghe-config cluster.$hostname.offline)" == true ] && continue
+  # Exclude replica hosts if primary filter is used
+  [ "$HA_FILTER" = "primary" ] && [ -n "$(ghe-config cluster.$hostname.replica || true)" ] && continue
+  # Exclude primary host if primary filter is used
+  [ "$HA_FILTER" = "replica" ] && [ "$(ghe-config cluster.$hostname.replica || true)" != "enabled" ] && [ "$(ghe-config cluster.$hostname.replica || true)" != "disabled" ] && continue
+  # Exclude Cluster HA replica nodes except mysql-master-replica 
+  [ "$CLUSTER_HA_REPLICA" = "primary" ] && [ -n "$(ghe-config cluster.mysql-master-replica || true)" ] && [ -n "$(ghe-config cluster."$hostname".replica || true)" ] && [ "$(ghe-config cluster.mysql-master-replica)" != "$hostname" ] && continue
+  # Exclude no Cluster HA, and Cluster HA primary nodes and mysql-master-replica 
+  [ "$CLUSTER_HA_REPLICA" = "replica" ] && [ -z "$(ghe-config cluster.mysql-master-replica || true)" ] && continue
+  if [ "$CLUSTER_HA_REPLICA" = "replica" ] && [ -n "$(ghe-config cluster.mysql-master-replica || true)" ]; then 
+    if [ -z "$(ghe-config cluster."$hostname".replica || true)" ] || [ "$(ghe-config cluster.mysql-master-replica)" == "$hostname" ]; then
+      continue
+    fi
+  fi
+
+  print_line="$hostname"
+
+  if [ -n "$PRINT_UUIDS" ]; then
+    uuid="$(ghe-config cluster.$hostname.uuid || true)"
+    print_line="$print_line\t$uuid"
+  fi
+
+  if [ -n "$PRINT_IPS" ]; then
+    ip=$(get_node_ip $hostname)
+    print_line="$print_line\t${ip:-UNKNOWN}"
+  fi
+
+  echo -e "${print_line#\\t}"
+done

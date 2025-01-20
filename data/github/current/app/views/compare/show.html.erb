@@ -1,0 +1,216 @@
+<%# erblint:counter DeprecatedComponentsCounter 5 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<%# @comparison is a GitHub::Comparison %>
+<%  author_count = @comparison.async_author_count.sync
+    commit_count = @comparison.total_commits
+    render_tabs_on_compare = render_tabs_on_compare?(@comparison)
+    selected_tab = render_tabs_on_compare ? :commits_bucket : nil
+    expand = params[:pull_request] || params[:expand] || params[:quick_pull]
+    has_pr_templates = @comparison.base_repo&.pull_request_templates.any? && @comparison.base_repo&.pull_request_templates.count > 1
+    show_pr_template_selector = (GitHub.flipper[:pull_request_templates].enabled?(current_user) || GitHub.flipper[:pull_request_templates].enabled?(current_repository)) && has_pr_templates && !expand
+    comparison_help_link = "https://docs.github.com/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-comparing-branches-in-pull-requests#three-dot-and-two-dot-git-diff-comparisons"
+%>
+
+<% stats.record_distribution("show_set_page_info") do %>
+  <% page_info \
+        title: "Comparing #{comparison_base_ref_label(@comparison)}#{@comparison.dots}#{comparison_head_ref_label(@comparison)} · #{current_repository.name_with_display_owner}",
+        container_xl: true,
+        selected_link: :repo_source,
+        dashboard_pinnable_item_id: current_repository.global_relay_id
+  %>
+<% end %>
+
+<% content_for :head do %>
+  <link data-turbo-transient rel='alternate' type='text/x-diff' href='<%=h request.path + '.diff' %>'>
+  <link data-turbo-transient rel='alternate' type='text/x-patch' href='<%=h request.path + '.patch' %>'>
+
+  <%# Normalize path for new PR form across any branch %>
+  <meta name="session-resume-id"
+        content="<%= compare_start_path(:user_id => current_repository.root.owner, :repository => current_repository.root) %>"
+        data-turbo-transient>
+<% end %>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix new-discussion-timeline container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <%= link_to 'Permalink', h(@comparison.to_permalink_url), :class => 'd-none js-permalink-shortcut', 'data-hotkey' => 'y' %>
+
+  <% stats.record_render("compare/subhead_component") do %>
+    <%= render Primer::Beta::Subhead.new(classes: "compare-show-header") do |component| %>
+      <% component.with_heading(tag: :h1) do %>Comparing changes<% end %>
+      <% component.with_description do %>
+        <% if @comparison.direct_compare? %>
+          <% three_dot_compare = GitHub::Comparison.from_range(@comparison.repo, "#{@comparison.base}...#{@comparison.head}") %>
+          This is a direct comparison between two commits made in this repository or its related repositories.
+          <a class="Link--inTextBlock" href="<%= three_dot_compare.to_path %>">View the default comparison</a> for this range or
+          <%= render(Primer::Beta::Link.new(href: comparison_help_link)) do %>learn more about diff comparisons<% end %>.
+        <% else %>
+          Choose two branches to see what’s changed or to start a new pull request.
+          <%- unless current_repository.advisory_workspace? %>
+            If you need to, you can also <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-toggle-range-editor-cross-repo") do %>compare across forks<% end %> or
+          <%- end %>
+          <%= render(Primer::Beta::Link.new(href: comparison_help_link)) do %>learn more about diff comparisons<% end %>.
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+  <% stats.record_render("PR/subhead_component") do %>
+    <%= render Primer::Beta::Subhead.new(classes: "compare-pr-header") do |component| %>
+      <% component.with_heading(tag: :h1) do %>Open a pull request<% end %>
+      <% component.with_description do %>
+        <% if current_repository.advisory_workspace? %>
+          Create a new pull request by comparing changes across two branches.
+        <% elsif params[:quick_pull] %>
+          <% if @comparison.cross_repository? %>
+            Your changes have been made in a new branch, <span class="branch-name"><%= @comparison.display_head_ref %></span>, in your fork of this project. Create a pull request below to propose these changes in the original project.
+          <% else %>
+            The change you just made was written to a new branch named <span class="branch-name"><%= @comparison.display_head_ref %></span>. Create a pull request below to propose these changes.
+          <% end %>
+        <% else %>
+          Create a new pull request by comparing changes across two branches. If you need to, you can also <%= render Primer::ButtonComponent.new(scheme: :link, classes: "js-toggle-range-editor-cross-repo") do %>compare across forks<% end %>.
+        <% end %>
+        <%= render(Primer::Beta::Link.new(href: comparison_help_link)) do %>Learn more about diff comparisons here<% end %>.
+      <% end %>
+    <% end %>
+  <% end %>
+  <% stats.record_render("compare/range_editor") do %>
+    <%= render :partial => "compare/range_editor", :locals => { :comparison => @comparison, :check_mergeability => true } %>
+  <% end %>
+  <% if @existing_pulls.any? && !@comparison.direct_compare? %>
+    <div class="my-3 Box">
+      <ul>
+        <% @existing_pulls.each do |existing_pull| %>
+          <li class="Box-row d-block d-md-flex flex-items-center">
+            <div class="flex-auto mr-3 min-width-0 mb-3 mb-md-0">
+              <div class="h4 ml-4 mb-1">
+                <%= render Primer::Beta::Octicon.new("git-pull-request", ml: -4, mr: 1, classes: "#{existing_pull.open? ? 'open' : 'closed'}") %>
+                <%= link_to existing_pull.title, pull_request_path(existing_pull), :class => "Link--primary" %>
+                <span class="color-fg-muted text-normal">#<%= existing_pull.number %></span>
+              </div>
+              <div class="css-truncate css-truncate-target width-fit pl-4 lh-condensed"><%=
+                if existing_pull.body.blank?
+                  content_tag(:div, link_to("No description available", pull_request_path(existing_pull), :class => "Link--secondary"))
+                elsif existing_pull.task_list?
+                  summary_view = TaskLists::SummaryView.new(existing_pull.task_list_summary)
+                  sanitize link_to summary_view.text, pull_request_path(existing_pull), class: "Link--primary"
+                else
+                  sanitize link_to existing_pull.async_body_text.sync[0..200], pull_request_path(existing_pull), class: "Link--primary"
+                end
+              %></div>
+            </div>
+            <%= link_to pull_request_path(existing_pull), :class => "btn btn-primary" do %>
+              <%= render Primer::Beta::Octicon.new("git-pull-request") %>
+              View pull request
+            <% end %>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+  <% if @comparison.empty? %>
+    <% stats.record_render("primer/blank_slate_component") do %>
+      <%= render Primer::BlankslateComponent.new(
+        icon: "git-compare",
+        title: "There isn’t anything to compare.",
+        "data-hpc": ""
+      ) do %>
+        <% if !@comparison.cross_repository? && @comparison.base_ref == @comparison.head_ref %>
+          <p>
+            You’ll need to use two different branch names to get a valid comparison.<br>
+            Check out some of these sample comparisons.
+          </p>
+          <div class="Box Box--condensed text-left container-sm">
+            <%= render :partial => "compare/sample_comparisons" %>
+          </div>
+        <% elsif @comparison.base_sha == @comparison.head_sha || @comparison.direct_compare? %>
+          <p>
+            <strong><%= comparison_base_ref_label @comparison %></strong> and
+            <strong><%= comparison_head_ref_label @comparison %></strong> are identical.
+          </p>
+        <% elsif !@comparison.common_ancestor? %>
+          <p>
+            <strong><%= comparison_base_ref_label @comparison %></strong> and
+            <strong><%= comparison_head_ref_label @comparison %></strong> are
+            entirely different commit histories.
+          </p>
+        <% else %>
+          <p>
+            <strong><%= comparison_base_ref_label @comparison %></strong> is up to date with
+            all commits from <strong><%= comparison_head_ref_label @comparison %></strong>.
+            Try <%= link_to compare_path(@comparison.repo, "#{@comparison.head}...#{@comparison.base}"), class: "Link--inTextBlock" do %>switching the base<% end %>
+            for your comparison.
+          </p>
+        <% end %>
+      <% end %>
+      <%
+        # Used to preserve drafted discussions when switching comparisons
+      %>
+      <% if params[:pull_request] && logged_in? %>
+        <div class="d-none">
+          <% stats.record_render("compare/pull_requests/composer") do %>
+            <%= render :partial => 'pull_requests/composer', :object => PullRequests::Composer.new(@pull, @comparison), locals: { is_draft: is_pull_request_draft } %>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  <% else %>
+    <% if logged_in? && !@existing_pulls.any?(&:open?) && @comparison.pull_requestable? %>
+        <% if show_pr_template_selector %>
+          <div class= "compare-template-header pull_request_templates" id="pull_request_template">
+            <include-fragment src="<%= compare_pr_templates_path(range: params[:range]) %>" aria-label="Pull Request Templates" >
+              <%= render(Primer::Beta::Spinner.new(mx: :auto, my: 3, display: :block)) %>
+            </include-fragment>
+          </div>
+        <% else %>
+          <% stats.record_render("compare/pull_requests/composer") do %>
+              <%= render :partial => 'pull_requests/composer', :object => PullRequests::Composer.new(@pull, @comparison), locals: { is_draft: is_pull_request_draft } %>
+          <% end %>
+        <% end %>
+  <% end %>
+    <% if !@comparison.direct_compare? %>
+      <% stats.record_render("compare/stats_tabs_component") do %>
+        <%= render Compare::StatsComponent.new(comparison: @comparison, author_count: author_count, commit_count: commit_count, selected_tab: selected_tab) %>
+      <% end %>
+
+      <%= render PullRequests::Copilot::PullRequestReviewBannerComponent.new(
+        comparison: @comparison,
+        location: :compare,
+      ) %>
+
+      <% stats.record_render("compare/commits_list_component") do %>
+        <div id="commits_bucket" class="commits_bucket <% if selected_tab && selected_tab != :commits_bucket %>d-none<% end %>">
+          <% if render_tabs_on_compare %>
+            <include-fragment src="<%= compare_commit_list_path(range: params[:range]) %>" aria-label="Loading Commits" >
+              <%= render(Primer::Beta::Spinner.new(mx: :auto, my: 3, display: :block)) %>
+            </include-fragment>
+          <% else %>
+            <%= render Compare::CommitsListComponent.new(comparison: @comparison, page: params[:page] || 1, current_user: current_user) %>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <div id="files_bucket" class="files-bucket <% if selected_tab && selected_tab != :files_bucket %>d-none<% end %>" <%= test_selector("compare-file-changed") %>>
+    <include-fragment src="<%= compare_file_list_path(range: params[:range], diff: params[:diff], w: params[:w]) %>" aria-label="Loading Files" >
+      <div data-hide-on-error>
+        <%= render(Primer::Beta::Spinner.new(mx: :auto, my: 3, display: :block)) %>
+      </div>
+      <div class="text-center p-1" data-show-on-error hidden>
+        <%= render Primer::BlankslateComponent.new(
+          icon: "alert",
+          title: "This comparison is taking too long to generate.",
+          description: "Unfortunately it looks like we can’t render this comparison for you right now. It might be too big, or there might be something weird with your repository.",
+          large: true,
+        ) do %>
+          <p>
+            You can try running this command locally to see the comparison on your machine: <br>
+            <code>git diff <%= @comparison.display_base_ref %>...<%= @comparison.display_head_ref %></code>
+          </p>
+        <% end %>
+        <%= render Primer::ButtonComponent.new("data-retry-button": "") do %>Retry<% end %>
+      </div>
+    </include-fragment>
+  </div>
+</div>
+<% end %>

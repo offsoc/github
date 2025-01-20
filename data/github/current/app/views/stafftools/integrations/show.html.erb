@@ -1,0 +1,263 @@
+<%# `view` is an instance of Stafftools::Integrations::ShowView %>
+<% page_info :title => view.page_title, :selected_link => :apps %>
+
+<div class="boxed-group">
+  <h3>
+    <a href="<%= stafftools_user_apps_path(this_user) %>" class="boxed-group-breadcrumb" data-pjax="true">Owned GitHub Apps /</a>
+    <%= view.integration.name %>
+  </h3>
+  <div class="boxed-group-inner">
+    <div class="summary">
+      <dl>
+        <dt>ID</dt>
+        <dd>
+          <%= view.integration.id %>
+            &ndash;
+            <%= stafftools_selected_link_to "Search audit logs",
+                      stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where data.integration_id == '#{view.integration.id}'" : "data.integration_id:#{view.integration.id}") %>
+        </dd>
+
+        <dt>Name</dt>
+        <dd>
+          <%= view.name %>
+          <% if view.integration.synchronized_dotcom_app? %>
+            | This app is synchronized from GitHub.com.
+            <%= link_to "View on GitHub.com", view.integration.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+          <% end %>
+        </dd>
+
+        <dt>Slug</dt>
+        <dd><%= view.integration.slug %></dd>
+
+        <dt>Description</dt>
+        <dd><%= view.integration.description %></dd>
+
+        <dt>Homepage URL</dt>
+        <dd><%= link_to view.integration.raw_url, view.integration.url %></dd>
+
+        <dt>Callback URL</dt>
+        <dd><%= view.integration.raw_callback_url %></dd>
+
+        <dt>Created</dt>
+        <dd><%= view.created_at %></dd>
+
+        <% if view.integration.suspended? %>
+          <dt>Suspended by <%= link_to view.integration.user_suspended_by, stafftools_user_path(view.integration.user_suspended_by), class: "Link--inTextBlock" %></dt>
+          <dd><%= view.integration.suspended_at %></dd>
+
+          <dt>Suspension reason</dt>
+          <dd><%= view.integration.suspended_reason %></dd>
+        <% end %>
+
+        <dt>Public?</dt>
+        <dd><%= view.integration.public %></dd>
+
+        <dt>Private key generated?</dt>
+        <dd><%= view.integration.public_keys.any? %></dd>
+
+        <dt>Version</dt>
+        <dd><%= view.integration.latest_version.number %></dd>
+
+        <dt>Total installations</dt>
+        <dd><%= view.installations_count %></dd>
+
+        <dt>Marketplace Listing</dt>
+        <% if view.has_marketplace_listing? %>
+          <dd><a href="<%= biztools_marketplace_listing_path(view.listing.slug) %>">View in Biztools</a></dd>
+        <% else %>
+          <dd class="text-italic">No listing</dd>
+        <% end %>
+
+        <% if view.has_automatic_installs? %>
+          <dt>Automatic Install Triggers</dt>
+          <dd><%= view.integration_install_trigger_string %></dd>
+        <% end %>
+
+        <dt>App Manifest</dt>
+        <dd>
+          <%= render Primer::Beta::ClipboardCopy.new(value: view.yaml_manifest, classes: "btn btn-sm", "aria-label": "Copy YAML") do %>
+            Copy YAML
+          <% end %>
+          <%= render Primer::Beta::ClipboardCopy.new(value: view.json_manifest, classes: "btn btn-sm", "aria-label": "Copy JSON") do %>
+            Copy JSON
+          <% end %>
+        </dd>
+      </dl>
+    </div>
+    <% if GitHub.runtime.dotcom? %>
+      <hr>
+      <h3 class="f5">Pinned API Version</h3>
+      <%= render partial: "stafftools/pinned_api_versions/form", locals: { actor: view.integration } %>
+    <% end %>
+  </div>
+</div>
+
+<% if view.owner.organization? %>
+  <div class="boxed-group">
+    <h3>App Managers</h3>
+    <div class="boxed-group-inner">
+      <ul class="boxed-group-list standalone">
+        <li><%= link_to "Organization owners team", owners_stafftools_user_path(view.owner) %></li>
+        <% view.this_app_managers.each do |user| %>
+          <li>
+            <span class="float-right">Manager of this app</span>
+            <%= link_to user.login, stafftools_user_path(user) %>
+          </li>
+        <% end %>
+        <% view.organization_app_managers.each do |user| %>
+          <li>
+            <span class="float-right">Organization app manager</span>
+            <%= link_to user.login, stafftools_user_path(user) %>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  </div>
+<% end %>
+
+<% if GitHub.ip_allowlists_available? %>
+  <%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2) do %>IP allow list<% end %>
+  <% end %>
+
+  <%= render IpAllowlistChecks::FormComponent.new(
+    owner_type: :integration,
+    owner_id: view.integration.id) %>
+
+  <%= render Stafftools::SimpleSearchFormComponent.new(
+    query_label: "Search IP allow list entries",
+    form_url: stafftools_user_app_path(this_user, view.integration),
+    query_placeholder: "Search by IP or description"
+  ) %>
+
+  <% if view.ip_allowlist_entries.any? %>
+    <div class="Box mb-4">
+      <% view.ip_allowlist_entries.each do |entry| %>
+        <div class="Box-row d-flex flex-items-center">
+          <div class="flex-auto">
+            <p>
+              <strong <%= test_selector("ip-allow-list-entry-#{entry.id}") %>><%= entry.allow_list_value %></strong>
+              <% if entry.active? %>
+                <%= render Primer::Beta::Label.new(ml: 2, scheme: :success, title: "Label: Is enabled") do %>
+                  Enabled
+                <% end %>
+              <% else %>
+                <%= render Primer::Beta::Label.new(ml: 2, scheme: :secondary, title: "Label: Is disabled") do %>
+                  Disabled
+                <% end %>
+              <% end%>
+            </p>
+            <p><%= entry.name %></p>
+            <p class="color-fg-muted f6 mb-0">
+              Added <relative-time prefix="" threshold="PT0S" datetime="<%= entry.created_at.utc.iso8601 %>"></relative-time>
+            </p>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <%= render Primer::Beta::Blankslate.new do |bs| %>
+      <% bs.with_heading(tag: :h3) do %>
+        No IP allow list entries
+        <% if params[:query].present? %>
+          matching <em><%= params[:query] %></em>
+        <% end %>
+        for this GitHub App.
+      <% end %>
+    <% end %>
+  <% end %>
+<% end %>
+
+<% access_group_view = Integrations::AccessGroupingsView.new(integration: view.integration) %>
+<%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+  <% component.with_heading(tag: :h2) do %>Requested permissions<% end %>
+  <% component.with_description do %>What a user sees when installing the App.<% end %>
+<% end %>
+
+<div class="Box mb-4">
+  <%= render partial: "integration_installations/requested_permissions_list",
+    locals: {
+      access_group_view: access_group_view,
+      row_class: "Box-row"
+    }
+  %>
+</div>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>Actual permissions<% end %>
+  <% component.with_description do %>Our internal representation of the permissions this App requests on different types of resources.<% end %>
+<% end %>
+
+<% Permissions::ResourceRegistry.permissions_by_resource(view.integration).each do |resource, perms| %>
+  <div class="Box Box--condensed mb-4">
+    <div class="Box-header">
+      <h3 class="Box-title">
+        <%= resource %>
+      </h3>
+    </div>
+
+    <ul>
+      <% perms.each do |perm, action| %>
+        <li class="Box-row d-flex flex-items-center">
+          <div class="flex-auto">
+            <strong><%= perm %></strong>
+          </div>
+
+          <%- scheme = action == :read ? :success : :danger %>
+          <%= render Primer::Beta::Label.new(title: action, scheme: scheme, size: :large) do %>
+            <%= action %>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<% if view.hook.present? %>
+  <%= render Primer::Beta::Subhead.new(hide_border: true) do |component| %>
+    <% component.with_heading(tag: :h2) do %>Webhook<% end %>
+  <% end %>
+  <div class="boxed-group">
+    <div class="boxed-group-inner">
+      <div class="summary">
+        <% if GitHub.flipper[:stafftools_disable_hook_button].enabled?(current_user) %>
+          <%= render partial: "stafftools/hooks/toggle_hook_button", locals: { :hook => view.hook } %>
+        <% end %>
+        <dl>
+          <dt>URL</dt>
+          <dd><%= view.hook.raw_url %></dd>
+
+          <dt>Events</dt>
+          <dd><%= view.hook.events.to_sentence %></dd>
+
+          <dt>Active?</dt>
+          <dd><%= view.hook.active? %></dd>
+
+          <% view.hook.masked_config.each do |field, value| %>
+            <% next if field == "url" %>
+
+            <dt><%= field.humanize %></dt>
+            <dd><%= value %></dd>
+          <% end %>
+
+          <dt>Audit log</dt>
+          <dd>
+            <%= stafftools_selected_link_to "Search logs",
+              stafftools_audit_log_path(:query => "data.hook_id:#{view.hook.id}") %>
+              for actions involving this installation hook.
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <% hook_view = Hooks::ShowView.new(current_user: current_user, hook: view.hook) %>
+  <%= render :partial => 'hooks/deliveries', :locals => {:hook => hook_view.hook,
+                                                         :disabled => hook_view.hook_disabled?,
+                                                         :target => hook_view.hook_target,
+                                                         :hook_deliveries_query => view.hook_deliveries_query,
+                                                         :can_filter_hook_deliveries => true,
+                                                         :hide_header => false } %>
+<% end %>
+
+<%= render partial: "stafftools/integrations/danger_zone", locals: { view: view } %>

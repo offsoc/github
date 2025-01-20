@@ -1,0 +1,78 @@
+#!/bin/bash
+set -e
+
+# create database
+if [ ! -d /data/user/mysql/github_enterprise ]; then
+  sudo mysql --user root --execute "CREATE DATABASE IF NOT EXISTS github_enterprise"
+fi
+
+sudo mysql --user root github_enterprise < /usr/local/share/enterprise/startup.sql
+
+set +x
+mysql_password="$(ghe-config 'secrets.mysql')"
+mysql_replication_password="$(ghe-config 'secrets.mysql-replication')"
+mysql_orchestrator_password="$(ghe-config 'secrets.mysql-orchestrator')"
+mysql_live_upgrade_password="$(ghe-config 'secrets.mysql-live-upgrade')"
+
+# Reset for fresh install case
+if ! MYSQL_PWD=$mysql_password mysql --user github github_enterprise -e 'select 1' >/dev/null 2>&1; then
+  cat <<EOF | sudo mysql --user root
+    SET sql_log_bin = OFF;
+    FLUSH PRIVILEGES;
+    DROP USER IF EXISTS "github"@"localhost", "github"@"%", "ghe-repl"@"%";
+    FLUSH PRIVILEGES;
+    CREATE USER "github"@"localhost" IDENTIFIED WITH mysql_native_password BY "$mysql_password";
+    CREATE USER "github"@"%" IDENTIFIED WITH mysql_native_password BY "$mysql_password";
+    CREATE USER 'ghe-repl'@'%' IDENTIFIED WITH mysql_native_password BY '${mysql_replication_password}';
+    GRANT ALL ON \`github_enterprise\`.* TO "github"@"localhost";
+    GRANT ALL ON \`github_enterprise\`.* TO "github"@"%";
+    GRANT REPLICATION SLAVE ON *.* TO 'ghe-repl'@'%';
+    FLUSH PRIVILEGES;
+    RESET MASTER;
+EOF
+fi
+
+# If we have defined a non-blank password for the live-upgrade user create the user and grant privileges
+if [[ -n $mysql_live_upgrade_password ]]; then
+  cat <<EOF | sudo mysql --user root
+    SET sql_log_bin = OFF;
+    FLUSH PRIVILEGES;
+    DROP USER IF EXISTS "live-upgrade"@"%";
+    FLUSH PRIVILEGES;
+    CREATE USER "live-upgrade"@"%" IDENTIFIED WITH mysql_native_password BY "$mysql_live_upgrade_password";
+    GRANT ALTER, CREATE, DELETE, DROP, INDEX, INSERT, LOCK TABLES, SELECT, TRIGGER, UPDATE ON \`github_enterprise\`.* TO "live-upgrade"@"%";
+    GRANT REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'live-upgrade'@'%';
+    FLUSH PRIVILEGES;
+EOF
+fi
+
+# Set PROCESS Privilege for both fresh install case and upgrade case
+cat <<EOF | sudo mysql --user root
+  SET sql_log_bin = OFF;
+  FLUSH PRIVILEGES;
+  GRANT PROCESS ON *.* TO 'github'@'%';
+  FLUSH PRIVILEGES;
+EOF
+
+
+# Set EXECUTE Privilege for sys.quote_identifier for both fresh install case and upgrade case
+cat <<EOF | sudo mysql --user root
+  SET sql_log_bin = OFF;
+  FLUSH PRIVILEGES;
+  GRANT EXECUTE ON FUNCTION \`sys\`.\`quote_identifier\` TO 'github'@'%';
+  FLUSH PRIVILEGES;
+EOF
+
+# Grant permission to orchestrator should be idempotent, always do that to ensure access
+if [ -f /etc/github/cluster ]; then
+  cat <<EOF | sudo mysql --user root
+    SET sql_log_bin = OFF;
+    FLUSH PRIVILEGES;
+    DROP USER IF EXISTS 'orchestrator'@'%';
+    FLUSH PRIVILEGES;
+    CREATE USER 'orchestrator'@'%' IDENTIFIED WITH mysql_native_password BY '${mysql_orchestrator_password}';
+    GRANT RELOAD, PROCESS, SUPER, REPLICATION SLAVE ON *.* TO 'orchestrator'@'%';
+    GRANT SELECT ON \`mysql\`.\`slave_master_info\` TO 'orchestrator'@'%';
+    FLUSH PRIVILEGES;
+EOF
+fi

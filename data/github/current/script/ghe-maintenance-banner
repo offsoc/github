@@ -1,0 +1,58 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+# vi: set ft=ruby:
+#
+#/ Usage: ghe-maintenance-banner [-s <time>|-u|-g]
+#/
+#/ Get, set, or clear the time of an upcoming maintenance window.
+#/ This will be displayed as a global banner to all users.
+#/
+#/ OPTIONS:
+#/   -h            Show this message
+#/   -s TIME       Set a global maintenance time
+#/   -g            Get the global maintenance time
+#/   -u            Unset the global maintenance time
+
+require "github/config/mysql"
+GitHub.load_activerecord
+require "github/config/kv"
+
+def usage
+  exec "grep ^#/<'#{__FILE__}'|cut -c4-"
+end
+
+command = ARGV.shift
+
+case command
+when "-g", "--get"
+  if time = GitHub.kv.get("enterprise:maintenance").value!
+    puts time
+  else
+    $stderr.puts "There isn't a maintenance time set."
+  end
+when "-s", "--set"
+  if ARGV.any?
+    begin
+      time = Time.iso8601(ARGV.first)
+      GitHub.kv.set("enterprise:maintenance", time.iso8601)
+      puts "Maintenance time set."
+    rescue ArgumentError => e
+      $stderr.puts "#{ARGV.first} couldn't be parsed as an ISO8601 datetime."
+      exit(1)
+    end
+  else
+    usage
+  end
+when "-u", "--unset"
+  if time = GitHub.kv.get("enterprise:maintenance").value!
+    GitHub.kv.del("enterprise:maintenance")
+    puts "Removed the maintenance time: \"#{time}\""
+  else
+    $stderr.puts "There isn't a maintenance time set."
+  end
+when "-h", "--help", nil
+  usage
+else
+  $stderr.puts "Unknown argument"
+  usage
+end

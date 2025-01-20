@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+
+export PATH="$PATH:/usr/local/share/enterprise"
+
+# die() prints a message to stderr and exits with code 1 (like Perl)
+die() {
+  echo "Error:" "$@" >&2
+  exit 1
+}
+
+# trap_err is run from an ERR trap, when a failing line triggers `set -e`
+trap_err() {
+  code=$?
+  echo "Error $code at line $1" >&2
+  exit $code
+}
+
+trap 'trap_err $LINENO' ERR
+
+echo "Starting WireGuard configuration." >&2
+
+ip link show tun0 || ip link add tun0 type wireguard
+
+for _ in $(seq 10); do
+  if ip link show tun0 > /dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+ip link show tun0 > /dev/null 2>&1 || \
+  die "Could not find tun0 interface."
+
+wg syncconf tun0 /etc/wireguard/tun0.conf || \
+  die "WireGuard could not be configured from /etc/wireguard/tun0.conf."
+
+vpn_ip="$(ghe-call-configrb 'vpn_node_ip')"
+
+if [ -z "$vpn_ip" ] ; then
+  die "vpn_node_ip is not present"
+fi
+
+if ghe-call-configrb 'cluster_ha_primary?' && \
+   ghe-call-configrb 'wireguard_hub_and_spoke?'; then
+  sysctl -q -w net.ipv4.conf.tun0.forwarding=1
+else
+  sysctl -q -w net.ipv4.conf.tun0.forwarding=0
+fi
+
+existing_ip="$(ip -brief -4 address show dev tun0 | awk '{print $3}')"
+if [ -n "$existing_ip" ] && [ "$vpn_ip/24" != "$existing_ip" ]; then
+    # Delete the existing IP address if we somehow ended up with
+    # something different here.
+    ip address del "$existing_ip" dev tun0
+    ip address add "$vpn_ip/24" dev tun0
+elif [ -z "$existing_ip" ]; then
+    ip address add "$vpn_ip/24" dev tun0
+fi
+
+ip link set tun0 mtu "$(ghe-call-configrb 'wireguard_mtu')"
+
+ip link set tun0 up
+
+ip address show dev tun0
+
+echo "WireGuard configuration complete, with VPN IP $vpn_ip." >&2

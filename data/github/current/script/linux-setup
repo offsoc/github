@@ -1,0 +1,150 @@
+#!/bin/sh
+if [ "$(id -u)" != "0" ]; then
+   echo "run linux-setup as root, please" 1>&2
+   exit 1
+fi
+
+# Don't run the script if this env var is present
+if [ -n "$SKIP_LINUX_SETUP" ]; then
+  exit 0
+fi
+
+set -ex
+cd "$(dirname "$0")/.."
+
+export DEBIAN_FRONTEND=noninteractive
+
+# We use Oracle MySQL 5.7 and need some of its features for our SQL. We use apt-key to tell apt what public key to use when
+# verifying the packages from mysql.com. This key is sourced from https://dev.mysql.com/doc/refman/8.0/en/checking-gpg-signature.html.
+# We used to pull the key from a public key server but that proved to be flakey.
+echo "deb http://repo.mysql.com/apt/debian buster mysql-5.7" >/etc/apt/sources.list.d/mysql.list
+apt-key add "config/mysql_debian.pgp"
+
+apt-get update
+
+# Helper tools
+apt-get install -y curl wget git ruby
+
+# Ruby depedencies
+apt-get install -y \
+  build-essential \
+  zlib1g-dev \
+  libyaml-dev \
+  libssl-dev \
+  libgdbm-dev \
+  libreadline-dev \
+  libncurses5-dev \
+  libffi-dev \
+  bison
+
+# Ruby gems dependencies
+apt-get install -y \
+  cmake \
+  pkg-config \
+  erlang-base \
+  google-perftools \
+  libgeoip-dev \
+  libgoogle-perftools-dev \
+  libicu-dev \
+  libjansson-dev \
+  libjemalloc-dev \
+  libmemcached-dev \
+  libmysqlclient-dev \
+  libreadline-dev \
+  libtag1-dev \
+  libxml2-dev \
+  libxslt1-dev \
+  libsasl2-dev \
+  libsodium-dev \
+  libsqlite3-dev \
+  nodejs
+
+# Git dependencies
+apt-get install -y \
+  autoconf \
+  time \
+  libcurl4-openssl-dev \
+  libexpat1-dev \
+  gettext
+
+#
+# Don't install `golang-go` on Linux systems if it looks like a `go`
+# binary is already available.  At this writing these packages install
+# the pretty-old 1.3.3 version on Debian Jessie, and hubbers running
+# tests on Linux locally may not want their local installation mutated.
+#
+if which go >/dev/null 2>&1; then
+  echo "Skipping go-related dependency installation."
+  echo "It seems like you already have 'go' installed: $(which go)."
+else
+  # Alambic dependencies
+  apt-get install -y \
+    golang-go
+fi
+
+# MySQL Server
+apt-get install -y mysql-server
+
+# Copy the configuraiton file so we match what the app expects
+CNF_PATH="/etc/mysql/my.cnf"
+touch "$CNF_PATH"
+
+SRC_PATH="config/my.cnf.dev"
+
+# This is almost what bootstrap-homebrew does but we use the file in this
+# repository as source
+if ! diff -q "$CNF_PATH" "$SRC_PATH"; then
+    echo "Backing up and replacing old my.cnf file"
+    cp -vf "$CNF_PATH" "$CNF_PATH.github"
+    cp -vf "$SRC_PATH" "$CNF_PATH"
+fi
+
+service mysql restart
+
+for db in github_development github_test github_notifications_test; do
+    [ -d "/var/lib/mysql/$db" ] || mysqladmin create "$db"
+done
+
+apt-get install -y memcached
+apt-get install -y redis-server
+
+# Java + Elasticsearch
+apt-get install -y default-jre
+
+ES_VER=8.13.2
+
+if ! apt-cache policy elasticsearch | grep -q "Installed: $ES_VER"; then
+    (cd /tmp && deb=elasticsearch-$ES_VER-amd64.deb &&
+        wget -q https://artifacts.elastic.co/downloads/elasticsearch/$deb &&
+        echo "a1872db51d1d4ca38c1cabfcb1ad621c9da8bfba7e8848d6ffaca1c4644b564641b72da05b0c63b61f932501b40c7e2323fde4c5a85ed6cc9415adfe1f646fbc *$deb" | sha512sum --check --status &&
+        dpkg -i $deb)
+
+    ruby -ni -e 'BEGIN {
+      opts = {
+        "http.port" => 9400,
+        "transport.port" => 9401,
+        "xpack.security.enabled" => false,
+        "ingest.geoip.downloader.enabled" => false,
+        "xpack.ml.enabled" => false,
+        "indices.lifecycle.history_index_enabled" => false,
+      }
+    };
+    if $_ =~ /^([a-z0-9._]+)/
+      print unless opts.key?($1)
+    else
+      print
+    end
+    END {
+      opts.each do |k, v|
+        puts "#{k}: #{v}"
+      end
+    }' /etc/elasticsearch/elasticsearch.yml
+    systemctl daemon-reload
+    systemctl start elasticsearch.service
+fi
+
+# Nginx
+apt-get install -y nginx
+rm -f /etc/nginx/sites-enabled/default
+ln -sf "$(readlink -f config/dev/nginx.root.conf)" /etc/nginx/sites-enabled/github.conf
+update-rc.d nginx defaults

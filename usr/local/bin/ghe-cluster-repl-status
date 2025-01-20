@@ -1,0 +1,172 @@
+#!/bin/bash
+#/ Usage: ghe-cluster-repl-status [options]
+#/
+#/ Show replication status for the cluster. This command is designed to run on
+#/ Cluster HA only. Non-zero exit code indicates possible replication error.
+#/
+#/ OPTIONS:
+#/   -h | --help    Show this message.
+#/   -v | --verbose Show verbose output
+
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/lib/ghe-repl-lib
+source /usr/local/share/enterprise/ghe-repl-lib
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  grep '^#/' < "$0" | cut -c4-
+  exit 2
+fi
+
+verbose=false
+for arg in "$@"
+do
+    case $arg in
+        -v|--verbose)
+        verbose=true
+        ;;
+        *)
+        echo "Unsupported argument $arg"
+        grep '^#/' < "$0" | cut -c4-
+        exit 2
+        ;;
+    esac
+done
+
+function cleanup {
+    # Kill all child processes if any exist. This prevents orphaned processes
+    # if the script is interrupted before the animation is killed.
+    if pgrep -P $$ >/dev/null; then
+      pkill -P $$
+    fi
+}
+trap cleanup EXIT
+
+# Check if we're on a cluster.
+if is_standalone ; then
+  echo "[ Error ] Running ghe-cluster-repl-status on a standalone instance is not supported. Exiting." >&2
+  exit 3
+fi
+
+# Check if cluster.conf is configured for standalone HA.
+if is_standalone_ha ; then
+  echo "[ Error ] Running ghe-cluster-repl-status on standalone HA is not supported. Exiting." >&2
+  exit 4
+fi
+
+# Check if cluster.conf is not configured for cluster HA.
+if ! is_cluster_ha ; then
+  echo "[ Error ] Running ghe-cluster-repl-status on a standalone cluster is not supported. Exiting." >&2
+  exit 5
+fi
+
+save_error(){ ret=$?; if [ $ret -gt "$err" ]; then err=$ret; fi }
+err=0
+err_out=""
+
+# Give the user visual indication that the script is working.
+loading_animation() {
+  # Define the animation frames
+  frames="/-\|"
+
+  # Start the animation loop
+  while :
+  do
+      # Print the current frame
+      printf "\rChecking Replication... [%c]" "${frames:i++%${#frames}:1}"
+      # Sleep for 0.1 seconds
+      sleep 0.1
+  done
+}
+
+# Start the loading animation in the background and save pid so we can kill it later
+if ! $verbose ;then
+  loading_animation &
+  animation_pid=$!
+fi
+
+
+# Check MySQL replication
+result=$(/usr/local/share/enterprise/ghe-cluster-status-mysql "$@" 2>&1 || save_error)
+if [[ $result != *"Mysql: OK"* ]];then
+  err=1
+  err_out="MySQL Errors:\n${result}\n"
+  summary="\nMySQL: ERROR"
+else
+  summary="\nMySQL: OK"
+fi
+if $verbose; then
+  echo "MySQL Replication:"
+  echo "$result"
+fi
+
+
+# Check Spokes replication
+result=$(ghe-spokes status "$@" 2>&1 || save_error)
+if [[ $result != *"Everything looks OK!"* ]];then
+  err=1
+  err_out+="Spokes Errors:\n${result}\n"
+  summary+="\nSpokes: ERROR"
+else
+  summary+="\nSpokes: OK"
+fi
+if $verbose; then
+  echo "Spokes Replication:"
+  echo "$result"
+fi
+
+# Check Storage replication
+result=$(ghe-storage replication-status "$@" 2>&1 || save_error)
+if [[ $result != *"Everything looks OK!"* ]];then
+  err=1
+  err_out+="Storage Errors:\n${result}\n"
+  summary+="\nStorage: ERROR"
+else
+  summary+="\nStorage: OK"
+fi
+if $verbose; then
+  echo "Storage Replication:"
+  echo "$result"
+fi
+
+# Check Pages replication (no verbose support for ghe-dpages)
+result=$(ghe-dpages replication-status 2>&1 || save_error)
+if [[ $result != *"Everything looks OK!"* ]];then
+  err=1
+  err_out+="Pages Errors:\n${result}\n"
+  summary+="\nPages: ERROR"
+else
+  summary+="\nPages: OK"
+fi
+
+# Check Elasticsearch replication (the building of indices on the replica cluster)
+# No verbose support.
+result=$(/usr/local/share/enterprise/ghe-cluster-repl-status-es "$@" 2>&1 || save_error)
+if [[ $result != *"Elasticsearch indices on replica cluster: OK"* ]];then
+  err=1
+  err_out+="Elasticsearch indices on replica cluster:\n${result}\n"
+  # this check can only result in OK or a warning
+  summary+="\nElasticsearch indices on replica cluster: WARN"
+else
+  summary+="\nElasticsearch indices on replica cluster: OK"
+fi
+if $verbose; then
+  echo "Elasticsearch indices on replica cluster:"
+  echo "$result"
+fi
+
+if ! $verbose; then
+  # all checks have finished, kill animation
+  kill $animation_pid
+  echo "" # add blank line after final animation frame.
+fi
+
+# output errors, if any
+if [ -n "$err_out" ];then
+  echo -e "$err_out" >&2
+fi
+
+# output summary
+echo "Summary:"
+echo -e "$summary" | column -t
+exit $err

@@ -1,0 +1,168 @@
+<% cancel_button_text = from_settings ? "Cancel" : "Ask me later" %>
+
+<div class="new-u2f-registration js-new-u2f-registration js-passkey">
+  <input type="hidden" id="existing_passkey_count" value="<%= existing_passkey_count %>">
+  <input type="hidden" id="existing_security_key_count" value="<%= existing_security_key_count %>">
+
+  <% if !convert_for.blank? %>
+    <div class="text-center">
+      <%= render(Primer::Beta::Octicon.new(icon: "passkey-fill", height: 32)) %>
+    </div>
+    <h2 class="mt-2 f3 text-normal text-center">
+      Upgrade your security key registration to a passkey
+    </h2>
+    <p class="mt-3 mr-3 ml-3">
+      Your security key <b>`<%= convert_for.nickname %>`</b> can be upgraded to a passkey.
+      <br><br>
+      <%= passkey_usage %>
+    </p>
+  <% else %>
+    <div class="text-center">
+      <%= render(Primer::Beta::Octicon.new(icon: "passkey-fill", height: 32)) %>
+    </div>
+
+    <h2 class="mt-2 f3 text-normal text-center">
+      Add a passkey
+    </h2>
+    <p class="mt-3 mx-2">
+      <%= passkey_intro %>
+      <br><br>
+      <%= passkey_usage %>
+    </p>
+  <% end %>
+
+  <noscript>
+    <hr>
+    Please enable Javascript to register a passkey.
+  </noscript>
+
+  <p class="webauthn-request-interaction mt-3 text-center color-fg-muted">
+    <%= render(Primer::Beta::Spinner.new(size: :small, vertical_align: :middle, mr: 2)) %>
+    Waiting for input from browser interaction...
+  </p>
+
+  <div class="webauthn-request-error js-webauthn-message js-webauthn-registration-error text-center mt-3" hidden>
+    <%= render Primer::Alpha::Banner.new(scheme: :danger, icon: "alert", text_align: :left, p: 0,
+      ) do %>
+      <span role="alert" class="js-webauthn-registration-error-message">
+        Passkey <% if convert_for.blank? %>registration<% else %>upgrade<% end %> failed.
+      </span>
+      <span class="js-webauthn-message js-webauthn-registration-upgrade-conflict-message" hidden>
+        If you are attempting to upgrade a security key, please delete the associated security key first.
+      </span>
+    <% end %>
+    <span class="js-webauthn-message js-webauthn-registration-error-message-info color-fg-muted" hidden>
+    </span>
+  </div>
+
+  <div class="js-passkey-duplicate-message text-center mt-3" hidden>
+    <%= render Primer::Alpha::Banner.new(text_align: :left, p: 0,
+      ) do %>
+      <span role="alert">
+        This passkey has already been registered.
+      </span>
+     <% end %>
+  </div>
+
+  <%= form_tag trusted_device_create_path, class: "add-u2f-registration-form for-trusted-device js-add-u2f-registration-form", "data-webauthn-register-request" => webauthn_register_request(webauthn_reason: convert_for ? :trusted_device_conversion : :trusted_device_registration, convert_for: convert_for).to_json, hidden: true do %>
+    <input type="hidden" name="response">
+    <button type="submit" class="<%= "btn-large " if mobile? %>btn btn-block btn-primary mt-3 js-trusted-device-registration-button" data-disable-invalid>
+      <% if !convert_for.blank? %>
+        Upgrade to passkey
+      <% else %>
+        Add passkey
+      <% end %>
+    </button>
+  <% end %>
+
+  <%= render(partial: "/sessions/webauthn/register_component_alt_options", locals: {
+    show_reset_button: !convert_for.blank? && from_settings,
+    cancel_button_text: cancel_button_text,
+  }) %>
+</div>
+
+<div class="js-webauthn-confirm" hidden>
+  <div class="text-center">
+    <%= render(Primer::Beta::Octicon.new(icon: "passkey-fill", height: 32)) %>
+  </div>
+
+  <h2 class="mt-2 f3 text-normal text-center">
+    Confirm existing registration
+  </h2>
+
+  <p class="mt-3 mx-2">This credential seems to match an existing security key or passkey registration.
+
+    <br><br>
+     Please authenticate again to ensure we upgrade the correct credential.
+  </p>
+
+  <%= form_tag session_path, class: "js-webauthn-form mt-3", data: { webauthn_sign_request: trusted_device_webauthn_sign_request(user: current_user).to_json } do -%>
+    <div class="webauthn-form-body">
+      <%= render partial: "/sessions/webauthn/get", locals: {
+        button_text: "Confirm passkey",
+        webauthn_user: current_user,
+        webauthn_reason: :passkey_promote_confirmation,
+        is_primary_auth_option_in_prompt: true,
+      } %>
+      <input type="hidden" name="webauthn_response" class="js-webauthn-response">
+      <input type="hidden" name="confirm">
+      <%= render partial: "/sessions/sign_in_state", locals: { ignore_return_to_path: true } %>
+    </div>
+  <% end %>
+
+  <%= render(partial: "/sessions/webauthn/register_component_alt_options", locals: {
+    show_reset_button: from_settings,
+    cancel_button_text: cancel_button_text,
+  }) %>
+</div>
+
+<div class="js-new-u2f-registration-success" hidden>
+  <div class="text-center">
+    <%= render(Primer::Beta::Octicon.new(icon: "check-circle", color: :success, height: 32)) %>
+  </div>
+
+  <% if convert_for %>
+    <h2 class="mt-2 f3 text-normal text-center">
+      Successfully upgraded '<%= convert_for.nickname %>' to a passkey
+    </h2>
+  <% else %>
+    <h2 class="mt-2 f3 text-normal text-center">
+      Successfully added a passkey
+    </h2>
+  <% end %>
+  <p class="mt-3">
+    From now on, you can use this passkey to sign-in to GitHub.
+    <% if convert_for %>
+      We've deleted the old '<%= convert_for.nickname %>' security key.
+    <% end %>
+  </p>
+
+  <hr>
+
+  <%= form_tag trusted_device_continue_path do %>
+    <div class="form-group mt-0">
+      <div class="form-group-header">
+        <label class="text-semibold" for="nickname">Passkey nickname</label>
+      </div>
+      <div class="mt-1 mb-2 js-u2f-registration-nickname-advice-synced" hidden>
+        This passkey can work across multiple devices - pick a nickname that will help you identify it later.
+        <br><br>
+        For example, the name of your password manager or account provider.
+      </div>
+      <div class="mt-1 mb-2 js-u2f-registration-nickname-advice-hardware" hidden>
+        This is a hardware passkey - you may want to nickname it by its manufacturer or device model.
+      </div>
+      <div class="form-group-body">
+        <auto-check src="<%= trusted_device_nickname_check_path %>" required>
+          <input type="text"
+            id="nickname"
+            name="nickname"
+            class="form-control width-full js-u2f-registration-nickname-field"
+            required>
+          <%= csrf_hidden_input_for(trusted_device_nickname_check_path) %>
+        </auto-check>
+      </div>
+    </div>
+    <button type="submit" class="<%= "btn-large " if mobile? %>btn btn-block btn-primary mt-3 js-trusted-device-continue" data-disable-with="Continuing…">Done</button>
+  <% end %>
+</div>

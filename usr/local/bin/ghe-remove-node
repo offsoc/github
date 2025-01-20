@@ -1,0 +1,428 @@
+#!/bin/bash
+#/ Usage: ghe-remove-node [options] <hostname>
+#/
+#/ Gracefully removes a node from a cluster.
+#/
+#/ OPTIONS:
+#/   -ne | --no-evacuate  WARNING: Skipping evacuation may result in data loss.
+#/                        Skips evacuation of spokes, pages, and storage.
+#/   -v  | --verbose      Print additional information to the console.
+#/   -h  | --help         Displays this help text
+#/
+
+source /usr/local/share/enterprise/lib/ghe-cluster-commons
+source /usr/local/share/enterprise/lib/remove-node/nomad-gateway
+source /usr/local/share/enterprise/lib/remove-node/pages-gateway
+source /usr/local/share/enterprise/lib/remove-node/spokes-gateway
+source /usr/local/share/enterprise/lib/remove-node/storage-gateway
+source /usr/local/share/enterprise/lib/remove-node/search-gateway
+source /usr/local/share/enterprise/lib/remove-node/verbose-utils
+set -e
+
+DRAIN_ENABLED=true
+
+## Argument values
+evacuate_enabled=true
+verbose=false
+hostname=""
+
+declare -A object_counts=( [spokes_network]=0 [spokes_gist]=0 [pages]=0 [storage]=0 )
+declare -A marked_offline=( )
+declare -A evacuated=( )
+
+main() {
+  SECONDS=0
+  parse_arguments "$@"
+  configure_verbosity
+
+  setup_event_logging
+  start_event "INFO" "Validating user input"
+    validate_node_online "$hostname" "$evacuate_enabled"
+    validate_cluster_environment
+    validate_cluster_delegate
+    validate_not_cluster_dr
+    validate_not_mysql_master "$hostname"
+    validate_not_redis_master "$hostname"
+    validate_cluster_topology "$hostname" "$evacuate_enabled"
+    validate_cluster_config "$hostname" "$evacuate_enabled"
+  finish_event "INFO" "Validating user input"
+
+  # Get initial object counts
+  start_event "INFO" "Determining object counts"
+    write_object_counts
+    for name in spokes_network spokes_gist pages storage ; do
+      object_counts[$name]="$(get_${name}_object_count "$hostname")"
+      write_object_counts
+    done
+  finish_event "INFO" "Determining object counts"
+
+  # Initiate evacaution if requested
+  if [ $evacuate_enabled = true ]; then
+    start_event "INFO" "Evacuating GitHub Data"
+
+      ## TODO: see if we can "force" the workers to start their evacuation jobs
+      evacuate_spokes "$hostname"
+      evacuate_pages  "$hostname"
+      evacuate_search "$hostname"
+      # storage is unique in that it must be offline before evacuation
+      mark_storage_offline "$hostname"
+      evacuate_storage "$hostname"
+
+      evacuated[spokes]=0
+      evacuated[pages]=0
+      evacuated[storage]=0
+
+      # Wait for evacuation to complete
+      while true ; do
+        write_evacuated
+        echo "waiting for evacuation to complete."
+        sleep 15s
+        if ! is_spokes_evacuated  "$hostname"; then continue; else evacuated[spokes]=1 ; fi
+        if ! is_pages_evacuated   "$hostname"; then continue; else evacuated[pages]=1  ; fi
+        if ! is_storage_evacuated "$hostname"; then continue; else evacuated[storage]=1; fi
+        break
+      done
+    finish_event "INFO" "Evacuating GitHub data"
+
+    # Mark each service as offline before destroying:
+    start_event "INFO" "Marking services offline"
+      write_services_marked_offline
+      for name in spokes pages search ; do
+        marked_offline[$name]=0
+        mark_${name}_offline "$hostname" && marked_offline[$name]=1
+        write_services_marked_offline
+      done
+      # storage is unique and must be offline before evacuation
+    finish_event "INFO" "Marking services offline"
+
+    # Destroy/Remove each service after evacuation is finished and marked as offline
+    destroy_spokes "$hostname"
+    remove_pages_server "$hostname"
+    remove_search_server "$hostname"
+    destroy_storage "$hostname"
+  else
+    echo "skipping evacuation of github data"
+    # Mark each service as offline:
+    start_event "INFO" "Marking services offline"
+      write_services_marked_offline
+      for name in spokes pages storage search ; do
+        marked_offline[$name]=0
+        mark_${name}_offline "$hostname" && marked_offline[$name]=1
+        write_services_marked_offline
+      done
+    finish_event "INFO" "Marking services offline"
+  fi
+
+  if [ "$DRAIN_ENABLED" = true ]; then
+    # Stop nomad on the node
+    start_event "INFO" "Draining Nomad"
+      mark_nomad_node_ineligible "$hostname"
+      drain_nomad_node "$hostname"
+    finish_event "INFO" "Draining Nomad"
+  else
+    echo "skipping nomad drain because node is offline and evacuation is disabled"
+  fi
+
+  # Wrap it up with a cluster.conf update
+  if [ "$evacuate_enabled" = true ]; then
+    ghe-config --remove-section "cluster.$hostname"
+  else
+    ghe-config "cluster.$hostname.offline" true
+  fi
+  # TODO: how to associate our logging context to this config-apply run?
+  ghe-config-apply
+  echo "node removal complete"
+}
+
+parse_arguments() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -ne|--no-evacuate)
+        evacuate_enabled=false
+        shift
+        ;;
+      -v|--verbose)
+        verbose=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      -*)
+        error "Unknown option: $1"
+        usage
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [ $# -ne 1 ]; then
+    error "Hostname is required."
+    usage
+  fi
+  hostname="$1"
+}
+
+configure_verbosity() {
+  if [ "$verbose" = true ]; then
+    shout "Verbose mode enabled. 📣"
+    enable_verbose_mode
+  else
+    shout "Quiet mode. 🤫"
+    disable_verbose_mode
+  fi
+}
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+  return 1
+}
+
+# Setup event logging
+setup_event_logging() {
+  export GHE_REMOVE_NODE_RUN_ID=${GHE_REMOVE_NODE_RUN_ID:-$(echo $RANDOM | md5sum | head -c 16)}
+  EVENTS_DIR=/data/user/config-apply/events
+  export EVENTS_LOGFILE="${EVENTS_DIR}/remove-node.${HOSTNAME}.${GHE_REMOVE_NODE_RUN_ID}.log"
+  if [ ! -e "$EVENTS_LOGFILE" ]; then
+    sudo mkdir -p "$EVENTS_DIR"
+    sudo chown admin:admin "$EVENTS_DIR"
+    touch "$EVENTS_LOGFILE"
+    shout "Logging events to: $EVENTS_LOGFILE"
+  fi
+}
+
+#/ function: assoc2json
+#/ Desciption:
+#/    Print an associative array in JSON format
+#/
+#/ Usage:
+#/    assoc2json <variable_name>
+assoc2json() {
+  declare -n dict=$1
+  for key in "${!dict[@]}"; do
+    printf '%s\0%s\0' "$key" "${dict[$key]}"
+  done |
+  jq -Rs '
+    split("\u0000")
+    | . as $a
+    | reduce range(0; length/2) as $i
+        ({}; . + {($a[2*$i]): ($a[2*$i + 1]|fromjson? // .)})'
+}
+
+#/ function: __write_status
+#/ Desciption:
+#/    Append a status JSON object to EVENTS_LOGFILE
+#/
+#/ Usage:
+#/    __write_status <variable_name>
+__write_status() {
+  var="$1"
+
+  local severity="INFO"
+  local event_state="running"
+  local event_name="Enterprise::RemoveNode::Run#${FUNCNAME[2]}"
+  local topology='cluster'
+  local run_id="$GHE_REMOVE_NODE_RUN_ID"
+  local body=""
+  local timestamp
+  timestamp="$(date +%Y-%m-%dT%H:%M:%S.%3N)"
+
+  jq -n -c \
+    --arg sc "$(assoc2json "$var")" \
+    --arg et "$SECONDS"     \
+    --arg ts "$timestamp"   \
+    --arg bd "$body"        \
+    --arg sv "$severity"    \
+    --arg es "$event_state" \
+    --arg en "$event_name"  \
+    --arg ri "$run_id"      \
+    --arg hn "$(hostname)"  \
+    --arg tp "$topology"    \
+    '{
+      "Timestamp":          $ts,
+      "SeverityText":       $sv,
+      "Body":               $bd,
+      "event.name":         $en,
+      "event.state":        $es,
+      "ghes.topology":      $tp,
+      "ghes.node.hostname": $hn,
+      "remove_node.id":     $ri,
+      "services":           $sc | fromjson,
+      "elapsed_time":       $et | tonumber,
+    }' | tee -a "$EVENTS_LOGFILE"
+}
+
+write_object_counts() {
+  __write_status object_counts
+}
+
+write_evacuated() {
+  __write_status evacuated
+}
+
+write_services_marked_offline() {
+  __write_status marked_offline
+}
+
+# should not be called directly.
+__emit_event() {
+  local severity="$1"
+  shift
+  local event_state="$1"
+  shift
+  local timestamp
+  timestamp="$(date +%Y-%m-%dT%H:%M:%S.%3N)"
+  local body="$*"
+  local event_name="Enterprise::RemoveNode::Run#${FUNCNAME[2]}"
+  local topology='cluster'
+  local run_id="$GHE_REMOVE_NODE_RUN_ID"
+
+  jq -n -c \
+    --arg ts "$timestamp"   \
+    --arg bd "$body"        \
+    --arg sv "$severity"    \
+    --arg es "$event_state" \
+    --arg en "$event_name"  \
+    --arg ri "$run_id"      \
+    --arg hn "$(hostname)"  \
+    --arg tp "$topology"    \
+    '{
+      "Timestamp":          $ts,
+      "SeverityText":       $sv,
+      "Body":               $bd,
+      "event.name":         $en,
+      "event.state":        $es,
+      "ghes.topology":      $tp,
+      "ghes.node.hostname": $hn,
+      "remove_node.id":     $ri,
+    }' | tee -a "$EVENTS_LOGFILE"
+}
+
+start_event() {
+  local severity="$1"
+  shift
+  __emit_event "$severity" "start" "$*"
+}
+
+finish_event() {
+  local severity="$1"
+  shift
+  __emit_event "$severity" "finish" "$*"
+}
+
+validate_cluster_environment() {
+  is_in_cluster || {
+    error "ghe-remove-node only supports cluster environments"
+    return 1
+  }
+}
+
+validate_node_online() {
+  local hostname
+  local evacuate_enabled
+  hostname="$1"
+  evacuate_enabled=$2
+  if ! is_node_online "$hostname"; then
+    if [ "$evacuate_enabled" == true ]; then
+      error "ghe-remove-node only supports removal of online nodes"
+      return 1
+    fi
+    if [ "$evacuate_enabled" == false ]; then
+      DRAIN_ENABLED=false
+    fi
+  else
+    return 0
+  fi
+}
+
+validate_cluster_delegate() {
+  if ! is_cluster_delegate; then
+    error "ghe-remove-node must be run on the cluster delegate"
+    return 1
+  fi
+}
+
+validate_not_cluster_dr() {
+  if is_in_cluster_dr; then
+    error "ghe-remove-node does not support cluster dr"
+    return 1
+  fi
+}
+
+validate_not_mysql_master() {
+  local hostname
+  hostname="$1"
+  local mysql_master
+  mysql_master="$(ghe-config cluster.mysql-master)"
+  if [[ "$hostname" == "$mysql_master" ]]; then
+    error "ghe-remove-node does not support removal of mysql-master"
+    return 1
+  fi
+}
+
+validate_not_redis_master() {
+  local hostname
+  hostname="$1"
+  local redis_master
+  redis_master="$(ghe-config cluster.redis-master)"
+  if [[ "$hostname" == "$redis_master" ]]; then
+    error "ghe-remove-node does not support removal of redis-master"
+    return 1
+  fi
+}
+
+# validate_cluster_topology checks to see if we have enough git servers to perform an evacatuion, if needed.
+validate_cluster_topology() {
+  local hostname=$1
+  local evacuate_enabled=$2
+  if is_git_server "$hostname"; then
+    local git_server_count
+    git_server_count=$(get_spokes_server_count)
+    if [ "$(( git_server_count - 1 ))" -lt 3 ] && [ "$evacuate_enabled" = true ]; then
+      error "At least 3 git-server nodes are required for evacuation.\nAdd a new git-server before removal, or re-run this command with --no-evacuate option."
+      return 1
+    fi
+  fi
+}
+
+# validate_cluster_config creates a temporary copy of the cluster.conf, manipulates this copy to
+# mimic the changes we would make if ghe-remove-node script succeeds, and runs this copy through
+# the normal ghe-cluster-config-check to ensure that we aren't breaking any validation rules.
+validate_cluster_config() {
+  local hostname=$1
+  local evacuate_enabled=$2
+  local config_copy="/data/user/common/cluster.conf.tmp"
+  cp /data/user/common/cluster.conf $config_copy
+  # Make sure we clean up our copy before we return.
+  trap "rm $config_copy" EXIT
+
+  if [ "$evacuate_enabled" = true ]; then
+    CLUSTER_CONFIG="$config_copy" ghe-config --remove-section "cluster.$hostname"
+  else
+    CLUSTER_CONFIG="$config_copy" ghe-config "cluster.$hostname.offline" true
+  fi
+
+  local output
+  output="$(ghe-cluster-config-check $config_copy)" || {
+    error "ghe-cluster-config-check failed."
+    error "$output"
+    return 1
+  }
+
+  return 0
+}
+
+error() {
+  shout_err "ERROR: $*"
+}
+
+
+# Prevent users from launching ghe-remove-node while a run is already in progress.
+[ -n "$GHE_REMOVE_NODE_LOCKED" ] || {
+  export GHE_REMOVE_NODE_LOCKED=1
+  exec lockrun --lockfile=/var/run/ghe-remove-node.pid -- "$0" "$@"
+}
+
+main "$@"

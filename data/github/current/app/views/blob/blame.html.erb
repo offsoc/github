@@ -1,0 +1,180 @@
+<%# erblint:counter DeprecatedComponentsCounter 1 %>
+<%
+  title = "#{current_repository.name}/#{path_string_for_display} at #{h tree_name_for_display} · #{current_repository.name_with_display_owner}"
+  page_info selected_link: :repo_source,
+  title: title,
+  container_xl: true,
+  dashboard_pinnable_item_id: current_repository.global_relay_id,
+  class: "full-width"
+%>
+
+<%= render layout: "layouts/repository_container", locals: { repository: current_repository } do %>
+<div class="clearfix container-xl px-3 px-md-4 px-lg-5 mt-4">
+  <% view = Blob::BlameView.new(:blame => current_blame) %>
+
+  <%= render partial: "blob/blame_header", locals: { view: view } %>
+
+  <div class="file">
+    <div class="file-header py-2 pl-3 pr-2">
+      <% if logged_in? && !current_user.dismissed_notice?("blame_ignore_revs") %>
+        <%= render Primer::Beta::Popover.new(
+          classes: "js-notice",
+          right: true,
+          position: :absolute,
+          ml: 3,
+          mt: 5,
+          display: [:none, :none, :block, :block],
+          test_selector: "blame-ignore-revs-notice"
+        ) do |component| %>
+          <% component.with_heading do %>
+            Ignore revisions
+          <% end %>
+          <% component.with_body(caret: :top_left, large: true) do %>
+            You can now hide commits e.g. from automated formatters. <a class="Link--inTextBlock" href="<%= "#{GitHub.help_url}/repositories/working-with-files/using-files/viewing-a-file#ignore-commits-in-the-blame-view" %>">Learn more about ignoring files in the blame view</a>.
+
+            <%= form_tag dismiss_notice_path(UserNotice::BLAME_IGNORE_REVS_NOTICE), class: "mt-3 js-notice-dismiss" do %>
+              <%= render Primer::ButtonComponent.new(scheme: :primary, type: :submit) do %>
+                Got it!
+              <% end %>
+            <% end %>
+          <% end %>
+        <% end %>
+      <% end %>
+
+      <% url_tree = current_branch_or_tag_name || commit_sha -%>
+      <div class="file-actions pt-0">
+        <%= render Primer::Beta::ButtonGroup.new(size: :small) do |c| %>
+          <% c.with_button(tag: :a, href: blob_raw_path(params[:path], url_tree), id: "raw-url") { "Raw" } %>
+          <% c.with_button(tag: :a, href: blob_view_path(params[:path], url_tree), classes: "js-update-url-with-hash") { "Normal view" } %>
+          <% c.with_button(tag: :a, href: commits_path(params[:path], url_tree), rel: "nofollow") { "History" } %>
+        <% end %>
+      </div>
+
+  <% timeout_if_expired! %>
+
+  <%# The caching starts down here to avoid caching the links above, which depend on the current commit. %>
+  <%# Only cache for two weeks so heat colors change as the commits age. %>
+  <%= cache(blame_view_key, :ttl => 2.weeks) do %>
+    <%
+      # inform the controller that the cache block fell through for metrics recording purposes.
+      controller.blame_not_cached!
+      commits = view.commit_line_ranges.map(&:commit).uniq
+      avatar_class = avatar_count_class(commits)
+      timeout_if_expired!
+    %>
+
+      <div class="file-info" style="line-height: 28px">
+        <span style="margin-left: 2px">
+          <%= primer_octicon(:file) %>
+        </span>
+        <span class="file-mode"><%= current_blob.mode %></span>
+        <span class="file-info-divider"></span>
+        <% if current_blob.viewable? %>
+          <%= current_blob.loc %> lines (<%= current_blob.sloc %> sloc)
+          <span class="file-info-divider"></span>
+        <% end %>
+        <%= number_to_human_size(current_blob.size) %>
+      </div>
+    </div>
+
+    <div class="blob-wrapper">
+      <% if current_blame.has_ignore_revs_file? %>
+        <div class="rounded-0 Box-row Box-row--blue pl-3 py-2 border-bottom color-border-accent" <%= test_selector("ignored-revisions-banner")%>>
+          <%= render Primer::Beta::Octicon.new(icon: :info, mr: 1, color: :accent, style: "margin-left: 2px") %>
+          <% if current_blame.did_blame_with_ignore_revs_timeout? %>
+            Failed to ignore revisions in <%= link_to Blame::IGNORE_REVS_FILE_PATH, blob_view_path(Blame::IGNORE_REVS_FILE_PATH, url_tree), class: "Link--inTextBlock" %>.
+          <% else %>
+            Ignoring revisions in <%= link_to Blame::IGNORE_REVS_FILE_PATH, blob_view_path(Blame::IGNORE_REVS_FILE_PATH, url_tree), class: "Link--inTextBlock" %>.
+          <% end%>
+        </div>
+      <% end %>
+      <div class="blame-container <%= avatar_class %> highlight data js-file-line-container tab-size" data-tab-size="<%= tab_size(current_blame.path) %>" data-paste-markdown-skip>
+        <% colorize_strategy = robot? ? :from_cache_or_plain : nil
+           colored_lines = current_blob.colorized_lines(strategy: colorize_strategy)
+           commit_urls = {}
+           commit_oids = commits.map(&:oid)
+           # batch load Commit#short_message_html to avoid async-sync pattern
+           short_message_htmls = commit_oids.zip(Promise.all(commits.map { |commit| commit.async_short_message_html }).sync).to_h
+           heats = {}
+           js_time_strs = {}
+           stacks = {}
+           hovercard_data_hashes = {}
+           commit_links = {}
+           reblame_links = {}
+           version_octicon = primer_octicon(:versions)
+           empty_string = ""
+           name_with_display_owner = current_repository.name_with_display_owner %>
+        <% view.commit_line_ranges.each_with_index do |range, i| %>
+          <%
+            timeout_if_expired! if i % 10 == 0
+            commit = range.commit
+            commit_oid = commit.oid
+            url = (commit_urls[commit_oid] ||= commit_path(commit, nil, nil, name_with_display_owner))
+            short_message_html = short_message_htmls.fetch(commit_oid)
+            heat = (heats[commit_oid] ||= view.heat(commit))
+            js_time_str = (js_time_strs[commit_oid] ||= render Primer::Beta::RelativeTime.new(datetime: commit.authored_date, tense: :past))
+
+            avatar_stack = (stacks[commit.author_emails] ||= render Commits::AvatarStackComponent.new(commit: commit))
+
+            hovercard_attributes = (hovercard_data_hashes[commit_oid] ||= hovercard_data_attributes_for_commit(commit_url: url).merge(pjax: true))
+            commit_link = (commit_links[commit_oid] ||= begin
+              if range.commit.empty_message?
+                link_to "No commit message", url, class: "message blank f6 color-fg-default", data: hovercard_attributes
+              else
+                link_markup_to title_markdown(short_message_html), url, class: "message f6 color-fg-default markdown-title", data: hovercard_attributes
+              end
+            end)
+            reblame_link = (reblame_links[commit_oid] ||= begin
+              if range.reblamable?
+                link_to version_octicon, blame_path(current_repository.owner, current_repository, commit.first_parent_oid, range.reblame_path), class: "reblame-link Link--onHover no-underline d-inline-block pr-1", id: "reblame-link-#{commit_oid}"
+              else
+                empty_string
+              end
+            end)
+          %>
+
+          <div class="blame-hunk d-flex color-border-muted border-bottom">
+
+            <div class="blame-commit flex-self-stretch mr-1" data-heat="<%= heat %>">
+              <div class="blame-commit-info pl-3 pr-2">
+
+                <div class="no-wrap d-flex flex-items-start">
+                  <%= avatar_stack %>
+                  <div class="blame-commit-content d-flex no-wrap flex-items-center">
+                    <div class="blame-commit-message overflow-hidden pt-1 f6">
+                      <%= commit_link %>
+                    </div>
+                  </div>
+                  <div class="blame-commit-date ml-3" data-heat="<%= heat %>"><%= js_time_str %></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="blob-reblame pl-1 pr-1">
+              <%= reblame_link %>
+              <%= render(Primer::Alpha::Tooltip.new(
+                text: range.reblamable? ? "View blame prior to this change" : "",
+                type: :label,
+                direction: :e,
+                for_id: "reblame-link-#{commit_oid}"
+              )) %>
+            </div>
+
+            <div class="width-full">
+              <% range.lines.each do |lineno, old_lineno, commit, text| %>
+                <div class="d-flex flex-justify-start flex-items-start">
+                  <div class="blob-num blame-blob-num color-bg-subtle js-line-number" id="L<%= lineno %>"><%= lineno %></div>
+                  <div class="blob-code blob-code-inner js-file-line" id="LC<%= lineno %>"><%= line = colored_lines.shift; line.blank? ? "\n" : line %></div>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+  </div>
+
+  <% end %>
+</div>
+<% end %>

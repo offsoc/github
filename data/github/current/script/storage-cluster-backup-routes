@@ -1,0 +1,72 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# GHE server side script to calculate storage backup routes.
+# Gets the host and path for each blob object.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Returns a list of <blob_path> <server>
+#
+# d/da/ac/daac5a11e... storage-node1
+# 6/69/fb/69fbd0459... storage-node2
+# a/a5/06/100000659... storage-node3
+# ...
+#
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/active_record"
+require "github/sql/batched"
+
+# For each Storage::Blob object which is present on at least one online
+# storage fileserver, calls the given block with the OID and a host where
+# the blob can be found.
+def each_blob
+  # Storage cluster doesn't have read weights, so for each blob, choose an
+  # online & voting fileserver based on the ID of the storage blob & fileserver
+  # entry. The algorithm is stable so unless a storage rebalancing moves an
+  # object, it will always be copied from the same host.
+
+  iterator = GitHub::QueryBatching::IteratorBuilder.new do |iteration|
+    sql = Arel.sql(<<-SQL)
+      SELECT blobs.id, blobs.oid,
+        (SELECT storage_replicas.host
+          FROM storage_replicas
+          INNER JOIN storage_blobs
+            ON storage_blobs.id=storage_replicas.storage_blob_id
+          INNER JOIN storage_file_servers
+            ON storage_replicas.host=storage_file_servers.host
+          WHERE storage_blobs.oid=blobs.oid
+            AND storage_file_servers.online=1
+            AND storage_file_servers.non_voting=0
+    SQL
+
+    sql += Arel.sql(<<-SQL) if GitHub::Storage::Allocator.have_cache_location_column?
+            AND cache_location IS NULL
+    SQL
+
+    sql += Arel.sql(<<-SQL, **iteration.cursor.arel_bindings)
+          ORDER BY (storage_blobs.id % (storage_file_servers.id + 100)) ASC, storage_replicas.id ASC
+          LIMIT 1
+        ) AS host
+      FROM storage_blobs AS blobs
+      WHERE blobs.id >= :lower_id
+      ORDER BY blobs.id
+      LIMIT :limit
+    SQL
+
+    results = ApplicationRecord::Domain::Storage.connection.select_rows(sql)
+
+    iteration << results
+  end
+
+  iterator.each do |batch|
+    batch.each { |r| yield r[1], r[2] if r[2] }
+  end
+end
+
+def path_for(oid)
+  File.join(oid[0], oid[0...2], oid[2...4], oid)
+end
+
+each_blob { |oid, host| puts "#{path_for(oid)} #{host}" }

@@ -1,0 +1,68 @@
+import {ProjectIcon, TableIcon} from '@primer/octicons-react'
+import {Link, Octicon} from '@primer/react'
+import {graphql} from 'react-relay'
+import {useFragment} from 'react-relay/hooks'
+
+import {LABELS} from '../constants/labels'
+import {createIssueEventExternalUrl} from '../utils/urls'
+
+import type {AddedToProjectEvent$key} from './__generated__/AddedToProjectEvent.graphql'
+import {TimelineRow} from './row/TimelineRow'
+
+type AddedToProjectEventProps = {
+  queryRef: AddedToProjectEvent$key
+  issueUrl: string
+  onLinkClick?: (event: MouseEvent) => void
+  highlightedEventId?: string
+  refAttribute?: React.MutableRefObject<HTMLDivElement | null>
+}
+
+export function AddedToProjectEvent({
+  queryRef,
+  issueUrl,
+  onLinkClick,
+  highlightedEventId,
+  refAttribute,
+}: AddedToProjectEventProps): JSX.Element {
+  const {actor, createdAt, project, projectColumnName, databaseId} = useFragment(
+    graphql`
+      fragment AddedToProjectEvent on AddedToProjectEvent {
+        createdAt
+        actor {
+          ...TimelineRowEventActor
+        }
+        project {
+          name
+          url
+        }
+        projectColumnName
+        databaseId
+      }
+    `,
+    queryRef,
+  )
+
+  if (!project) {
+    return <></>
+  }
+  const highlighted = String(databaseId) === highlightedEventId
+  return (
+    <TimelineRow
+      highlighted={highlighted}
+      refAttribute={refAttribute}
+      actor={actor}
+      createdAt={createdAt}
+      deepLinkUrl={createIssueEventExternalUrl(issueUrl, databaseId)}
+      onLinkClick={onLinkClick}
+      leadingIcon={TableIcon}
+    >
+      <TimelineRow.Main>
+        {`${LABELS.timeline.addedThisTo} ${projectColumnName} in `}
+        <Octicon icon={ProjectIcon} />{' '}
+        <Link href={project.url} sx={{color: 'fg.default', mr: 1}} aria-label={project.name} inline>
+          {project.name}
+        </Link>
+      </TimelineRow.Main>
+    </TimelineRow>
+  )
+}

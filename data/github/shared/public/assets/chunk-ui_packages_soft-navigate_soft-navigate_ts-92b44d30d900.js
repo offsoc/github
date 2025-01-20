@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunk=globalThis.webpackChunk||[]).push([["ui_packages_soft-navigate_soft-navigate_ts"],{63120:(a,t,s)=>{s.d(t,{softNavigate:()=>o});var i=s(56725),e=s(7332);function o(a,t){(0,i.SC)("turbo"),(0,e.YR)(a,{...t})}}}]);
+//# sourceMappingURL=ui_packages_soft-navigate_soft-navigate_ts-0b4628f75eb8.js.map

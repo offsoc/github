@@ -1,0 +1,202 @@
+<span class="css-truncate">
+  <% requests = pull_request.pending_review_requests.to_a %>
+  <% requests += with_database_error_fallback(fallback: []) { pull_request.deferred_code_owner_review_requests(requests) } %>
+  <% codeowners = with_database_error_fallback(fallback: []) { pull_request.codeowners } %>
+  <% if GitHub.flipper[:filter_sidebar_requests].enabled?(current_repository) %>
+    <% requests = pull_request.visible_sidebar_requests(current_user, requests) %>
+  <% end %>
+
+  <% if pull_request.visible_sidebar_reviews(current_user).any? || requests.any? %>
+    <%
+
+    reviews = pull_request.visible_sidebar_reviews(current_user)
+
+    review_by_writer = {}
+
+
+    Promise.all([
+      Promise.all(reviews.map { |review|
+        review.async_author_can_push_to_repository?.then { |made_by_writer|
+          review_by_writer[review] = made_by_writer
+        }
+      }),
+
+      Promise.all(reviews.map { |review|
+        if review.commented?
+          review.async_user.then { |user|
+            if enforced_review = pull_request.latest_enforced_review_for(user)
+              enforced_review.async_author_can_push_to_repository?.then { |made_by_writer|
+                review_by_writer[enforced_review] = made_by_writer
+              }
+            end
+          }
+        end
+      })
+    ]).sync
+    %>
+
+    <% reviews.each do |review| %>
+      <% if review.user %>
+        <p class="d-flex">
+          <%= render "issues/sidebar/user", user: review.user %>
+
+          <% if review.commented? && enforced_review = pull_request.latest_enforced_review_for(review.user) %>
+            <% review = enforced_review %>
+          <% end %>
+
+          <%
+            review_status_id="review-status-#{review.user}"
+
+            if review.approved?
+              review_status_label = "#{review.user} approved these changes"
+              if review_by_writer[review]
+                review_status_icon = primer_octicon(:check, color: :success)
+              else
+                review_status_icon = primer_octicon(:check, color: :muted)
+              end
+            elsif review.changes_requested?
+              review_status_label = "#{review.user} requested changes"
+              if review_by_writer[review]
+                review_status_icon = review_state_icon("changes_requested", :class => "color-fg-danger")
+              else
+                review_status_icon = review_state_icon("changes_requested", :class => "color-fg-muted")
+              end
+            else
+              review_status_label = "#{review.user} left review comments"
+              review_status_icon = primer_octicon(:comment, color: :muted)
+            end
+          %>
+          <a id="<%=review_status_id%>" class="flex-order-1" href="<%= pull_request_files_with_range_path(pull_request.repository.owner, pull_request.repository, pull_request.number, review.head_sha) %>">
+            <span class="reviewers-status-icon text-center">
+              <%= review_status_icon %>
+            </span>
+          </a>
+          <%= render Primer::Alpha::Tooltip.new(for_id: review_status_id, text: review_status_label, type: :label, direction: :nw) %>
+
+          <% if pull_request.open? && !review.user.bot? && issue_permissions(pull_request.issue, current_user, :review_re_requestable) %>
+            <%
+              hydro_tracking = hydro_click_tracking_attributes("rerequest_review.sidebar", { pull_request_id: pull_request.id, subject_id: review.user.id, actor_id: current_user.id, action: "REREQUESTED" })
+              review_sync_id="re-request-review-#{review.user}"
+            %>
+            <%= button_tag(id: review_sync_id, name: "re_request_reviewer_id", value: review.user_id, type: "submit", class: "mr-2 btn-link muted-icon", data: hydro_tracking) do %>
+              <span class="reviewers-status-icon">
+                <%= primer_octicon(:sync) %>
+              </span>
+            <% end %>
+            <%= render Primer::Alpha::Tooltip.new(for_id: review_sync_id, text: "Re-request review", type: :label, direction: :nw) %>
+          <% end %>
+          <% render_nothing_if_database_fails do %>
+            <% if codeowners.include?(review.user) %>
+              <%= button_tag(id: "codeowner-#{review.user}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+                <span class="reviewers-status-icon">
+                  <%= primer_octicon(:"shield-lock") %>
+                </span>
+              <% end %>
+              <%= render Primer::Alpha::Tooltip.new(for_id: "codeowner-#{review.user}", text: "#{review.user} is a code owner", type: :label, direction: :nw) %>
+            <% end %>
+          <% end %>
+        </p>
+      <% end %>
+    <% end %>
+    <% requests.each do |req| %>
+    <% reviewer_display_name = req.reviewer.is_a?(Team) ? req.reviewer : user_display_login_or_bot_integration_name(req.reviewer) %>
+      <p class="d-flex">
+        <% if req.reviewer.is_a?(Team) && current_repository.in_organization? %>
+            <%= avatar_for req.reviewer, 20, :class => "avatar mr-1" %>
+            <%= content_tag(:span,
+              class: "flex-1 min-width-0 text-bold v-align-middle color-fg-muted js-team-mention js-reviewer-team tooltipped",
+              "data-url": team_members_path(req.reviewer),
+              "data-id": req.reviewer.id,
+              "data-error-text": "Failed to load team members",
+              "data-permission-text": "Team members are private",
+              data: hovercard_data_attributes_for_team(req.reviewer)
+            ) do %><%# erblint:disable Primer::Accessibility::TooltippedMigration %>
+              <span class="css-truncate-target width-fit v-align-middle">
+                <%= req.reviewer.name %>
+              </span>
+            <% end %>
+        <% elsif req.reviewer.is_a?(User) %>
+          <%= render "issues/sidebar/user", user: req.reviewer %>
+        <% end %>
+
+        <%= button_tag(id: "awaiting-review-#{reviewer_display_name}", type: "button", class: "btn-link flex-order-2") do %>
+          <span class="reviewers-status-icon">
+            <%= primer_octicon(:"dot-fill", classes: "hx_dot-fill-pending-icon") %>
+          </span>
+        <% end %>
+        <%= render Primer::Alpha::Tooltip.new(for_id: "awaiting-review-#{reviewer_display_name}", text: "Awaiting requested review from #{reviewer_display_name}", type: :label, direction: :nw) %>
+
+        <% if req.deferred_code_owner? %>
+          <%= button_tag(id: "deferred-code-owner-rr-for-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon" <%= test_selector("deferred-code-owner-rr-for-#{reviewer_display_name}") %>>
+              <%= primer_octicon(:moon) %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "deferred-code-owner-rr-for-#{reviewer_display_name}", text: "#{reviewer_display_name} will be requested when the pull request is marked ready for review", type: :label, direction: :nw) %>
+          <%= button_tag(id: "codeowner-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon">
+              <%= primer_octicon(:"shield-lock") %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "codeowner-#{reviewer_display_name}", text: "#{reviewer_display_name} is a code owner", type: :label, direction: :nw) %>
+        <% elsif req.deferred? %>
+          <%= button_tag(id: "deferred-code-owner-rr-for-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon" <%= test_selector("deferred-code-owner-rr-for-#{reviewer_display_name}") %>>
+              <%= primer_octicon(:moon) %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "deferred-code-owner-rr-for-#{reviewer_display_name}", text: "#{reviewer_display_name} will be requested when the pull request is marked ready for review", type: :label, direction: :nw) %>
+        <% elsif req.assigned_from_review_request.present? && codeowners.include?(req.assigned_from_review_request.reviewer) %>
+          <%= button_tag(id: "assigned-codeowner-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon">
+              <%= primer_octicon(:"shield-lock") %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "assigned-codeowner-#{reviewer_display_name}", text: "#{reviewer_display_name} is a code owner automatically assigned from #{req.assigned_from_review_request.reviewer}", type: :label, direction: :nw) %>
+        <% elsif req.assigned_from_review_request.present? %>
+          <%= button_tag(id: "assigned-review-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon">
+              <%= primer_octicon(:people) %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "assigned-review-#{reviewer_display_name}", text: "#{reviewer_display_name} was automatically assigned from #{req.assigned_from_review_request.reviewer}", type: :label, direction: :nw) %>
+        <% elsif codeowners.include?(req.reviewer) %>
+          <%= button_tag(id: "codeowner-#{reviewer_display_name}", type: "button", class: "mr-2 btn-link muted-icon") do %>
+            <span class="reviewers-status-icon">
+              <%= primer_octicon(:"shield-lock") %>
+            </span>
+          <% end %>
+          <%= render Primer::Alpha::Tooltip.new(for_id: "codeowner-#{reviewer_display_name}", text: "#{reviewer_display_name} is a code owner", type: :label, direction: :nw) %>
+        <% end %>
+      </p>
+    <% end %>
+
+    <% if pull_request.suggested_reviewers_available? && local_assigns[:suggested_reviewers] %>
+      <%= render partial: "pull_requests/suggested_reviewers", locals: {
+        pull_request: pull_request,
+        suggestions: suggested_reviewers
+      } %>
+    <%- else -%>
+      <%= render "issues/sidebar/reviewers_hint", pull_request: pull_request %>
+    <% end %>
+  <% elsif issue_permissions(pull_request.issue, current_user, :review_requestable) && current_repository_writable? %>
+    <% if pull_request.suggested_reviewers_available? %>
+      <include-fragment src="<%= gh_suggested_reviewers_path(pull_request) %>">
+        Loading suggestions…
+      </include-fragment>
+    <% else %>
+      <%= render "issues/sidebar/reviewers_none", pull_request: pull_request %>
+    <% end %>
+  <% else %>
+    No reviews
+  <% end %>
+  <% if !pull_request.new_record? && current_repository_writable? && PullRequests::Copilot::CodeReviewAccess.new(actor: current_user, current_repository: current_repository).can_request_via_button? %>
+    <%= render_react_partial name: "copilot-code-review", ssr: false, props: {
+      owner: pull_request.repository.owner_display_login,
+      repository: pull_request.repository.name,
+      number: pull_request.number,
+      apiURL: GitHub.copilot_api_url,
+      ssoOrganizations: []
+    }%>
+  <% end %>
+</span>

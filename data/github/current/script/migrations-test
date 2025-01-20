@@ -1,0 +1,75 @@
+#!/bin/bash
+# Usage: migrations-test
+# Drop and recreate the test database and then run all DB
+# migrations.
+set -e
+
+# change into root dir
+cd "$(dirname "$0")"/..
+mkdir -p tmp/builds
+
+# sh compatibility: subshells sometimes cause an
+# set -e exit when exiting non-zero, sometimes dont
+set +e
+
+# check no needed SQL files were deleted
+MISSING_SQL_FILES=""
+for i in {abilities-,ballast-,collab-,copilot-,gitbackups-,mysql2-,notifications-deliveries-,notifications-entries-,mysql5-,notify-,repositories-,repositories-pushes-,repositories-actions-checks-,issues-pull-requests-,spokes-,stratocaster-,iam-,memex-,billing-,permissions-,token-scanning-service-,migrations-,vt-}structure.sql
+do
+  if ! [ -f "db/$i" ]; then
+    echo "ERROR: db/$i is missing"
+    MISSING_SQL_FILES="1"
+  fi
+done
+[ -n "$MISSING_SQL_FILES" ] && exit 1
+
+# drop and recreate the DB and run all migrations in a subshell redirected
+# to a log file. we'll cat this out only if something fails.
+echo "Running all migrations ..."
+(
+set -e
+export RAILS_ENV=test
+bin/rake --trace -s db:drop db:create
+bin/rake --trace -s db:test:load_initial_structure
+bin/rake --trace -s db:migrate
+bin/rake --trace -s db:abort_if_pending_migrations
+) 1>tmp/builds/migrations 2>&1
+res=$?
+
+# If anything fails, output the log output and abort
+if [ $res != 0 ]; then
+  cat tmp/builds/migrations
+  echo "ERROR: MIGRATION FAILURE SECTOR SEVEN"
+  exit $res
+else
+  echo "MIGRATIONS OK"
+fi
+
+# Test that the migrations were run locally, by ensuring there's an INSERT for the
+# latest migration added to this PR.
+# shellcheck disable=SC2046
+LATEST_MIGRATION_VERSION="$(git diff --diff-filter=A --name-only \
+  $(git merge-base origin/master HEAD) -- db/migrate | sort | tail -n1 | grep -Eo '[0-9]+' || true)"
+if [ -n "$LATEST_MIGRATION_VERSION" ]; then
+  if ! grep --quiet "('$LATEST_MIGRATION_VERSION')"  -- db/structure.sql
+  then
+    echo "ERROR: db/structure.sql is missing migration version $LATEST_MIGRATION_VERSION"
+    exit 1
+  fi
+fi
+
+git diff --ignore-all-space --exit-code -- db/*.sql db/vschema/*.json 1>tmp/builds/schema-diff 2>&1 &&
+git diff --exit-code -- db/*.sql db/vschema/*.json 1>tmp/builds/schema-diff 2>&1 || {
+  echo
+  echo "FAIL: db/*.sql or db/vschema/*.json has uncommitted changes. Please run \`bin/rake db:structure:dump\` and commit the results"
+  echo
+  cat tmp/builds/schema-diff
+  echo
+  echo "Full migration output follows:"
+  echo
+  cat tmp/builds/migrations
+  exit 1
+}
+
+# make sure we exit zero if we get here
+true

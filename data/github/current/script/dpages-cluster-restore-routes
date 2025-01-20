@@ -1,0 +1,50 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# GHE server side script to calculate pages routes.
+#
+# Note: This script typically isn't called directly. It's invoked by GHE
+# backup-utils.
+#
+# Receives one pages path per line, something like:
+#
+# 5/d3/d9/44/10
+# 0/02/e7/4f/27
+# 4/c1/6a/53/31
+# 3/34/17/3c/30
+# 6/6e/a9/ab/29
+# ...
+#
+# Returns a list of <page_path> <server1> <server2> <server3>:
+#
+# 5/d3/d9/44/10 pages-server-1 pages-server-2 pages-server-3
+# 0/02/e7/4f/27 pages-server-1 pages-server-3 pages-server-4
+# 4/c1/6a/53/31 pages-server-2 pages-server-3 pages-server-4
+# 3/34/17/3c/30 pages-server-4 pages-server-2 pages-server-1
+# 6/6e/a9/ab/29 pages-server-3 pages-server-2 pages-server-1
+# ...
+
+
+require File.expand_path("../../config/basic", __FILE__)
+require "github/config/mysql"
+require "github/pages/builder"
+require "github/pages/allocator"
+
+GitHub.load_activerecord
+
+def process(page_path)
+  page_id = page_path.split("/").last.to_i
+  replicas = GitHub::Pages::Builder.current_replicas(page_id).map { |replica| replica.last }
+
+  if replicas.empty?
+    replicas = GitHub::Pages::Allocator.least_loaded_hosts(is_voting: true)
+  end
+
+  revision = GitHub::Pages::Builder.current_revision(page_id)
+
+  # Only print information is the page_id is found.
+  puts "#{page_path} #{replicas.join(' ')}" if revision
+end
+
+while line = $stdin.gets
+  process(line.chomp)
+end

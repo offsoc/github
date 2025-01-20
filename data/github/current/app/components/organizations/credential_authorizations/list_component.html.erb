@@ -1,0 +1,153 @@
+<%# primer_experimental_selectpanel %>
+<% cap_pats_limit_policy_enabled = current_user.feature_enabled?(:cap_pats_policy_enforcement) %>
+<% if @experimental == "1" %>
+  <% non_allowed_orgs = [] %>
+  <% if has_available_orgs_to_authorize? %>
+    <div class="text-left mt-3 px-2 lh-default">
+      <span class="text-semibold d-block mb-2 ">Available to authorize</span>
+      <p class="note mt-n2"><%= cred_type %> must be authorized for use in these organizations:</p>
+    </div>
+  <% end %>
+
+  <%= render(Primer::Alpha::ActionList.new(
+    m: 2,
+    menu_id: "configure-sso-#{id}",
+    role: "listbox",
+    aria_selection_variant: :selected,
+    select_variant: :none,
+    aria: { label: "single sign-ons"},
+    show_dividers: true,
+  )) do |list| %>
+    <% @org_credential_map.each_pair do |org, credential_authorization| %>
+      <% if cap_pats_limit_policy_enabled && credential_disobeys_target_limit?(org, current_user) %>
+        <% non_allowed_orgs << org %>
+      <% elsif credential_authorization.nil? %>
+        <% list.with_avatar_item(
+          **helpers.avatar_component_options(org, 20),
+          username: org.display_login,
+          active: false,
+          size: :medium,
+          content_arguments: {
+            aria: { label: "Authorize #{cred_title} for #{org.name}" },
+          },
+          avatar_arguments: {
+            shape: :square,
+          },
+          href: authorize_path(org),
+        ) do |item|  %>
+          <% item.with_trailing_visual_label do %>
+            Authorize
+          <% end %>
+        <% end %>
+      <% elsif credential_authorization.revoked? %>
+         <% list.with_avatar_item(
+          disabled: true,
+          size: :large,
+          avatar_arguments: {
+            shape: :square,
+          },
+          **helpers.avatar_component_options(org, 20),
+          username: "Revoked by #{credential_authorization.revoked_by.display_login}",
+        ) do |item|  %>
+          <% item.with_trailing_visual_label do %>
+            Revoked
+          <% end %>
+        <% end %>
+      <% else %>
+        <% list.with_avatar_item(
+          **helpers.avatar_component_options(org, 20),
+          username: org.display_login,
+          type: :submit,
+          href: destroy_path(org),
+          size: :medium,
+          avatar_arguments: {
+            shape: :square,
+          },
+          form_arguments: {
+            method: :delete,
+          }
+        ) do |item|  %>
+          <% item.with_trailing_visual_label(color: :danger) do %>
+            Deauthorize
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+  <% unless non_allowed_orgs.empty? %>
+    <div class="text-left mt-3 px-2 lh-default">
+      <span class="text-semibold d-block mb-2">Unavailable to authorize</span>
+      <p class="note mt-n2"><%= cred_type %> cannot be authorized for use in these organizations:</p>
+    </div>
+
+    <%= render(Primer::Alpha::ActionList.new(
+      m: 2,
+      menu_id: "unauthorized-configure-sso-#{id}",
+      role: "listbox",
+      aria_selection_variant: :selected,
+      select_variant: :none,
+      aria: { label: "single sign-ons"},
+      show_dividers: true,
+    )) do |list| %>
+      <% non_allowed_orgs.each do |org| %>
+        <% list.with_avatar_item(
+          **helpers.avatar_component_options(org, 20),
+          username: org.display_login,
+          active: false,
+          disabled: true,
+          size: :medium,
+          content_arguments: {
+            aria: { label: "#{org.name} allows a token with maxium of #{org.personal_access_token_classic_expiration_limit} day expiration limit" }
+          },
+          avatar_arguments: {
+            shape: :square,
+          },
+          "data-test-selector": "#{org.id}-unavailable-to-authorize",
+          description_scheme: :inline,
+        ) do |item|  %>
+          <% item.with_description.with_content("#{org.personal_access_token_classic_expiration_limit} day maximum") %>
+          <% item.with_trailing_visual_icon(icon: :alert, color: :attention) %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+
+<% else %>
+  <div data-filter-empty-state class="text-center pt-4 text-bold" hidden>
+    No results found.
+  </div>
+  <% non_allowed_orgs = [] %>
+
+    <div class="text-left mt-3 lh-default" data-filter-header="available">
+      <span class="text-semibold d-block mb-2">Available to authorize</span>
+      <p class="note mt-n2"><%= cred_type %> must be authorized for use in these organizations:</p>
+    </div>
+
+  <% @org_credential_map.each_pair do |org, credential_authorization| %>
+    <% if cap_pats_limit_policy_enabled && credential_disobeys_target_limit?(org, current_user) %>
+      <% non_allowed_orgs << org %>
+    <% else %>
+      <%= render(Organizations::CredentialAuthorizations::ItemComponent.new(org, @credential, credential_authorization, "available")) %>
+    <% end %>
+  <% end %>
+
+  <% unless non_allowed_orgs.empty? %>
+    <div class="text-left mt-3 lh-default" data-filter-header="unavailable">
+      <span class="text-semibold d-block mb-2">Unavailable to authorize</span>
+      <p class="note mt-n2"><%= cred_type %> cannot be authorized for use in these organizations:</p>
+    </div>
+
+    <% non_allowed_orgs.each do |non_allowed_org| %>
+      <button type="button" class="SelectMenu-item flex-items-center d-flex" <%= test_selector("#{non_allowed_org.id}-unavailable-to-authorize") %> data-sso-availability="unavailable" disabled>
+        <div class="flex-auto flex-items-center">
+          <%= render(Organizations::CredentialAuthorizations::AvatarComponent.new(non_allowed_org)) %>
+
+          <small class="note ml-2"><%= non_allowed_org.personal_access_token_classic_expiration_limit %> day maximum</small>
+        </div>
+
+        <%= render(Primer::Beta::Octicon.new("alert", size: :small, color: :attention, m: 1)) %>
+      </button>
+    <% end %>
+  <% end %>
+<% end %>

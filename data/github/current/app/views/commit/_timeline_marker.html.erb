@@ -1,0 +1,38 @@
+<%
+    page_request = params[:before_comment_id].present?
+    commit = timeline_marker
+    timeline = commit.comments
+%>
+
+<% if commit.can_load_more_comments? %>
+  <%= form_tag "#{commit_path(commit)}/show_partial", :method => :get,
+      :class => "ajax-pagination-form js-ajax-pagination" do %>
+    <%= hidden_field_tag :partial, "commit/timeline_marker" %>
+    <%= hidden_field_tag :before_comment_id, commit.comments.first.id %>
+    <%= hidden_field_tag :mark_as_unread, "0" %>
+    <%= button_tag "Load more comments...", class: "ajax-pagination-btn", data: { :"disable-with" => "" } %>
+  <% end %>
+<% end %>
+<% timeline.each_with_index do |item, index| %>
+  <div class="js-comment-container TimelineItem d-block" id="<%= diff_comment_id(item) %>">
+    <%= linked_avatar_for(item.user, 40, img_class: "avatar rounded-2", link_class: "avatar-parent-child TimelineItem-avatar d-none d-md-block", link_data: { "test-selector" => "pr-timeline-events-actor-avatar" }) %>
+    <%= render Comments::CommitCommentComponent.new(commit_comment: item, repository: commit.repository) %>
+  </div>
+<% end %>
+
+<% unless page_request %>
+  <% updated_at = commit.comments.last.try(:created_at) || discussion_last_modified_at || commit.created_at %>
+  <% notification_response = commit.get_notification_summary %>
+  <!-- Rendered timeline since <%= updated_at.to_formatted_s(:db) %> -->
+  <div id="partial-timeline-marker"
+        class="js-timeline-marker js-socket-channel js-updatable-content"
+        data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.commit(current_repository, commit)) %>"
+        data-url="<%= show_partial_commit_path(:repository => current_repository, :user_id => current_repository.owner_display_login, :name => commit, :partial => "commit/timeline_marker", :since => updated_at.to_i) %>"
+        data-last-modified="<%= updated_at.httpdate %>">
+
+    <% if notification_response.success? && notification_summary = notification_response.value %>
+      <%= form_tag mark_list_notifications_path(repository: current_repository, user_id: current_repository.owner_display_login, ids: notification_summary.id), :class => "d-none js-timeline-marker-form", "data-remote" => true do %>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

@@ -1,0 +1,131 @@
+<%
+  replying = local_assigns.fetch(:replying, false)
+%>
+
+<% if logged_in? &&
+      current_repository.writable? &&
+      !thread.locked_for?(current_user) &&
+      # Prevent new comments if commit objects are missing
+      (!thread.is_a?(DeprecatedPullRequestReviewThread) || thread.pull_comparison) %>
+<div class="inline-comment-form-container js-inline-comment-form-container <%= "review-comment-form-container" if !replying %>">
+  <% if replying %>
+    <div class="inline-comment-form-actions">
+      <div class="d-table width-full">
+        <div class="d-table-cell">
+          <%= linked_avatar_for current_user, 28, img_class: "avatar" %>
+        </div>
+        <div class="d-table-cell col-12">
+          <button type="button" class="review-thread-reply-button width-full color-fg-muted text-left form-control js-toggle-inline-comment-form">
+            Reply…
+          </button>
+        </div>
+      </div>
+    </div>
+  <% else %>
+    <div class="f6 pb-2 d-flex flex-justify-between js-multi-line-preview" hidden>
+      <%= render partial: "pull_request_review_threads/range_info", locals: {
+        start_line: nil,
+        start_line_type: nil,
+        end_line: nil,
+        end_line_type: nil,
+        preview: true
+      } %>
+    </div>
+  <% end %>
+
+  <div class="inline-comment-form-box">
+    <% if current_user.must_verify_email? %>
+      <%= render :partial => "comments/no_verified_email_message" %>
+    <% else %>
+      <%= form_tag create_line_comment_thread_path(thread),
+            :class => "js-inline-comment-form" do %>
+        <%= spamurai_form_signals %>
+        <input type="hidden" name="comment_context" value="diff">
+        <input type="hidden" name="position" value="<%= thread.position %>">
+
+        <% case thread %>
+        <% when CommitCommentThread %>
+          <input type="hidden" name="commit_id" value="<%= thread.commit_id %>">
+        <% when DeprecatedPullRequestReviewThread %>
+          <%# commit_id is deprecated %>
+          <input type="hidden" name="commit_id" value="<%= thread.pull_comparison.end_commit.oid %>">
+          <input type="hidden" name="comparison_start_oid" value="<%= thread.pull_comparison.start_commit.oid %>">
+          <input type="hidden" name="comparison_end_oid" value="<%= thread.pull_comparison.end_commit.oid %>">
+          <input type="hidden" name="comparison_base_oid" value="<%= thread.pull_comparison.base_commit.oid %>">
+          <input type="hidden" name="side" value="<%= thread.side %>">
+          <input type="hidden" name="start_side" value="<%= thread.start_side %>">
+          <input type="hidden" name="subject_type" value="<%= thread.subject_type %>">
+          <input type="hidden" name="algorithm" value="<%= thread.pull_comparison.diffs.algorithm %>">
+          <input type="hidden" name="expanded_diff" value="false" class="js-expanded-diff-placeholder-value">
+        <% else %>
+          <% raise TypeError, "unexpected thread type: #{thread.class}" %>
+        <% end %>
+
+        <% if thread.new_record? %>
+          <%# template string interpolated by line-comments.ts %>
+          <%# hack: prepend junk to template id incase we have multiple template forms on the page %>
+          <% textarea_id = "r{{sequence}}_new_inline_comment_diff_{{anchor}}_{{position}}" %>
+        <% else %>
+          <% textarea_id = "new_inline_comment_diff_#{diff_file_anchor(thread.path)}_#{thread.id}_#{thread.position}" %>
+          <input type="hidden" name="in_reply_to" value="<%= thread.id %>">
+        <% end %>
+
+        <%
+          comment = thread&.comments&.first
+          original_line = if comment.is_a?(PullRequestReviewComment)
+            comment.diff_hunk_lines&.last
+          end
+        %>
+
+        <%= render(Comments::PreviewableCommentFormComponent.new(
+          comment_path: thread&.path,
+          comparison_start_oid: thread.respond_to?(:pull_comparison) && thread.pull_comparison.start_commit.oid,
+          comparison_end_oid: thread.respond_to?(:pull_comparison) && thread.pull_comparison.end_commit.oid,
+          comparison_base_oid: thread.respond_to?(:pull_comparison) && thread.pull_comparison.base_commit.oid,
+          line_number: thread.respond_to?(:line) && thread.line,
+          original_line: original_line,
+          size_to_fit: false,
+          textarea_id: textarea_id,
+          comment_id: thread.respond_to?(:comments_for) && thread.comments_for(current_user).first&.id,
+          subject: @pull || current_commit, # rubocop:disable GitHub/DeprecatedViewHelpers, Lint/InstanceVariable
+          allows_suggested_changes: allows_suggested_changes,
+          current_repository: current_repository,
+          slash_commands_enabled: slash_commands_enabled?,
+          use_fixed_width_font: current_user.use_fixed_width_font?,
+          copilot_text_suggestions_enabled: @pull.present? && user_feature_enabled?(:ghost_pilot_pr_autocomplete_comments), # rubocop:disable Lint/InstanceVariable
+        )) %>
+
+        <div class="form-actions mt-2">
+          <div class="position-relative float-md-right float-none ml-md-1 ml-0">
+            <% if thread.supports_multiple_threads_per_line? %>
+              <%= render Primer::Beta::Button.new(float: [:none, nil, :right], type: :submit, scheme: :primary, width: [:full, nil, :auto], mb: [2, nil, 0], data: { "disable-invalid": "", "disable-with": "" }) do %>
+                <span class="add-comment-label">Add review comment</span>
+                <span class="start-review-label">Start a review</span>
+              <% end %>
+            <% end %>
+
+            <%= render Primer::Beta::Button.new(
+                type: :submit,
+                float: [:none, nil, :right],
+                name: "single_comment",
+                value: 1,
+                classes: "review-simple-reply-button js-quick-submit-alternative",
+                mr: [0, nil, 1],
+                width: [:full, nil, :auto],
+                mb: [2, nil, 0],
+                data: { "disable-invalid": "", "disable-with": "" }
+              ).with_content("Add single comment") %>
+          </div>
+
+          <%= render Primer::Beta::Button.new(
+              float: [:none, nil, :right],
+              width: [:full, nil, :auto],
+              classes: "js-hide-inline-comment-form",
+              "data-confirm-cancel-text": "Are you sure you want to discard your unsaved changes?"
+            ).with_content("Cancel") %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+</div>
+<% end %>

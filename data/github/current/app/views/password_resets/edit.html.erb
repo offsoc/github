@@ -1,0 +1,186 @@
+<%# erblint:counter DeprecatedComponentsCounter 3 %>
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info title: "Change your password" %>
+
+<%
+  gh_mobile_link_text = "Use GitHub Mobile"
+  app_link_text = "Use your authenticator app"
+  sms_link_text = "Send a code via SMS"
+  resend_sms_link_text = "Resend SMS"
+%>
+
+<% if @reset.verify_two_factor? %>
+  <%
+    otp = ""
+    case totp_type
+    when :app
+      otp_param_name = :app_otp
+      otp = @user.two_factor_app_totp&.now || "" if Rails.env.development?
+    when :sms
+      otp_param_name = :sms_otp
+      otp = @user.two_factor_sms_totp&.now || "" if Rails.env.development?
+    end
+  %>
+
+  <div id="login" class="auth-form px-3">
+    <div class="auth-form-header p-0 mb-2">
+      <h1>Two-factor password reset</h1>
+      <% if password_reset_webauthn_available? %>
+        <p> Please do one of the following </p>
+      <% end %>
+    </div>
+
+    <%= render "shared/flash" %>
+    <%= render Primer::Beta::Flash.new(classes: "flash-notice sms-success") do %>
+      <button type="button" class="flash-close js-flash-close">
+        <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+      </button>
+      Your authentication code has been sent.
+    <% end %>
+    <%= render Primer::Beta::Flash.new(scheme: :warning, classes: "sms-error") do %>
+      <button type="button" class="flash-close js-flash-close">
+        <%= render(Primer::Beta::Octicon.new(icon: "x")) %>
+      </button>
+      <span class="js-sms-error">
+        We were unable to send your authentication code. Please try again or <a class="Link--inTextBlock" href="<%= contact_path %>">contact support</a> if the problem persists.
+      </span>
+    <% end %>
+
+    <div>
+      <%= form_tag check_password_reset_otp_path(@reset.token), class: "js-webauthn-form" do %>
+        <div class="auth-form-body mt-2">
+          <% if password_reset_webauthn_available? %>
+            <div class="mt-2 webauthn-form-body">
+              <%= render(partial: "/sessions/webauthn/get", locals: {
+                webauthn_user: @user,
+                webauthn_reason: :password_reset,
+                is_primary_auth_option_in_prompt: true,
+              }) %>
+              <input type="hidden" name="webauthn_response" class="js-webauthn-response">
+            </div>
+            <div class="auth-divider text-center mt-3 f4">Or</div>
+          <% end %>
+          <label for="otp" class="mt-1 f4 text-center" id="pw-reset-otp-input-label">
+          Enter an authentication code or a recovery code
+          <%= render Primer::Beta::IconButton.new(
+            scheme: :invisible,
+            icon: :question,
+            tag: :a,
+            aria: {label: "More information about Authentication Codes"},
+              href: GitHub.help_url + "/articles/recovering-your-account-if-you-lose-your-2fa-credentials",
+            target: "_blank",
+            rel: "noopener noreferrer",
+            mb: 1)
+          %>
+          </label>
+          <%= text_field_tag otp_param_name, "", "aria-labelledby": "pw-reset-otp-input-label",
+            "aria-describedby": "pw-reset-otp-input-description", :autocomplete => :off, :autofocus => "autofocus",
+            :class => "input-block js-verification-code-input-auto-submit", :value => otp, :id => "otp" ,
+            placeholder: "XXXXXX OR XXXXX-XXXXX"
+          %>
+          <button class="btn btn-block <% "btn-primary" unless password_reset_webauthn_available? %>" data-disable-with="Verifying…" type="submit">Verify</button>
+          <div class="mt-3" id="pw-reset-otp-input-description" <%= test_selector "otp-prompt-phrasing" %>>
+            <% if totp_type == :sms %>
+                We just sent you a message via SMS with your authentication code.
+                Enter the code in the form above to verify your identity. If you do not have access to your phone, you may enter a recovery code instead.
+            <% else %>
+              Open the two-factor authentication app on your device to view your authentication code and verify your identity.
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <%= render(Primer::Beta::BorderBox.new(mt: 3)) do |component| %>
+    <%= component.with_body(p: 3) do %>
+      <h2 id="otp-options" class="h5 mb-2">Having problems?</h2>
+      <ul class="ml-3" aria-labelledby="otp-options">
+        <% if totp_type == :sms %>
+          <li><%= link_to resend_sms_link_text, edit_password_reset_path(totp_type: "sms", resending_sms: true) %></li>
+          <% if @user.two_factor_configured_with?(:app) %>
+            <li><%= link_to app_link_text, edit_password_reset_path(totp_type: "app") %></li>
+          <% end %>
+        <% elsif @user.two_factor_sms_enabled? %>
+          <li><%= link_to sms_link_text, edit_password_reset_path(totp_type: "sms") %></li>
+        <% end %>
+        <% if totp_type == :sms && @user.two_factor_sms_fallback_enabled? %>
+          <li>
+            <%= form_tag password_reset_fallback_path, :class => "inline-form js-send-auth-code" do %>
+              <%= render Primer::ButtonComponent.new(type: :submit, scheme: :link, text_align: :left, classes: "ws-normal") do %>
+                Send the code to your backup number
+              <% end %>
+              <img src="<%= image_path "spinners/octocat-spinner-32.gif" %>" width="16" class="sms-send-code-spinner" alt="">
+            <% end %>
+          </li>
+        <% end %>
+        <li>You can also enter a <a class="Link--inTextBlock" href="https://docs.github.com/authentication/securing-your-account-with-two-factor-authentication-2fa/configuring-two-factor-authentication-recovery-methods#downloading-your-two-factor-authentication-recovery-codes" target="_blank">two-factor recovery code</a> above</li>
+        <% if can_use_gh_mobile_auth?(@user) %>
+          <li><%= link_to gh_mobile_link_text, edit_password_reset_mobile_path %></li>
+        <% end %>
+        <% if allow_tfa_recovery_without_password %>
+          <li>
+            <%= form_tag two_factor_recovery_request_without_password_path, method: :post do %>
+              <%= hidden_field_tag :reset_token, @reset.token %>
+              Start a
+              <%= render partial: "sessions/two_factor_recover_modal", locals: { tfa_recovery_without_password: true } %>
+              or unlink your account email address(es)
+            <% end %>
+          </li>
+        <% end %>
+
+      </ul>
+    <% end %>
+  <% end %>
+<% elsif @user.is_first_emu_owner? %>
+  <div class="auth-form login-form px-3" <%= test_selector "emu-admin-password-set-standard-view" %>>
+    <%= form_tag update_password_reset_path(@reset.token), :method => :put do -%>
+      <div class="auth-form-header p-0">
+        <h1>Set up admin password</h1>
+      </div>
+      <div class="auth-form-body mt-3">
+        <div class="text-center mb-3">
+          <div class="CircleBadge CircleBadge--small mx-auto mb-2">
+            <%= render(Primer::Beta::Octicon.new(:person, size: :medium, classes: "fgColor-done")) %>
+          </div>
+          <h2 class="h3">@<%= @user %></h2>
+          <p class="note">Admin account for <%= @user.business_user_account.business.name %></p>
+        </div>
+        <label for="password">Set password</label>
+        <%= auto_check_tag(:password, subject: @user) do %>
+          <%= password_field_tag "password", "", :class => "input-block", :autofocus => "autofocus", :autocomplete => "new-password" %>
+        <% end %>
+
+        <label for="password_confirmation">Confirm password</label>
+        <%= password_field_tag "password_confirmation", "", :class => "input-block", :autocomplete => "new-password" %>
+
+        <p class="note"><%= password_strength_sentence %></p>
+        <%= spamurai_form_signals %>
+        <%= submit_tag "Set password", :class => "btn btn-primary btn-block" %>
+        <p class="note mt-3 text-center">Next: Sign in to your enterprise</p>
+      </div>
+
+    <% end %>
+  </div>
+<% else %>
+  <div class="auth-form login-form px-3" <%= test_selector "password-reset-standard-view" %>>
+    <%= form_tag update_password_reset_path(@reset.token), :method => :put do -%>
+      <div class="auth-form-header p-0">
+        <h1>Change password for @<%= @user %></h1>
+      </div>
+      <%= render "shared/flash" %>
+      <div class="auth-form-body mt-3">
+        <label for="password">Password</label>
+        <%= auto_check_tag(:password, subject: @user) do %>
+          <%= password_field_tag "password", "", :class => "input-block", :autofocus => "autofocus", :autocomplete => "new-password" %>
+        <% end %>
+
+        <label for="password_confirmation">Confirm password</label>
+        <%= password_field_tag "password_confirmation", "", :class => "input-block", :autocomplete => "new-password" %>
+
+        <p class="note"><%= password_strength_sentence %></p>
+        <%= spamurai_form_signals %>
+        <%= submit_tag "Change password", :class => "btn btn-primary btn-block" %>
+      </div>
+    <% end %>
+  </div>
+<% end %>

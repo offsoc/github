@@ -1,0 +1,466 @@
+#!/bin/bash
+#/ Usage: ghe-repl-setup [-ahfv] <primary_ip>
+#/
+#/ Setup the current appliance as a replica of the specified primary.
+#/
+#/ OPTIONS:
+#/   -a | --add       Add as a secondary replica
+#/   -h | --help      Show this message.
+#/   -f | --force     Force this host to be a replica of the specified primary.
+#/   -v | --verbose   Run with verbose output.
+#/   <primary_ip>     The IP address of the primary node.
+#/
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+add=false
+verbose=false
+force=false
+cluster_name=''
+replica_postfix=''
+
+# Parse args.
+ARGS=$(getopt --name "$0" --long add,help,verbose,force --options an:p:vhf -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a|--add)
+      add=true
+      shift
+      ;;
+    -n)
+      cluster_name=$2
+      shift
+      shift
+      ;;
+    -p)
+      replica_postfix=$2
+      shift
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    -v|--verbose)
+      verbose=true
+      set -x
+      shift
+      ;;
+    -f|--force)
+      force=true
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+done
+
+if [ -z "$1" ]; then
+  usage
+  exit 1
+fi
+
+export PATH="$PATH:/usr/local/share/enterprise"
+. ghe-repl-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/lib/ghe-commons
+trap cleanup EXIT
+acquire_repl_lock
+
+if [ -f /etc/github/repl-running ]; then
+  echo "Error: Replication is already running. Please run ghe-repl-stop first." >&2
+  exit 1
+fi
+
+# resolve primary ip
+PRIMARY_HOST="$1"
+PRIMARY_IP=$(/usr/share/rbenv/versions/current/bin/ruby -rsocket -e "puts Addrinfo.ip('$PRIMARY_HOST').ip_address")
+
+if [ -n "$(ghe-config core.github-hostname)" ]; then
+  if [ "$PRIMARY_HOST" != "$PRIMARY_IP" ] && [ "$PRIMARY_HOST" == "$(ghe-config core.github-hostname)" ]; then
+    echo "Error: Can't configure replication with the GitHub Enterprise Server hostname. Please configure with the primary's IP address." >&2
+    exit 1
+  fi
+fi
+
+if [ -z "$PRIMARY_IP" ]; then
+  echo "Error: Unable to resolve '$PRIMARY_HOST' to an IP address." >&2
+  exit 1
+fi
+
+if [ "$PRIMARY_IP" = "127.0.0.1" ]; then
+  echo "Error: Can't configure replication with itself." >&2
+  exit 1
+fi
+
+PRIMARY_URL_HOST=$PRIMARY_IP
+if grep -q ":" <<<$PRIMARY_IP; then
+  PRIMARY_URL_HOST="[$PRIMARY_IP]"
+fi
+
+# Reduce the chances of accidental wrong-way replication
+if [ -f /etc/github/configured ]; then
+  echo "Warning: This appliance is or has been a configured appliance."
+  echo "Proceeding will overwrite data on this appliance."
+  echo
+  read -p "Proceed with initializing this appliance as a replica? [y/N] "
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+  backup_cluster_configs
+  sudo rm -f /etc/github/cluster /data/user/common/cluster.conf
+  sudo timeout -k4 10 systemctl stop wireguard 2>/dev/null || sudo ip link delete tun0 || true
+fi
+
+skip_ssh_check=false
+
+if ghe-config --blank 'secrets.admin-ssh-key'; then
+  filename=/home/admin/.ssh/id_ed25519
+  yes | ssh-keygen -t ed25519 -N "" -C "admin-ssh-key" -f $filename
+  ghe-config 'secrets.admin-ssh-key' "$(cat $filename)"
+  ghe-config 'secrets.admin-ssh-pubkey' "$(cat $filename.pub)"
+  skip_ssh_check=true
+
+  if [ -f /home/admin/.ssh/id_rsa ] && USE_ADMIN_SSH_KEY=1 ssh_check $PRIMARY_IP; then
+    export USE_ADMIN_SSH_KEY=1
+    skip_ssh_check=false
+  fi
+fi
+pubkey=$(ghe-config secrets.admin-ssh-pubkey)
+
+# This checks communication between new replica and primary node
+needauth=true
+if ! "$skip_ssh_check"; then
+  if ssh_check "$PRIMARY_IP"; then
+    echo "Connection check with primary succeeded."
+    needauth=false
+  else
+    echo "Connection check to primary node $PRIMARY_IP failed."
+    needauth=true
+  fi
+fi
+
+# instruct the user to add the replica ssh key to the primary appliance
+if $needauth; then
+  echo "The primary GitHub Enterprise Server appliance must be configured to allow replica access."
+  echo "Visit http://$PRIMARY_URL_HOST/setup/settings and authorize the following SSH key:"
+  echo
+  echo "$pubkey"
+  echo
+  echo "Run \`ghe-repl-setup $PRIMARY_IP' once the key has been added to continue replica setup."
+  exit 1
+fi
+
+# A new repl node will not have the keys necessary to connect to existing repl nodes
+# This copies the authorized_keys file which will be overwritten later
+secret_key=$(primary_ssh sudo cat /data/user/common/authorized_keys)
+echo "${secret_key}" >> /home/admin/.ssh/authorized_keys
+
+# This checks communication with all other existing repl nodes in cluster
+# Communication between primary and existing replica nodes already assumed here
+# because `ghe-repl-setup` had to have been run prior to set up the cluster in the first place
+REPLICA_IP=$(primary_ssh echo \$SSH_CLIENT | awk '{ print $1 }')
+if ssh_check_ha_replicas "$REPLICA_IP" -eq 0; then
+  echo "Connection check with replicas succeeded."
+else
+  echo "Connection check with replicas failed. Please ensure all nodes are online."
+  exit 1
+fi
+
+if [[ "$PRIMARY_IP" == "$REPLICA_IP" ]]; then
+  echo "Error: Can't configure replication with itself." >&2
+  exit 1
+fi
+
+if [[ "$(primary_ssh -- ghe-repl-status -r)" == "replica" ]] ; then
+  echo "Error: Cannot configure replication with another replica." >&2
+  exit 1
+fi
+
+# verify enough disk capacity on the replica
+ensure_replica_capacity
+
+# verify replica is the same release
+ensure_primary_and_replica_compatible
+
+# verify Elasticsearch node ids don't clash
+es_ensure_no_id_clash $force
+
+if actions-ever-enabled; then
+  # ensure existing container is stopped, if any
+  nomad stop mssql > /dev/null 2>&1 || true
+fi
+
+if ! is_service_external_on_primary "mysql" ; then
+  sudo touch /etc/github/repl-force-mysql
+fi
+
+# Stop auto-update check feature replica if it ever enabled as standalone
+cmd="/usr/local/bin/ghe-update-check -q"
+( sudo crontab -l 2> /dev/null | grep -v "$cmd" ) | sudo crontab - 
+
+check_for_config_run
+
+# warn if another replica already exists
+# first check for a conf file on primary to not assume a setup has been done before
+if primary_ssh "[ -f /etc/github/cluster ]"; then
+  primary_repl_state=$(primary_ssh "if test -f /etc/github/repl-state; then cat /etc/github/repl-state; fi")
+  replicas=$(primary_ssh "ghe-cluster-nodes --replica --ip")
+  if ! $force && ! $add && [ "$primary_repl_state" = "primary" ] && ! echo "$replicas" | grep -q "$REPLICA_IP"; then
+    echo "The primary appliance is configured with another replica."
+    echo "If you are sure you want to update the current configuration, use the -f option:"
+    echo "ghe-repl-setup -f $PRIMARY_IP"
+    echo "If you want to add this host as an additional replica, use the -a option:"
+    echo "ghe-repl-setup -a $PRIMARY_IP"
+    exit 1
+  fi
+fi
+
+domain_name=$(primary_ssh ghe-config core.github-hostname)
+if [ -n "$cluster_name" ]; then
+  primary_host_name="${cluster_name//./-}-primary"
+  replica_host_name="${cluster_name//./-}-replica"
+else
+  primary_host_name="${domain_name//./-}-primary"
+  replica_host_name="${domain_name//./-}-replica"
+fi
+
+if $add; then
+  if [ "$(primary_ssh -- ghe-cluster-nodes --replica | wc -l)" -ge 8 ]; then
+    echo "Error: GitHub Enterprise Server supports a maximum of 8 replica appliances." >&2
+    exit 1
+  fi
+  for ip in $(primary_ssh -- "ghe-config --get-regexp cluster.*.ipv4 | cut -d ' ' -f2"); do
+    if [ "$ip" = "$REPLICA_IP" ]; then
+      echo "Error: There is already a node with the IP $REPLICA_IP configured." >&2
+      echo "If you want to reconfigure this node, please run \`ghe-repl-teardown\` first." >&2
+      exit 1
+    fi
+  done
+  if [ -n "$replica_postfix" ]; then
+    replica_host_name="$replica_host_name$replica_postfix"
+  else
+    replica_host_name="$replica_host_name-$(cat /data/user/common/uuid | tr -cd 'a-z' | head -c 10)"
+  fi
+  primary_ssh cat /data/user/common/cluster.conf | sudo dd status=none of=/data/user/common/cluster.conf
+  primary_ssh sudo chmod o+r /data/user/common/cluster.conf
+elif [ ! -f /data/user/common/cluster.conf ]; then
+  ghe-config "cluster.ha" "true"
+
+  if ! is_service_external_on_primary "mysql" ; then
+    ghe-config "cluster.mysql-master" "$primary_host_name"
+  fi
+
+  ghe-config "cluster.redis-master" "$primary_host_name"
+  ghe-config "cluster.mssql-master" "$primary_host_name"
+  ghe-config "cluster.primary-datacenter" "${primary_host_name}-dc"
+
+  ghe-config "cluster.$primary_host_name.hostname" "$primary_host_name"
+  ghe-config "cluster.$primary_host_name.ipv4" "$PRIMARY_IP"
+  ghe-config "cluster.$primary_host_name.ipv6" ""
+  if [ -z "$(ghe-config "cluster.$primary_host_name.consul-datacenter")" ]; then
+    ghe-config "cluster.$primary_host_name.consul-datacenter" "${primary_host_name}-dc"
+  fi
+
+  for s in consul git pages storage mysql mssql elasticsearch redis metrics web job memcache actions launch; do
+    if ! is_service_external_on_primary "$s" ; then
+      ghe-config "cluster.$primary_host_name.$s-server" "true"
+    fi
+  done
+fi
+
+# Resolving domain names with labels longer than 63 character does not work.
+# The replica domain name here consists only of a single label and many GHES
+# processes depend on the domain name (e.g. nomad).
+# See https://datatracker.ietf.org/doc/html/rfc1034#section-3.1
+if [ "${#replica_host_name}" -gt "63" ]; then
+  short_name="${replica_host_name::60}$(cat /dev/urandom | tr -cd 'a-z' | head -c 3)"
+  echo "WARNING: The auto-generated default replica hostname '$replica_host_name' is too long. Using '$short_name'."
+  replica_host_name="$short_name"
+fi
+
+ghe-config "cluster.$replica_host_name.hostname" "$replica_host_name"
+ghe-config "cluster.$replica_host_name.ipv4" "$REPLICA_IP"
+ghe-config "cluster.$replica_host_name.ipv6" ""
+if [ -z "$(ghe-config "cluster.$replica_host_name.consul-datacenter")" ]; then
+  ghe-config "cluster.$replica_host_name.consul-datacenter" "${replica_host_name}-dc"
+fi
+ghe-config "cluster.$replica_host_name.replica" "disabled"
+
+for s in consul git pages storage mysql mssql elasticsearch redis metrics; do
+  if ! is_service_external_on_primary "$s" ; then
+    ghe-config "cluster.$replica_host_name.$s-server" "true"
+  fi
+done
+
+export HA_CLUSTER=1
+
+existing_cluster_name=$(primary_ssh "if test -f /etc/github/cluster; then cat /etc/github/cluster; fi")
+if ! $add; then
+  if [ -n "$existing_cluster_name" ]; then
+    if ! $force && [ "$primary_host_name" != "$existing_cluster_name" ]; then
+      echo "Already configured as cluster node with name $existing_cluster_name" >&2
+      exit 1
+    fi
+  fi
+  echo "$primary_host_name" | primary_ssh sudo dd status=none of=/etc/github/cluster
+fi
+echo "$replica_host_name" | sudo dd status=none of=/etc/github/cluster
+
+if ! $add; then
+  ghe-config 'secrets.admin-ssh-pubkey' >> /home/admin/.ssh/authorized_keys
+  primary_ssh "ghe-config 'secrets.admin-ssh-pubkey' '$(ghe-config 'secrets.admin-ssh-pubkey')'"
+  primary_ssh "ghe-config 'secrets.admin-ssh-key' '$(ghe-config 'secrets.admin-ssh-key')'"
+  primary_ssh "/bin/bash -c 'ghe-config secrets.admin-ssh-pubkey >> /home/admin/.ssh/authorized_keys'"
+  cat /home/admin/.ssh/id_ed25519 | primary_ssh dd status=none of=/home/admin/.ssh/id_ed25519
+  cat /home/admin/.ssh/id_ed25519.pub | primary_ssh dd status=none of=/home/admin/.ssh/id_ed25519.pub
+fi
+
+ghe-config 'secrets.admin-ssh-pubkey' >> /home/admin/.ssh/authorized_keys
+replica_uuid=$(cat /data/user/common/uuid)
+replica_wireguard_pubkey=$(sudo cat /data/user/common/wireguard.key | wg pubkey)
+for node in $(ghe-cluster-nodes -x); do
+  ip=$(ghe-config "cluster.$node.ipv6" || true)
+  if [ -z "$ip" ]; then
+    ip=$(ghe-config "cluster.$node.ipv4" || true)
+  fi
+  if [ -n "$ip" ]; then
+    cat /data/user/common/cluster.conf | ssh_cmd $ip sudo dd status=none of=/data/user/common/cluster.conf
+    ssh_cmd $ip sudo chmod o+r /data/user/common/cluster.conf
+    # UUID check
+    node_uuid="$(ssh_cmd "$ip" cat /data/user/common/uuid)"
+    if [ "$node_uuid" == "$replica_uuid" ]; then
+      echo "Generating new UUID for replica" >&2
+      sudo uuid -o /data/user/common/uuid
+      sudo systemctl restart consul
+    fi
+    node_wireguard_pubkey="$(ssh_cmd "$ip" sudo cat /data/user/common/wireguard.key | wg pubkey)"
+    if [ "$node_wireguard_pubkey" == "$replica_wireguard_pubkey" ]; then
+      echo "Generating new WireGuard private key for replica" >&2
+      wg genkey | sudo sponge /data/user/common/wireguard.key
+    fi
+  fi
+done
+
+echo "Updating Elasticsearch configuration ..."
+es_set_local_auto_expand "0-all"
+es_set_primary_auto_expand "0-all"
+
+REPLICA_URL_HOST=$REPLICA_IP
+if grep -q ":" <<<$REPLICA_IP; then
+  REPLICA_URL_HOST="[$REPLICA_IP]"
+fi
+
+# create repl-fingerprint on both sides
+ghe-repl-fingerprint >/dev/null
+primary_ssh /usr/local/share/enterprise/ghe-repl-fingerprint >/dev/null
+
+# verify primary is configured
+if ! primary_ssh test -f /etc/github/configured -a -f /data/user/common/enabled; then
+  echo "Error: Primary appliance was not fully configured." >&2
+  echo "Please run \`ghe-config-apply' on the primary appliance," >&2
+  echo "or hit \"Save settings\" via the admin interface on http://$PRIMARY_URL_HOST/setup/settings." >&2
+  exit 1
+fi
+
+# verify replica preflight checks passed
+sudo /usr/bin/env PREFLIGHT_SHELL=1 /usr/local/share/enterprise/ghe-preflight-check > /tmp/preflight.sh || {
+  . /tmp/preflight.sh
+  sudo rm -f /tmp/preflight.sh
+
+  echo "Error: Replica appliance did not pass the preflight checks." >&2
+  echo "Please visit http://$REPLICA_URL_HOST/setup for more information." >&2
+  echo >&2
+  echo "Block device mounted: $PREFLIGHT_BLOCKDEV_MOUNTED" >&2
+  if [ "$PREFLIGHT_BLOCKDEV_MOUNTED" = "success" ]; then
+    echo "Block device capacity: $PREFLIGHT_BLOCKDEV_CAPACITY" >&2
+  fi
+  echo "Root device capacity: $PREFLIGHT_ROOTDEV_CAPACITY" >&2
+  echo "Memory: $PREFLIGHT_MEMORY" >&2
+  if [ -n "$PREFLIGHT_AWS_INSTANCE" ]; then
+    echo "AWS instance type: $PREFLIGHT_AWS_INSTANCE" >&2
+  fi
+  exit 1
+}
+
+# write repl-state to both sides
+echo "replica" | sudo dd status=none of=/etc/github/repl-state
+echo "primary" | ssh_cmd $PRIMARY_IP sudo dd status=none of=/etc/github/repl-state
+
+# mark user volume as cluster replica
+sudo touch /data/user/replica-mode-cluster
+
+# clean up upgrade flag
+sudo rm -f /etc/github/repl-setup
+
+# Copy license and settings from primary appliance
+echo "Copying license and settings from primary appliance ..."
+primary_ssh sudo tar --acls -cpPzf - \
+  /data/user/common/authorized_keys \
+  /data/user/common/enterprise.ghl \
+  /data/user/common/github.conf \
+  /data/user/common/secrets.conf \
+  /data/user/common/saml-sp.p12 \
+  | sudo tar --acls -xpPzf - 2>/dev/null
+
+# Sync Actions files (whether Actions is enabled or not)
+echo "Syncing Actions state files and certificates (if applicable) from primary appliance ..."
+sudo rm -f /data/user/actions/states/* /data/user/actions/certificates/*
+primary_ssh 'sudo tar --acls -cpPzf - /data/user/actions/states/* /data/user/actions/certificates/* 2>/dev/null' |
+  sudo tar --acls -xpPzf - 2>/dev/null
+
+primary_ssh ghe-export-ssh-host-keys | ghe-import-ssh-host-keys
+if $add; then
+  ghe-copy-authorized-keys
+fi
+echo " --> The SSH host keys on this appliance have been replaced to match the primary."
+echo " --> Please run 'ssh-keygen -R $REPLICA_IP; ssh-keygen -R \"[$REPLICA_IP]:122\"' on your client to prevent future ssh warnings."
+
+# Sync custom CA certificates, if there are any
+custom_certs=$(primary_ssh ghe-ssl-ca-certificate-install -l)
+if [ -n "$custom_certs" ]; then
+  echo "Copying custom CA certificates from primary appliance ..."
+  ghe-repl-sync-ca-certificates "$PRIMARY_IP" || true
+fi
+
+# shut down services on replica
+services_to_stop=$(systemctl show -p Wants github-enterprise-ha.target | cut -d= -f2)
+if [ -n "$services_to_stop" ]; then
+  sudo systemctl stop --no-block -- "$services_to_stop" || true
+fi
+ghe-nomad-cleanup -y --no-haproxy-restart
+
+# install static page
+export PRIMARY_IP
+
+sudo ghe-replica-mode-html
+
+# disable maintenance mode
+ghe-maintenance -u
+
+if [ -f /home/admin/.ssh/id_rsa  ] && [ -f /etc/github/cluster ]; then
+  primary_ssh rm -f /home/admin/.ssh/id_rsa /home/admin/.ssh/id_rsa.pub
+  rm -f /home/admin/.ssh/id_rsa /home/admin/.ssh/id_rsa.pub
+fi
+
+primary_ssh sudo env HA_CLUSTER=1 ghe-cluster-config-update
+
+# configure fluent-bit for centralized config-apply logs + traces
+echo "Running ghe-fluent-bit-configure replica $primary_host_name"
+/usr/local/share/enterprise/ghe-fluent-bit-configure replica "$primary_host_name"
+echo "Running ghe-fluent-bit-configure primary on $primary_host_name"
+primary_ssh "/usr/local/share/enterprise/ghe-fluent-bit-configure primary"
+
+echo "Success: Replica mode is configured against $PRIMARY_IP."
+echo "To disable replica mode and undo these changes, run 'ghe-repl-teardown'."
+echo "Run 'ghe-repl-start' to start replicating from the newly configured primary."

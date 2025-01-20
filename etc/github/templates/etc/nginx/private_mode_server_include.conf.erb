@@ -1,0 +1,38 @@
+# If included in a server block, this adds the necessary routes to do
+# auth_request style authentication against an Enterprise instance. This should
+# be included in each server for which authentication is needed and should be
+# used in conjunction with private_mode_location_include.conf.erb.
+
+<% if @config['private-mode'] -%>
+
+location = /sessions/_auth_request_endpoint {
+  # Forward request to SessionController#auth_request_endpoint on github/github
+  <% if cluster_ha_primary? -%>
+  allow 127.0.0.1;
+  allow <%= cluster_vpn_subnet %>/24;
+  deny all;
+  <% else -%>
+  internal;
+  <% end -%>
+  proxy_set_header Host <%= @config['github-hostname'] %>;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header Content-Length "";
+  proxy_pass http://github_upstream;
+}
+
+location = /sessions/_auth_request_bounce {
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header Host $http_host;
+
+  # Send the UA to SessionsController#auth_request_bounce to pick up a session cookie.
+  if ($http_host = <%= @config['github-hostname'] %>) {
+    # We're on the same domain. Just pass the request through.
+    rewrite ^(.*)$ $1?return_to=$original_url break;
+    proxy_pass http://github_upstream;
+  }
+  if ($http_host != <%= @config['github-hostname'] %>) {
+    # We're on a different domain. Redirect to the main domain.
+    return 302 $http_x_forwarded_proto://<%= @config['github-hostname'] %>/sessions/_auth_request_bounce?return_to=$original_url;
+  }
+}
+<% end -%>

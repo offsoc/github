@@ -1,0 +1,227 @@
+<%# erblint:counter ButtonComponentMigrationCounter 2 %>
+<%# erblint:counter GoogleAnalyticsDeprecation 1 %>
+
+<%= header %>
+<%= render(Primer::BaseComponent.new(tag: :label, for: @textarea_id, classes: "sr-only", position: :absolute).with_content(label)) %>
+<tab-container class="<%= class_names(
+    "js-previewable-comment-form write-selected Box CommentBox",
+    "js-suggested-changes-container" => allows_suggested_changes?
+  ) %>" data-preview-url="<%= data_preview_url %>">
+  <%= csrf_hidden_input_for data_preview_url, class: "js-data-preview-url-csrf" %>
+  <div class="tabnav CommentBox-header width-full">
+    <% unless hide_nav? %>
+      <div
+        class="tabnav-tabs"
+        role="tablist"
+        aria-label="Add a comment"
+      >
+        <button
+          type="button"
+          class="btn-link tabnav-tab write-tab js-write-tab"
+          role="tab"
+          id="write_tab_<%= id %>"
+          <%= safe_comment_box_tracking(:WRITE_TAB) %>
+          aria-selected="true"
+        >
+          Write
+        </button>
+        <button
+          type="button"
+          class="btn-link tabnav-tab preview-tab js-preview-tab"
+          role="tab"
+          id="preview_tab_<%= id %>"
+          <%= safe_comment_box_tracking(:PREVIEW_TAB) %>
+        >
+          Preview
+        </button>
+      </div>
+    <% end %>
+    <%= render Comments::GitHubSpecificMarkdownToolbarComponent.new(
+        allow_attachments: allow_attachments?,
+        allows_suggested_changes: allows_suggested_changes?,
+        copilot_summary_enabled: copilot_summary_enabled?,
+        copilot_text_completion_enabled: copilot_text_suggestions_enabled?,
+        hide_cross_references: hide_cross_references,
+        hide_mentions: hide_mentions,
+        hide_saved_replies: hide_saved_replies,
+        pull_request: pull_request,
+        repository: current_repository,
+        saved_reply_context: saved_reply_context,
+        slash_commands_enabled: slash_commands_enabled?,
+        suggestion_button_path: suggestion_button_path,
+        tasklist_blocks_enabled: tasklist_blocks_enabled?,
+        textarea_id: textarea_id,
+      ) %>
+  </div>
+
+  <div class="comment-form-error js-comment-form-error" role="alert" <% if !show_errors_inline? %>hidden<% end %>>
+    There was an error creating your <%= subject_name %><%= ": " + subject.errors.full_messages.join(", ").downcase if show_errors_inline? %>.
+  </div>
+
+  <%= write_content_tabpanel do |upload_enabled| %>
+    <div class="js-write-bucket position-relative">
+      <% unless gist? %>
+        <input
+          type="hidden"
+          name="saved_reply_id"
+          id="<%= textarea_id %>_saved_reply_id"
+          class="js-resettable-field"
+          value=""
+          data-reset-value=""
+        >
+      <% end %>
+
+      <text-expander
+        keys="<%= text_expander_keys %>"
+        <% if preview_repository %>
+          data-issue-url="<%= suggestions_path(issue_suggestions_params(preview_repository, subject)) %>"
+          data-mention-url="<%= suggestions_path(mention_suggestions_params(preview_repository, subject)) %>"
+          multiword="#"
+        <% end %>
+        <% if gist? %>
+          data-mention-url="<%= suggestions_user_gist_path(gist.user_param, gist, target: "user") %>"
+        <% end %>
+        data-emoji-url="<%= gist ? suggestions_user_gist_path(gist.user_param, gist) : emoji_suggestions_path %>"
+      >
+        <%= render(
+          SlashCommands::SlashCommandExpanderWrapperComponent.new(
+            repository: current_repository,
+            user: current_user,
+            subject: subject,
+            surface: slash_command_surface
+          )
+        ) do %>
+        <% if show_discussion_validation_errors? %>
+          <div
+            class="<%= class_names(
+              "form-group js-remove-error-state-on-click m-0 ml-2 mr-2 ml-md-0 mr-md-0",
+              "errored" => subject.errors[:body].present? || subject.errors[:discussion].present?,
+            ) %>"
+          >
+        <% end %>
+        <div class="CommentBox-container">
+          <textarea name="<%= field_name %>"
+                    id="<%= textarea_id %>"
+                    <% if autofocus? %>autofocus<% end %>
+                    placeholder=" "
+                    <% if required? %>data-required-trimmed="Text field is empty"<% end %>
+                    class="<%= class_names(
+                      "js-comment-field js-paste-markdown js-task-list-field js-quick-submit FormControl-textarea CommentBox-input",
+                      "js-size-to-fit" => size_to_fit?,
+                      "js-local-storage-resumable" => local_storage_resumable?,
+                      "js-session-resumable" => session_resumable?,
+                      "js-saved-reply-shortcut-comment-field" => !subject.is_a?(Gist),
+                      "js-length-limited-input" => input_max_length && max_length_warning_text,
+                      "input-monospace" => use_fixed_width_font?,
+                      "CommentBox-input--medium" => @size == :medium,
+                      "CommentBox-input--large" => @size == :large,
+                    ) %>"
+                    dir="auto"
+                    <% if show_discussion_validation_errors? %>
+                      aria-describedby="body-input-validation placeholder_<%= id %>"
+                    <% elsif aria[:describedby] %>
+                      aria-describedby="<%= aria[:describedby] %> placeholder_<%= id %>"
+                    <% else %>
+                      aria-describedby="placeholder_<%= id %>"
+                    <% end %>
+                    <% if input_max_length %>
+                      data-input-max-length="<%= input_max_length %>"
+                    <% end %>
+                    <% if max_length_warning_text %>
+                      data-warning-text="<%= max_length_warning_text %>"
+                    <% end %>
+                    <% if current_user&.paste_url_link_as_plain_text? %>data-paste-url-links-as-plain-text<% end %>
+                    <% if required? %>required<% end %>><%= body %></textarea>
+          <p class="CommentBox-placeholder" id="placeholder_<%= id %>" data-comment-box-placeholder aria-hidden="true">
+            <%= placeholder %>
+          </p>
+        </div>
+        <% end %>
+        <% if show_discussion_validation_errors? %>
+          <% if subject.errors[:body].present? %>
+            <p class="note error" id="body-input-validation">
+              <%= subject.errors.full_messages_for(:body).to_sentence %>
+            </p>
+          <% elsif subject.errors[:discussion].present? %>
+            <p class="note error" id="body-input-validation">
+              <%= subject.errors.full_messages_for(:discussion).to_sentence %>
+            </p>
+          <% end %>
+          </div>
+        <% end %>
+      </text-expander>
+      <% if allow_attachments? %>
+        <input <%= upload_policy_accept_extensions_attribute(asset_types) %> type="file" multiple hidden id="<%= file_chooser_id %>">
+        <div class="file-attachment-errors">
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 bad-file repository-required", full: true, description: "Try again with #{upload_policy_friendly_extensions(asset_types)}")) { "We don’t support that file type." } %>
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 bad-permissions", full: true, description: "Try again with #{upload_policy_friendly_extensions(asset_types)}")) { "Attaching documents requires write permission to this repository." } %>
+          <%# This HTML has been moved off the render thread. The error message will come from the server response and be inserted in the DOM by JavaScript %>
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 too-big js-upload-too-big", full: true)) { "" } %>
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 empty", full: true, description: "Try again with a file that’s not empty.")) { "This file is empty." } %>
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 hidden-file", full: true, description: "Try again with another file.")) { "This file is hidden." } %>
+          <%= render(Primer::Alpha::Banner.new(border_bottom: 0, scheme: :danger, classes: "rounded-bottom-2 failed-request", full: true, description: "Try again.")) { "Something went really wrong, and we can’t process that file." } %>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="pr-2 pl-2 pb-2">
+      <%= render(Primer::Box.new(border: :right, border_color: :muted, display: :inline_block, mr: 1, pr: 2)) do %>
+        <%= render(
+          Primer::Beta::Button.new(
+            tag: :a,
+            href: GitHub.markdown_docs_url,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            data: { ga_click: "Markdown Toolbar, click, help", **comment_box_tracking(:MARKDOWN_BUTTON) },
+            scheme: :invisible,
+            size: :small)
+          ) do |button| %>
+            <% button.with_leading_visual_icon(icon: :markdown) %>
+            Markdown is supported
+          <% end %>
+      <% end %>
+      <% if allow_attachments? %>
+        <%= render(
+          Primer::Beta::Button.new(
+            scheme: :invisible,
+            size: :small,
+            data: { file_attachment_for: file_chooser_id, **comment_box_tracking(:UPLOAD_BUTTON) })
+          ) do |button| %>
+            <% button.with_leading_visual_icon(icon: :image) %>
+            Paste, drop, or click to add files
+          <% end %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <div
+    role="tabpanel"
+    class="js-preview-panel overflow-auto CommentBox-comment"
+    aria-labelledby="preview_tab_<%= id %>"
+    hidden
+  >
+    <input type="hidden" name="path" value="<%= comment_path %>" class="js-path">
+    <input type="hidden" name="line" value="<%= line_number %>" class="js-line-number">
+    <input type="hidden" name="start_line" value="" class="js-start-line-number">
+    <input type="hidden" name="preview_side" value="" class="js-side">
+    <input type="hidden" name="preview_start_side" value="" class="js-start-side">
+    <input type="hidden" name="start_commit_oid" value="<%= comparison_start_oid %>" class="js-start-commit-oid">
+    <input type="hidden" name="end_commit_oid" value="<%= comparison_end_oid %>" class="js-end-commit-oid">
+    <input type="hidden" name="base_commit_oid" value="<%= comparison_base_oid %>" class="js-base-commit-oid">
+    <input type="hidden" name="comment_id" value="<%= comment_id %>" class="js-comment-id">
+    <%= render "comments/preview_comment", allows_suggested_changes: allows_suggested_changes?, size_to_fit: size_to_fit? %>
+  </div>
+
+  <div class="comment-form-error mb-2 js-comment-update-error" hidden></div>
+  <% if copilot_text_suggestions_enabled? %>
+    <%= render GhostPilot::SuggestionsComponent.new(
+      source_element_id: textarea_id,
+      element_description: copilot_text_completion_description,
+      context: [
+        GhostPilot::DiffSummaryComponent.new(comparison: pull_request.comparison, lazy_load: true),
+        GhostPilot::FormInputComponent.new(target_element_id: "pull_request_title"),
+        GhostPilot::RecentInteractionsComponent.new(organization_id: pull_request.repository.organization_id, lazy_load: true),
+      ] + copilot_text_suggestions_additional_context
+    ) %>
+  <% end %>
+</tab-container>

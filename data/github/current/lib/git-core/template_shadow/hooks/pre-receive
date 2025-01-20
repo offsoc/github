@@ -1,0 +1,34 @@
+#!/bin/sh
+# Wrapper for git hooks that forces them to use bin/safe-ruby.
+# Also exports a $REPO_PATH pointing to the originating <id>.git.
+set -e
+
+if [ -n "$GIT_SOCKSTAT_VAR_disable_hooks" ]; then
+  export GIT_SOCKSTAT_VAR_quarantine_only=1
+fi
+
+# expand relative paths and symlinks to an absolute canonical path.
+_realpath () {
+    (cd "$1" && pwd -P)
+}
+
+ROOT=$(_realpath $(_realpath $(dirname $0))/../../../..)
+
+REPO_PATH=$(_realpath $(dirname $0)/..)
+export REPO_PATH
+PRE_RECEIVE_BINARY=/data/gitrpcd/current/bin/pre-receive-fork
+if [ "$GIT_SOCKSTAT_VAR_githooks_env" = "development" ] || [ "$GIT_SOCKSTAT_VAR_githooks_env" = "test" ]; then
+	PRE_RECEIVE_BINARY=$ROOT/vendor/gitrpcd/build/githooks/dotcom/fork/pre-receive
+elif [ -e /data/gitrpcd/.app-config/${GIT_SOCKSTAT_VAR_githooks_env}.sh ]; then
+	. /data/gitrpcd/.app-config/${GIT_SOCKSTAT_VAR_githooks_env}.sh
+else
+	PRE_RECEIVE_BINARY=/usr/local/bin/githooks/dotcom/fork/pre-receive
+fi
+
+$PRE_RECEIVE_BINARY && rc=$? || rc=$?
+
+if [ $rc -eq 2 ]; then
+    rc=1
+fi
+
+exit $rc

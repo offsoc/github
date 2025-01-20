@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+ping_test() {
+  echo -ne "Trying payload size of $size bytes...\033[0K\r"
+  if (ping -c 2 -A -n -W 1 -s "$size" -M 'do' "$dst_ip" >/dev/null 2>&1); then
+    max_ok=$size
+    size=$(( size + (min_nok - size) / 2))
+  else
+    min_nok=$size
+    size=$(( max_ok + ((min_nok - max_ok) / 2) ))
+  fi
+}
+
+IP="$1"
+if [ -z "$IP" ]; then
+  echo "Usage: ghe-mtu-test hostname"
+  exit 2
+fi
+
+echo "Attempting to determine the MTU to $1..."
+
+trap "exit 1" INT
+
+# Get source interface from route table and determin MTU
+dst_ip=$(getent ahosts "$1" | awk '{print $1; exit}')
+if_name=$(ip route get "$dst_ip" | grep -oP 'dev \K[^ ]+')
+src_mtu=$(cat /sys/class/net/"$if_name"/mtu)
+
+# Use MTU of the source interface as an upper bound of the binary search
+
+max_ok=0
+# Max ping payload size = MTU - ( IP header (20 bytes) + ICMP header (8 bytes) )
+size=$(( src_mtu - 28 ))
+min_nok=$(( src_mtu - 27 ))
+
+while [ $max_ok -ne $size ]; do
+  ping_test
+done
+
+if [ "$max_ok" -eq 0 ]; then
+  echo "Failed to determin MTU. Make sure that ICMP is not blocked by firewalls."
+else
+  echo "MTU of $(( max_ok + 28 )) detected (20 byte IP header + 8 byte ICMP header + $max_ok byte payload)"
+fi

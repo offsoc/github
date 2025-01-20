@@ -1,0 +1,56 @@
+<%
+  feeds_dev_analytics = local_assigns.fetch(:feeds_dev_analytics, nil)
+  feed_v2_classes = user_feature_enabled?(:feeds_v2) ? "color-bg-overlay" : ""
+  feed_error = local_assigns[:error]
+%>
+
+<turbo-frame id="conduit-feed-frame" <%= test_selector("org-feed") %> data-repository-hovercards-enabled <% if feeds_dev_analytics %>data-dev-analytics-enabled<% end %>>
+  <% if feed_error %>
+    <p <%= test_selector("org-feed-error") %> class="color-fg-muted my-2 mb-2">
+      There was an error in loading the activity feed.
+      <a class="Link--inTextBlock" <%= test_selector("org-feed-error-reload") %>
+        href="<%= conduit_org_feed_path %>"
+        aria-label="Reload this page">Reload this page</a>.
+    </p>
+  <% else %>
+    <% if feed.empty? %>
+      <div class="pt-2">
+        <%= render Feed::GetStartedComponent.new %>
+      </div>
+    <% else %>
+      <% feed.items.each do |item| %>
+        <% renderer = Conduit::Web::Renderer.new(item:, viewer: viewer) %>
+        <%# catching exception from rendering individual card so that the feed itself doesn't fail %>
+        <% begin %>
+          <%= render renderer.component.new(
+            item:,
+            feed:,
+            stats_timer_method: show_stats.method(:record_render),
+            stats: renderer.stats,
+          ) %>
+        <% rescue Exception => e %>
+          <% Failbot.report(e) %>
+          <%# make sure to not swallow error during development %>
+          <% if Rails.env.development? %>
+            <% raise e %>
+          <% end %>
+        <% end %>
+      <% end %>
+      <% if feed.has_more? %>
+        <%
+          data_attrs = hydro_click_tracking_attributes("feeds.feed_click", {
+              click_target: "page=#{feed.next_page}",
+              original_request_id: feed.request_id,
+            }).
+            merge(disable_with: "Loading more&hellip;").
+            merge(test_selector_hash("feed-load-more-button"))
+        %>
+        <%= form_tag next_page_path, method: :get, class: "ajax-pagination-form js-ajax-pagination", data: test_selector_hash("feed-load-more-form") do %>
+          <% button_tag type: :submit, class: "ajax-pagination-btn #{feed_v2_classes}", data: data_attrs do %>
+            More
+          <% end %>
+        <% end %>
+      <% end %>
+    <% end %>
+  <% end %>
+</turbo-frame>

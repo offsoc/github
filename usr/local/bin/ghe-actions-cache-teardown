@@ -1,0 +1,130 @@
+#!/bin/bash
+#/ Usage: ghe-actions-cache-teardown [-hyf]
+#/
+#/ Disable Actions Cache service in GHES and stop nomad jobs.
+#/ When provided with --force parameter, check for the current state of the service is ignored
+#/ Always run this from ghe-actions-cache-disable. Should not be run independently. It can leave the system in an inconsistent state.
+#/ If run independently, ensure to restart actions services and flush location cache.
+#/
+#/ OPTIONS:
+#/   -h  | --help            Show this message
+#/   -y  | --yes             Do not show the warning prompt.
+#/   -f  | --force           When set, check for the current state of the service is ignored
+#/
+
+set -e
+
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-actions-lib
+. /usr/local/share/enterprise/ghe-actions-lib
+#shellcheck source=vm_files/usr/local/share/enterprise/ghe-mssql-lib
+. /usr/local/share/enterprise/ghe-mssql-lib
+
+force=false
+prompt_less=
+usage() {
+    grep '^#/' < "$0" | cut -c 4-
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -f|--force)
+            force=true
+            shift
+            ;;
+        -y|--yes)
+            prompt_less=1
+            shift
+            ;;
+        *)
+            >&2 echo "Unrecognized argument: $1"
+            usage
+            ;;
+    esac
+done
+
+should-run() {
+    ghe-actions-check -a 1 -s "artifactcache" >/dev/null 2>&1
+}
+proceed() {
+    if [ -z "$prompt_less" ]; then
+        echo "$(basename "$0") should only be used when requested by the GitHub Enterprise Support team. The changes are irreversible and will cause loss of data."
+        read -p "Proceed with ghe-actions-cache-teardown? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+proceed
+REPL_STATE=$(cat /etc/github/repl-state 2>/dev/null || true)
+if [ "$REPL_STATE" = "replica" ]; then
+    echo "Running on Replica. Skipping."
+    exit 0
+fi
+
+# In full cluster and HA, this script can only be ran from the `mssql-master`.
+# If you change that, make sure the calls to `ghe-mssql-console` use the `-p` flag where needed.
+if [ -f /etc/github/cluster ];then
+  ensure_mssql_primary
+fi
+
+if ! $force; then
+    if ! (should-run); then
+        echo "Exiting because Actions Cache is not running."
+        exit 0
+    fi
+fi
+
+# Stop Nomad jobs
+echo "Attempting to stop nomad jobs"
+ghe-actions-stop -s "artifactcache"
+
+# Unregister from MPS
+unregister="
+        Remove-ServiceInstance -Commit
+    "
+echo "Unregistering the service"
+ghe-actions-console -s "ArtifactCache" -c "$unregister"
+
+# Drop ArtifactCache databases
+artifactcache_dbs=$(ghe-mssql-console -y -r -q "SELECT name from sys.databases WHERE name LIKE '%ArtifactCache_%'" | grep -i ArtifactCache )
+
+echo "Starting database deletion"
+for ac_db in $artifactcache_dbs
+do
+    if [ "$REPL_STATE" = "primary" ]; then
+        # HA
+        echo "Removing DB $ac_db from the availability group and dropping it from the primary..."
+        # Run on localhost (primary)
+        ghe-mssql-console -y -r -q "ALTER AVAILABILITY GROUP ha REMOVE DATABASE [$ac_db]; ALTER DATABASE [$ac_db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE IF EXISTS [$ac_db]"
+        sleep 5
+        echo "Deleting DB $ac_db on all replicas..."
+        # Using `--role mssql` is needed since repository cache replicas don't run MSSQL.
+        ghe-cluster-each --replica --role mssql -o -- "
+        echo -n 'Deleting DB $ac_db on ' && hostname &&
+        ghe-mssql-console -y -n -q \"DROP DATABASE IF EXISTS [$ac_db]\"" || echo "Failed to delete database  $ac_db on some nodes. You may need to stop and start replication."
+    elif [ -f /etc/github/cluster ]; then
+        # Cluster
+        # Run on localhost (mssql-master).
+        echo "Removing DB $ac_db from the availability group and dropping it from the primary..."
+        ghe-mssql-console -y -r -q "ALTER AVAILABILITY GROUP ha REMOVE DATABASE [$ac_db]; ALTER DATABASE [$ac_db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE IF EXISTS [$ac_db]"
+        sleep 5
+        echo "Deleting DB $ac_db on all mssql replica nodes..."
+        ghe-cluster-each --exclude --role mssql -o -- "
+        echo -n 'Deleting DB $ac_db on ' && hostname &&
+        ghe-mssql-console -y -n -q \"DROP DATABASE IF EXISTS [$ac_db]\"" || echo "Failed to delete database $ac_db on some nodes."
+    else
+        # Standalone
+        echo "Deleting DB $ac_db..."
+        ghe-mssql-console -y -r -q "ALTER DATABASE [$ac_db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE IF EXISTS [$ac_db]"
+    fi
+done
+
+# Remove the state file for ArtifactCache service
+echo "Removing the state file"
+sudo rm -f /data/user/actions/states/artifactcache_state
+
+echo "Tearing down Actions Cache Service completed."

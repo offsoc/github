@@ -1,0 +1,284 @@
+#!/bin/bash
+#
+# Common functions used by support-focused scripts such as ghe-support-bundle
+# and ghe-diagnostics.
+#
+# Usage:
+#   . ghe-support-lib
+
+# Maximum seconds to wait for a connection to the bundle server
+CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
+
+ESB_BASE_URL=${ESB_BASE_URL:-"https://enterprise-bundles.github.com"}
+CONNECTIVITY_URL="$ESB_BASE_URL/bundles/connectivity.json"
+UPLOAD_URL="$ESB_BASE_URL/bundles.json"
+TOKEN_URL="$ESB_BASE_URL/bundles/token.json"
+TMP_DIR=${TMP_DIR:-"/data/user/tmp"}
+
+AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-"4"}
+AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-"0.5"}
+AZCOPY_TUNE_TO_CPU=${AZCOPY_TUNE_TO_CPU:-"false"}
+AZCOPY_BLOCK_SIZE=${AZCOPY_BLOCK_SIZE:-"50"}
+ESB_CLIENT_VERSION=${ESB_CLIENT_VERSION:-"2021-12-11"}
+ESB_VIA_GATEWAY=${ESB_VIA_GATEWAY:-"false"}
+
+# Writes a message on stderr, with a prefix to highlight the message for users.
+# Optionally pass additional arguments to echo via the second param.
+#
+# Usage:
+#   message "Hello world!" [-en]
+message() {
+  echo "$2" " --> ${1}" >&2
+}
+
+# Create the temporary staging folder if not present (as the admin user)
+if [ ! -d "$TMP_DIR" ]; then
+  message "ERROR: Can't access temporary file path: '$TMP_DIR'"
+  exit 1
+fi
+
+# Ensures the appliance's http(s) proxy settings have been loaded.
+if [ -z "$https_proxy" ] && [ -f "/etc/environment" ]; then
+  # /etc/environment is on the appliance, but not available during development.
+  # shellcheck disable=SC1091
+  . /etc/environment && export https_proxy
+fi
+
+# read the release version for the connectivity check
+if [ -f /etc/github/enterprise-release ]; then
+  #shellcheck disable=SC1091
+  source /etc/github/enterprise-release
+fi
+
+# Reads metadata from a license file and returns it in JSON format.
+# If an error occurs, it will be supressed and an empty JSON object returned.
+read_license() {
+  /ghe-license info -j 2>/dev/null || echo "{}"
+}
+
+# Returns the current organisation name from the appliance's license data.
+# If the data is invalid, an empty string will be returned.
+get_license_organization() {
+  echo "$1"  | jq -j '.company //""' 2>/dev/null || true
+}
+
+# Returns the reference number from the appliance's license data.
+# If the data is invalid, an empty string will be returned.
+get_license_reference() {
+  echo "$1" | jq -j '.reference_number //""' 2>/dev/null || true
+}
+
+# Reads the size of a file and converts it to a format understandable by humans.
+simple_file_size() {
+  stat -Lc %s "$1" | numfmt --to=iec-i --suffix=B
+}
+
+# Performs a quick connectivity check to $ESB_BASE_URL and verifies that the string
+# "GitHub Enterprise Tools" is returned as part of the response.
+check_connectivity() {
+  message "Checking connectivity ${https_proxy:+(via proxy \"$https_proxy\")}... " -n
+  if response=$(curl -sS --connect-timeout "$CONNECT_TIMEOUT" -H "ESB-CLIENT-VERSION: $ESB_CLIENT_VERSION" -H "GHES-VERSION: $RELEASE_VERSION" -X GET "$CONNECTIVITY_URL" 2>&1); then
+    if [ "$response" == "ok" ]; then
+      message "Success!"
+    else
+      message "ERROR: ${response:+(\"$response\")}"
+      return 1
+    fi
+  else
+    echo "Failed!"
+    message "ERROR: '$response'"
+    return 1
+  fi
+}
+
+# Usage: upload_file [options] <path>
+#
+# Upload a given file to GitHub Enterprise Support
+#
+# OPTIONS:
+#   -t <id>    Specify an associated support ticket ID.
+#   -d <name>  Add an additional description to the upload.
+#   -h <name>  Override the hostname (for cluster bundles).
+#
+upload_file() {
+  local upload_file_args ticket_id description file_path license_data org ref
+  upload_file_args=$(getopt --name "$0" --long ticket:,description:,host: --options t:d:h: -- "$@") || {
+    return 2
+  }
+
+  eval set -- "$upload_file_args"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -t|--ticket)
+        ticket_id="$2"
+        shift
+        ;;
+      -d|--description)
+        description="$2"
+        shift
+        ;;
+      -h|--host)
+        host="$2"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$1" ]; then
+    echo "No file path specified for upload."
+    return 2
+  else
+    file_path=$1
+  fi
+
+  license_data=$(read_license)
+  org=$(get_license_organization "$license_data")
+  ref=$(get_license_reference "$license_data")
+
+  message "Uploading '$file_path' (size: $(simple_file_size "$file_path")) ... "
+
+  # No progress bar needed here, so we'll capture STDOUT for cleanliness in case a connectivity test wasn't executed first.
+  if token_response=$(curl -sS --connect-timeout "$CONNECT_TIMEOUT" -H "ESB-CLIENT-VERSION: $ESB_CLIENT_VERSION" -H "ESB-VIA-GATEWAY: $ESB_VIA_GATEWAY" \
+                      -X POST -d 'bundle[uploaded_by]=uploader@enterprise.github.com' -d "bundle[reference]=$ref" "$TOKEN_URL" 2>&1); then
+    if ! token=$(echo "$token_response" | jq -r .token 2>&1); then
+      message "ERROR: Could not parse the upload token. ${token_response:+(\"$token_response\")}"
+      return 3
+    fi
+  else
+    message "ERROR: Could not fetch an upload token. ${token_response:+(\"$token_response\")}"
+    return 3
+  fi
+
+  # Bundle upload to blob storage
+  if az_blob_url=$(echo "$token_response" | jq -r .azBlobUrl 2>&1) && [[ "$az_blob_url" =~ "http" ]]; then
+    az_blob_uuid=$(echo "$token_response" | jq -r .blobUuid 2>&1)
+    blob_metadata=$(jq \
+      --arg bundle_ticket_id_v "$ticket_id" \
+      --arg bundle_name_v "$description" \
+      --arg bundle_file_v "$file_path" \
+      --arg bundle_host_v "${host:-$(hostname)}" \
+      --arg bundle_organization_name_v "$org" \
+      --arg license_ref_v "$ref" \
+      --arg esb_client_version_v "$ESB_CLIENT_VERSION" \
+      '.
+        | .["bundle_ticket_id"]=$bundle_ticket_id_v
+        | .["bundle_name"]=$bundle_name_v
+        | .["bundle_file"]=$bundle_file_v
+        | .["bundle_host"]=$bundle_host_v
+        | .["bundle_organization_name"]=$bundle_organization_name_v
+        | .["license_ref"]=$license_ref_v
+        | .["esb_client_version"]=$esb_client_version_v
+      ' <<<'{}' | jq -sRr @uri)
+
+    # send file. azcopy when ctrl-c'd "gracefully" exits 0 so trap and abort
+    USER_CANCEL=0
+    trap 'USER_CANCEL=1' INT
+    AZCOPY_CONCURRENCY_VALUE="$AZCOPY_CONCURRENCY_VALUE" AZCOPY_BUFFER_GB="$AZCOPY_BUFFER_GB" AZCOPY_TUNE_TO_CPU="$AZCOPY_TUNE_TO_CPU" azcopy \
+	    copy --from-to=LocalBlob --metadata="bundlemeta=$blob_metadata" --block-size-mb=$AZCOPY_BLOCK_SIZE --check-length=false --follow-symlinks=true "$file_path" "$az_blob_url"
+    trap - INT
+    if [ "$USER_CANCEL" -eq 1 ]; then
+      message "ERROR: upload cancelled by interrupt signal"
+      return 1
+    fi
+
+    # send metadata to finalize upload
+    if response=$(curl -f -X POST -H "ESB-CLIENT-VERSION: $ESB_CLIENT_VERSION" -F "token=$token" \
+                  ${ticket_id:+-F "bundle[ticket_id]=$ticket_id"} ${description:+-F "bundle[name]=$description"} \
+                  -F "bundle[blob_uuid]=$az_blob_uuid" -F "bundle[host]=${host:-$(hostname)}" -F "bundle[organization_name]=$org" \
+		              -# "$UPLOAD_URL" >&1); then
+      message "Upload completed (ID: $(echo "$response" | jq .id))."
+    else
+      message "ERROR: Upload failed. ${response:+(\"$response\")}"
+      return 1
+    fi
+  # Legacy bundle upload direct to server
+  else
+    # Can't capture STDOUT here as its needed to display the upload progress bar.
+    # Relying on the exit code and accepting the low potential for ugly output on failure.
+    if response=$(curl -f -X POST -F "token=$token" \
+                  ${ticket_id:+-F "bundle[ticket_id]=$ticket_id"} ${description:+-F "bundle[name]=$description"} \
+                  -F "bundle[file]=@${file_path}" -F "bundle[host]=${host:-$(hostname)}" -F "bundle[organization_name]=$org" \
+                  -# "$UPLOAD_URL" >&1); then
+      message "Upload completed (ID: $(echo "$response" | jq .id))."
+    else
+      message "ERROR: Upload failed. ${response:+(\"$response\")}"
+      return 1
+    fi
+  fi
+}
+
+# Simple Yes/No user prompt. Defaults to "No"
+check_yes_no() {
+  local yn
+  if echo -n " --> Continue (y/N)? " 2>/dev/null >/dev/tty; then
+    if read -r yn 2>/dev/null < /dev/tty; then
+      if ! [[ $yn =~ ^[Yy] ]]; then
+        false
+      fi
+    fi
+  fi
+}
+
+# Displays a message advising what we can do with the uploaded support bundle
+#
+# Usage:
+#   display_privacy_statement
+display_privacy_statement() {
+  message "We will use the data you provide to address your support request. This may"
+  message "include analyzing the data to diagnose the issue, communicating with you"
+  message "about the problem and potential solutions, and using the information to"
+  message "improve the products, services, or your experience. We will not disclose"
+  message "your data to any third parties without your explicit consent unless required"
+  message "to do so by law."
+}
+
+# Displays a message advising that a manual upload is necessary and requests confirmation.
+# Confirmation prompt can be disabled by passing an optional argument.
+#
+# Usage:
+#   prompt_manual_upload [No Prompt]
+prompt_manual_upload() {
+  message "The data cannot be automatically uploaded, but you can still send it manually."
+  if [ -z "$1" ]; then
+    message "Further instructions will be provided after the requested data is collected."
+    check_yes_no
+  fi
+}
+
+# Displays a message indicating how to manually download the data via SCP and upload to Enterprise Support
+# Must also flag whether the file should be cleaned up afterwards. Optionally accepts a ticket id.
+#
+# Usage:
+#   manual_upload_help <File Path> <delete_temp> [Ticket ID]
+manual_upload_help() {
+  local file_path=$1
+  local delete_temp=$2
+  local ticket_id=$3
+
+  cat <<-eof
+
+ ## Manual upload is required, data has not yet been sent to Enterprise Support.
+
+ 1. Run the following command on your workstation to download the data file (size: $(simple_file_size "$file_path")) from GitHub Enterprise:
+    scp -P 122 admin@$(ghe-config core.github-hostname):$file_path .
+
+ 2. Browse to the GitHub Support portal via the address below to upload the file:
+    https://support.github.com/uploads${ticket_id:+?ticket_id=$ticket_id}
+
+    Note: You'll need to be signed into your GitHub.com account to access the upload form.
+
+eof
+
+  if [ "$delete_temp" -eq 1 ]; then
+    cat <<-eof
+ 3. After the upload is complete, remove the temporary file using the following command on the appliance:
+    rm $file_path
+
+eof
+  fi
+}

@@ -1,0 +1,138 @@
+<%# erblint:counter ButtonComponentMigrationCounter 1 %>
+<%# view is an instance of Notification::V2::IndexView %>
+
+<%
+  repositories_by_id = {}
+  notifications_by_group_key = Hash.new { |h, k| h[k] = [] }
+
+  notifications.each do |notification|
+    if notification.list.is_a?(Repository)
+      repositories_by_id[notification.list.global_relay_id] = notification.list
+      notifications_by_group_key[notification.list.global_relay_id] << notification
+    else
+      graphql_type_name = Platform::Helpers::NodeIdentification.type_name_from_object(notification.subject)
+      notifications_by_group_key[graphql_type_name] << notification
+    end
+  end
+
+  repository_total_notification_counts = view.repo_notification_counts.each_with_object({}) do |count, hash|
+    hash[count.repository.global_relay_id] = view.unread_only? ? count.unread_count : count.total_count
+  end
+%>
+
+<% if total_count == 0 %>
+  <div
+    class="js-notifications-list js-socket-channel js-notifications-blankslate"
+    data-channel="<%= live_update_view_channel(GitHub::WebSocket::Channels.notifications_changed(current_user)) %>"
+    data-url="<%= notifications_beta_notifications_exist_path(query: params[:query]) %>"
+    data-hpc
+  >
+    <%= render partial: "notifications/v2/blankslate", locals: { view: view } %>
+  </div>
+<% else %>
+  <%= render ConditionalAccess::UnauthorizedAccountsComponent.new(
+    classes: "Box mb-1",
+    container_classes: "mb-2",
+    resource_label: "notifications",
+    cap_filter: cap_filter,
+    accounts: current_user&.resources_for_cap_filter(
+      direct_and_indirect_orgs: true
+    ),
+    # Enable SAML logging
+    logging: current_user&.feature_enabled?(:log_notifications_unauthorized_accounts),
+    # Group SAML accounts into unified SAML SSO banner
+    group_saml: GitHub.flipper[:notifications_unified_sso_banner].enabled?(current_user),
+    # Sort SAML accounts by name
+    sort_by_name: GitHub.flipper[:notifications_unified_sso_banner_alphabetical_order].enabled?(current_user),
+  ) %>
+
+  <div <%= test_selector("notifications-grouped-list-view") %>>
+    <div class="Box mx-0 mt-0 border-0">
+      <% unless view.selected_tab?(:saved) %>
+        <div class="Box-header d-flex flex-items-center py-2 pl-md-0 pl-3 rounded-2" style="height: 52px;">
+          <label class="h6 pl-0 pl-md-4">
+            <input class="mr-1 js-notifications-mark-all-prompt" type="checkbox" data-check-all autocomplete="off">
+
+            <span class="js-select-all-text">
+              Select all
+            </span>
+            <span class="js-count-selected-text" hidden>
+              <span data-check-all-count>0</span> selected
+            </span>
+            <span class="js-all-count-selected-text" hidden>
+              <%= total_count %> selected
+            </span>
+          </label>
+
+          <%= render partial: "notifications/v2/actions/bulk_actions", locals: { view: view, mark_all: false, total_count: total_count } %>
+          <%= render partial: "notifications/v2/actions/bulk_actions", locals: { view: view, mark_all: true, total_count: total_count} %>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="js-navigation-container js-active-navigation-container" data-hpc>
+      <% notifications_by_group_key.each do |(group_key, notifications)| %>
+        <%
+          repository = repositories_by_id[group_key]
+          total_repository_count = repository_total_notification_counts[group_key] if repository.present?
+          # For v2 projects we want the title header to just read as "Projects" instead of "ProjectV2s"
+          group_header_key = if group_key == "ProjectV2" then "Project" else group_key end
+          title = repository ? repository.name_with_display_owner : group_header_key.titlecase.pluralize
+        %>
+
+        <div class="Box mt-3 js-notifications-group">
+          <div class="Box-header d-flex flex-items-center p-2 pl-3">
+            <h6 class="flex-auto m-0" <%= test_selector("notifications-group-header") %>>
+              <% if repository.present? %>
+                <%= link_to title, repository_path(repository), class: "Link--primary no-underline" %>
+              <% else %>
+                <%= title %>
+              <% end %>
+            </h6>
+            <%= form_tag notifications_beta_mark_as_archived_path, class: "d-none d-md-block js-grouped-notifications-mark-all-read-button" do %>
+              <% notifications.each do |notification| %>
+                <input type="hidden" name="notification_ids[]" value="<%= notification.global_relay_id %>">
+              <% end %>
+
+              <button type="submit" class="btn btn-sm">
+                <span class="text-center d-inline-block" style="width:16px"><%= render(Primer::Beta::Octicon.new(icon: "check")) %></span>
+                Mark as done
+              </button>
+            <% end %>
+          </div>
+          <div class="Box-body p-0">
+            <ul class="list-style-none color-bg-subtle <%= "mixed-notifications-tab" if view.show_all_notification_states? %> <%= "archived-notifications-tab" if view.show_only_archived_notifications? %>">
+              <% notifications.each do |notification| %>
+                <%= render partial: "notifications/v2/notifications_item", locals: { notification: notification, view: view } %>
+              <% end %>
+            </ul>
+            <% if total_repository_count && total_repository_count > notifications.size %>
+              <%= render partial: "notifications/v2/notifications_group_view_all", locals: {
+                  href: view.notifications_repository_tab_path(repository.name_with_display_owner, true),
+                  text: "View all #{pluralize(number_with_delimiter(total_repository_count), "notification")}"
+              } %>
+            <% elsif group_key == "Gist" %>
+              <%= render partial: "notifications/v2/notifications_group_view_all", locals: {
+                  href: view.notifications_gists_path,
+                  text: "View all gist notifications"
+              } %>
+            <% elsif group_key == "TeamDiscussion" %>
+              <%= render partial: "notifications/v2/notifications_group_view_all", locals: {
+                  href: view.notifications_team_discussions_path,
+                  text: "View all team discussion notifications"
+              } %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="d-flex flex-items-center color-fg-muted mt-4 mb-6 f6 flex-justify-center">
+      <%= primer_octicon(:'light-bulb', color: :muted) %>
+      <div class="ml-1">
+        <strong>ProTip!</strong>
+        <%= view.protip %>
+      </div>
+    </div>
+  </div>
+<% end %>

@@ -1,0 +1,105 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% page_info :title => "Webhook - #{@hook_view.title}", :selected_link => :hooks %>
+
+<%= render Primer::Beta::Subhead.new do |component| %>
+  <% component.with_heading(tag: :h2) do %>
+    <a href="<%= stafftools_hooks_path(current_context) %>" data-pjax="true"><%= @hook_view.hook_type_title %></a>
+    / Details
+  <% end %>
+<% end %>
+
+<div>
+  <div class="summary">
+    <% if GitHub.flipper[:stafftools_disable_hook_button].enabled?(current_user) %>
+      <%= render partial: "stafftools/hooks/toggle_hook_button", locals: { :hook => @hook } %>
+    <% end %>
+    <dl>
+      <% if @hook.webhook? %>
+        <dt>URL</dt>
+        <dd><code><%= @hook.url %></code></dd>
+      <% else %>
+        <dt>Service</dt>
+        <dd><%= @hook.display_name %></dd>
+      <% end %>
+
+      <dt>Events</dt>
+      <dd><%= @hook.events.to_sentence %></dd>
+
+      <dt>Active?</dt>
+      <dd><%= @hook.active? %></dd>
+
+
+      <% @hook.masked_config.each do |field, value| %>
+        <% next if @hook.webhook? && field == "url" %>
+
+        <dt><%= field %></dt>
+        <dd><%= value %></dd>
+      <% end %>
+
+      <dt>Audit log</dt>
+      <dd>
+        <%= stafftools_selected_link_to "Search logs",
+          stafftools_audit_log_path(query: driftwood_ade_query?(current_user) ? "webevents | where data.hook_id == '#{@hook.id}'" : "data.hook_id:#{@hook.id}") %>
+        for actions involving this <%= @hook_view.hook_type %>.
+      </dd>
+
+      <dt>Creator</dt>
+      <dd>
+        <% if @hook.created_by_oauth_application? %>
+          <%= link_to @hook.oauth_application.name, stafftools_user_application_path(@hook.oauth_application.owner, @hook.oauth_application), class: "Link--inTextBlock" %>
+          on behalf of
+          <%= link_to @hook.creator, stafftools_user_path(@hook.creator), class: "Link--inTextBlock" %>
+          <% if @hook.oauth_application.synchronized_dotcom_app? %>
+            | This app is synchronized from GitHub.com.
+            <%= link_to "View on GitHub.com", @hook.oauth_application.dotcom_app_owner_metadata.url, target: "_blank", class: "Link--inTextBlock" %>
+          <% end %>
+        <% elsif @hook.created_by_user? %>
+          <%= link_to @hook.creator, stafftools_user_path(@hook.creator), class: "Link--inTextBlock" %>
+        <% else %>
+          unknown
+        <% end %>
+      </dd>
+      <% if @hook.repo_hook? && @hook.created_by_oauth_application? && @hook.installation_target.owner.organization? %>
+        <% org = @hook.installation_target.owner %>
+        <dt>OAuth app policy</dt>
+        <% if org.restricts_oauth_applications? %>
+          <% if org.allows_oauth_application? @hook.oauth_application %>
+            <dd>
+              <%= primer_octicon(:thumbsup, classes: "success") %>
+              Approved
+            </dd>
+          <% elsif org.approval_pending_for_oauth_application? @hook.oauth_application %>
+            <dd>
+              <%= primer_octicon(:hourglass, classes: "highlight") %>
+              Pending
+            </dd>
+          <% elsif org.approval_denied_for_oauth_application? @hook.oauth_application %>
+            <dd>
+              <%= primer_octicon(:thumbsdown, classes: "error") %>
+              Denied
+            </dd>
+          <% else %>
+            <dd>
+              <%= primer_octicon(:alert, classes: "error") %>
+              Not approved
+            </dd>
+          <% end %>
+        <% else %>
+          <dd>OAP not enabled for <%= org.name %></dd>
+        <% end %>
+      <% end %>
+    </dl>
+  </div>
+</div>
+
+<%= render :partial => 'hooks/deliveries', :locals => {:hook => @hook,
+                                                       :disabled => @hook.installation_target_type == "Repository" && @hook.installation_target.disabled?,
+                                                       :target => @hook.installation_target.class.name.humanize,
+                                                       :hook_deliveries_query => hook_deliveries_query,
+                                                       :can_filter_hook_deliveries => true,
+                                                       :render_as_fragment => true,
+                                                       :hide_header => false } %>
+
+<% content_for :head do %>
+  <%= stylesheet_bundle :settings %>
+<% end %>

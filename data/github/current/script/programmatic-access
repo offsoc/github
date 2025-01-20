@@ -1,0 +1,141 @@
+#!/usr/bin/env safe-ruby
+# frozen_string_literal: true
+
+require_relative "../lib/apps/programmatic_access_definitions"
+
+require "pathname"
+
+FILE_PATH = "config/access_control/programmatic_access.yaml"
+ACCESS_DEFS_FILE = Pathname.new(__FILE__).dirname.dirname.join(FILE_PATH)
+
+if ACCESS_DEFS_FILE.exist?
+  Defs = Apps::ProgrammaticAccessDefinitions.new(Apps::ProgrammaticAccessDefinitions.load_yaml)
+end
+
+def generate_access_defs
+  if File.exist?(ACCESS_DEFS_FILE)
+    $stderr.puts "Programmatic access defs already exist, use 'update' instead"
+    exit 1
+  end
+
+  puts "Generating definitions to '#{ACCESS_DEFS_FILE}'"
+  Kernel.exec("./bin/rake", "api:programmatic_access_defs[#{ACCESS_DEFS_FILE}]")
+end
+
+def update_access_defs
+  if !File.exist?(ACCESS_DEFS_FILE)
+    $stderr.puts "Programmatic access defs don't exist, use 'generate' instead"
+    exit 1
+  end
+
+  Kernel.exec("./bin/rake", "api:update_programmatic_access_defs[#{ACCESS_DEFS_FILE}]")
+end
+
+def setup_ci
+  # Skip CI builds on master and trains. Train skips are temporary
+  # while we allow in-flight PRs which would error to merge without error
+  # but prevent new PRs from merging. Skipping master will remain long term
+  # since we'd be linting master against itself which doesn't really make
+  # sense.
+  if ENV["BUILD_BRANCH"].nil?
+    puts "Skipping permissions linting for missing build branch. Pass --local for local testing"
+    return false
+  end
+
+  # KEEP OUT 🤺
+  skippable_branches = %w(master main operation_id_in_yaml)
+
+  if skippable_branches.include?(ENV["BUILD_BRANCH"]) ||
+     ENV["BUILD_BRANCH"].start_with?("train-") ||
+     ENV["BUILD_BRANCH"].start_with?("gh-readonly-queue") # These are merge-queue prep branches
+    puts "Skipping permissions linting for branch #{ENV["BUILD_BRANCH"]}"
+    return false
+  end
+
+  sha = `git rev-parse HEAD`
+  pr_files = `bin/find-pr-files-for-ci #{sha}`
+
+  unless pr_files.include? FILE_PATH
+    puts "Skipping permissions linting because programmatic-access.yaml is unchanged"
+    return false
+  end
+
+  true
+end
+
+def lint_permissions_for_access_defs
+
+  local_flag = ARGV[1] == "--local"
+
+  # skip build if wrong configurations
+  return unless local_flag || setup_ci
+
+  # Download origin/master if we haven't
+  `git fetch origin master --depth=1 2>&1 >/dev/null`
+
+  updated_copy = YAML.load_file(ACCESS_DEFS_FILE)
+
+  mainline_copy = `git show origin/master:#{FILE_PATH}`
+  mainline_copy = Hash[YAML.load(mainline_copy).map { |h| [h["endpoint"], h] }]
+
+  # iterate through the updated access definitions to collect invalid defs
+  # which differ from the mainline version without adding permissions
+  invalid_defs = updated_copy.map do |updated_def|
+    # for non-fgp-enabled endpoints we can skip further validation
+    next unless enabled_for_fgp?(updated_def)
+    # if updated_def has permissions and a test framework config, it is valid for this linter
+    next if valid_permissions?(updated_def) && valid_for_test_framework?(updated_def)
+
+    endpoint = updated_def["endpoint"]
+
+    # it is a new endpoint if no equivalent exists on mainline copy
+    next endpoint unless mainline_copy[endpoint]
+
+    # compares if updated version differs from mainline copy
+    next endpoint unless mainline_copy[endpoint] == updated_def
+  end.compact
+
+  if invalid_defs.any?
+    $stderr.puts "\nYour `config/access_control/programmatic_access.yaml` file is out of date or invalid."
+    $stderr.puts "If you modified any of the REST API endpoints listed below, please ensure they have required permissions data."
+    invalid_defs.each { |invalid_def| $stderr.puts invalid_def }
+    $stderr.puts "\nRead more here: https://thehub.github.com/epd/engineering/products-and-services/dotcom/apps/fine-grained-permissions/add-permissions-metadata/"
+    $stderr.puts "\nIf you did not modify the endpoints above, this build should pass if you merge in the latest version of master.\n"
+    exit 1
+  else
+    puts "\nAll REST API endpoint definitions are up to date or valid.\n"
+  end
+end
+
+def enabled_for_fgp?(access_def)
+  # true if either server_to_server or user_to_server are enabled
+  access_def.dig("server_to_server", "enabled") || access_def.dig("user_to_server", "enabled")
+end
+
+def valid_permissions?(access_def)
+  # true if permission_sets are defined or allows_permissionless_access is true
+  access_def.fetch("allows_permissionless_access", false) || access_def.dig("permission_sets", 0).is_a?(Hash)
+end
+
+def valid_for_test_framework?(access_def)
+  # true if automated_tests_enabled is defined and reviwed_by_team is true
+  access_def.fetch("meta", {}).has_key?("automated_tests_enabled") && access_def.dig("meta", "reviewed_by_team")
+end
+
+case ARGV[0]
+when "generate"
+  generate_access_defs
+when "update"
+  update_access_defs
+when "lint-permissions"
+  lint_permissions_for_access_defs
+when "console"
+  ARGV.shift
+  require "pry"
+  IRB.start
+else
+  $stderr.puts "usage: ./script/programmatic-access <generate|update|lint-permissions|console>"
+  exit 1
+end
+
+# vim:ft=ruby:

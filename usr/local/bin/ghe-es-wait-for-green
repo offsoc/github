@@ -1,0 +1,64 @@
+#!/bin/bash
+#/ Usage: ghe-es-wait-for-green [options]
+#/
+#/ Wait for Elasticsearch cluster health to be green for up to 30 seconds
+#/ xRef: 30s timer is set https://github.com/github/github/blob/master/lib/tasks/es.rake#L155
+#/
+#/ OPTIONS:
+#/   -h | --help  Show this message.
+#/   --debug      Skip wait and show the Elasticsearch cluster and nodes statuses.
+#/   -l | --local Queries Elasticsearch directly rather than through haproxy.
+#/                On HA replicas, checks local ES, not ES on the Primary node.
+#/   --yellow-ok  Consider a yellow state ok when checking health
+set -e
+
+usage () {
+  grep '^#/' < "$0" | cut -c4-
+}
+
+ARGS=$(getopt --name "$0" --long help,debug,local,yellow-ok --options hl -- "$@") || {
+  usage
+  exit 2
+}
+eval set -- $ARGS
+
+debug=
+port="9201"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 2
+      ;;
+    --debug)
+      debug=true
+      ;;
+    -l|--local)
+      port="9200"
+      ;;
+    --yellow-ok)
+      check_yellow=true
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ ! -z "$check_yellow" ]; then
+  status_check='"status":("green"|"yellow")'
+else
+  status_check='"status":"green"'
+fi
+
+if [ -z "$debug" ]; then
+  # Avoid loading github environment if status is considered healthy
+  curl -s "http://localhost:${port}/_cluster/health" | egrep -q "$status_check" && exit 0
+  github-env bin/rake es:enterprise:wait_for_status
+else
+  github-env bin/rake --trace es:enterprise:wait_for_status['red'] || true
+  github-env bin/rake --trace es:enterprise:status
+fi

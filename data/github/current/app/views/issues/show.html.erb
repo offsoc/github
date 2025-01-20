@@ -1,0 +1,128 @@
+<%# rubocop:disable Lint/InstanceVariable %>
+<% fragment_layout = false unless defined? fragment_layout %>
+<% react_mode = false unless defined? react_mode %>
+<%
+  page_description = issue_page_description(@issue)
+  page_info(
+    title: "#{@issue.title} · Issue ##{@issue.number} · #{current_repository.name_with_display_owner}",
+    container_xl: true,
+    selected_link: :repo_issues,
+    stafftools: gh_stafftools_repository_issue_path(@issue),
+    description: page_description,
+    dashboard_pinnable_item_id: @issue.global_relay_id,
+    breadcrumb_object: @issue,
+    richweb: {
+      title: "#{@issue.title} · Issue ##{@issue.number} · #{current_repository.name_with_display_owner}",
+      url: "#{GitHub.url}#{issue_permalink_path(@issue)}",
+      description: page_description,
+      image: repository_open_graph_image_url(current_repository, resource: @issue),
+      adaptivecard: repository_adaptivecard_url(current_repository, resource: @issue),
+      card: repository_twitter_image_card(current_repository),
+      author: @issue.user&.display_login,
+    }
+  )
+
+  project_cards ||= ProjectsClassicSunset.projects_classic_ui_enabled?(current_user, org: current_repository&.organization) ? @issue.visible_cards_for(current_user).to_a : []
+  tags ||= []
+  tracking_issues ||= []
+  sidebar_tags = tags + %W[from:sidebar]
+  render_repo_layout = local_assigns.fetch(:render_repo_layout, render_repo_layout?)
+
+  websocket_channel = issue_node&.timeline_websocket
+%>
+
+<% if fragment_layout %>
+  <% content_for :head do %>
+    <meta name="voltron-timing" value="<view-proxy-timing></view-proxy-timing>">
+  <% end %>
+<% end %>
+
+<% if render_content? %>
+  <% if react_mode %>
+      <viewproxy-fragment id="content"></viewproxy-fragment>
+  <% else %>
+    <% contents = capture do %>
+      <% show_tip = params[:enable_tip].present? && current_repository.organization.present? %>
+      <% if show_tip %>
+        <%= render(Onboarding::Organizations::CompletedGuidanceComponent.new(
+          organization: current_repository.organization,
+          completed_task: OnboardingTasks::Organizations::AutoAssignIssue.new(taskable: current_repository.organization, user: current_user),
+          show_tip: show_tip,
+          container_class: "mb-4"
+        )) %>
+      <% end %>
+      <% if current_discussion_for_issue %>
+        <% track_render_partial("issues/discussion_conversion_banner", tags) do %>
+          <%= render "issues/discussion_conversion_banner",
+            discussion: current_discussion_for_issue,
+            wrapper_class: "flash",
+            heading_class: "h3"
+          %>
+        <% end %>
+      <% end %>
+
+      <% track_render_partial("issues/show", tags) do %>
+        <div id="show_issue"
+            class="js-issues-results js-socket-channel js-updatable-content"
+            data-morpheus-enabled="<%= GitHub.flipper[:tasklist_block_morpheus].enabled?(current_user) %>"
+            data-channel="<%= live_update_view_channel(websocket_channel) %>">
+
+          <% track_render_partial("comments/title", tags) do %>
+            <%= render :partial => 'comments/title', :locals => {
+              :comment      => @issue,
+              :issue        => @issue,
+              :title        => @issue.title? ? @issue.title : "Untitled",
+              :sticky       => true,
+              :viewer_can_update      => with_database_error_fallback(fallback: false) { issue_node.viewer_can_update },
+              :tasklist_block_enabled => issue_node.repository.tasklist_block_enabled,
+              :tags => tags,
+              :tracking_issues => tracking_issues,
+            } %>
+          <% end %>
+
+          <% track_render_partial("issues/sidebar/responsive_meta_info", sidebar_tags) do %>
+            <%= render partial: 'issues/sidebar/responsive_meta_info', locals: { issue: @issue, project_cards: project_cards } %>
+          <% end %>
+
+          <div id="discussion_bucket">
+            <%= render(Primer::Alpha::Layout.new(first_in_source: :main)) do |component| %>
+              <% if fragment_layout %>
+                <% component.with_main do %>
+                  <viewproxy-fragment id="content"></viewproxy-fragment>
+                <% end %>
+                <% component.with_sidebar(col_placement: :end, row_placement: :end) do %>
+                  <viewproxy-fragment id="sidebar"></viewproxy-fragment>
+                <% end %>
+              <% else %>
+                <% component.with_main do %>
+                  <%= render partial: 'issues/issues_show_main_section', locals: { issue: @issue, tags: tags, issue_node: issue_node } %>
+                <% end %>
+                <% component.with_sidebar(col_placement: :end, row_placement: :end) do %>
+                  <% track_render_partial("issues/sidebar", sidebar_tags) do %>
+                    <%=
+                      render "issues/sidebar",
+                        issue: @issue,
+                        project_cards: project_cards,
+                        deferred_content: true, # Indicate that some content can be deferred
+                        tags: sidebar_tags
+                    %>
+                  <% end %>
+                <% end %>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  <% end %>
+<% else %>
+  <% contents = "" %>
+<% end %>
+
+<% if render_repo_layout && !react_mode %>
+  <%= render layout: "issues/issues", locals: { tags: tags } do %>
+    <%= contents %>
+  <% end %>
+<% else %>
+  <%= contents %>
+<% end %>
